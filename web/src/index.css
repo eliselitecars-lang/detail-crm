@@ -1,0 +1,207 @@
+@import 'tailwindcss';
+
+/*
+ * Detail CRM design tokens.
+ *
+ * Raw values live in --dc-* custom properties that flip between light and
+ * dark. Tailwind utilities are generated from the semantic names in
+ * `@theme inline` below, so components write `bg-surface text-ink
+ * border-line` and never hard-code a hex value.
+ *
+ *   Glacier  (primary)  #1F6FEB  interaction / selection
+ *   Amber    (money)    #E8A23A  money & primary money actions ONLY
+ *   success #1F9D55 · warning #D98A0B · danger #D93F3F
+ *   ink #0B1220 · canvas #F6F8FB
+ */
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+:root {
+  color-scheme: light;
+
+  --dc-canvas: #f6f8fb;
+  --dc-surface: #ffffff;
+  --dc-surface-2: #eef2f7;
+  --dc-surface-3: #e3e9f1;
+  --dc-ink: #0b1220;
+  --dc-muted: #566175;
+  --dc-subtle: #7a8497;
+  --dc-line: #dce3ec;
+  --dc-line-strong: #c3cddb;
+  --dc-overlay: rgb(11 18 32 / 0.45);
+
+  --dc-primary: #1f6feb;
+  --dc-primary-hover: #185fcc;
+  --dc-primary-fg: #ffffff;
+  --dc-primary-soft: #e8f0fe;
+  --dc-primary-ink: #1553b8;
+
+  --dc-money: #e8a23a;
+  --dc-money-hover: #d6902a;
+  --dc-money-fg: #1f1403;
+  --dc-money-soft: #fdf3e3;
+  --dc-money-ink: #8a560e;
+
+  --dc-success: #1f9d55;
+  --dc-success-soft: #e4f5eb;
+  --dc-success-ink: #177a42;
+  --dc-warning: #d98a0b;
+  --dc-warning-soft: #fcf1de;
+  --dc-warning-ink: #8f5a05;
+  --dc-danger: #d93f3f;
+  --dc-danger-hover: #c23434;
+  --dc-danger-soft: #fbe7e7;
+  --dc-danger-ink: #a82e2e;
+
+  --dc-shadow: 0 1px 2px rgb(11 18 32 / 0.06), 0 1px 3px rgb(11 18 32 / 0.08);
+  --dc-shadow-lg: 0 12px 32px rgb(11 18 32 / 0.18), 0 2px 6px rgb(11 18 32 / 0.08);
+
+  /* Shop brand colour on public pages; PublicLayout overrides it inline. */
+  --dc-brand: var(--dc-primary);
+  --dc-brand-fg: var(--dc-primary-fg);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --dc-canvas: #0b1220;
+  --dc-surface: #111a2e;
+  --dc-surface-2: #17223a;
+  --dc-surface-3: #1e2b47;
+  --dc-ink: #e6ebf3;
+  --dc-muted: #a0abbe;
+  --dc-subtle: #7e8aa1;
+  --dc-line: #24324d;
+  --dc-line-strong: #33466b;
+  --dc-overlay: rgb(3 6 12 / 0.65);
+
+  --dc-primary: #1f6feb;
+  --dc-primary-hover: #3b82f6;
+  --dc-primary-fg: #ffffff;
+  --dc-primary-soft: rgb(31 111 235 / 0.2);
+  --dc-primary-ink: #7fb0ff;
+
+  --dc-money: #e8a23a;
+  --dc-money-hover: #f0b458;
+  --dc-money-fg: #1f1403;
+  --dc-money-soft: rgb(232 162 58 / 0.16);
+  --dc-money-ink: #f2bd6b;
+
+  --dc-success: #2bb068;
+  --dc-success-soft: rgb(31 157 85 / 0.18);
+  --dc-success-ink: #5fd394;
+  --dc-warning: #e59a1f;
+  --dc-warning-soft: rgb(217 138 11 / 0.18);
+  --dc-warning-ink: #f3bc5e;
+  --dc-danger: #e05252;
+  --dc-danger-hover: #ea6a6a;
+  --dc-danger-soft: rgb(217 63 63 / 0.18);
+  --dc-danger-ink: #f28b8b;
+
+  --dc-shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  --dc-shadow-lg: 0 16px 40px rgb(0 0 0 / 0.55);
+}
+
+@theme inline {
+  --font-sans:
+    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+
+  --color-canvas: var(--dc-canvas);
+  --color-surface: var(--dc-surface);
+  --color-surface-2: var(--dc-surface-2);
+  --color-surface-3: var(--dc-surface-3);
+  --color-ink: var(--dc-ink);
+  --color-muted: var(--dc-muted);
+  --color-subtle: var(--dc-subtle);
+  --color-line: var(--dc-line);
+  --color-line-strong: var(--dc-line-strong);
+  --color-overlay: var(--dc-overlay);
+
+  --color-primary: var(--dc-primary);
+  --color-primary-hover: var(--dc-primary-hover);
+  --color-primary-fg: var(--dc-primary-fg);
+  --color-primary-soft: var(--dc-primary-soft);
+  --color-primary-ink: var(--dc-primary-ink);
+
+  --color-money: var(--dc-money);
+  --color-money-hover: var(--dc-money-hover);
+  --color-money-fg: var(--dc-money-fg);
+  --color-money-soft: var(--dc-money-soft);
+  --color-money-ink: var(--dc-money-ink);
+
+  --color-success: var(--dc-success);
+  --color-success-soft: var(--dc-success-soft);
+  --color-success-ink: var(--dc-success-ink);
+  --color-warning: var(--dc-warning);
+  --color-warning-soft: var(--dc-warning-soft);
+  --color-warning-ink: var(--dc-warning-ink);
+  --color-danger: var(--dc-danger);
+  --color-danger-hover: var(--dc-danger-hover);
+  --color-danger-soft: var(--dc-danger-soft);
+  --color-danger-ink: var(--dc-danger-ink);
+
+  --color-brand: var(--dc-brand);
+  --color-brand-fg: var(--dc-brand-fg);
+
+  --radius-card: 12px;
+  --radius-control: 8px;
+
+  --shadow-card: var(--dc-shadow);
+  --shadow-pop: var(--dc-shadow-lg);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans text-sm antialiased;
+    min-width: 320px;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--dc-primary);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--dc-primary-soft);
+  }
+
+  /* Numeric columns line up. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* FullCalendar picks up our tokens so feature calendars match light/dark. */
+  .fc {
+    --fc-border-color: var(--dc-line);
+    --fc-page-bg-color: var(--dc-surface);
+    --fc-neutral-bg-color: var(--dc-surface-2);
+    --fc-today-bg-color: var(--dc-primary-soft);
+    --fc-event-bg-color: var(--dc-primary);
+    --fc-event-border-color: var(--dc-primary);
+    --fc-now-indicator-color: var(--dc-danger);
+    --fc-button-bg-color: var(--dc-surface);
+    --fc-button-border-color: var(--dc-line-strong);
+    --fc-button-text-color: var(--dc-ink);
+    --fc-button-hover-bg-color: var(--dc-surface-2);
+    --fc-button-hover-border-color: var(--dc-line-strong);
+    --fc-button-active-bg-color: var(--dc-primary-soft);
+    --fc-button-active-border-color: var(--dc-primary);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

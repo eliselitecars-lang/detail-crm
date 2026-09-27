@@ -1,10 +1,46 @@
-# Placeholder so workflow_dispatch is available; the real pipeline lives on
-# the development branch until it is merged.
+# Edge functions: fmt, lint, type-check and unit tests (Stripe/Twilio/Resend/
+# Supabase faked; tests run without network permission).
 name: functions
+
 on:
+  push:
+    paths:
+      - "supabase/functions/**"
+      - "supabase/config.toml"
+      - "scripts/test_functions.sh"
+      - ".github/workflows/functions.yml"
+  pull_request:
+    paths:
+      - "supabase/functions/**"
+      - "supabase/config.toml"
+      - "scripts/test_functions.sh"
+      - ".github/workflows/functions.yml"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: functions-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  placeholder:
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo "functions pipeline not merged yet"
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/deno
+          key: deno-${{ runner.os }}-${{ hashFiles('supabase/functions/deno.json') }}
+          restore-keys: deno-${{ runner.os }}-
+
+      - name: Edge function checks
+        run: scripts/test_functions.sh
