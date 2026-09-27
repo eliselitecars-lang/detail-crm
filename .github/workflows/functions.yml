@@ -1,0 +1,10 @@
+# Placeholder so workflow_dispatch is available; the real pipeline lives on
+# the development branch until it is merged.
+name: functions
+on:
+  workflow_dispatch:
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "functions pipeline not merged yet"
