@@ -13,7 +13,19 @@ export const routes: FeatureRoutes = {
           <Outlet />
         </RequireRole>
       ),
-      children: [{ index: true, lazy: lazyPage(() => import('./JobsPage')) }],
+      children: [
+        { index: true, lazy: lazyPage(() => import('./JobsPage')) },
+        {
+          path: 'new',
+          element: (
+            <RequireRole capability="jobs.manage">
+              <Outlet />
+            </RequireRole>
+          ),
+          children: [{ index: true, lazy: lazyPage(() => import('./NewJobPage')) }],
+        },
+        { path: ':jobId', lazy: lazyPage(() => import('./JobDetailPage')) },
+      ],
     },
   ],
 };

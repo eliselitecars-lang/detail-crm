@@ -1,0 +1,203 @@
+import { describe, expect, it } from 'vitest';
+import {
+  buildPriceDrafts,
+  checklistItemsError,
+  checklistPayload,
+  describeUsage,
+  formatDuration,
+  imageFileError,
+  moveItem,
+  parseChecklistItems,
+  planHasChanges,
+  planPriceChanges,
+  resequence,
+  serviceColumns,
+  serviceFormDefaults,
+  serviceFormSchema,
+  serviceImagePath,
+  usageTotal,
+  type PriceRow,
+} from './model';
+
+function price(overrides: Partial<PriceRow>): PriceRow {
+  return {
+    id: 'p1',
+    shop_id: 'shop-1',
+    service_id: 'svc-1',
+    vehicle_category_id: null,
+    price_cents: 10000,
+    duration_minutes: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  };
+}
+
+const categories = [
+  { id: 'suv', name: 'SUV', sort: 20 },
+  { id: 'car', name: 'Car', sort: 10 },
+];
+
+describe('formatDuration', () => {
+  it('formats minutes', () => {
+    expect(formatDuration(0)).toBe('No time');
+    expect(formatDuration(45)).toBe('45 min');
+    expect(formatDuration(60)).toBe('1 h');
+    expect(formatDuration(150)).toBe('2 h 30 min');
+    expect(formatDuration(null)).toBe('—');
+  });
+});
+
+describe('service form', () => {
+  it('parses text fields into columns', () => {
+    const values = serviceFormSchema.parse({
+      ...serviceFormDefaults(),
+      name: '  Full detail ',
+      durationMinutes: '180',
+      sort: '-5',
+      categoryId: '',
+    });
+    expect(serviceColumns(values)).toEqual({
+      name: 'Full detail',
+      description: null,
+      kind: 'service',
+      category_id: null,
+      duration_minutes: 180,
+      taxable: true,
+      online_bookable: false,
+      active: true,
+      sort: -5,
+    });
+  });
+
+  it('rejects out-of-range durations and empty names', () => {
+    const result = serviceFormSchema.safeParse({
+      ...serviceFormDefaults(),
+      name: ' ',
+      durationMinutes: '1441',
+    });
+    expect(result.success).toBe(false);
+    const paths = result.error?.issues.map((i) => i.path[0]);
+    expect(paths).toContain('name');
+    expect(paths).toContain('durationMinutes');
+  });
+});
+
+describe('price grid', () => {
+  it('builds base + categories in sort order', () => {
+    const drafts = buildPriceDrafts(
+      [
+        price({ id: 'base', price_cents: 5000 }),
+        price({ id: 'x', vehicle_category_id: 'suv', duration_minutes: 90 }),
+      ],
+      categories,
+    );
+    expect(drafts).toEqual([
+      { vehicleCategoryId: null, id: 'base', priceCents: 5000, duration: '' },
+      { vehicleCategoryId: 'car', id: null, priceCents: null, duration: '' },
+      { vehicleCategoryId: 'suv', id: 'x', priceCents: 10000, duration: '90' },
+    ]);
+  });
+
+  it('plans inserts, updates and deletes', () => {
+    const saved = [
+      price({ id: 'base', price_cents: 5000 }),
+      price({ id: 'x', vehicle_category_id: 'suv', price_cents: 9000 }),
+    ];
+    const plan = planPriceChanges(
+      [
+        { vehicleCategoryId: null, id: 'base', priceCents: 5500, duration: '' },
+        { vehicleCategoryId: 'car', id: null, priceCents: 6000, duration: '75' },
+        { vehicleCategoryId: 'suv', id: 'x', priceCents: null, duration: '' },
+      ],
+      saved,
+    );
+    expect(plan).toEqual({
+      updates: [{ id: 'base', price_cents: 5500, duration_minutes: null }],
+      inserts: [{ vehicle_category_id: 'car', price_cents: 6000, duration_minutes: 75 }],
+      deletes: ['x'],
+      errors: {},
+    });
+    expect(planHasChanges(plan)).toBe(true);
+  });
+
+  it('skips unchanged rows and validates durations', () => {
+    const saved = [price({ id: 'base', price_cents: 5000, duration_minutes: 60 })];
+    const unchanged = planPriceChanges(
+      [{ vehicleCategoryId: null, id: 'base', priceCents: 5000, duration: '60' }],
+      saved,
+    );
+    expect(planHasChanges(unchanged)).toBe(false);
+
+    const bad = planPriceChanges(
+      [
+        { vehicleCategoryId: null, id: null, priceCents: null, duration: '30' },
+        { vehicleCategoryId: 'car', id: null, priceCents: 100, duration: 'abc' },
+      ],
+      [],
+    );
+    expect(bad.errors).toEqual({
+      '': 'Enter a price to set a duration.',
+      car: 'Duration must be 0–1440 minutes.',
+    });
+    expect(planHasChanges(bad)).toBe(false);
+  });
+});
+
+describe('checklists', () => {
+  it('parses stored items defensively', () => {
+    expect(parseChecklistItems([{ id: 'a', label: 'Wash' }])).toEqual([{ id: 'a', label: 'Wash' }]);
+    expect(parseChecklistItems('nope')).toEqual([]);
+    expect(parseChecklistItems([{ id: 'bad id!', label: 'x' }])).toEqual([]);
+  });
+
+  it('builds the payload: trims, drops blanks, keeps ids of existing items', () => {
+    expect(
+      checklistPayload([
+        { key: 'a', id: 'a', label: ' Rinse ' },
+        { key: 'b', id: null, label: 'Dry' },
+        { key: 'c', id: null, label: '   ' },
+      ]),
+    ).toEqual([{ id: 'a', label: 'Rinse' }, { label: 'Dry' }]);
+  });
+
+  it('limits items', () => {
+    const many = Array.from({ length: 201 }, (_, i) => ({ key: String(i), id: null, label: 'x' }));
+    expect(checklistItemsError(many)).toMatch(/at most 200/);
+    expect(checklistItemsError([{ key: 'a', id: null, label: 'x'.repeat(201) }])).toMatch(
+      /200 characters/,
+    );
+    expect(checklistItemsError([{ key: 'a', id: null, label: 'ok' }])).toBeNull();
+  });
+});
+
+describe('ordering', () => {
+  it('moves and resequences only changed rows', () => {
+    const rows = [
+      { id: 'a', sort: 10 },
+      { id: 'b', sort: 20 },
+      { id: 'c', sort: 30 },
+    ];
+    expect(resequence(moveItem(rows, 2, 0))).toEqual([
+      { id: 'c', sort: 10 },
+      { id: 'a', sort: 20 },
+      { id: 'b', sort: 30 },
+    ]);
+    expect(resequence(rows)).toEqual([]);
+  });
+});
+
+describe('images and usage', () => {
+  it('validates files and builds the storage path', () => {
+    expect(imageFileError({ type: 'image/gif', size: 10 })).toMatch(/PNG, JPEG or WebP/);
+    expect(imageFileError({ type: 'image/png', size: 6 * 1024 * 1024 })).toMatch(/5 MB/);
+    expect(imageFileError({ type: 'image/webp', size: 1000 })).toBeNull();
+    expect(serviceImagePath('shop-1', 'svc-1', 'image/jpeg')).toBe('shop-1/services/svc-1.jpg');
+  });
+
+  it('describes usage', () => {
+    const usage = { jobLines: 2, quoteLines: 0, invoiceLines: 1, packages: 1, plans: 0 };
+    expect(usageTotal(usage)).toBe(4);
+    expect(describeUsage(usage)).toBe('2 job lines, 1 invoice line, 1 package');
+  });
+});

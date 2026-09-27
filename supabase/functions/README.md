@@ -276,7 +276,9 @@ account, so payment events are emitted **on the connected account**.
    version `2026-08-26.dahlia` (= `STRIPE_API_VERSION`).
 4. Events: `checkout.session.completed`, `payment_intent.succeeded`,
    `payment_intent.payment_failed`, `payment_intent.canceled`,
-   `charge.refunded`, `setup_intent.succeeded`,
+   `charge.refunded`, `charge.refund.updated`, `refund.updated`,
+   `refund.failed` (a failed refund lowers the refunded total),
+   `setup_intent.succeeded`,
    `customer.subscription.created`, `customer.subscription.updated`,
    `customer.subscription.deleted`, `invoice.paid`,
    `invoice.payment_failed`, `account.updated`.
@@ -289,11 +291,15 @@ Local testing: `stripe listen --forward-connect-to localhost:54321/functions/v1/
 
 ## Twilio webhooks
 
-Configure each shop's number (or the Messaging Service) in the Twilio Console:
+Configure each shop's number (not a Messaging Service) in the Twilio Console;
+full procedure in `supabase/setup/twilio.md`:
 
-- **A message comes in:** `POST https://<ref>.supabase.co/functions/v1/messaging?action=twilio_inbound`
+- **A message comes in:** `POST https://<ref>.supabase.co/functions/v1/messaging?action=twilio_inbound&shop_id=<SHOP UUID>#rc=3&rp=all`
+  (`shop_id` is the platform's binding of the number to its shop: messaging
+  only sends from, and routes replies/STOPs through, a number whose inbound
+  URL names that shop; `#rc=3&rp=all` makes Twilio retry a 5xx).
 - **Status callback:** sent per message as `StatusCallback`
-  (`functionUrl(env.functionsPublicUrl(), "messaging", { action: "twilio_status" })`).
+  (`messaging?action=twilio_status#rc=3&rp=all`, see `messaging/deliver.ts`).
 
 The signature covers the exact URL including `?action=...`, so the URL in
 Twilio must match `FUNCTIONS_PUBLIC_URL`/`SUPABASE_URL` exactly. When

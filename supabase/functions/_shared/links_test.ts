@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { functionUrl, links, publicRequestUrl } from "./links.ts";
+import { functionUrl, links, publicRequestUrl, withQuery } from "./links.ts";
 
 Deno.test("links: customer-facing web routes", () => {
   const base = "https://app.example.com/";
@@ -33,4 +33,27 @@ Deno.test("links: publicRequestUrl keeps the query verbatim and swaps the host",
     publicRequestUrl("https://p.supabase.co/functions/v1", "messaging", req),
     "https://p.supabase.co/functions/v1/messaging?b=2&action=twilio_inbound&a=1",
   );
+});
+
+Deno.test("links: Stripe Connect return/refresh pages", () => {
+  assertEquals(
+    links.stripeConnect("https://app.example.com/", "return"),
+    "https://app.example.com/app/settings/payments?stripe=return",
+  );
+  assertEquals(
+    links.stripeConnect("https://x.example.com/crm", "refresh"),
+    "https://x.example.com/crm/app/settings/payments?stripe=refresh",
+  );
+});
+
+Deno.test("links: withQuery adds or replaces parameters", () => {
+  assertEquals(
+    withQuery(links.invoice("https://app.example.com", "tok"), { paid: "1" }),
+    "https://app.example.com/i/tok?paid=1",
+  );
+  assertEquals(
+    withQuery("https://app.example.com/portal?card=x&a=1", { card: "saved" }),
+    "https://app.example.com/portal?card=saved&a=1",
+  );
+  assertThrows(() => withQuery("not a url", { a: "1" }), TypeError);
 });

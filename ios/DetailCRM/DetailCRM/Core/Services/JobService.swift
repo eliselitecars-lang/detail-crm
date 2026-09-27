@@ -1,0 +1,782 @@
+//
+//  JobService.swift
+//  DetailCRM
+//
+//  Jobs (SPEC §4.4): the job row, its customer/vehicle, line items,
+//  assignments, status changes, scheduling edits, the job's money picture,
+//  invoicing, templated customer messages, and the New Job flow (customer
+//  search/create, vehicles, job + lines + assignments inserts).
+//
+//  Rules the server enforces regardless of the UI:
+//    * technicians may change only `status` (technician-allowed edges) and
+//      `internal_notes` of jobs assigned to them;
+//    * totals are recomputed by triggers from the line items — the app never
+//      sends subtotal/tax/total;
+//    * `number`, `tax_rate_bps`, `created_by` and the status timestamps are
+//      stamped by triggers.
+//
+
+import Foundation
+import Supabase
+import DetailCore
+
+enum JobService {
+
+    // MARK: - Job detail
+
+    /// One job, or `AppError.notFound` when missing / not visible.
+    static func job(shopID: UUID, jobID: UUID) async throws -> Job {
+        let rows: [Job] = try await Supa.client
+            .from("jobs")
+            .select(Job.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: jobID.uuidString)
+            .limit(1)
+            .execute()
+            .value
+        guard let job = rows.first else { throw AppError.notFound("That job") }
+        return job
+    }
+
+    /// The job with its customer, vehicle, lines, assignments and team.
+    static func detail(shopID: UUID, jobID: UUID) async throws -> JobDetailSnapshot {
+        let job = try await job(shopID: shopID, jobID: jobID)
+        async let customerTask = customer(shopID: shopID, customerID: job.customerID)
+        async let vehicleTask = vehicle(shopID: shopID, vehicleID: job.vehicleID)
+        async let linesTask = lineItems(shopID: shopID, jobID: jobID)
+        async let assignmentsTask = assignments(shopID: shopID, jobID: jobID)
+        async let teamTask = team(shopID: shopID)
+        let customer = try await customerTask
+        let vehicle = try await vehicleTask
+        let lines = try await linesTask
+        let assignments = try await assignmentsTask
+        let team = try await teamTask
+        return JobDetailSnapshot(
+            job: job,
+            customer: customer,
+            vehicle: vehicle,
+            lineItems: lines,
+            assignments: assignments,
+            team: team
+        )
+    }
+
+    /// The customer, or nil when the caller can't read it.
+    static func customer(shopID: UUID, customerID: UUID) async throws -> JobCustomer? {
+        let rows: [JobCustomer] = try await Supa.client
+            .from("customers")
+            .select(JobCustomer.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: customerID.uuidString)
+            .limit(1)
+            .execute()
+            .value
+        return rows.first
+    }
+
+    /// The vehicle, or nil when none / not readable.
+    static func vehicle(shopID: UUID, vehicleID: UUID?) async throws -> JobVehicle? {
+        guard let vehicleID else { return nil }
+        let rows: [JobVehicle] = try await Supa.client
+            .from("vehicles")
+            .select(JobVehicle.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: vehicleID.uuidString)
+            .limit(1)
+            .execute()
+            .value
+        return rows.first
+    }
+
+    static func lineItems(shopID: UUID, jobID: UUID) async throws -> [JobLineItem] {
+        try await Supa.client
+            .from("job_line_items")
+            .select(JobLineItem.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("job_id", value: jobID.uuidString)
+            .order("sort", ascending: true)
+            .order("created_at", ascending: true)
+            .execute()
+            .value
+    }
+
+    static func assignments(shopID: UUID, jobID: UUID) async throws -> [JobAssignment] {
+        try await Supa.client
+            .from("job_assignments")
+            .select("id,shop_id,job_id,member_id,created_at")
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("job_id", value: jobID.uuidString)
+            .order("created_at", ascending: true)
+            .execute()
+            .value
+    }
+
+    /// Team directory (names/colors for everyone; contact details for
+    /// managers and above).
+    static func team(shopID: UUID) async throws -> [JobTeamMember] {
+        let rows: [JobTeamMember] = try await Supa.client
+            .rpc("shop_team", params: JobShopParam(p_shop_id: shopID))
+            .execute()
+            .value
+        return rows.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    /// Active bays / vans.
+    static func resources(shopID: UUID) async throws -> [JobResource] {
+        try await Supa.client
+            .from("resources")
+            .select("id,name,kind,active")
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("active", value: true)
+            .is("archived_at", value: nil)
+            .order("sort", ascending: true)
+            .order("name", ascending: true)
+            .execute()
+            .value
+    }
+
+    // MARK: - Status & notes
+
+    /// Moves the job to `status` (the status machine validates the edge and
+    /// the caller's role; timestamps are stamped by the server). A reason
+    /// is stored only when cancelling.
+    static func updateStatus(shopID: UUID, jobID: UUID, to status: JobStatus, cancelReason: String? = nil) async throws -> Job {
+        let patch = JobStatusPatch(
+            status: status.rawValue,
+            cancel_reason: status == .cancelled ? cancelReason?.trimmedNonEmpty : nil
+        )
+        return try await Supa.client
+            .from("jobs")
+            .update(patch)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: jobID.uuidString)
+            .select(Job.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Internal (staff-only) notes; technicians may edit these on assigned jobs.
+    static func updateInternalNotes(shopID: UUID, jobID: UUID, notes: String?) async throws -> Job {
+        try await Supa.client
+            .from("jobs")
+            .update(JobInternalNotesPatch(internalNotes: notes?.trimmedNonEmpty))
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: jobID.uuidString)
+            .select(Job.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Manager+: schedule, location, resource, customer-visible notes and
+    /// the deposit requirement.
+    static func updateDetails(shopID: UUID, jobID: UUID, patch: JobDetailsPatch) async throws -> Job {
+        try await Supa.client
+            .from("jobs")
+            .update(patch)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: jobID.uuidString)
+            .select(Job.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Manager+: the job-level discount (percent in basis points, or cents).
+    static func updateDiscount(shopID: UUID, jobID: UUID, kind: JobDiscountKind, value: Int) async throws -> Job {
+        let patch = JobDiscountPatch(discount_kind: kind.rawValue, discount_value: kind == .none ? 0 : max(0, value))
+        return try await Supa.client
+            .from("jobs")
+            .update(patch)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: jobID.uuidString)
+            .select(Job.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    // MARK: - Assignments
+
+    /// Manager+: makes the job's assignees exactly `memberIDs` (removes the
+    /// others, adds the new ones).
+    static func setAssignments(
+        shopID: UUID,
+        jobID: UUID,
+        current: [JobAssignment],
+        memberIDs: Set<UUID>
+    ) async throws {
+        let removed = current.filter { !memberIDs.contains($0.memberID) }
+        let existing = Set(current.map(\.memberID))
+        let added = memberIDs.subtracting(existing).sorted { $0.uuidString < $1.uuidString }
+        if !removed.isEmpty {
+            try await Supa.client
+                .from("job_assignments")
+                .delete()
+                .eq("shop_id", value: shopID.uuidString)
+                .in("id", values: removed.map { $0.id.uuidString })
+                .execute()
+        }
+        try await insertAssignments(shopID: shopID, jobID: jobID, memberIDs: added)
+    }
+
+    static func insertAssignments(shopID: UUID, jobID: UUID, memberIDs: [UUID]) async throws {
+        guard !memberIDs.isEmpty else { return }
+        let rows = memberIDs.map { JobAssignmentInsert(shop_id: shopID, job_id: jobID, member_id: $0) }
+        try await Supa.client
+            .from("job_assignments")
+            .insert(rows, returning: .minimal)
+            .execute()
+    }
+
+    // MARK: - Line items (manager+)
+
+    /// Inserts lines in one request (all or nothing).
+    static func insertLines(shopID: UUID, jobID: UUID, lines: [JobLineDraft]) async throws {
+        guard !lines.isEmpty else { return }
+        let rows = lines.map { JobLineInsert(shopID: shopID, jobID: jobID, draft: $0) }
+        try await Supa.client
+            .from("job_line_items")
+            .insert(rows, returning: .minimal)
+            .execute()
+    }
+
+    static func updateLine(shopID: UUID, lineID: UUID, draft: JobLineDraft) async throws {
+        try await Supa.client
+            .from("job_line_items")
+            .update(draft, returning: .minimal)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: lineID.uuidString)
+            .execute()
+    }
+
+    static func deleteLine(shopID: UUID, lineID: UUID) async throws {
+        try await Supa.client
+            .from("job_line_items")
+            .delete(returning: .minimal)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: lineID.uuidString)
+            .execute()
+    }
+
+    // MARK: - Money
+
+    /// The job's deposit / paid / balance picture, or nil when the RPC
+    /// returns no row. Throws 42501 for callers who can't collect.
+    static func paymentSummary(jobID: UUID) async throws -> JobPaymentSummary? {
+        let rows: [JobPaymentSummary] = try await Supa.client
+            .rpc("job_payment_summary", params: JobIDParam(p_job_id: jobID))
+            .execute()
+            .value
+        return rows.first
+    }
+
+    /// Issues the job's invoice (copies lines, attaches earlier deposits).
+    static func createInvoice(jobID: UUID) async throws -> JobCreatedInvoice {
+        try await Supa.client
+            .rpc("create_invoice_from_job", params: JobIDParam(p_job_id: jobID))
+            .select("id,number,status")
+            .single()
+            .execute()
+            .value
+    }
+
+    // MARK: - Customer messages
+
+    /// What the template would send for this job (nothing is queued).
+    static func previewTemplate(jobID: UUID, key: JobMessageTemplateKey, channel: JobMessageChannel) async throws -> JobMessagePreview? {
+        let rows: [JobMessagePreview] = try await Supa.client
+            .rpc(
+                "preview_template_message",
+                params: JobTemplatePreviewParams(p_job_id: jobID, p_key: key.rawValue, p_channel: channel.rawValue)
+            )
+            .execute()
+            .value
+        return rows.first
+    }
+
+    /// Sends a job template through the messaging function (technicians:
+    /// on-my-way / started / complete on their assigned jobs only).
+    static func sendTemplate(
+        shopID: UUID,
+        jobID: UUID,
+        key: JobMessageTemplateKey,
+        channel: JobMessageChannel
+    ) async throws -> JobMessageSendResult {
+        let body = JobMessageSendBody(
+            action: "send",
+            shop_id: shopID.uuidString,
+            job_id: jobID.uuidString,
+            channel: channel.rawValue,
+            template_key: key.rawValue
+        )
+        do {
+            let reply: JobMessageSendReply = try await Supa.client.functions.invoke(
+                "messaging",
+                options: FunctionInvokeOptions(body: body)
+            )
+            return JobMessageSendResult(
+                messageID: reply.message_id.flatMap { UUID(uuidString: $0) },
+                status: reply.status ?? "queued",
+                error: reply.error
+            )
+        } catch let error as FunctionsError {
+            throw readableFunctionError(error)
+        }
+    }
+
+    /// Turns the edge function's `{"error": "...", "code": "..."}` body
+    /// into a readable `AppError`.
+    static func readableFunctionError(_ error: FunctionsError) -> Error {
+        if case .httpError(let code, let data) = error {
+            if let decoded = try? JSONDecoder().decode(JobFunctionErrorBody.self, from: data),
+               let message = decoded.error?.trimmedNonEmpty {
+                return AppError.message(ErrorText.sentence(message))
+            }
+            if code == 401 { return AppError.notSignedIn }
+            if code == 403 { return AppError.message("You don't have permission to do that.") }
+            return AppError.message("That didn't go through. Try again.")
+        }
+        return AppError.message("Couldn't reach the server. Try again.")
+    }
+
+    // MARK: - New job: customers
+
+    /// Up to 25 customers matching every word of `term` (name, company,
+    /// email, phone — via the generated `search_text`). Phone-like input
+    /// matches digits only.
+    static func searchCustomers(shopID: UUID, term: String) async throws -> [JobCustomer] {
+        var request = Supa.client
+            .from("customers")
+            .select(JobCustomer.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .is("archived_at", value: nil)
+        for pattern in searchPatterns(for: term) {
+            request = request.ilike("search_text", pattern: pattern)
+        }
+        return try await request
+            .order("updated_at", ascending: false)
+            .limit(25)
+            .execute()
+            .value
+    }
+
+    /// ILIKE patterns: one `%word%` per word (LIKE wildcards escaped), or
+    /// a digits-only pattern for phone-looking input.
+    static func searchPatterns(for input: String) -> [String] {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return [] }
+        let phoneCharacters: Set<Character> = [" ", "(", ")", "-", ".", "+", "/"]
+        let digits = trimmed.filter { $0.isASCII && $0.isNumber }
+        if digits.count >= 3,
+           trimmed.allSatisfy({ ($0.isASCII && $0.isNumber) || phoneCharacters.contains($0) }) {
+            return ["%" + digits + "%"]
+        }
+        let words = trimmed.split(whereSeparator: { $0.isWhitespace }).prefix(6).map { String($0) }
+        return words.map { escapeLike($0) }.filter { !$0.isEmpty }.map { "%" + $0 + "%" }
+    }
+
+    private static func escapeLike(_ term: String) -> String {
+        var result = ""
+        for character in term where character != "*" {
+            switch character {
+            case "\\": result += "\\\\"
+            case "%": result += "\\%"
+            case "_": result += "\\_"
+            default: result.append(character)
+            }
+        }
+        return result
+    }
+
+    /// Manager+: a minimal new customer (at least one name; phone in any
+    /// common format is stored as E.164).
+    static func createCustomer(
+        shopID: UUID,
+        firstName: String,
+        lastName: String,
+        phone: String,
+        email: String
+    ) async throws -> JobCustomer {
+        let first = firstName.trimmedNonEmpty
+        let last = lastName.trimmedNonEmpty
+        guard first != nil || last != nil else {
+            throw AppError.invalidInput("Enter the customer's first or last name.")
+        }
+        var e164: String?
+        if let rawPhone = phone.trimmedNonEmpty {
+            guard let normalized = PhoneNumber.normalize(rawPhone) else {
+                throw AppError.invalidInput("Enter a valid phone number.")
+            }
+            e164 = normalized
+        }
+        var normalizedEmail: String?
+        if let rawEmail = email.trimmedNonEmpty {
+            guard Validation.isValidEmail(rawEmail) else {
+                throw AppError.invalidInput("Enter a valid email address.")
+            }
+            normalizedEmail = Validation.normalizedEmail(rawEmail)
+        }
+        let row = JobCustomerInsert(
+            shop_id: shopID,
+            first_name: first,
+            last_name: last,
+            phone: e164,
+            email: normalizedEmail
+        )
+        return try await Supa.client
+            .from("customers")
+            .insert(row)
+            .select(JobCustomer.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    // MARK: - New job: vehicles
+
+    static func vehicles(shopID: UUID, customerID: UUID) async throws -> [JobVehicle] {
+        try await Supa.client
+            .from("vehicles")
+            .select(JobVehicle.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("customer_id", value: customerID.uuidString)
+            .is("archived_at", value: nil)
+            .order("created_at", ascending: false)
+            .execute()
+            .value
+    }
+
+    static func vehicleCategories(shopID: UUID) async throws -> [JobVehicleCategory] {
+        try await Supa.client
+            .from("vehicle_categories")
+            .select("id,name,sort")
+            .eq("shop_id", value: shopID.uuidString)
+            .order("sort", ascending: true)
+            .order("name", ascending: true)
+            .execute()
+            .value
+    }
+
+    /// Manager+: adds a vehicle to a customer.
+    static func createVehicle(shopID: UUID, customerID: UUID, draft: JobVehicleDraft) async throws -> JobVehicle {
+        let row = JobVehicleInsert(shopID: shopID, customerID: customerID, draft: draft)
+        return try await Supa.client
+            .from("vehicles")
+            .insert(row)
+            .select(JobVehicle.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    // MARK: - New job: create
+
+    /// Inserts the job row (lines and assignments are separate calls so a
+    /// partial failure can be retried without creating a second job).
+    static func createJob(shopID: UUID, draft: JobCreateDraft) async throws -> Job {
+        let row = JobInsert(shopID: shopID, draft: draft)
+        return try await Supa.client
+            .from("jobs")
+            .insert(row)
+            .select(Job.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+}
+
+// MARK: - Public drafts
+
+/// Fields for a new vehicle.
+struct JobVehicleDraft: Hashable, Sendable {
+    var year: Int?
+    var make: String = ""
+    var model: String = ""
+    var trim: String = ""
+    var color: String = ""
+    var vin: String = ""
+    var licensePlate: String = ""
+    var categoryID: UUID?
+
+    /// Something identifies the vehicle (year, make, model or VIN).
+    var isMeaningful: Bool {
+        year != nil || make.trimmedNonEmpty != nil || model.trimmedNonEmpty != nil || vin.trimmedNonEmpty != nil
+    }
+}
+
+/// Everything the job row needs at creation. Totals are never sent.
+struct JobCreateDraft: Hashable, Sendable {
+    var customerID: UUID
+    var vehicleID: UUID?
+    /// `.scheduled` with a time, or `.requested` without one.
+    var status: JobStatus
+    var scheduledStart: Date?
+    var scheduledEnd: Date?
+    var locationType: JobLocationType
+    var serviceAddressLine1: String?
+    var serviceAddressLine2: String?
+    var serviceCity: String?
+    var serviceRegion: String?
+    var servicePostalCode: String?
+    var resourceID: UUID?
+    var notes: String?
+    var internalNotes: String?
+    var discountKind: JobDiscountKind
+    var discountValue: Int
+}
+
+/// Manager+ edits of scheduling, location, resource, notes and deposit.
+/// Every field is sent (nulls clear values); coordinates are cleared when
+/// the address changes so maps never point at a stale pin.
+// table: jobs
+struct JobDetailsPatch: Encodable, Hashable, Sendable {
+    var scheduledStart: Date?
+    var scheduledEnd: Date?
+    var locationType: JobLocationType
+    var serviceAddressLine1: String?
+    var serviceAddressLine2: String?
+    var serviceCity: String?
+    var serviceRegion: String?
+    var servicePostalCode: String?
+    var clearCoordinates: Bool
+    var resourceID: UUID?
+    var notes: String?
+    var depositRequiredCents: Int
+
+    enum CodingKeys: String, CodingKey {
+        case scheduledStart = "scheduled_start"
+        case scheduledEnd = "scheduled_end"
+        case locationType = "location_type"
+        case serviceAddressLine1 = "service_address_line1"
+        case serviceAddressLine2 = "service_address_line2"
+        case serviceCity = "service_city"
+        case serviceRegion = "service_region"
+        case servicePostalCode = "service_postal_code"
+        case serviceLat = "service_lat"
+        case serviceLng = "service_lng"
+        case resourceID = "resource_id"
+        case notes
+        case depositRequiredCents = "deposit_required_cents"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(scheduledStart, forKey: .scheduledStart)
+        try container.encode(scheduledEnd, forKey: .scheduledEnd)
+        try container.encode(locationType, forKey: .locationType)
+        try container.encode(serviceAddressLine1, forKey: .serviceAddressLine1)
+        try container.encode(serviceAddressLine2, forKey: .serviceAddressLine2)
+        try container.encode(serviceCity, forKey: .serviceCity)
+        try container.encode(serviceRegion, forKey: .serviceRegion)
+        try container.encode(servicePostalCode, forKey: .servicePostalCode)
+        if clearCoordinates {
+            try container.encodeNil(forKey: .serviceLat)
+            try container.encodeNil(forKey: .serviceLng)
+        }
+        try container.encode(resourceID, forKey: .resourceID)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(max(0, depositRequiredCents), forKey: .depositRequiredCents)
+    }
+}
+
+// MARK: - Private wire types (file scope: never nest types in generic functions)
+
+private struct JobShopParam: Encodable {
+    let p_shop_id: UUID
+}
+
+private struct JobIDParam: Encodable {
+    let p_job_id: UUID
+}
+
+private struct JobTemplatePreviewParams: Encodable {
+    let p_job_id: UUID
+    let p_key: String
+    let p_channel: String
+}
+
+private struct JobStatusPatch: Encodable {
+    let status: String
+    /// Omitted unless cancelling (technicians may not touch other columns).
+    let cancel_reason: String?
+}
+
+// table: jobs
+private struct JobInternalNotesPatch: Encodable {
+    let internalNotes: String?
+
+    enum CodingKeys: String, CodingKey {
+        case internalNotes = "internal_notes"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(internalNotes, forKey: .internalNotes)
+    }
+}
+
+private struct JobDiscountPatch: Encodable {
+    let discount_kind: String
+    let discount_value: Int
+}
+
+private struct JobAssignmentInsert: Encodable {
+    let shop_id: UUID
+    let job_id: UUID
+    let member_id: UUID
+}
+
+// table: job_line_items
+private struct JobLineInsert: Encodable {
+    let shopID: UUID
+    let jobID: UUID
+    let draft: JobLineDraft
+
+    enum CodingKeys: String, CodingKey {
+        case shopID = "shop_id"
+        case jobID = "job_id"
+        case serviceID = "service_id"
+        case vehicleID = "vehicle_id"
+        case name
+        case description
+        case quantity
+        case unitPriceCents = "unit_price_cents"
+        case discountCents = "discount_cents"
+        case taxable
+        case durationMinutes = "duration_minutes"
+        case sort
+    }
+
+    /// Every key on every row (nulls explicit) so a batch insert is uniform.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(shopID, forKey: .shopID)
+        try container.encode(jobID, forKey: .jobID)
+        try container.encode(draft.serviceID, forKey: .serviceID)
+        try container.encode(draft.vehicleID, forKey: .vehicleID)
+        try container.encode(draft.name, forKey: .name)
+        try container.encode(draft.description, forKey: .description)
+        try container.encode(draft.quantity, forKey: .quantity)
+        try container.encode(draft.unitPriceCents, forKey: .unitPriceCents)
+        try container.encode(draft.discountCents, forKey: .discountCents)
+        try container.encode(draft.taxable, forKey: .taxable)
+        try container.encode(draft.durationMinutes, forKey: .durationMinutes)
+        try container.encode(draft.sort, forKey: .sort)
+    }
+}
+
+private struct JobCustomerInsert: Encodable {
+    let shop_id: UUID
+    let first_name: String?
+    let last_name: String?
+    let phone: String?
+    let email: String?
+}
+
+// table: vehicles
+private struct JobVehicleInsert: Encodable {
+    let shopID: UUID
+    let customerID: UUID
+    let draft: JobVehicleDraft
+
+    enum CodingKeys: String, CodingKey {
+        case shopID = "shop_id"
+        case customerID = "customer_id"
+        case year
+        case make
+        case model
+        case trim
+        case color
+        case vin
+        case licensePlate = "license_plate"
+        case categoryID = "category_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(shopID, forKey: .shopID)
+        try container.encode(customerID, forKey: .customerID)
+        try container.encodeIfPresent(draft.year, forKey: .year)
+        try container.encodeIfPresent(draft.make.trimmedNonEmpty, forKey: .make)
+        try container.encodeIfPresent(draft.model.trimmedNonEmpty, forKey: .model)
+        try container.encodeIfPresent(draft.trim.trimmedNonEmpty, forKey: .trim)
+        try container.encodeIfPresent(draft.color.trimmedNonEmpty, forKey: .color)
+        let vin = VIN.normalize(draft.vin)
+        try container.encodeIfPresent(vin.isEmpty ? nil : vin, forKey: .vin)
+        try container.encodeIfPresent(draft.licensePlate.trimmedNonEmpty?.uppercased(), forKey: .licensePlate)
+        try container.encodeIfPresent(draft.categoryID, forKey: .categoryID)
+    }
+}
+
+// table: jobs
+private struct JobInsert: Encodable {
+    let shopID: UUID
+    let draft: JobCreateDraft
+
+    enum CodingKeys: String, CodingKey {
+        case shopID = "shop_id"
+        case customerID = "customer_id"
+        case vehicleID = "vehicle_id"
+        case status
+        case scheduledStart = "scheduled_start"
+        case scheduledEnd = "scheduled_end"
+        case locationType = "location_type"
+        case serviceAddressLine1 = "service_address_line1"
+        case serviceAddressLine2 = "service_address_line2"
+        case serviceCity = "service_city"
+        case serviceRegion = "service_region"
+        case servicePostalCode = "service_postal_code"
+        case resourceID = "resource_id"
+        case notes
+        case internalNotes = "internal_notes"
+        case source
+        case discountKind = "discount_kind"
+        case discountValue = "discount_value"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(shopID, forKey: .shopID)
+        try container.encode(draft.customerID, forKey: .customerID)
+        try container.encodeIfPresent(draft.vehicleID, forKey: .vehicleID)
+        try container.encode(draft.status.rawValue, forKey: .status)
+        try container.encodeIfPresent(draft.scheduledStart, forKey: .scheduledStart)
+        try container.encodeIfPresent(draft.scheduledEnd, forKey: .scheduledEnd)
+        try container.encode(draft.locationType, forKey: .locationType)
+        if draft.locationType == .mobile {
+            try container.encodeIfPresent(draft.serviceAddressLine1?.trimmedNonEmpty, forKey: .serviceAddressLine1)
+            try container.encodeIfPresent(draft.serviceAddressLine2?.trimmedNonEmpty, forKey: .serviceAddressLine2)
+            try container.encodeIfPresent(draft.serviceCity?.trimmedNonEmpty, forKey: .serviceCity)
+            try container.encodeIfPresent(draft.serviceRegion?.trimmedNonEmpty, forKey: .serviceRegion)
+            try container.encodeIfPresent(draft.servicePostalCode?.trimmedNonEmpty, forKey: .servicePostalCode)
+        }
+        try container.encodeIfPresent(draft.resourceID, forKey: .resourceID)
+        try container.encodeIfPresent(draft.notes?.trimmedNonEmpty, forKey: .notes)
+        try container.encodeIfPresent(draft.internalNotes?.trimmedNonEmpty, forKey: .internalNotes)
+        try container.encode("staff", forKey: .source)
+        try container.encode(draft.discountKind, forKey: .discountKind)
+        try container.encode(draft.discountKind == .none ? 0 : max(0, draft.discountValue), forKey: .discountValue)
+    }
+}
+
+private struct JobMessageSendBody: Encodable {
+    let action: String
+    let shop_id: String
+    let job_id: String
+    let channel: String
+    let template_key: String
+}
+
+private struct JobMessageSendReply: Decodable {
+    let message_id: String?
+    let channel: String?
+    let status: String?
+    let error: String?
+}
+
+private struct JobFunctionErrorBody: Decodable {
+    let error: String?
+    let code: String?
+}

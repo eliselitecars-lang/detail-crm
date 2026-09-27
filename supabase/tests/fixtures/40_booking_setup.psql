@@ -1,0 +1,135 @@
+-- Fixture for the 40_* integration tests: builds on two_shops.psql (include
+-- that first) and makes shop A bookable online. Runs as the superuser.
+--   shop A: booking enabled (60-min grid, no lead time, 365 days ahead,
+--           capacity 1, no buffer), open every day 08:00-17:00 local
+--           (America/Chicago), tax 10%, business_type both, SMS number and
+--           phone set, app_base_url configured.
+--   categories  cat_car_a (seeded 'Car'), cat_suv_a ('Small SUV'),
+--               cat_truck_a ('Large SUV / Truck'), cat_van_a ('Van')
+--   services    svc_a      Full Detail (service, 120 min) base 20000; truck 25000 / 180 min
+--               svc_wash   Exterior Wash (service, 60 min) base 5000; add-ons limited to addon_engine
+--               pkg_a      Showroom Package (package, 240 min) base 40000; includes svc_a + svc_wash
+--               addon_engine  Engine Bay (addon, 30 min) base 3000
+--               addon_pet     Pet Hair (addon, 30 min, not taxable) base 4000
+--               svc_hidden    not online-bookable (base 1000)
+--               svc_inactive  inactive (base 1000)
+--               svc_van       Van Interior: priced for Van only (9000), no base price
+--               prod_a        a product (never bookable online)
+--   coupons     coupon_a SAVE10 (10%), cp_fixed FIXED25 ($25), cp_limited LIMITED
+--               (20%, max 1), cp_expired EXPIRED, cp_future FUTURE, cp_inactive OFF
+--   shop B: booking enabled; svc_b Wash base 5000; open every day 08-17.
+do $fixture$
+declare
+  v_a  uuid := tests.fx('shop_a');
+  v_b  uuid := tests.fx('shop_b');
+  v_id uuid;
+  d    integer;
+begin
+  insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
+
+  update public.shops
+     set tax_rate_bps = 1000, business_type = 'both', sms_from_number = '+12055550100', phone = '+12055550199',
+         city = 'Birmingham', region = 'AL', email = 'hello@shop-a.test', address_line1 = '1 Main St',
+         postal_code = '35203'
+   where id = v_a;
+  update public.booking_settings
+     set enabled = true, slot_interval_minutes = 60, lead_time_minutes = 0, max_days_ahead = 365,
+         buffer_minutes = 0, max_concurrent_jobs = 1, allow_client_cancel_hours = 24,
+         booking_message = 'See you soon', cancellation_policy = 'Cancel 24 hours ahead'
+   where shop_id = v_a;
+  update public.booking_settings set enabled = true, lead_time_minutes = 0, max_days_ahead = 365 where shop_id = v_b;
+  for d in 0 .. 6 loop
+    insert into public.business_hours (shop_id, weekday, opens_at, closes_at) values (v_a, d, '08:00', '17:00');
+    insert into public.business_hours (shop_id, weekday, opens_at, closes_at) values (v_b, d, '08:00', '17:00');
+  end loop;
+
+  perform tests.fx_set('cat_truck_a', (select id from public.vehicle_categories where shop_id = v_a and name = 'Large SUV / Truck'));
+  perform tests.fx_set('cat_suv_a', (select id from public.vehicle_categories where shop_id = v_a and name = 'Small SUV'));
+  perform tests.fx_set('cat_van_a', (select id from public.vehicle_categories where shop_id = v_a and name = 'Van'));
+
+  insert into public.service_prices (shop_id, service_id, vehicle_category_id, price_cents, duration_minutes)
+    values (v_a, tests.fx('svc_a'), tests.fx('cat_truck_a'), 25000, 180);
+
+  insert into public.services (shop_id, category_id, name, duration_minutes, online_bookable, sort)
+    values (v_a, tests.fx('svc_cat_a'), 'Exterior Wash', 60, true, 2) returning id into v_id;
+  perform tests.fx_set('svc_wash', v_id);
+  insert into public.service_prices (shop_id, service_id, price_cents) values (v_a, v_id, 5000);
+
+  insert into public.services (shop_id, name, kind, duration_minutes, online_bookable, sort, description)
+    values (v_a, 'Showroom Package', 'package', 240, true, 3, 'Everything, inside and out') returning id into v_id;
+  perform tests.fx_set('pkg_a', v_id);
+  insert into public.service_prices (shop_id, service_id, price_cents) values (v_a, v_id, 40000);
+  insert into public.package_items (shop_id, package_id, service_id, sort) values
+    (v_a, v_id, tests.fx('svc_a'), 1), (v_a, v_id, tests.fx('svc_wash'), 2);
+
+  insert into public.services (shop_id, name, kind, duration_minutes, online_bookable, sort)
+    values (v_a, 'Engine Bay', 'addon', 30, true, 10) returning id into v_id;
+  perform tests.fx_set('addon_engine', v_id);
+  insert into public.service_prices (shop_id, service_id, price_cents) values (v_a, v_id, 3000);
+  insert into public.services (shop_id, name, kind, duration_minutes, online_bookable, taxable, sort)
+    values (v_a, 'Pet Hair', 'addon', 30, true, false, 11) returning id into v_id;
+  perform tests.fx_set('addon_pet', v_id);
+  insert into public.service_prices (shop_id, service_id, price_cents) values (v_a, v_id, 4000);
+  insert into public.service_addons (shop_id, service_id, addon_id) values (v_a, tests.fx('svc_wash'), tests.fx('addon_engine'));
+
+  insert into public.services (shop_id, name, duration_minutes, online_bookable) values (v_a, 'Staff Only', 60, false)
+    returning id into v_id;
+  perform tests.fx_set('svc_hidden', v_id);
+  insert into public.service_prices (shop_id, service_id, price_cents) values (v_a, v_id, 1000);
+  insert into public.services (shop_id, name, duration_minutes, online_bookable, active) values (v_a, 'Retired', 60, true, false)
+    returning id into v_id;
+  perform tests.fx_set('svc_inactive', v_id);
+  insert into public.service_prices (shop_id, service_id, price_cents) values (v_a, v_id, 1000);
+  insert into public.services (shop_id, name, duration_minutes, online_bookable) values (v_a, 'Van Interior', 60, true)
+    returning id into v_id;
+  perform tests.fx_set('svc_van', v_id);
+  insert into public.service_prices (shop_id, service_id, vehicle_category_id, price_cents)
+    values (v_a, v_id, tests.fx('cat_van_a'), 9000);
+  insert into public.services (shop_id, name, kind, duration_minutes, online_bookable) values (v_a, 'Wax Bottle', 'product', 0, true)
+    returning id into v_id;
+  perform tests.fx_set('prod_a', v_id);
+  insert into public.service_prices (shop_id, service_id, price_cents) values (v_a, v_id, 1500);
+
+  insert into public.service_prices (shop_id, service_id, price_cents) values (v_b, tests.fx('svc_b'), 5000);
+
+  insert into public.coupons (shop_id, code, kind, value, description) values (v_a, 'FIXED25', 'fixed', 2500, '$25 off')
+    returning id into v_id;
+  perform tests.fx_set('cp_fixed', v_id);
+  insert into public.coupons (shop_id, code, kind, value, max_redemptions) values (v_a, 'LIMITED', 'percent', 2000, 1)
+    returning id into v_id;
+  perform tests.fx_set('cp_limited', v_id);
+  insert into public.coupons (shop_id, code, kind, value, ends_at) values (v_a, 'EXPIRED', 'percent', 1000, '2025-01-01Z')
+    returning id into v_id;
+  perform tests.fx_set('cp_expired', v_id);
+  insert into public.coupons (shop_id, code, kind, value, starts_at) values (v_a, 'FUTURE', 'percent', 1000, '2999-01-01Z')
+    returning id into v_id;
+  perform tests.fx_set('cp_future', v_id);
+  insert into public.coupons (shop_id, code, kind, value, active) values (v_a, 'OFF', 'percent', 1000, false)
+    returning id into v_id;
+  perform tests.fx_set('cp_inactive', v_id);
+end
+$fixture$;
+
+-- A valid booking payload for shop A (Monday 2025-06-09 10:00 CDT, Full
+-- Detail, new customer); tests override pieces with jsonb || / jsonb_set.
+create function pg_temp.booking(p_overrides jsonb default '{}'::jsonb) returns jsonb
+language sql as $$
+  select jsonb_build_object(
+    'customer', jsonb_build_object('first_name', 'Nina', 'last_name', 'New', 'email', 'nina@example.com',
+                                   'phone', '(205) 555-0142', 'sms_opt_in', true, 'email_opt_in', false),
+    'vehicle', jsonb_build_object('year', 2020, 'make', 'Toyota', 'model', 'Camry', 'color', 'Blue',
+                                  'category_id', tests.fx('cat_car_a')),
+    'service_ids', jsonb_build_array(tests.fx('svc_a')),
+    'addon_ids', jsonb_build_array(),
+    'starts_at', '2025-06-09T15:00:00Z',
+    'location', jsonb_build_object('type', 'shop'),
+    'notes', 'Please park in the back') || coalesce(p_overrides, '{}'::jsonb)
+$$;
+grant execute on function pg_temp.booking(jsonb) to anon, authenticated, service_role;
+
+-- JSON object keys as a sorted comma list (for exposure checks).
+create function pg_temp.keys(p jsonb) returns text language sql as $$
+  select string_agg(k, ',' order by k) from jsonb_object_keys(p) k
+$$;
+grant execute on function pg_temp.keys(jsonb) to anon, authenticated, service_role;

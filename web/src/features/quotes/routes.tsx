@@ -13,7 +13,19 @@ export const routes: FeatureRoutes = {
           <Outlet />
         </RequireRole>
       ),
-      children: [{ index: true, lazy: lazyPage(() => import('./QuotesPage')) }],
+      children: [
+        { index: true, lazy: lazyPage(() => import('./QuotesPage')) },
+        {
+          path: 'new',
+          element: (
+            <RequireRole capability="quotes.manage">
+              <Outlet />
+            </RequireRole>
+          ),
+          children: [{ index: true, lazy: lazyPage(() => import('./QuoteNewPage')) }],
+        },
+        { path: ':quoteId', lazy: lazyPage(() => import('./QuoteDetailPage')) },
+      ],
     },
   ],
 };

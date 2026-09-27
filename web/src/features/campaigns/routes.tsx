@@ -13,7 +13,11 @@ export const routes: FeatureRoutes = {
           <Outlet />
         </RequireRole>
       ),
-      children: [{ index: true, lazy: lazyPage(() => import('./CampaignsPage')) }],
+      children: [
+        { index: true, lazy: lazyPage(() => import('./CampaignsPage')) },
+        { path: 'new', lazy: lazyPage(() => import('./CampaignNewPage')) },
+        { path: ':campaignId', lazy: lazyPage(() => import('./CampaignDetailPage')) },
+      ],
     },
   ],
 };

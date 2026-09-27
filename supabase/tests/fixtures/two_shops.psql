@@ -1,0 +1,115 @@
+-- Shared fixture: two fully set-up shops with one member per role, plus a
+-- small CRM/catalog/jobs data set. Include from a test file with
+--   \ir fixtures/two_shops.psql
+-- Runs as the superuser; every id is registered in tests.fixtures (read with
+-- tests.fx('key')). Keys:
+--   shops      shop_a, shop_b
+--   users      u_owner_a u_admin_a u_manager_a u_tech_a u_tech2_a
+--              u_owner_b u_admin_b u_manager_b u_tech_b u_outsider
+--   members    m_owner_a m_admin_a m_manager_a m_tech_a m_tech2_a
+--              m_owner_b m_admin_b m_manager_b m_tech_b
+--   shop A     cat_car_a (seeded 'Car' category), svc_cat_a, svc_a (base price 20000),
+--              cust_a  + veh_a  -> job_a  (assigned to tech_a; line_a)
+--              cust_a2 + veh_a2 -> job_a2 (assigned to tech2_a)
+--              cust_a3 (no jobs), res_a, coupon_a
+--   shop B     cat_car_b, svc_b, cust_b + veh_b -> job_b (assigned to tech_b; line_b),
+--              res_b, coupon_b
+do $fixture$
+declare
+  v_a  uuid;
+  v_b  uuid;
+  v_id uuid;
+begin
+  v_a := tests.fx_set('shop_a', tests.make_shop('owner-a@test.local', 'shop-a', 'Shop A'));
+  v_b := tests.fx_set('shop_b', tests.make_shop('owner-b@test.local', 'shop-b', 'Shop B'));
+
+  perform tests.fx_set('u_owner_a', tests.user_id('owner-a@test.local'));
+  perform tests.fx_set('u_owner_b', tests.user_id('owner-b@test.local'));
+  perform tests.fx_set('m_owner_a', (select id from public.shop_members where shop_id = v_a and role = 'owner'));
+  perform tests.fx_set('m_owner_b', (select id from public.shop_members where shop_id = v_b and role = 'owner'));
+
+  perform tests.fx_set('m_admin_a',   tests.add_member(v_a, 'admin-a@test.local', 'admin'));
+  perform tests.fx_set('m_manager_a', tests.add_member(v_a, 'manager-a@test.local', 'manager'));
+  perform tests.fx_set('m_tech_a',    tests.add_member(v_a, 'tech-a@test.local', 'technician'));
+  perform tests.fx_set('m_tech2_a',   tests.add_member(v_a, 'tech2-a@test.local', 'technician'));
+  perform tests.fx_set('m_admin_b',   tests.add_member(v_b, 'admin-b@test.local', 'admin'));
+  perform tests.fx_set('m_manager_b', tests.add_member(v_b, 'manager-b@test.local', 'manager'));
+  perform tests.fx_set('m_tech_b',    tests.add_member(v_b, 'tech-b@test.local', 'technician'));
+
+  perform tests.fx_set('u_admin_a',   tests.user_id('admin-a@test.local'));
+  perform tests.fx_set('u_manager_a', tests.user_id('manager-a@test.local'));
+  perform tests.fx_set('u_tech_a',    tests.user_id('tech-a@test.local'));
+  perform tests.fx_set('u_tech2_a',   tests.user_id('tech2-a@test.local'));
+  perform tests.fx_set('u_admin_b',   tests.user_id('admin-b@test.local'));
+  perform tests.fx_set('u_manager_b', tests.user_id('manager-b@test.local'));
+  perform tests.fx_set('u_tech_b',    tests.user_id('tech-b@test.local'));
+  perform tests.fx_set('u_outsider',  tests.create_user('outsider@test.local'));
+
+  perform tests.fx_set('cat_car_a', (select id from public.vehicle_categories where shop_id = v_a and name = 'Car'));
+  perform tests.fx_set('cat_car_b', (select id from public.vehicle_categories where shop_id = v_b and name = 'Car'));
+
+  -- catalog
+  insert into public.service_categories (shop_id, name) values (v_a, 'Exterior') returning id into v_id;
+  perform tests.fx_set('svc_cat_a', v_id);
+  insert into public.services (shop_id, category_id, name, duration_minutes, online_bookable)
+    values (v_a, tests.fx('svc_cat_a'), 'Full Detail', 120, true) returning id into v_id;
+  perform tests.fx_set('svc_a', v_id);
+  insert into public.service_prices (shop_id, service_id, vehicle_category_id, price_cents)
+    values (v_a, v_id, null, 20000);
+  insert into public.services (shop_id, name, duration_minutes, online_bookable)
+    values (v_b, 'Wash', 60, true) returning id into v_id;
+  perform tests.fx_set('svc_b', v_id);
+  insert into public.resources (shop_id, name) values (v_a, 'Bay 1') returning id into v_id;
+  perform tests.fx_set('res_a', v_id);
+  insert into public.resources (shop_id, name) values (v_b, 'Bay 1') returning id into v_id;
+  perform tests.fx_set('res_b', v_id);
+  insert into public.coupons (shop_id, code, kind, value) values (v_a, 'SAVE10', 'percent', 1000) returning id into v_id;
+  perform tests.fx_set('coupon_a', v_id);
+  insert into public.coupons (shop_id, code, kind, value) values (v_b, 'SAVE10', 'percent', 1000) returning id into v_id;
+  perform tests.fx_set('coupon_b', v_id);
+
+  -- CRM
+  insert into public.customers (shop_id, first_name, last_name, email, phone)
+    values (v_a, 'Alice', 'Anders', 'alice@example.com', '+12055550101') returning id into v_id;
+  perform tests.fx_set('cust_a', v_id);
+  insert into public.customers (shop_id, first_name, last_name) values (v_a, 'Aaron', 'Other') returning id into v_id;
+  perform tests.fx_set('cust_a2', v_id);
+  insert into public.customers (shop_id, company) values (v_a, 'Fleet Co') returning id into v_id;
+  perform tests.fx_set('cust_a3', v_id);
+  insert into public.customers (shop_id, first_name, last_name) values (v_b, 'Bob', 'Burns') returning id into v_id;
+  perform tests.fx_set('cust_b', v_id);
+  insert into public.vehicles (shop_id, customer_id, year, make, model, category_id)
+    values (v_a, tests.fx('cust_a'), 2021, 'Honda', 'Civic', tests.fx('cat_car_a')) returning id into v_id;
+  perform tests.fx_set('veh_a', v_id);
+  insert into public.vehicles (shop_id, customer_id, year, make, model)
+    values (v_a, tests.fx('cust_a2'), 2019, 'Ford', 'F-150') returning id into v_id;
+  perform tests.fx_set('veh_a2', v_id);
+  insert into public.vehicles (shop_id, customer_id, year, make, model)
+    values (v_b, tests.fx('cust_b'), 2018, 'Tesla', 'Model 3') returning id into v_id;
+  perform tests.fx_set('veh_b', v_id);
+
+  -- jobs
+  insert into public.jobs (shop_id, customer_id, vehicle_id, scheduled_start, scheduled_end, notes, internal_notes)
+    values (v_a, tests.fx('cust_a'), tests.fx('veh_a'), '2025-06-02 15:00+00', '2025-06-02 17:00+00',
+            'Gate code 1234', 'Customer is picky') returning id into v_id;
+  perform tests.fx_set('job_a', v_id);
+  insert into public.jobs (shop_id, customer_id, vehicle_id, scheduled_start, scheduled_end)
+    values (v_a, tests.fx('cust_a2'), tests.fx('veh_a2'), '2025-06-02 18:00+00', '2025-06-02 19:00+00')
+    returning id into v_id;
+  perform tests.fx_set('job_a2', v_id);
+  insert into public.jobs (shop_id, customer_id, vehicle_id, scheduled_start, scheduled_end)
+    values (v_b, tests.fx('cust_b'), tests.fx('veh_b'), '2025-06-02 15:00+00', '2025-06-02 16:00+00')
+    returning id into v_id;
+  perform tests.fx_set('job_b', v_id);
+  insert into public.job_line_items (shop_id, job_id, service_id, name, unit_price_cents)
+    values (v_a, tests.fx('job_a'), tests.fx('svc_a'), 'Full Detail', 20000) returning id into v_id;
+  perform tests.fx_set('line_a', v_id);
+  insert into public.job_line_items (shop_id, job_id, name, unit_price_cents)
+    values (v_b, tests.fx('job_b'), 'Wash', 5000) returning id into v_id;
+  perform tests.fx_set('line_b', v_id);
+  insert into public.job_assignments (shop_id, job_id, member_id) values
+    (v_a, tests.fx('job_a'),  tests.fx('m_tech_a')),
+    (v_a, tests.fx('job_a2'), tests.fx('m_tech2_a')),
+    (v_b, tests.fx('job_b'),  tests.fx('m_tech_b'));
+end
+$fixture$;

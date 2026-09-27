@@ -20,7 +20,23 @@ export const links = {
   invite: (baseUrl: string, token: string): string => build(baseUrl, `/invite/${segment(token)}`),
   bookingPage: (baseUrl: string, slug: string): string => build(baseUrl, `/book/${segment(slug)}`),
   portal: (baseUrl: string): string => build(baseUrl, "/portal"),
+  /**
+   * Staff payments settings page Stripe Connect onboarding returns to:
+   * `return` after the account link flow, `refresh` when the link expired.
+   */
+  stripeConnect: (baseUrl: string, state: "refresh" | "return"): string =>
+    build(baseUrl, `/app/settings/payments?stripe=${state}`),
 } as const;
+
+/**
+ * `url` with query parameters added (or replaced), e.g. Stripe Checkout
+ * success/cancel URLs: `withQuery(links.invoice(base, token), { paid: "1" })`.
+ */
+export function withQuery(url: string, params: Readonly<Record<string, string>>): string {
+  const parsed = new URL(url);
+  for (const [key, value] of Object.entries(params)) parsed.searchParams.set(key, value);
+  return parsed.toString();
+}
 
 /** Public URL of an edge function (+ optional query), e.g. Twilio callbacks. */
 export function functionUrl(
