@@ -526,6 +526,12 @@ private struct InboxComposer: View {
     private var canSend: Bool {
         InboxComposeRules.draftProblem(channel: channel, body: draftBody) == nil
     }
+
+    /// Length of the draft as the server counts it — the same trimmed text
+    /// `InboxComposeRules.draftProblem` checks against `smsLimit`.
+    private var smsLength: Int {
+        InboxComposeRules.smsLength(draftBody.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
 }
 
 /// Round send button that shows a spinner while sending.
