@@ -4,6 +4,8 @@ import { renderRoute, shopValue, signedInAuth } from '@/test/render';
 import {
   builders,
   createBuilder,
+  mockRpc,
+  pgError,
   resetSupabaseMock,
   setTableResult,
   supabase,
@@ -43,9 +45,10 @@ describe('OnboardingPage', () => {
   });
 
   it('creates the shop, saves details and hours, then opens the dashboard', async () => {
-    supabase.rpc.mockReturnValueOnce(
-      createBuilder({ data: { id: 'shop-new', name: 'Glacier Detailing' } }),
-    );
+    const calls = mockRpc({
+      create_shop: { data: { id: 'shop-new', name: 'Glacier Detailing' } },
+      replace_business_hours: { data: [] },
+    });
     const { user, switchShop } = setup();
 
     await user.type(screen.getByLabelText(/Shop name/), 'Glacier Detailing');
@@ -81,15 +84,17 @@ describe('OnboardingPage', () => {
       expect.objectContaining({ city: 'Birmingham', tax_rate_bps: 825, address_line1: null }),
     );
     expect(shopUpdate?.eq).toHaveBeenCalledWith('id', 'shop-new');
-    const [deleteHours, insertHours] = builders.business_hours ?? [];
-    expect(deleteHours?.delete).toHaveBeenCalled();
-    expect(insertHours?.insert).toHaveBeenCalledWith(
+    // Hours are replaced atomically by the RPC (no direct table writes).
+    expect(builders.business_hours).toBeUndefined();
+    const hours = calls.find((c) => c.fn === 'replace_business_hours');
+    expect(hours?.args.p_shop_id).toBe('shop-new');
+    expect(hours?.args.p_rows).toEqual(
       expect.arrayContaining([
-        { weekday: 1, opens_at: '08:00', closes_at: '17:00', shop_id: 'shop-new' },
-        { weekday: 6, opens_at: '08:00', closes_at: '17:00', shop_id: 'shop-new' },
+        { weekday: 1, opens_at: '08:00', closes_at: '17:00' },
+        { weekday: 6, opens_at: '08:00', closes_at: '17:00' },
       ]),
     );
-    expect(insertHours?.insert.mock.calls[0]?.[0]).toHaveLength(6);
+    expect(hours?.args.p_rows).toHaveLength(6);
     expect(switchShop).toHaveBeenCalledWith('shop-new');
   });
 
@@ -116,9 +121,13 @@ describe('OnboardingPage', () => {
   });
 
   async function failAfterCreate() {
-    supabase.rpc.mockReturnValueOnce(createBuilder({ data: { id: 'shop-new' } }));
-    setTableResult('business_hours', {
-      error: { code: '42501', message: 'permission denied for table business_hours' },
+    let hoursFail = true;
+    const calls = mockRpc({
+      create_shop: { data: { id: 'shop-new' } },
+      replace_business_hours: () =>
+        hoursFail
+          ? pgError('42501', 'only owners and admins can change business hours')
+          : { data: [] },
     });
     const utils = setup();
     const { user } = utils;
@@ -131,12 +140,13 @@ describe('OnboardingPage', () => {
       'Your shop was created, but some settings didn’t save',
     );
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
-    setTableResult('business_hours', { data: null, error: null });
-    return utils;
+    hoursFail = false;
+    const created = () => calls.filter((c) => c.fn === 'create_shop').length;
+    return { ...utils, created };
   }
 
   it('saves edits made after a partial failure when retrying', async () => {
-    const { user, switchShop } = await failAfterCreate();
+    const { user, switchShop, created } = await failAfterCreate();
 
     await user.click(screen.getByRole('button', { name: 'Back' }));
     await user.selectOptions(await screen.findByLabelText(/Time zone/), 'America/Denver');
@@ -150,7 +160,7 @@ describe('OnboardingPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Try again' }));
 
     expect(await screen.findByText('Dashboard home')).toBeInTheDocument();
-    expect(supabase.rpc).toHaveBeenCalledTimes(1); // the shop is not created twice
+    expect(created()).toBe(1); // the shop is not created twice
     const retryUpdate = builders.shops?.at(-1);
     expect(retryUpdate?.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -165,7 +175,7 @@ describe('OnboardingPage', () => {
   });
 
   it('shows a taken booking link on step 1 when a retry changes it', async () => {
-    const { user } = await failAfterCreate();
+    const { user, created } = await failAfterCreate();
     setTableResult('shops', {
       error: {
         code: '23505',
@@ -185,6 +195,6 @@ describe('OnboardingPage', () => {
 
     expect(await screen.findByText('That booking link is taken. Try another.')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Your business' })).toBeInTheDocument();
-    expect(supabase.rpc).toHaveBeenCalledTimes(1);
+    expect(created()).toBe(1);
   });
 });

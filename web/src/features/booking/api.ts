@@ -148,7 +148,8 @@ export function useBookingCatalog(slug: string, enabled: boolean) {
 export interface SlotArgs {
   /** Services + add-ons (the server sizes the slot from all of them). */
   serviceIds: readonly string[];
-  vehicleCategoryId: string;
+  /** null when the shop has no vehicle categories: the argument is omitted. */
+  vehicleCategoryId: string | null;
   /** Shop-local dates, inclusive. */
   from: string;
   to: string;
@@ -163,7 +164,7 @@ export function useAvailableSlots(slug: string, args: SlotArgs | null) {
         await supabase.rpc('get_available_slots', {
           p_shop_slug: slug,
           p_service_ids: [...args.serviceIds],
-          p_vehicle_category_id: args.vehicleCategoryId,
+          ...(args.vehicleCategoryId ? { p_vehicle_category_id: args.vehicleCategoryId } : {}),
           p_from: args.from,
           p_to: args.to,
         }),
@@ -198,7 +199,8 @@ export type CouponPreview = z.output<typeof couponPreviewSchema>;
 export interface PreviewArgs {
   /** Services + add-ons. */
   serviceIds: readonly string[];
-  vehicleCategoryId: string;
+  /** null when the shop has no vehicle categories: the argument is omitted. */
+  vehicleCategoryId: string | null;
   /** Coupon code ("" = none: the server answers with undiscounted totals). */
   code: string;
 }
@@ -211,7 +213,7 @@ async function fetchPreview(slug: string, args: PreviewArgs): Promise<CouponPrev
         p_slug: slug,
         p_code: args.code,
         p_service_ids: [...args.serviceIds],
-        p_vehicle_category_id: args.vehicleCategoryId,
+        ...(args.vehicleCategoryId ? { p_vehicle_category_id: args.vehicleCategoryId } : {}),
       }),
     ),
   );

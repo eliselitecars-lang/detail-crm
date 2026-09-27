@@ -4,13 +4,15 @@
  * action authenticates itself:
  *
  *   send             POST JSON  staff JWT + role (technicians: templated
- *                               on-my-way / started / complete on assigned jobs)
+ *                               on-my-way / started / complete on assigned jobs;
+ *                               quotes / invoices: owner/admin/manager)
  *   process_queue    POST JSON  x-cron-secret == CRON_SECRET (pg_cron, every minute)
  *   run_automations  POST JSON  x-cron-secret == CRON_SECRET (enqueue_due_automations)
  *   twilio_inbound   POST form  ?action=twilio_inbound&shop_id=…, X-Twilio-Signature
  *   twilio_status    POST form  ?action=twilio_status,  X-Twilio-Signature
- *   unsubscribe      POST/GET   ?action=unsubscribe&token=<message id> (public by
- *                               token; RFC 8058 one-click for campaign emails)
+ *   unsubscribe      POST/GET   ?action=unsubscribe&token=<unsubscribe token> (public
+ *                               by the email's messages.unsubscribe_token, never its
+ *                               message id; RFC 8058 one-click for marketing emails)
  *
  * See supabase/setup/cron.sql for the schedules and twilio_webhooks.ts for
  * the URLs to configure in Twilio.

@@ -3,8 +3,9 @@
 //  DetailCRM
 //
 //  The signed-in member's in-app notifications for the active shop:
-//  unread first, then newest. Tapping one marks it read and, when it is
-//  about a job, opens the job. Swipe to toggle read or dismiss; "Mark all
+//  unread first, then newest. Tapping one marks it read and opens what it
+//  is about (`AppNotification.route`: the conversation, quote, invoice, job
+//  or customer). Swipe to toggle read or dismiss; "Mark all
 //  read" in the toolbar. Rows are created by the server (new bookings,
 //  quote answers, payments, inbound messages, signed forms).
 //
@@ -190,19 +191,19 @@ private struct NotificationsList: View {
     }
 }
 
-/// A job notification opens the job and is marked read when the job
+/// A notification with a destination opens it and is marked read when that
 /// page appears — so every way of activating the link (tap, VoiceOver
-/// double-tap, Switch Control, keyboard) marks it. Any other one is just
-/// marked read on activation.
+/// double-tap, Switch Control, keyboard) marks it. One without a
+/// destination is just marked read on activation.
 private struct NotificationsRowLink: View {
     let item: AppNotification
     let clock: ShopClock
     let onOpen: (AppNotification) -> Void
 
     var body: some View {
-        if let jobID = item.jobID {
+        if let route = item.route {
             NavigationLink {
-                AppRouteDestination(route: AppRoute.job(jobID))
+                AppRouteDestination(route: route)
                     .onAppear { onOpen(item) }
             } label: {
                 NotificationsRow(item: item, clock: clock)

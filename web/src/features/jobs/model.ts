@@ -435,9 +435,7 @@ export interface InspectionDetailsDraft {
 }
 
 /** Form strings → the inspection columns, or a user-facing error. */
-export function parseInspectionDetails(
-  draft: InspectionDetailsDraft,
-):
+export function parseInspectionDetails(draft: InspectionDetailsDraft):
   | {
       ok: true;
       details: { mileage: number | null; fuel_level: number | null; notes: string | null };
@@ -472,25 +470,20 @@ export function inspectionDetailsDraft(row: {
 // ---------------------------------------------------------------------------
 
 /**
- * Moves the line at `index` one step up (-1) or down (+1) and renumbers the
- * whole list 1..n, returning only the rows whose `sort` must change. Robust
- * to equal / gapped sort values (job_line_items.sort defaults to 0, and two
- * concurrent adds can pick the same value): the result is always a strict
- * order, and re-running after a partial failure converges.
+ * The job's line ids after moving the line at `index` one step up (-1) or
+ * down (+1), for reorder_job_line_items (which renumbers sort 0..n-1 in one
+ * transaction). null when the move would leave the list.
  */
-export function reorderLineSorts(
-  rows: readonly { id: string; sort: number }[],
+export function movedLineOrder(
+  rows: readonly { id: string }[],
   index: number,
   delta: -1 | 1,
-): { id: string; sort: number }[] {
+): string[] | null {
   const target = index + delta;
-  if (index < 0 || index >= rows.length || target < 0 || target >= rows.length) return [];
-  const order = [...rows];
+  if (index < 0 || index >= rows.length || target < 0 || target >= rows.length) return null;
+  const order = rows.map((row) => row.id);
   const [moved] = order.splice(index, 1);
-  if (!moved) return [];
+  if (moved === undefined) return null;
   order.splice(target, 0, moved);
-  return order
-    .map((row, i) => ({ id: row.id, sort: i + 1, was: row.sort }))
-    .filter((row) => row.sort !== row.was)
-    .map(({ id, sort }) => ({ id, sort }));
+  return order;
 }

@@ -2,13 +2,14 @@
 //  MessageService.swift
 //  DetailCRM
 //
-//  The staff inbox (SPEC §4.7; owner/admin/manager only — RLS returns
-//  nothing to technicians). Conversations are grouped client-side from
-//  recent `messages` rows; unread = inbound rows with `read_at` null.
-//  Sending always goes through the `messaging` edge function's `send`
-//  action, which checks the role, queues the message with the database's
-//  consent rules (opt-outs, missing address, SMS not configured) and
-//  delivers it right away.
+//  The staff inbox (SPEC §4.7; owner/admin/manager only). Conversations
+//  come from the server (`inbox_threads`: the newest message per customer
+//  or unknown sender, with unread counts), paged newest first; the total
+//  unread count is `inbox_unread_count`. Sending always goes through the
+//  `messaging` edge function's `send` action, which checks the role, queues
+//  the message with the database's consent rules (opt-outs, missing
+//  address, SMS not configured) and delivers it right away. Every compose
+//  carries a `request_nonce`, so a retry never queues a second copy.
 //
 
 import Foundation
@@ -16,8 +17,8 @@ import Supabase
 
 enum MessageService {
 
-    /// How many recent messages the inbox groups into conversations.
-    static let inboxWindow = 500
+    /// Conversations per inbox page (`inbox_threads` p_limit).
+    static let inboxPageSize = 50
     /// How many messages a conversation screen loads.
     static let threadWindow = 300
 
@@ -33,84 +34,30 @@ enum MessageService {
 
     // MARK: - Inbox
 
-    /// Conversations, newest activity first, with unread counts.
-    static func threads(shopID: UUID) async throws -> [MessageThread] {
-        async let recentTask: [Message] = Supa.client
-            .from("messages")
-            .select(Message.selectColumns)
-            .eq("shop_id", value: shopID.uuidString)
-            .neq("status", value: "cancelled")
-            .order("created_at", ascending: false)
-            .limit(inboxWindow)
+    /// One page of conversations, newest activity first. `before` is the
+    /// `lastCreatedAt` of the last conversation already shown (strictly
+    /// older ones are returned); nil for the first page.
+    static func inbox(shopID: UUID, before: Date? = nil) async throws -> InboxPage {
+        let rows: [InboxThreadRow] = try await Supa.client
+            .rpc("inbox_threads", params: InboxThreadsParams(
+                p_shop_id: shopID,
+                p_limit: inboxPageSize,
+                p_before: before.map { Supa.iso($0) }
+            ))
             .execute()
             .value
-        async let unreadTask: [MessageUnreadRow] = Supa.client
-            .from("messages")
-            .select("customer_id,from_address")
-            .eq("shop_id", value: shopID.uuidString)
-            .eq("direction", value: Message.Direction.inbound.rawValue)
-            .is("read_at", value: nil)
-            .limit(2000)
-            .execute()
-            .value
-        let (recent, unread) = try await (recentTask, unreadTask)
-
-        var unreadCounts: [MessageThreadKey: Int] = [:]
-        for row in unread {
-            if let key = threadKey(customerID: row.customerID, fromAddress: row.fromAddress) {
-                unreadCounts[key, default: 0] += 1
-            }
-        }
-
-        var order: [MessageThreadKey] = []
-        var latestByKey: [MessageThreadKey: Message] = [:]
-        for message in recent {
-            let address = message.isInbound ? message.fromAddress : nil
-            guard let key = threadKey(customerID: message.customerID, fromAddress: address) else { continue }
-            if latestByKey[key] == nil {
-                latestByKey[key] = message
-                order.append(key)
-            }
-        }
-
-        var customerIDs: [UUID] = []
-        for key in order {
-            if case .customer(let id) = key { customerIDs.append(id) }
-        }
-        // Names are a secondary lookup: if it fails, the conversations still
-        // show (titled "Customer") instead of failing the whole inbox.
-        let customers: [Customer]
-        do {
-            customers = try await CustomerService.fetch(shopID: shopID, ids: customerIDs)
-        } catch {
-            customers = []
-        }
-        let customersByID = Dictionary(customers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-
-        return order.compactMap { key -> MessageThread? in
-            guard let latest = latestByKey[key] else { return nil }
-            var customer: Customer?
-            if case .customer(let id) = key { customer = customersByID[id] }
-            return MessageThread(key: key, customer: customer, latest: latest, unreadCount: unreadCounts[key] ?? 0)
-        }
+        return InboxPage(
+            threads: rows.compactMap { MessageThread(row: $0) },
+            nextBefore: rows.count >= inboxPageSize ? rows.last?.lastCreatedAt : nil
+        )
     }
 
     /// Total unread inbound messages in the shop (for badges).
     static func unreadCount(shopID: UUID) async throws -> Int {
-        let response = try await Supa.client
-            .from("messages")
-            .select("id", head: true, count: .exact)
-            .eq("shop_id", value: shopID.uuidString)
-            .eq("direction", value: Message.Direction.inbound.rawValue)
-            .is("read_at", value: nil)
+        try await Supa.client
+            .rpc("inbox_unread_count", params: InboxUnreadParams(p_shop_id: shopID))
             .execute()
-        return response.count ?? 0
-    }
-
-    private static func threadKey(customerID: UUID?, fromAddress: String?) -> MessageThreadKey? {
-        if let customerID { return .customer(customerID) }
-        if let address = fromAddress?.trimmedNonEmpty { return .unknownSender(address) }
-        return nil
+            .value
     }
 
     // MARK: - One conversation
@@ -198,7 +145,8 @@ enum MessageService {
         channel: Message.Channel,
         subject: String?,
         body: String,
-        jobID: UUID? = nil
+        jobID: UUID? = nil,
+        nonce: String
     ) async throws -> InboxSendResult {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw AppError.invalidInput("Write a message first.") }
@@ -213,7 +161,8 @@ enum MessageService {
             channel: channel.rawValue,
             template_key: nil,
             subject: channel == .email ? subject?.trimmedNonEmpty : nil,
-            body: trimmed
+            body: trimmed,
+            request_nonce: nonce
         )
         return try await invokeSend(payload, channel: channel)
     }
@@ -225,7 +174,8 @@ enum MessageService {
         customerID: UUID,
         key: String,
         channel: Message.Channel,
-        jobID: UUID? = nil
+        jobID: UUID? = nil,
+        nonce: String
     ) async throws -> InboxSendResult {
         let payload = MessageSendBody(
             action: "send",
@@ -235,42 +185,34 @@ enum MessageService {
             channel: channel.rawValue,
             template_key: key,
             subject: nil,
-            body: nil
+            body: nil,
+            request_nonce: nonce
         )
         return try await invokeSend(payload, channel: channel)
     }
 
     private static func invokeSend(_ payload: MessageSendBody, channel: Message.Channel) async throws -> InboxSendResult {
-        do {
-            let reply: MessageSendReply = try await Supa.client.functions.invoke(
-                "messaging",
-                options: FunctionInvokeOptions(body: payload)
-            )
-            return InboxSendResult(
-                messageID: reply.message_id.flatMap { UUID(uuidString: $0) },
-                channel: Message.Channel(rawValue: reply.channel ?? "") ?? channel,
-                status: Message.Status(rawValue: reply.status ?? "") ?? .unknown,
-                error: reply.error
-            )
-        } catch let error as FunctionsError {
-            throw readable(error)
-        }
+        let reply: MessageSendReply = try await EdgeFunctions.invoke("messaging", body: payload)
+        return InboxSendResult(
+            messageID: reply.message_id.flatMap { UUID(uuidString: $0) },
+            channel: Message.Channel(rawValue: reply.channel ?? "") ?? channel,
+            status: Message.Status(rawValue: reply.status ?? "") ?? .unknown,
+            error: reply.error
+        )
     }
 
-    /// Turns the function's `{"error": "...", "code": "..."}` body into a
-    /// readable `AppError`.
-    private static func readable(_ error: FunctionsError) -> Error {
-        if case .httpError(let code, let data) = error {
-            if let decoded = try? JSONDecoder().decode(MessageFunctionErrorBody.self, from: data),
-               let message = decoded.error?.trimmedNonEmpty {
-                return AppError.message(ErrorText.sentence(message))
-            }
-            if code == 401 { return AppError.notSignedIn }
-            if code == 403 { return AppError.message("You don't have permission to send messages.") }
-            return AppError.message("The message couldn't be sent. Try again.")
-        }
-        return AppError.message("Couldn't reach the messaging service. Try again.")
+    /// A fresh per-compose nonce for `send` (url-safe, 32 characters).
+    static func newNonce() -> String {
+        MoneyEdge.newNonce()
     }
+}
+
+/// One page of the inbox.
+struct InboxPage: Sendable {
+    var threads: [MessageThread]
+    /// Pass as `before` to load the next (older) page; nil when this was
+    /// the last page.
+    var nextBefore: Date?
 }
 
 // MARK: - Private wire types (file scope: never nest types in generic functions)
@@ -288,6 +230,7 @@ private struct MessageSendBody: Encodable {
     let template_key: String?
     let subject: String?
     let body: String?
+    let request_nonce: String
 }
 
 /// Response of `send`: `{message_id, channel, status, error}`.
@@ -298,26 +241,21 @@ private struct MessageSendReply: Decodable {
     let error: String?
 }
 
-private struct MessageFunctionErrorBody: Decodable {
-    let error: String?
-    let code: String?
+private struct InboxThreadsParams: Encodable {
+    let p_shop_id: UUID
+    let p_limit: Int
+    /// Omitted for the first page.
+    let p_before: String?
+}
+
+private struct InboxUnreadParams: Encodable {
+    let p_shop_id: UUID
 }
 
 private struct MessagePreviewParams: Encodable {
     let p_job_id: String
     let p_key: String
     let p_channel: String
-}
-
-// table: messages
-private struct MessageUnreadRow: Decodable {
-    let customerID: UUID?
-    let fromAddress: String?
-
-    enum CodingKeys: String, CodingKey {
-        case customerID = "customer_id"
-        case fromAddress = "from_address"
-    }
 }
 
 // table: messages

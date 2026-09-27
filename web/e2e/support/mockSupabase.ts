@@ -2,22 +2,64 @@ import type { Page, Route, WebSocketRoute } from '@playwright/test';
 import type { MockUser } from './fixtures';
 
 export const SUPABASE_URL = 'https://e2e-mock.supabase.co';
-const STORAGE_KEY = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`;
+/** localStorage key supabase-js keeps the session under. */
+export const STORAGE_KEY = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`;
 
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-type Handler = (request: { url: URL; method: string; body: unknown }) => Json | Promise<Json>;
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+/**
+ * A non-2xx (or explicit-status) answer from a handler: `{ status, body }`.
+ * Build it with `reply(status, body)`. Any handler (tables, rpc, functions,
+ * storage) may return one, e.g. an edge-function refusal
+ * `reply(422, { error, code: 'unprocessable', details: { reason } })`, the
+ * gateway's `reply(401, { code: 401, message: 'Invalid JWT' })` or a PostgREST
+ * error `reply(404, { code: 'PT404', message: 'quote not found' })`.
+ */
+const REPLY = Symbol('mockReply');
+
+export interface MockReply {
+  readonly [REPLY]: true;
+  readonly status: number;
+  readonly body: Json;
+}
+
+/** An explicit HTTP status + JSON body for any mock handler. */
+export function reply(status: number, body: Json): MockReply {
+  return { [REPLY]: true, status, body };
+}
+
+function isReply(value: unknown): value is MockReply {
+  return typeof value === 'object' && value !== null && REPLY in value;
+}
+
+export interface MockRequest {
+  url: URL;
+  method: string;
+  /** Parsed JSON body (functions / rpc / tables); raw bytes for storage uploads. */
+  body: unknown;
+  headers: Record<string, string>;
+}
+
+export type Handler = (request: MockRequest) => Json | MockReply | Promise<Json | MockReply>;
 
 export interface MockBackendOptions {
   /** Signed-in user (session is pre-seeded in localStorage). Omit for signed out. */
   user?: MockUser | null;
   /** Rows returned for `GET /rest/v1/<table>` (all rows; filters are not applied). */
-  tables?: Record<string, Json[] | Handler>;
+  tables?: Record<string, Json[] | MockReply | Handler>;
   /** Results for `POST /rest/v1/rpc/<fn>`. */
-  rpc?: Record<string, Json | Handler>;
+  rpc?: Record<string, Json | MockReply | Handler>;
   /** Exact counts for `HEAD` count queries, by table. */
   counts?: Record<string, number>;
   /** Users that may sign in with password (any password is accepted). */
   accounts?: MockUser[];
+  /**
+   * Results for `POST /functions/v1/<name>`, by function name. A handler sees
+   * the JSON body (`{ action, … }`). Unknown functions answer 404.
+   */
+  functions?: Record<string, Json | MockReply | Handler>;
+  /** Handler for every `/storage/v1/**` request (uploads, removes, signed URLs); default 200 `{}`. */
+  storage?: Handler;
 }
 
 function base64url(value: object): string {
@@ -65,6 +107,13 @@ export function sessionFor(user: MockUser) {
   };
 }
 
+const CORS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-headers': '*',
+  'access-control-allow-methods': 'GET, POST, PATCH, PUT, DELETE, HEAD, OPTIONS',
+  'access-control-expose-headers': 'content-range',
+};
+
 async function json(
   route: Route,
   status: number,
@@ -74,9 +123,24 @@ async function json(
   await route.fulfill({
     status,
     contentType: 'application/json',
-    headers: { 'access-control-allow-origin': '*', ...headers },
+    headers: { ...CORS, ...headers },
     body: body === undefined ? '' : JSON.stringify(body),
   });
+}
+
+function jsonBody(route: Route): unknown {
+  try {
+    return route.request().postDataJSON() as unknown;
+  } catch {
+    return route.request().postData();
+  }
+}
+
+async function resolve(
+  entry: Json | MockReply | Handler | undefined,
+  request: MockRequest,
+): Promise<Json | MockReply | undefined> {
+  return typeof entry === 'function' ? entry(request) : entry;
 }
 
 /** Answers realtime joins/heartbeats so channels subscribe quietly. */
@@ -146,7 +210,15 @@ function handleRealtime(ws: WebSocketRoute) {
  * so pages render their empty states instead of hanging.
  */
 export async function mockSupabase(page: Page, options: MockBackendOptions = {}) {
-  const { user = null, tables = {}, rpc = {}, counts = {}, accounts = [] } = options;
+  const {
+    user = null,
+    tables = {},
+    rpc = {},
+    counts = {},
+    accounts = [],
+    functions = {},
+    storage,
+  } = options;
 
   if (user) {
     await page.addInitScript(
@@ -188,13 +260,12 @@ export async function mockSupabase(page: Page, options: MockBackendOptions = {})
     if (method === 'OPTIONS') return json(route, 204, undefined);
     const path = url.pathname.replace(/^\/rest\/v1\//, '');
 
+    const headers = request.headers();
     if (path.startsWith('rpc/')) {
       const name = path.slice(4);
-      const entry = rpc[name];
-      const body: unknown = request.postDataJSON();
-      const result =
-        typeof entry === 'function' ? await entry({ url, method, body }) : (entry ?? null);
-      return json(route, 200, result);
+      const result = await resolve(rpc[name], { url, method, body: jsonBody(route), headers });
+      if (isReply(result)) return json(route, result.status, result.body);
+      return json(route, 200, result ?? null);
     }
 
     const table = path.split('?')[0] ?? '';
@@ -204,15 +275,13 @@ export async function mockSupabase(page: Page, options: MockBackendOptions = {})
         status: 200,
         headers: {
           'content-range': count === 0 ? '*/0' : `0-${count - 1}/${count}`,
-          'access-control-expose-headers': 'content-range',
+          ...CORS,
         },
       });
     }
-    const entry = tables[table];
-    const rows =
-      typeof entry === 'function'
-        ? await entry({ url, method, body: request.postDataJSON() as unknown })
-        : (entry ?? []);
+    const result = await resolve(tables[table], { url, method, body: jsonBody(route), headers });
+    if (isReply(result)) return json(route, result.status, result.body);
+    const rows = result ?? [];
     const wantsObject = (request.headers()['accept'] ?? '').includes('vnd.pgrst.object');
     if (wantsObject) {
       const first = Array.isArray(rows) ? rows[0] : rows;
@@ -223,6 +292,40 @@ export async function mockSupabase(page: Page, options: MockBackendOptions = {})
     return json(route, method === 'POST' ? 201 : 200, rows, {
       'content-range': `0-${Array.isArray(rows) ? rows.length - 1 : 0}/*`,
     });
+  });
+
+  await page.route(`${SUPABASE_URL}/functions/v1/**`, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    if (method === 'OPTIONS') return json(route, 204, undefined);
+    const name = url.pathname.replace(/^\/functions\/v1\//, '').split('/')[0] ?? '';
+    if (!(name in functions)) {
+      return json(route, 404, { code: 'NOT_FOUND', message: 'Requested function was not found' });
+    }
+    const result = await resolve(functions[name], {
+      url,
+      method,
+      body: jsonBody(route),
+      headers: request.headers(),
+    });
+    if (isReply(result)) return json(route, result.status, result.body);
+    return json(route, 200, result ?? null);
+  });
+
+  await page.route(`${SUPABASE_URL}/storage/v1/**`, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    if (method === 'OPTIONS') return json(route, 204, undefined);
+    if (!storage) return json(route, 200, {});
+    const contentType = request.headers()['content-type'] ?? '';
+    const body: unknown = contentType.includes('application/json')
+      ? jsonBody(route)
+      : request.postDataBuffer();
+    const result = await storage({ url, method, body, headers: request.headers() });
+    if (isReply(result)) return json(route, result.status, result.body);
+    return json(route, 200, result);
   });
 
   await page.routeWebSocket(/\/realtime\/v1\/websocket/, handleRealtime);

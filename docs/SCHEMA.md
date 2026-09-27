@@ -75,7 +75,7 @@
 | function | args (`?` = has default) | exec | returns | file | called by |
 |---|---|---|---|---|---|
 | `accept_invite` | p_token | authenticated · DEFINER | `shop_members` | 0002_foundation_tenancy.sql | web, iOS |
-| `account_deletion_blockers` | — | authenticated · DEFINER | `jsonb` | 0092_integration_crm_ops.sql | — |
+| `account_deletion_blockers` | — | authenticated · DEFINER | `jsonb` | 0092_integration_crm_ops.sql | edge:account |
 | `apply_checklist_template` | p_job_id, p_template_id | authenticated · DEFINER | `SETOF job_checklist_items` | 0021_field_ops_checklists.sql | web, iOS |
 | `apply_payment_to_invoice` | p_payment_id, p_invoice_id, p_now? | authenticated · DEFINER | `payments` | 0013_money_rpcs.sql | — |
 | `audit_user_ref` | p_new, p_old | authenticated · DEFINER | `uuid` | 0001_foundation_extensions_enums_helpers.sql | 8 SQL fns |
@@ -111,18 +111,18 @@
 | `create_membership` | p_plan_id, p_customer_id, p_vehicle_id? | authenticated · DEFINER | `memberships` | 0011_money_memberships_cards_events.sql | web, iOS |
 | `create_online_booking` | p_slug, p_payload, p_now? | anon, authenticated · DEFINER | `jsonb` | 0042_integration_public_booking.sql | web |
 | `create_shop` | p_name, p_slug, p_timezone, p_business_type?, p_email?, p_phone?, p_currency?, p_country? | authenticated · DEFINER | `shops` | 0002_foundation_tenancy.sql | web, iOS |
-| `customer_summary` | p_customer_id | authenticated · DEFINER | `TABLE(customer_id uuid, lifetime_paid_cents bigint, tips_cents bigint, refunded_cents big…` | 0092_integration_crm_ops.sql | — |
+| `customer_summary` | p_customer_id | authenticated · DEFINER | `TABLE(customer_id uuid, lifetime_paid_cents bigint, tips_cents bigint, refunded_cents big…` | 0092_integration_crm_ops.sql | web, iOS |
 | `dashboard_summary` | p_shop_id, p_now? | authenticated · DEFINER | `jsonb` | 0046_reports_dashboard.sql | web, iOS |
 | `default_message_templates` | — | authenticated | `TABLE(key message_template_key, channel message_channel, subject text, body text, enabled…` | 0032_comms_templates.sql | web, 2 SQL fns |
-| `enqueue_document_message` | p_quote_id?, p_invoice_id?, p_channel?, p_request_nonce? | authenticated · DEFINER | `uuid` | 0090_integration_comms.sql | — |
+| `enqueue_document_message` | p_quote_id?, p_invoice_id?, p_channel?, p_request_nonce? | authenticated · DEFINER | `uuid` | 0090_integration_comms.sql | edge:messaging |
 | `enqueue_template_message` | p_job_id, p_key, p_send_after?, p_channel?, p_request_nonce? | authenticated · DEFINER | `uuid` | 0033_comms_messages.sql | edge:messaging |
 | `form_link_token` | p_submission_id | authenticated · DEFINER | `uuid` | 0023_field_ops_forms.sql | web |
 | `format_money` | p_cents, p_currency? | authenticated | `text` | 0030_comms_enums_config.sql | 4 SQL fns |
 | `format_phone` | p_e164 | authenticated | `text` | 0030_comms_enums_config.sql | 2 SQL fns |
 | `get_available_slots` | p_shop_slug, p_service_ids, p_from, p_to, p_vehicle_category_id?, p_now? | anon, authenticated · DEFINER | `TABLE(starts_at timestamp with time zone, ends_at timestamp with time zone)` | 0007_foundation_scheduling.sql | web, 1 SQL fn |
 | `has_shop_role` | p_shop_id, p_roles | authenticated · DEFINER | `boolean` | 0002_foundation_tenancy.sql | 3 SQL fns, RLS (1 table) |
-| `inbox_threads` | p_shop_id, p_limit?, p_before? | authenticated · DEFINER | `TABLE(thread_key text, customer_id uuid, from_address text, customer_first_name text, cus…` | 0090_integration_comms.sql | — |
-| `inbox_unread_count` | p_shop_id | authenticated · DEFINER | `integer` | 0090_integration_comms.sql | — |
+| `inbox_threads` | p_shop_id, p_limit?, p_before? | authenticated · DEFINER | `TABLE(thread_key text, customer_id uuid, from_address text, customer_first_name text, cus…` | 0090_integration_comms.sql | web, iOS |
+| `inbox_unread_count` | p_shop_id | authenticated · DEFINER | `integer` | 0090_integration_comms.sql | web, iOS |
 | `invite_member` | p_shop_id, p_email, p_role | authenticated · DEFINER | `shop_invites` | 0002_foundation_tenancy.sql | iOS, edge:invites |
 | `invoice_link_token` | p_invoice_id | authenticated · DEFINER | `uuid` | 0015_money_privileges.sql | web, iOS |
 | `is_assigned_to_job` | p_job_id | authenticated · DEFINER | `boolean` | 0006_foundation_jobs.sql | 4 SQL fns, RLS (3 tables) |
@@ -163,8 +163,8 @@
 | `portal_overview` | — | authenticated · DEFINER | `jsonb` | 0043_integration_portal.sql | web |
 | `postal_code_in_area` | p_postal, p_area | authenticated | `boolean` | 0040_integration_helpers_pricing.sql | 1 SQL fn |
 | `preview_campaign_audience` | p_shop_id, p_channel, p_audience? | authenticated · DEFINER | `integer` | 0035_comms_campaigns.sql | web |
-| `preview_campaign_message` | p_shop_id, p_channel, p_body, p_subject? | authenticated · DEFINER | `jsonb` | 0090_integration_comms.sql | — |
-| `preview_document_message` | p_quote_id?, p_invoice_id?, p_channel? | authenticated · DEFINER | `TABLE(enabled boolean, to_address text, subject text, body text)` | 0090_integration_comms.sql | — |
+| `preview_campaign_message` | p_shop_id, p_channel, p_body, p_subject? | authenticated · DEFINER | `jsonb` | 0090_integration_comms.sql | web |
+| `preview_document_message` | p_quote_id?, p_invoice_id?, p_channel? | authenticated · DEFINER | `TABLE(enabled boolean, to_address text, subject text, body text)` | 0090_integration_comms.sql | web, iOS |
 | `preview_template_message` | p_job_id, p_key, p_channel? | authenticated · DEFINER | `TABLE(enabled boolean, to_address text, subject text, body text)` | 0033_comms_messages.sql | web, iOS |
 | `price_services` | p_shop, p_customer_id, p_service_ids, p_vehicle_category_id?, p_vehicle_id? | authenticated · DEFINER | `jsonb` | 0040_integration_helpers_pricing.sql | web, iOS |
 | `public_booking_catalog` | p_slug | anon, authenticated · DEFINER | `jsonb` | 0042_integration_public_booking.sql | web |
@@ -179,21 +179,21 @@
 | `public_shop_profile` | p_slug | anon, authenticated · DEFINER | `jsonb` | 0042_integration_public_booking.sql | web |
 | `public_sign_form` | p_token, p_signer_name, p_signature_path? | anon, authenticated · DEFINER | `jsonb` | 0023_field_ops_forms.sql | web |
 | `public_unsubscribe` | p_token | anon, authenticated · DEFINER | `boolean` | 0035_comms_campaigns.sql | web, edge:messaging |
-| `public_unsubscribe_info` | p_token | anon, authenticated · DEFINER | `jsonb` | 0090_integration_comms.sql | — |
+| `public_unsubscribe_info` | p_token | anon, authenticated · DEFINER | `jsonb` | 0090_integration_comms.sql | web |
 | `public_validate_coupon` | p_slug, p_code, p_service_ids, p_vehicle_category_id?, p_now? | anon, authenticated · DEFINER | `jsonb` | 0042_integration_public_booking.sql | web |
 | `queue_message` | p_shop_id, p_customer_id, p_channel, p_subject, p_body, p_job_id?, p_request_nonce? | authenticated · DEFINER | `messages` | 0033_comms_messages.sql | edge:messaging |
 | `quote_validity_end` | p_valid_until, p_timezone | authenticated | `timestamp with time zone` | 0010_money_quotes.sql | 7 SQL fns |
 | `record_manual_payment` | p_invoice_id, p_amount_cents, p_method, p_tip_cents?, p_note? | authenticated · DEFINER | `payments` | 0013_money_rpcs.sql | web, iOS |
 | `refund_manual_payment` | p_payment_id, p_amount_cents | authenticated · DEFINER | `payments` | 0013_money_rpcs.sql | web, iOS |
-| `render_template` | p_body, p_vars | authenticated | `text` | 0032_comms_templates.sql | web, 5 SQL fns |
-| `reorder_job_line_items` | p_job_id, p_ids | authenticated · DEFINER | `void` | 0092_integration_crm_ops.sql | — |
-| `replace_business_hours` | p_shop_id, p_rows | authenticated · DEFINER | `SETOF business_hours` | 0092_integration_crm_ops.sql | — |
+| `render_template` | p_body, p_vars | authenticated | `text` | 0032_comms_templates.sql | 5 SQL fns |
+| `reorder_job_line_items` | p_job_id, p_ids | authenticated · DEFINER | `void` | 0092_integration_crm_ops.sql | web |
+| `replace_business_hours` | p_shop_id, p_rows | authenticated · DEFINER | `SETOF business_hours` | 0092_integration_crm_ops.sql | web |
 | `report_customer_label` | p_first, p_last, p_company | authenticated | `text` | 0045_reports_helpers.sql | 4 SQL fns |
 | `report_customers` | p_shop_id, p_from, p_to, p_limit? | authenticated · DEFINER | `jsonb` | 0048_reports_work.sql | web, iOS |
 | `report_outstanding` | p_shop_id, p_now? | authenticated · DEFINER | `jsonb` | 0047_reports_money.sql | web, iOS |
 | `report_payments` | p_shop_id, p_from, p_to | authenticated · DEFINER | `TABLE(method payment_method, payments_count bigint, gross_cents bigint, refunds_cents big…` | 0047_reports_money.sql | web, iOS |
 | `report_revenue` | p_shop_id, p_from, p_to, p_bucket? | authenticated · DEFINER | `TABLE(bucket_start date, gross_cents bigint, refunds_cents bigint, net_cents bigint, tips…` | 0047_reports_money.sql | web, iOS |
-| `report_revenue_totals` | p_shop_id, p_from, p_to | authenticated · DEFINER | `TABLE(gross_cents bigint, refunds_cents bigint, net_cents bigint, tips_cents bigint, paym…` | 0093_integration_money.sql | — |
+| `report_revenue_totals` | p_shop_id, p_from, p_to | authenticated · DEFINER | `TABLE(gross_cents bigint, refunds_cents bigint, net_cents bigint, tips_cents bigint, paym…` | 0093_integration_money.sql | web, iOS |
 | `report_sales_by_service` | p_shop_id, p_from, p_to | authenticated · DEFINER | `TABLE(service_id uuid, service_name text, service_kind service_kind, category_id uuid, ca…` | 0048_reports_work.sql | web, iOS |
 | `report_team` | p_shop_id, p_from, p_to, p_now? | authenticated · DEFINER | `TABLE(member_id uuid, display_name text, role shop_role, active boolean, worked_seconds b…` | 0048_reports_work.sql | web, iOS |
 | `report_vehicle_label` | p_year, p_make, p_model | authenticated | `text` | 0045_reports_helpers.sql | 2 SQL fns |
@@ -204,7 +204,7 @@
 | `shop_role_of` | p_shop_id | authenticated · DEFINER | `shop_role` | 0002_foundation_tenancy.sql | 9 SQL fns |
 | `shop_team` | p_shop_id | authenticated · DEFINER | `TABLE(member_id uuid, user_id uuid, role shop_role, display_name text, calendar_color tex…` | 0002_foundation_tenancy.sql | web, iOS |
 | `sign_form_submission` | p_submission_id, p_signer_name, p_signature_path? | authenticated · DEFINER | `form_submissions` | 0023_field_ops_forms.sql | web, iOS |
-| `staff_record_quote_response` | p_quote_id, p_action, p_selected_optional_line_ids?, p_approved_by_name?, p_declined_reason? | authenticated · DEFINER | `quotes` | 0093_integration_money.sql | — |
+| `staff_record_quote_response` | p_quote_id, p_action, p_selected_optional_line_ids?, p_approved_by_name?, p_declined_reason? | authenticated · DEFINER | `quotes` | 0093_integration_money.sql | web, iOS |
 | `storage_path_uuid` | p_name, p_index | anon, authenticated | `uuid` | 0020_field_ops_enums_helpers.sql | 9 SQL fns, RLS (1 table), CHECK/default (1 table) |
 | `template_vars_for_job` | p_job_id | authenticated · DEFINER | `jsonb` | 0033_comms_messages.sql | — |
 | `transfer_ownership` | p_shop_id, p_member_id | authenticated · DEFINER | `void` | 0002_foundation_tenancy.sql | web |
@@ -215,7 +215,7 @@
 | function | args (`?` = has default) | returns | file | called by |
 |---|---|---|---|---|
 | `app_url` | p_path | `text` | 0030_comms_enums_config.sql | 10 SQL fns |
-| `apply_stripe_dispute` | p_shop_id, p_payment_intent_id, p_dispute_status, p_amount_cents | `payments` | 0093_integration_money.sql | — |
+| `apply_stripe_dispute` | p_shop_id, p_payment_intent_id, p_dispute_status, p_amount_cents | `payments` | 0093_integration_money.sql | edge:stripe-webhook |
 | `apply_stripe_refund` | p_payment_intent_id, p_refunded_cents_total | `payments` | 0013_money_rpcs.sql | edge:payments, edge:stripe-webhook |
 | `booking_check_bookable` | p_shop_id, p_ids, p_kinds, p_label | `void` | 0042_integration_public_booking.sql | 2 SQL fns |
 | `booking_document_lines` | p_pricing | `jsonb` | 0042_integration_public_booking.sql | 1 SQL fn |
@@ -228,11 +228,11 @@
 | `comms_customer_vars` | p_shop_id, p_customer_id | `jsonb` | 0033_comms_messages.sql | edge:messaging, 5 SQL fns |
 | `comms_document_check_access` | p_shop_id, p_what | `void` | 0090_integration_comms.sql | 2 SQL fns |
 | `comms_document_target` | p_quote_id, p_invoice_id | `record` | 0090_integration_comms.sql | 2 SQL fns |
-| `comms_document_vars` | p_quote_id?, p_invoice_id? | `jsonb` | 0090_integration_comms.sql | 2 SQL fns |
+| `comms_document_vars` | p_quote_id?, p_invoice_id? | `jsonb` | 0090_integration_comms.sql | edge:messaging, 2 SQL fns |
 | `comms_is_suppressed` | p_shop_id, p_channel, p_address | `boolean` | 0033_comms_messages.sql | 4 SQL fns |
 | `comms_job_vars` | p_job_id | `jsonb` | 0033_comms_messages.sql | edge:messaging, 8 SQL fns |
 | `comms_suppress` | p_shop_id, p_channel, p_address, p_at? | `boolean` | 0033_comms_messages.sql | 3 SQL fns |
-| `comms_unsuppress` | p_shop_id, p_channel, p_address | `boolean` | 0033_comms_messages.sql | edge:messaging, 2 SQL fns |
+| `comms_unsuppress` | p_shop_id, p_channel, p_address | `boolean` | 0033_comms_messages.sql | 2 SQL fns |
 | `comms_withdraw_reason` | p_msg, p_now? | `text` | 0033_comms_messages.sql | 2 SQL fns |
 | `coupon_unavailable_reason` | p_coupon, p_now | `text` | 0042_integration_public_booking.sql | 2 SQL fns |
 | `effective_now` | p_now | `timestamp with time zone` | 0001_foundation_extensions_enums_helpers.sql | 7 SQL fns |
@@ -269,13 +269,13 @@
 | `queue_storage_purge` | p_shop_id, p_bucket, p_path, p_is_prefix, p_reason | `void` | 0025_field_ops_storage.sql | 6 SQL fns |
 | `record_inbound_sms` | p_to, p_from, p_body, p_provider_id? | `TABLE(message_id uuid, shop_id uuid, customer_id uuid, opt_action text)` | 0033_comms_messages.sql | edge:messaging |
 | `record_stripe_event` | p_event_id, p_type, p_account?, p_now? | `boolean` | 0011_money_memberships_cards_events.sql | — |
-| `remove_customer_payment_method` | p_shop_id, p_stripe_payment_method_id | `boolean` | 0011_money_memberships_cards_events.sql | edge:stripe-webhook |
+| `remove_customer_payment_method` | p_shop_id, p_stripe_payment_method_id | `boolean` | 0011_money_memberships_cards_events.sql | edge:payments, edge:stripe-webhook |
 | `report_caller_member` | p_shop_id | `uuid` | 0045_reports_helpers.sql | 2 SQL fns |
 | `report_caller_role` | p_shop_id, p_allow_technician? | `shop_role` | 0045_reports_helpers.sql | 9 SQL fns |
 | `report_check_range` | p_from, p_to | `void` | 0045_reports_helpers.sql | 6 SQL fns |
 | `report_local_start` | p_date, p_timezone | `timestamp with time zone` | 0045_reports_helpers.sql | 7 SQL fns |
 | `set_app_base_url` | p_url | `text` | 0030_comms_enums_config.sql | setup SQL |
-| `set_stripe_refund_total` | p_shop_id, p_payment_intent_id, p_expected_refunded_cents, p_refunded_cents_total | `payments` | 0093_integration_money.sql | — |
+| `set_stripe_refund_total` | p_shop_id, p_payment_intent_id, p_expected_refunded_cents, p_refunded_cents_total | `payments` | 0093_integration_money.sql | edge:stripe-webhook |
 | `storage_object_exists` | p_bucket, p_name | `boolean` | 0020_field_ops_enums_helpers.sql | 4 SQL fns |
 | `storage_object_in_use` | p_bucket, p_name | `boolean` | 0025_field_ops_storage.sql | 1 SQL fn |
 | `sync_stripe_subscription` | p_shop_id, p_subscription_id, p_status, p_current_period_end?, p_cancel_at_period_end?, p_membership_id?, p_now?, p_price_id?, p_price_cents?, p_interval?, p_interval_count? | `memberships` | 0011_money_memberships_cards_events.sql | edge:payments, edge:stripe-webhook |
@@ -2150,6 +2150,7 @@ file `0011_money_memberships_cards_events.sql` · RLS on · realtime: no
 - **DEFINER** · plpgsql · volatile · exec: service_role · search_path="" · file `0011_money_memberships_cards_events.sql`
 - Returns true when a row was removed. Removing the default promotes the most recently added remaining card.
 - Called by:
+  - edge:payments: `supabase/functions/payments/staff.ts`
   - edge:stripe-webhook: `supabase/functions/stripe-webhook/handlers.ts`
 
 #### `sync_stripe_subscription`
@@ -2159,7 +2160,7 @@ file `0011_money_memberships_cards_events.sql` · RLS on · realtime: no
 - **DEFINER** · plpgsql · volatile · exec: service_role · search_path="" · file `0011_money_memberships_cards_events.sql`
 - service_role: sync_stripe_subscription — apply a Stripe subscription state (webhook customer.subscription.*). The row is found by subscription id, or linked on first sight through p_membership_id (subscription metadata). Out-of-order safe: a cancelled membership never revives and an active/past_due one never regresses to incomplete (those updates only refresh the period fields). Idempotent. Billing terms: p_price_cents / p_interval / p_interval_count (all three or none) and p_price_id are the subscription's actual Stripe price (its unit amount × quantity); they replace the membership's recorded terms. Omitted, the recorded terms stay (the plan's terms captured while unlinked).
 - Called by:
-  - edge:payments: `supabase/functions/payments/memberships.ts`
+  - edge:payments: `supabase/functions/payments/memberships.ts`, `supabase/functions/payments/shop_delete.ts`
   - edge:stripe-webhook: `supabase/functions/stripe-webhook/handlers.ts`
 
 #### `upsert_customer_payment_method`
@@ -3275,7 +3276,6 @@ file `0033_comms_messages.sql` · also altered/policies in `0093_integration_mon
 - **DEFINER** · plpgsql · volatile · exec: service_role · search_path="" · file `0033_comms_messages.sql`
 - Clears an address's opt-out (START / UNSTOP, or service_role): removes the suppression and the opt-out stamp of every customer of the shop with that address. Marketing opt-ins are NOT restored (they need fresh consent). Returns true when a suppression was removed.
 - Called by:
-  - edge:messaging: `supabase/functions/messaging/twilio_webhooks.ts`
   - SQL functions: `customers_comms_optout_sync`, `record_inbound_sms`
 
 #### `comms_uses_app_links`
@@ -3475,7 +3475,6 @@ file `0033_comms_messages.sql` · also altered/policies in `0093_integration_mon
 - invoker · plpgsql · immutable · exec: authenticated, service_role · search_path="" · file `0032_comms_templates.sql`
 - render_template — pure; byte-for-byte equivalent to renderTemplate() in supabase/functions/_shared/templates.ts: * placeholder = "{{", optional spaces/tabs, name [A-Za-z_][A-Za-z0-9_]*, optional spaces/tabs, "}}"; names are case-sensitive * strings verbatim, numbers in JSON form, booleans true/false * unknown names, JSON null, objects and arrays render as '' * single pass: substituted values are never re-scanned * anything else (e.g. "{{ a b }}", "{x}") is left untouched Never raises: a null body renders null, non-object vars count as {}.
 - Called by:
-  - web: `web/src/features/quotes/shared/api.ts`
   - SQL functions: `comms_render_parts`, `launch_campaign`, `preview_campaign_message`, `preview_document_message`, `preview_template_message`
 
 #### `reset_message_template`
@@ -4005,7 +4004,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · stable · exec: authenticated · search_path="" · file `0092_integration_crm_ops.sql`
 - account_deletion_blockers — for the signed-in caller: the shops they own. An owner cannot delete their account (the owner membership blocks it, 0002) until ownership is transferred or the shop is deleted; clients use this to explain that before calling the account deletion function. {"owned_shops": [{"shop_id", "name"}]} ordered by name.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - edge:account: `supabase/functions/account/index.ts`
 
 #### `apply_stripe_dispute`
 
@@ -4013,7 +4013,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: service_role · search_path="" · file `0093_integration_money.sql`
 - apply_stripe_dispute (service_role; stripe-webhook) — records the outcome of a card dispute on the payment (payments.disputed_cents): 'lost' → least(p_amount_cents, the charge not yet refunded) 'won' / 'warning_closed' / 'funds_reinstated' → 0 anything else (needs_response, under_review, …) → unchanged Balances, payment_net_amount and revenue are NOT changed: staff decide whether to bill the customer again (SPEC §4.5). Unknown intent / other shop: P0002. Idempotent.
-- Called by: no caller in this repo (service-role API / manual operations only)
+- Called by:
+  - edge:stripe-webhook: `supabase/functions/stripe-webhook/handlers.ts`
 
 #### `comms_document_check_access`
 
@@ -4040,6 +4041,7 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 - invoker · plpgsql · stable · exec: service_role · search_path="" · file `0090_integration_comms.sql`
 - (COMMENT ON) Internal: template variables of one quote or invoice (job or customer variables plus the document link, amount and balance).
 - Called by:
+  - edge:messaging: `supabase/functions/messaging/send.ts`
   - SQL functions: `enqueue_document_message`, `preview_document_message`
 
 #### `customer_summary`
@@ -4049,7 +4051,9 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 - **DEFINER** · plpgsql · stable · exec: authenticated, service_role · search_path="" · file `0092_integration_crm_ops.sql`
 - (COMMENT ON) Money and visit overview of one customer (owner/admin/manager).
 - Nullable output columns (`@nullable`): `first_visit_at`, `last_visit_at`, `next_job_at`
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/customers/api.ts`
+  - iOS: `ios/DetailCRM/DetailCRM/Core/Services/CustomerService.swift`
 
 #### `enqueue_document_message`
 
@@ -4057,7 +4061,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: authenticated, service_role · search_path="" · file `0090_integration_comms.sql`
 - enqueue_document_message — staff "send quote / invoice" (quote_sent / invoice_sent template, rendered and queued on the server). Returns the message id, or null when nothing was queued (template off, no address, opted out, no SMS number, or the document has no link yet: a draft quote, a draft or void invoice). Raises 55000 when the wording needs customer links and app_base_url is not configured. p_request_nonce as in 0033.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - edge:messaging: `supabase/functions/messaging/send.ts`
 
 #### `inbox_threads`
 
@@ -4066,7 +4071,9 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 - **DEFINER** · plpgsql · stable · exec: authenticated, service_role · search_path="" · file `0090_integration_comms.sql`
 - (COMMENT ON) Staff inbox: newest message per conversation with unread counts (keyset paging on last_created_at).
 - Nullable output columns (`@nullable`): `customer_company`, `customer_first_name`, `customer_id`, `customer_last_name`, `from_address`
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/messages/api.ts`
+  - iOS: `ios/DetailCRM/DetailCRM/Core/Services/MessageService.swift`
 
 #### `inbox_unread_count`
 
@@ -4074,7 +4081,9 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · stable · exec: authenticated, service_role · search_path="" · file `0090_integration_comms.sql`
 - (file header) inbox_unread_count counts for the staff inbox (manager+)
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/messages/api.ts`
+  - iOS: `ios/DetailCRM/DetailCRM/Core/Services/MessageService.swift`
 
 #### `preview_campaign_message`
 
@@ -4082,7 +4091,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · stable · exec: authenticated, service_role · search_path="" · file `0090_integration_comms.sql`
 - preview_campaign_message — a campaign's text rendered exactly as launch_campaign renders it, with placeholder names for the recipient, and the length the body may have: sms max_body_length = 1600, or 1600 − the opt-out line when the wording carries no opt-out instruction (footer_added: the line comms_sms_with_optout appends); body is the final text email max_body_length = 50000; the unsubscribe footer is shown with '[unsubscribe link]' (footer_added stays false: every marketing email carries it) body_length is the rendered length before any footer; truncated says the sent text will be cut. A body over 50000 characters: 22023.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/campaigns/api.ts`
 
 #### `preview_document_message`
 
@@ -4091,7 +4101,9 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 - **DEFINER** · plpgsql · stable · exec: authenticated, service_role · search_path="" · file `0090_integration_comms.sql`
 - (COMMENT ON) What enqueue_document_message will send for a quote or invoice (manager+).
 - Nullable output columns (`@nullable`): `subject`, `to_address`
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/quotes/shared/api.ts`
+  - iOS: `ios/DetailCRM/DetailCRM/Core/Services/PaymentService.swift`
 
 #### `public_unsubscribe_info`
 
@@ -4099,7 +4111,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · stable · exec: anon, authenticated, service_role · search_path="" · file `0090_integration_comms.sql`
 - public_unsubscribe_info — what the /u/<token> page shows before the visitor confirms (public_unsubscribe does the opt-out). Curated keys only: {shop_name, shop_logo_path, unsubscribed}; never the address, customer or message. Unknown / null token: PT404 (HTTP 404; see 0042's header).
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/campaigns/api.ts`
 
 #### `reorder_job_line_items`
 
@@ -4107,7 +4120,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: authenticated, service_role · search_path="" · file `0092_integration_crm_ops.sql`
 - reorder_job_line_items — sets the order of a job's lines in one call (owner/admin/manager). p_ids must list every line of the job exactly once (22023 otherwise); sort becomes the position (0-based) and only rows whose position changes are written. The job row is locked, so concurrent reorders / line inserts of the job serialize.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/jobs/api.ts`
 
 #### `replace_business_hours`
 
@@ -4115,7 +4129,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: authenticated, service_role · search_path="" · file `0092_integration_crm_ops.sql`
 - replace_business_hours — replaces all of a shop's business hours in one statement block (owner/admin). p_rows: a JSON array (at most 50) of {"weekday": 0-6 (0 = Sunday), "opens_at": "HH:MM[:SS]", "closes_at": "HH:MM[:SS]" (24:00 allowed)}; [] = closed all week. Overlapping intervals (23P01) or closes_at <= opens_at (23514) fail the whole call, so the previous hours stay. Concurrent saves of one shop are serialized by an advisory lock. Returns the stored rows by weekday, time.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/shop/onboarding/api.ts`
 
 #### `report_revenue_totals`
 
@@ -4123,7 +4138,9 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · stable · exec: authenticated, service_role · search_path="" · file `0093_integration_money.sql`
 - (COMMENT ON) Cash revenue totals over a date range (shop time zone): gross, refunds, net (excl. tips), tips, count. One row.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/reports/api.ts`
+  - iOS: `ios/DetailCRM/DetailCRM/Core/Services/ReportService.swift`
 
 #### `set_stripe_refund_total`
 
@@ -4131,7 +4148,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: service_role · search_path="" · file `0093_integration_money.sql`
 - set_stripe_refund_total (service_role; stripe-webhook) — sets a received card payment's cumulative refunded amount to p_refunded_cents_total when it still equals p_expected_refunded_cents (compare-and-set: a concurrent refund event changed it otherwise → 40001, Stripe redelivers). Unlike apply_stripe_refund the total may go DOWN (a refund that failed or was cancelled at Stripe gives the money back to the payment). The status follows (payment_refund_status). Unknown intent / other shop: P0002.
-- Called by: no caller in this repo (service-role API / manual operations only)
+- Called by:
+  - edge:stripe-webhook: `supabase/functions/stripe-webhook/handlers.ts`
 
 #### `staff_record_quote_response`
 
@@ -4139,7 +4157,9 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: authenticated, service_role · search_path="" · file `0093_integration_money.sql`
 - staff_record_quote_response — staff record that the customer approved or declined a sent quote (e.g. by phone), atomically with the optional lines the customer chose. Owner/admin/manager. Same rules as the customer's own public_respond_quote: only sent / viewed quotes inside their validity. 'approve' p_selected_optional_line_ids (when not null) must be optional lines of this quote and becomes exactly the selected set; null keeps the current selections. approved_by_name = the name the customer gave (optional, ≤ 200). 'decline' declined_reason (optional, ≤ 1000). Returns the updated quote.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/quotes/api.ts`
+  - iOS: `ios/DetailCRM/DetailCRM/Core/Services/QuoteService.swift`
 
 ### Trigger functions
 

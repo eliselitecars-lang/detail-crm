@@ -87,6 +87,14 @@ struct MoreView: View {
             itemSection("Work", items: MoreItem.workItems)
             itemSection("Shop", items: MoreItem.shopItems)
             Section {
+                // Every role: profile, and deleting the account (App Store 5.1.1(v)).
+                NavigationLink {
+                    SettingsAccountView()
+                } label: {
+                    Label("Your account", systemImage: "person.crop.circle")
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .themedRow()
                 Button {
                     appState.beginSwitchingShop()
                 } label: {

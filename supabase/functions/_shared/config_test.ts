@@ -21,6 +21,7 @@ const EXPECTED_VERIFY_JWT: Record<string, boolean> = {
   "messaging": false,
   "invites": true,
   "storage-purge": false,
+  "account": true,
 };
 
 interface FunctionConfig {

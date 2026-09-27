@@ -9,6 +9,7 @@ import {
   bucketStart,
   defaultBucket,
   MAX_BUCKETS,
+  MAX_DAY_BUCKETS,
   presetRange,
   rangeError,
   readParams,
@@ -100,12 +101,24 @@ describe('bucket limits (PostgREST max_rows would truncate report_revenue)', () 
     expect(bucketAllowed(tenYears, 'month')).toBe(true);
   });
 
-  it('coerces a too-fine ?bucket= to the automatic bucket', () => {
+  it('allows daily buckets for at most 366 days (report_revenue refuses more)', () => {
+    expect(MAX_DAY_BUCKETS).toBe(366);
+    expect(bucketAllowed({ from: '2024-01-01', to: '2024-12-31' }, 'day')).toBe(true); // 366
+    expect(bucketAllowed({ from: '2025-01-01', to: '2026-01-02' }, 'day')).toBe(false); // 367
+    expect(bucketAllowed({ from: '2025-01-01', to: '2026-01-02' }, 'week')).toBe(true);
+  });
+
+  it('coerces a too-fine ?bucket= (day → week when weeks fit, else automatic)', () => {
     const result = readParams(
       new URLSearchParams('range=custom&from=2023-01-01&to=2026-09-27&bucket=day'),
       'UTC',
     );
-    expect(result).toMatchObject({ valid: true, bucket: 'month' });
+    expect(result).toMatchObject({ valid: true, bucket: 'week' });
+    const tenYears = readParams(
+      new URLSearchParams('range=custom&from=2016-10-01&to=2026-09-27&bucket=day'),
+      'UTC',
+    );
+    expect(tenYears.bucket).toBe('month');
     const week = readParams(
       new URLSearchParams('range=custom&from=2023-01-01&to=2026-09-27&bucket=week'),
       'UTC',

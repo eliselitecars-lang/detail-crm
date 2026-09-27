@@ -351,7 +351,8 @@ export type BookingPayload = {
     make: string;
     model: string;
     color: string | null;
-    category_id: string | null;
+    /** Omitted when the shop has no vehicle categories (the server prices by base price). */
+    category_id?: string;
   };
   service_ids: string[];
   addon_ids: string[];
@@ -392,7 +393,7 @@ export function buildPayload(
       make: vehicle.make.trim(),
       model: vehicle.model.trim(),
       color: orNull(vehicle.color),
-      category_id: vehicle.categoryId,
+      ...(vehicle.categoryId ? { category_id: vehicle.categoryId } : {}),
     },
     service_ids: [...state.serviceIds],
     addon_ids: [...state.addonIds],
@@ -426,7 +427,10 @@ export interface ClassifiedBookingError {
   step: StepId | null;
 }
 
-/** create_online_booking error codes (0042 header): 23P01, 55000, PT429, P0002, 22023. */
+/**
+ * create_online_booking error codes (0042 header): 23P01, 55000, PT429,
+ * PT404 (unknown shop or saved vehicle; older servers raised P0002), 22023.
+ */
 export function classifyBookingError(error: unknown): ClassifiedBookingError {
   const appError = toAppError(error);
   const code = appError.code ?? '';
@@ -442,7 +446,7 @@ export function classifyBookingError(error: unknown): ClassifiedBookingError {
   if (code === 'PT429' || appError.kind === 'rate_limited') {
     return { kind: 'rate_limited', message, step: null };
   }
-  if (code === 'P0002') return { kind: 'not_found', message, step: null };
+  if (code === 'PT404' || code === 'P0002') return { kind: 'not_found', message, step: null };
   if (code === '22023') {
     const text = message.toLowerCase();
     let step: StepId | null = null;

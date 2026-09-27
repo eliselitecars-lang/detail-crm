@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { membership, renderRoute, shopValue, signedInAuth } from '@/test/render';
 import {
   builders,
@@ -10,13 +10,9 @@ import {
 } from '@/test/supabaseMock';
 import TeamPage from './TeamPage';
 
-vi.mock('@/lib/supabase', async () => {
-  const mod = await import('@/test/supabaseMock');
-  Object.assign(mod.supabase, { functions: { invoke: vi.fn() } });
-  return mod;
-});
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
-const invoke = () => (supabase as unknown as { functions: { invoke: Mock } }).functions.invoke;
+const invoke = () => supabase.functions.invoke;
 
 const team = [
   {

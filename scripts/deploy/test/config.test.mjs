@@ -62,6 +62,7 @@ verify_jwt = true
   test('the repo: every function directory is declared, webhooks/cron are verify_jwt=false', () => {
     const plan = Object.fromEntries(functionsPlan(SUPA).map((f) => [f.name, f.verifyJwt]));
     assert.deepEqual(plan, {
+      account: true,
       invites: true,
       messaging: false,
       payments: false,

@@ -258,10 +258,28 @@ final class JobDetailModel {
         return job.scheduledStart == nil && Self.statusNeedsTime(target)
     }
 
-    func changeStatus(to status: JobStatus, cancelReason: String? = nil) async throws {
+    /// This member may release the job's card payments before it closes:
+    /// the collectors of `cancel_open_payments` (manager+, or an assigned
+    /// technician while the shop lets technicians take payments).
+    var canReleasePayments: Bool {
+        role.can(.collectPaymentOnAssignedJob, policy: policy)
+            && (role.isManagerOrAbove || permissions.isAssigned)
+    }
+
+    /// Moves the job to `status`. Before cancelling or marking a no-show,
+    /// the job's open card payments and pay links are released first; a
+    /// card payment that is still processing stops the change (thrown).
+    /// Returns how many card payments turned out to have gone through while
+    /// releasing (now recorded on the job), so the screen can say so.
+    @discardableResult
+    func changeStatus(to status: JobStatus, cancelReason: String? = nil) async throws -> Int {
         let shopID = try requireShop()
         if needsTimeFirst(for: status) {
             throw AppError.invalidInput("Set a date and time before moving this job to \(status.displayName.lowercased()).")
+        }
+        var recordedPayments = 0
+        if (status == .cancelled || status == .noShow) && canReleasePayments {
+            recordedPayments = try await JobService.releaseOpenPayments(shopID: shopID, jobID: jobID)
         }
         let updated = try await JobService.updateStatus(
             shopID: shopID,
@@ -273,6 +291,7 @@ final class JobDetailModel {
         // Forms become void on cancel / no-show; deposits may matter again.
         await loadForms()
         await loadPayment()
+        return recordedPayments
     }
 
     func saveInternalNotes(_ text: String) async throws {
@@ -383,9 +402,9 @@ final class JobDetailModel {
 
     // MARK: - Messages
 
-    func sendMessage(_ key: JobMessageTemplateKey, channel: JobMessageChannel) async throws -> JobMessageSendResult {
+    func sendMessage(_ key: JobMessageTemplateKey, channel: JobMessageChannel, nonce: String) async throws -> JobMessageSendResult {
         let shopID = try requireShop()
-        return try await JobService.sendTemplate(shopID: shopID, jobID: jobID, key: key, channel: channel)
+        return try await JobService.sendTemplate(shopID: shopID, jobID: jobID, key: key, channel: channel, nonce: nonce)
     }
 
     // MARK: - Checklist

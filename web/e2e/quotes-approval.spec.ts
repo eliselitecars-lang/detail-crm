@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { membershipRow, OWNER, SHOP } from './support/fixtures';
-import { mockSupabase } from './support/mockSupabase';
+import { mockSupabase, reply } from './support/mockSupabase';
 
 /** Staff recording a phone approval also record the optional upsells chosen. */
 
@@ -88,28 +88,29 @@ const TOP_UP = line({
 test('recording a phone approval keeps the optional upsell the customer chose', async ({
   page,
 }) => {
-  const writes: { table: string; url: string; body: unknown }[] = [];
+  const writes: { table: string; body: unknown }[] = [];
+  const responses: unknown[] = [];
   await mockSupabase(page, {
     user: OWNER,
     tables: {
       shop_members: [membershipRow(OWNER, 'owner')],
       notifications: [],
-      quotes: ({ url, method, body }) => {
-        if (method === 'PATCH') {
-          writes.push({ table: 'quotes', url: url.search, body });
-          return [{ ...QUOTE, status: 'approved' }];
-        }
+      quotes: ({ method, body }) => {
+        if (method === 'PATCH') writes.push({ table: 'quotes', body });
         return [QUOTE];
       },
-      quote_line_items: ({ url, method, body }) => {
-        if (method === 'PATCH') {
-          writes.push({ table: 'quote_line_items', url: url.search, body });
-          return [];
-        }
+      quote_line_items: ({ method, body }) => {
+        if (method === 'PATCH') writes.push({ table: 'quote_line_items', body });
         return [line({}), TOP_UP];
       },
       customers: [CUSTOMER],
       vehicles: [],
+    },
+    rpc: {
+      staff_record_quote_response: ({ body }) => {
+        responses.push(body);
+        return { ...QUOTE, status: 'approved', approved_by_name: 'Jane by phone' };
+      },
     },
   });
   await page.goto(`/app/quotes/${QUOTE_ID}`);
@@ -121,9 +122,42 @@ test('recording a phone approval keeps the optional upsell the customer chose', 
   await dialog.getByRole('button', { name: 'Mark approved' }).click();
   await expect(page.getByText('Quote marked approved')).toBeVisible();
 
-  expect(writes.map((w) => w.table)).toEqual(['quote_line_items', 'quotes']);
-  expect(writes[0]?.body).toEqual({ selected: true });
-  expect(writes[0]?.url).toContain(`id=eq.${TOP_UP.id}`);
-  expect(writes[0]?.url).toContain('optional=eq.true');
-  expect(writes[1]?.body).toEqual({ status: 'approved', approved_by_name: 'Jane by phone' });
+  // One atomic RPC: the chosen optional lines, the name and the status together.
+  expect(responses).toEqual([
+    {
+      p_quote_id: QUOTE_ID,
+      p_action: 'approve',
+      p_selected_optional_line_ids: [TOP_UP.id],
+      p_approved_by_name: 'Jane by phone',
+    },
+  ]);
+  expect(writes).toEqual([]);
+});
+
+test('an expired quote cannot be recorded as declined', async ({ page }) => {
+  await mockSupabase(page, {
+    user: OWNER,
+    tables: {
+      shop_members: [membershipRow(OWNER, 'owner')],
+      notifications: [],
+      quotes: [QUOTE],
+      quote_line_items: [line({})],
+      customers: [CUSTOMER],
+      vehicles: [],
+    },
+    rpc: {
+      staff_record_quote_response: reply(400, {
+        code: '22023',
+        message: 'this quote has expired',
+        details: null,
+        hint: null,
+      }),
+    },
+  });
+  await page.goto(`/app/quotes/${QUOTE_ID}`);
+  await page.getByRole('button', { name: 'More quote actions' }).click();
+  await page.getByRole('menuitem', { name: /Mark declined/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Mark quote as declined' });
+  await dialog.getByRole('button', { name: 'Mark declined' }).click();
+  await expect(page.getByText('This quote has expired.')).toBeVisible();
 });

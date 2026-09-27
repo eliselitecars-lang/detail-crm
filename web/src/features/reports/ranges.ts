@@ -103,6 +103,9 @@ export const MAX_RANGE_DAYS = 3660;
  */
 export const MAX_BUCKETS = 400;
 
+/** report_revenue refuses daily buckets over more than 366 days (22023). */
+export const MAX_DAY_BUCKETS = 366;
+
 /** Natural start of the bucket containing `date` (Monday / 1st of the month). */
 export function bucketStart(date: LocalDate, bucket: Bucket): LocalDate {
   if (bucket === 'month') return startOfMonth(date);
@@ -123,9 +126,13 @@ export function bucketCount(range: DateRange, bucket: Bucket): number {
   return (ty - fy) * 12 + (tm - fm) + 1;
 }
 
-/** Whether `bucket` keeps a (valid) range within MAX_BUCKETS periods. */
+/**
+ * Whether `bucket` keeps a (valid) range within the server's limits: at most
+ * MAX_DAY_BUCKETS days for daily buckets, MAX_BUCKETS periods otherwise.
+ */
 export function bucketAllowed(range: DateRange, bucket: Bucket): boolean {
-  return bucketCount(range, bucket) <= MAX_BUCKETS;
+  const count = bucketCount(range, bucket);
+  return count <= (bucket === 'day' ? MAX_DAY_BUCKETS : MAX_BUCKETS);
 }
 
 /** Validation message for a custom range, or null when it's usable. */
@@ -177,11 +184,12 @@ export function readParams(
   const rawBucket = params.get('bucket');
   let bucket: Bucket;
   if (error) bucket = isBucket(rawBucket) ? rawBucket : 'day';
-  // A grouping too fine for the range (e.g. ?bucket=day over three years)
-  // falls back to the automatic one, which always fits in MAX_BUCKETS.
-  else
-    bucket =
-      isBucket(rawBucket) && bucketAllowed(range, rawBucket) ? rawBucket : defaultBucket(range);
+  // A grouping too fine for the range falls back: ?bucket=day over more
+  // than 366 days becomes weeks (when they fit), anything else the
+  // automatic grouping, which always fits.
+  else if (isBucket(rawBucket) && bucketAllowed(range, rawBucket)) bucket = rawBucket;
+  else if (rawBucket === 'day' && bucketAllowed(range, 'week')) bucket = 'week';
+  else bucket = defaultBucket(range);
   return { preset, range, bucket, valid: error === null, error };
 }
 

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, reply } from './support/mockSupabase';
 
 /** The customer's booking page (/booking/:token) against a mocked backend. */
 
@@ -128,24 +128,12 @@ async function setup(page: Page, getBooking: (call: number) => Doc) {
         };
       },
     },
-  });
-  await page.route(`${SUPABASE_URL}/functions/v1/payments`, async (route) => {
-    if (route.request().method() === 'OPTIONS') {
-      return route.fulfill({
-        status: 204,
-        headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
-      });
-    }
-    calls.push({ name: 'payments', body: route.request().postDataJSON() });
-    return route.fulfill({
-      status: 409,
-      contentType: 'application/json',
-      headers: { 'access-control-allow-origin': '*' },
-      body: JSON.stringify({
-        error: 'This shop cannot take card payments yet.',
-        code: 'conflict',
-      }),
-    });
+    functions: {
+      payments: ({ body }) => {
+        calls.push({ name: 'payments', body });
+        return reply(409, { error: 'This shop cannot take card payments yet.', code: 'conflict' });
+      },
+    },
   });
   return calls;
 }

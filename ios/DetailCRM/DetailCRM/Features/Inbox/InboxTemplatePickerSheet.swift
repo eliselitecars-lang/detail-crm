@@ -145,6 +145,9 @@ private struct InboxTemplateSendView: View {
     @State private var jobID: UUID?
     @State private var serverPreview: LoadState<InboxTemplatePreview?> = .idle
     @State private var sendError: String?
+    /// Reused when Send is tapped again for the same job (see
+    /// `InboxComposeAttempt`).
+    @State private var lastAttempt: InboxComposeAttempt?
 
     var body: some View {
         FormScreen {
@@ -306,14 +309,21 @@ private struct InboxTemplateSendView: View {
     private func send() async {
         guard blockReason == nil, let shopID = try? appState.requireShopID() else { return }
         sendError = nil
+        let attempt = InboxComposeAttempt.next(
+            after: lastAttempt,
+            fingerprint: [customer.id.uuidString, template.key, template.channel.rawValue, jobID?.uuidString ?? ""]
+        )
+        lastAttempt = attempt
         do {
             let result = try await MessageService.sendTemplate(
                 shopID: shopID,
                 customerID: customer.id,
                 key: template.key,
                 channel: template.channel,
-                jobID: jobID
+                jobID: jobID,
+                nonce: attempt.nonce
             )
+            lastAttempt = nil
             onSent(result)
         } catch {
             sendError = ErrorText.message(for: error)

@@ -11,7 +11,6 @@ import {
 } from './coupons';
 import { bookingUrl } from './links';
 import { confirmationMatches } from './deleteShop';
-import { planHoursReplace } from './hoursPlan';
 import { moveItem, nextSortPosition } from './reorder';
 import {
   blockedTimeSchema,
@@ -346,36 +345,6 @@ describe('nextSortPosition', () => {
   it("never yields NaN for rows without a sort (e.g. another feature's cache shape)", () => {
     expect(nextSortPosition([{}, { sort: null }, { sort: 2 }])).toBe(3);
     expect(Number.isNaN(nextSortPosition([{}, {}]))).toBe(false);
-  });
-});
-
-describe('planHoursReplace', () => {
-  const stored = [
-    { id: 'a', weekday: 1, opens_at: '08:00:00', closes_at: '12:00:00' },
-    { id: 'b', weekday: 1, opens_at: '13:00:00', closes_at: '17:00:00' },
-    { id: 'c', weekday: 6, opens_at: '10:00:00', closes_at: '24:00:00' },
-  ];
-
-  it('keeps unchanged intervals (seconds and 24:00 normalised)', () => {
-    const plan = planHoursReplace(stored, [
-      { weekday: 1, opens_at: '08:00', closes_at: '12:00' },
-      { weekday: 1, opens_at: '13:00', closes_at: '17:00' },
-      { weekday: 6, opens_at: '10:00', closes_at: '24:00' },
-    ]);
-    expect(plan).toEqual({ remove: [], insert: [] });
-  });
-
-  it('removes changed/closed intervals and inserts new ones only', () => {
-    const plan = planHoursReplace(stored, [
-      { weekday: 1, opens_at: '08:00', closes_at: '12:00' },
-      { weekday: 1, opens_at: '12:30', closes_at: '17:00' },
-      { weekday: 3, opens_at: '09:00', closes_at: '17:00' },
-    ]);
-    expect(plan.remove.map((r) => r.id)).toEqual(['b', 'c']);
-    expect(plan.insert).toEqual([
-      { weekday: 1, opens_at: '12:30', closes_at: '17:00' },
-      { weekday: 3, opens_at: '09:00', closes_at: '17:00' },
-    ]);
   });
 });
 

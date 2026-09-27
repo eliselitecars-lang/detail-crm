@@ -8,11 +8,8 @@ import {
   describeAudience,
   EMPTY_AUDIENCE_FORM,
   normalizeTags,
-  smsNeedsStopFooter,
-  campaignBodyMax,
-  EMAIL_FOOTER_RESERVE,
+  campaignPreviewSchema,
   hasPlaceholders,
-  hasUnsubscribeLink,
 } from './model';
 
 describe('audience', () => {
@@ -105,34 +102,30 @@ describe('campaignFormSchema', () => {
     expect(half.error?.issues[0]?.path).toEqual(['sendTime']);
   });
 
-  it('knows when the STOP footer is appended', () => {
-    expect(smsNeedsStopFooter('Deal inside')).toBe(true);
-    expect(smsNeedsStopFooter('Reply STOP to quit')).toBe(false);
-    expect(smsNeedsStopFooter('Deals! text "stop" to end')).toBe(false);
-    expect(smsNeedsStopFooter('Stop by this Saturday for our spring special!')).toBe(true);
+  it('bounds the body by the channel limit only (the server measures the rendered text)', () => {
+    expect(campaignFormSchema.safeParse({ ...base, body: 'x'.repeat(1600) }).success).toBe(true);
+    const email = { ...base, channel: 'email' as const, subject: 'Spring' };
+    expect(campaignFormSchema.safeParse({ ...email, body: 'x'.repeat(50000) }).success).toBe(true);
+    expect(
+      campaignFormSchema.safeParse({ ...email, body: 'x'.repeat(50001) }).error?.issues[0]?.message,
+    ).toBe('Keep it under 50,000 characters.');
   });
 
-  it('reserves room for the footer the server appends', () => {
-    expect(campaignBodyMax('sms', 'Deal inside')).toBe(1577);
-    expect(campaignBodyMax('sms', 'Reply STOP to quit')).toBe(1600);
-    expect(campaignBodyMax('email', 'Hi')).toBe(50000 - EMAIL_FOOTER_RESERVE);
-    expect(campaignBodyMax('email', 'Bye: {{ unsubscribe_link }}')).toBe(50000);
-
-    const fits = campaignFormSchema.safeParse({ ...base, body: 'x'.repeat(1577) });
-    expect(fits.success).toBe(true);
-    const cut = campaignFormSchema.safeParse({ ...base, body: 'x'.repeat(1578) });
-    expect(cut.error?.issues[0]?.message).toMatch(/1,577 characters.*Reply STOP/);
-    const withStop = campaignFormSchema.safeParse({
-      ...base,
-      body: `${'x'.repeat(1580)} Reply STOP to quit`,
-    });
-    expect(withStop.success).toBe(true);
+  it('parses the server preview', () => {
+    expect(
+      campaignPreviewSchema.parse({
+        subject: null,
+        body: 'Hi [first name]\nReply STOP to opt out.',
+        body_length: 15,
+        max_body_length: 1577,
+        footer_added: true,
+        truncated: false,
+      }).max_body_length,
+    ).toBe(1577);
   });
 
-  it('spots placeholders and unsubscribe links', () => {
+  it('spots placeholders', () => {
     expect(hasPlaceholders('Hi {{customer_name}}!')).toBe(true);
     expect(hasPlaceholders('Hi there {not one}')).toBe(false);
-    expect(hasUnsubscribeLink('{{unsubscribe_link}}')).toBe(true);
-    expect(hasUnsubscribeLink('{{review_link}}')).toBe(false);
   });
 });

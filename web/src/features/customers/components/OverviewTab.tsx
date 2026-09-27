@@ -1,8 +1,10 @@
 import { Link2 } from 'lucide-react';
 import { Badge, KeyValueList, SectionCard } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { useCan } from '@/features/shop/useCan';
 import { formatDate } from '@/lib/dates';
 import { formatPhone, phoneHref } from '@/lib/phone';
+import { CustomerSummaryCard } from './CustomerSummaryCard';
 import { customerAddress, LIFECYCLE_LABELS, SOURCE_LABELS, type CustomerRow } from '../model';
 
 function optInText(optedIn: boolean, optedOutAt: string | null, timezone: string): string {
@@ -10,14 +12,17 @@ function optInText(optedIn: boolean, optedOutAt: string | null, timezone: string
   return optedIn ? 'Opted in' : 'Not opted in';
 }
 
-/** Contact, tags, notes, lifecycle and portal status. */
+/** Totals (manager+), contact, tags, notes, lifecycle and portal status. */
 export function OverviewTab({ customer }: { customer: CustomerRow }) {
   const { timezone } = useShop();
+  // customer_summary is owner/admin/manager only (money); technicians skip it.
+  const canSeeTotals = useCan('payments.view');
   const address = customerAddress(customer);
   const tel = phoneHref(customer.phone);
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {canSeeTotals && <CustomerSummaryCard customerId={customer.id} />}
       <SectionCard title="Contact" level={2}>
         <KeyValueList
           items={[

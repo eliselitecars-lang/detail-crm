@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, SHOP, TECH } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, reply } from './support/mockSupabase';
 
 const CUSTOMER = {
   id: '30000000-0000-4000-8000-000000000001',
@@ -124,27 +124,17 @@ async function setup(page: Page, role: 'owner' | 'technician' = 'owner') {
         return { ...PAYMENT, id: 'c0000000-0000-4000-8000-000000000002', method: 'cash' };
       },
     },
-  });
-  await page.route(`${SUPABASE_URL}/functions/v1/**`, async (route) => {
-    const request = route.request();
-    if (request.method() === 'OPTIONS') {
-      return route.fulfill({
-        status: 204,
-        headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
-      });
-    }
-    functionCalls.push(request.postDataJSON());
-    return route.fulfill({
-      status: 402,
-      contentType: 'application/json',
-      headers: { 'access-control-allow-origin': '*' },
-      body: JSON.stringify({
-        error:
-          "The card's bank requires the customer to confirm this payment. Send them a payment link instead.",
-        code: 'payment_failed',
-        details: { reason: 'authentication_required' },
-      }),
-    });
+    functions: {
+      payments: ({ body }) => {
+        functionCalls.push(body);
+        return reply(402, {
+          error:
+            "The card's bank requires the customer to confirm this payment. Send them a payment link instead.",
+          code: 'payment_failed',
+          details: { reason: 'authentication_required' },
+        });
+      },
+    },
   });
   return { rpcCalls, functionCalls };
 }

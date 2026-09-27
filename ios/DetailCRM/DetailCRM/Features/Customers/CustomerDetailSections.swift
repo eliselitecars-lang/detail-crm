@@ -26,6 +26,14 @@ struct CustomerDetailContent: View {
                 AnyView(CustomerPrimaryActions(customer: customer, permissions: permissions, newJob: actions.newJob))
                 AnyView(CustomerContactDetails(customer: customer))
                 AnyView(CustomerTagsAndNotes(customer: customer))
+                if permissions.canSeeSummary {
+                    AnyView(CustomerSummarySection(
+                        state: history.summary,
+                        clock: clock,
+                        currencyCode: currencyCode,
+                        retry: actions.retrySummary
+                    ))
+                }
                 AnyView(CustomerVehiclesSection(
                     state: history.vehicles,
                     categories: categories,
@@ -64,7 +72,12 @@ struct CustomerDetailContent: View {
                 AnyView(CustomerMembershipsSection(state: history.memberships, clock: clock, currencyCode: currencyCode, retry: actions.retryHistory))
             }
             if permissions.canSeeSavedCards {
-                AnyView(CustomerSavedCardsSection(state: history.savedCards, retry: actions.retryHistory))
+                AnyView(CustomerSavedCardsSection(
+                    state: history.savedCards,
+                    canRemove: permissions.canRemoveCards,
+                    remove: actions.removeCard,
+                    retry: actions.retryHistory
+                ))
             }
         }
     }
@@ -641,16 +654,10 @@ private struct CustomerMembershipRow: View {
 // MARK: - Saved cards
 
 private struct CustomerSavedCardsSection: View {
-    let state: LoadState<Int>
+    let state: LoadState<[SavedCard]>
+    let canRemove: Bool
+    let remove: (SavedCard) -> Void
     let retry: () async -> Void
-
-    private func savedCardsText(_ count: Int) -> String {
-        switch count {
-        case 0: return "No saved cards"
-        case 1: return "1 saved card"
-        default: return "\(count) saved cards"
-        }
-    }
 
     var body: some View {
         CustomersSectionCard("Saved cards") {
@@ -659,25 +666,175 @@ private struct CustomerSavedCardsSection: View {
                 CustomersSectionStatusRow(kind: .loading)
             case .failed(let message):
                 CustomersSectionStatusRow(kind: .failed(message), retry: retry)
-            case .loaded(let count):
-                HStack(spacing: Theme.Spacing.md) {
-                    Image(systemName: "creditcard")
-                        .foregroundStyle(Theme.textSecondary)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                        Text(savedCardsText(count))
-                            .font(Theme.Typography.body)
-                            .foregroundStyle(Theme.textPrimary)
-                        Text("Cards are stored securely by Stripe. Charge them from an invoice.")
-                            .font(Theme.Typography.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
+            case .loaded(let cards):
+                if cards.isEmpty {
+                    CustomersSectionStatusRow(kind: .empty("No saved cards."))
+                } else {
+                    ForEach(Array(cards.enumerated()), id: \.element.id) { index, card in
+                        if index > 0 { CustomersRowDivider() }
+                        CustomerSavedCardRow(card: card, canRemove: canRemove, remove: { remove(card) })
                     }
-                    Spacer(minLength: 0)
                 }
-                .padding(.vertical, Theme.Spacing.xs)
-                .accessibilityElement(children: .combine)
+                CustomersRowDivider()
+                Text("Cards are stored securely by Stripe. Charge them from an invoice.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, Theme.Spacing.xxs)
             }
+        }
+    }
+}
+
+private struct CustomerSavedCardRow: View {
+    let card: SavedCard
+    let canRemove: Bool
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            Image(systemName: "creditcard")
+                .foregroundStyle(Theme.textSecondary)
+                .accessibilityHidden(true)
+            Text(card.label)
+                .font(Theme.Typography.body)
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            if card.isDefault {
+                StatusBadge(text: "Default", tone: .neutral)
+            }
+            Spacer(minLength: Theme.Spacing.sm)
+            if canRemove {
+                Button("Remove", role: .destructive, action: remove)
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.danger)
+                    .accessibilityLabel("Remove \(card.label)")
+            }
+        }
+        .padding(.vertical, Theme.Spacing.xs)
+    }
+}
+
+// MARK: - Overview (customer_summary)
+
+private struct CustomerSummarySection: View {
+    let state: LoadState<CustomerSummary>
+    let clock: ShopClock
+    let currencyCode: String
+    let retry: () async -> Void
+
+    var body: some View {
+        CustomersSectionCard("Overview") {
+            switch state {
+            case .idle, .loading:
+                CustomersSectionStatusRow(kind: .loading)
+            case .failed(let message):
+                CustomersSectionStatusRow(kind: .failed(message), retry: retry)
+            case .loaded(let summary):
+                CustomerSummaryGrid(summary: summary, clock: clock, currencyCode: currencyCode)
+            }
+        }
+    }
+}
+
+private struct CustomerSummaryGrid: View {
+    let summary: CustomerSummary
+    let clock: ShopClock
+    let currencyCode: String
+
+    private let columns = [
+        GridItem(.flexible(), spacing: Theme.Spacing.md, alignment: .topLeading),
+        GridItem(.flexible(), spacing: Theme.Spacing.md, alignment: .topLeading),
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: Theme.Spacing.md) {
+            CustomerSummaryTile(
+                title: "Lifetime paid",
+                value: Money.format(cents: summary.lifetimePaidCents, currencyCode: currencyCode),
+                detail: summary.tipsCents > 0
+                    ? "+ " + Money.format(cents: summary.tipsCents, currencyCode: currencyCode) + " tips"
+                    : nil,
+                tone: .money
+            )
+            CustomerSummaryTile(
+                title: "Open balance",
+                value: Money.format(cents: summary.openBalanceCents, currencyCode: currencyCode),
+                detail: summary.overdueBalanceCents > 0
+                    ? Money.format(cents: summary.overdueBalanceCents, currencyCode: currencyCode) + " overdue"
+                    : nil,
+                tone: summary.overdueBalanceCents > 0 ? .danger : .plain
+            )
+            CustomerSummaryTile(
+                title: "Completed jobs",
+                value: "\(summary.completedJobs)",
+                detail: summary.upcomingJobs > 0 ? "\(summary.upcomingJobs) upcoming" : nil,
+                tone: .plain
+            )
+            CustomerSummaryTile(
+                title: summary.nextJobAt != nil ? "Next job" : "Last visit",
+                value: visitText,
+                detail: summary.nextJobAt != nil ? lastVisitDetail : nil,
+                tone: .plain
+            )
+        }
+        .padding(.vertical, Theme.Spacing.xs)
+    }
+
+    private var visitText: String {
+        if let next = summary.nextJobAt {
+            return CustomersFormatting.dayText(next, clock: clock)
+        }
+        if let last = summary.lastVisitAt {
+            return CustomersFormatting.dayText(last, clock: clock)
+        }
+        return "No visits yet"
+    }
+
+    private var lastVisitDetail: String? {
+        summary.lastVisitAt.map { "Last visit " + CustomersFormatting.dayText($0, clock: clock) }
+    }
+}
+
+private struct CustomerSummaryTile: View {
+    enum Tone {
+        case plain
+        case money
+        case danger
+    }
+
+    let title: String
+    let value: String
+    let detail: String?
+    let tone: Tone
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+            Text(title)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textSecondary)
+            Text(value)
+                .font(tone == .plain ? Theme.Typography.headline : Theme.Typography.money)
+                .foregroundStyle(valueColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            if let detail {
+                Text(detail)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(tone == .danger ? Theme.danger : Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var valueColor: Color {
+        switch tone {
+        case .plain: return Theme.textPrimary
+        case .money: return Theme.amber
+        case .danger: return Theme.danger
         }
     }
 }

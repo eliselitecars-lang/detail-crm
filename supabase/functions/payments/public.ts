@@ -122,6 +122,7 @@ export async function invoiceCheckout(
     {
       mode: "payment",
       customer: stripeCustomer,
+      payment_method_types: ["card"],
       client_reference_id: invoice.id,
       line_items: [
         {
@@ -243,7 +244,10 @@ export async function bookingDepositCheckout(
   // then capped at what the job's invoice still owes (below).
   const summary = await s.admin.rpc("public_get_booking", { p_token: input.token });
   if (summary.error) {
-    if (summary.error.code === "P0002") throw errors.notFound("Booking not found.");
+    // PT404: public_get_booking's unknown token (0042); P0002 before that convention.
+    if (summary.error.code === "PT404" || summary.error.code === "P0002") {
+      throw errors.notFound("Booking not found.");
+    }
     throw dbFailure("public_get_booking", summary.error);
   }
   const deposit =
@@ -298,6 +302,7 @@ export async function bookingDepositCheckout(
     {
       mode: "payment",
       customer: stripeCustomer,
+      payment_method_types: ["card"],
       client_reference_id: job.id,
       line_items: [{
         quantity: 1,

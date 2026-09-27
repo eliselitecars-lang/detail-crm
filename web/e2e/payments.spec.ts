@@ -71,7 +71,9 @@ test('payments ledger shows server totals and exports CSV', async ({ page }) => 
   const stream = await file.createReadStream();
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(chunk as Buffer);
-  const text = Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '');
+  const text = Buffer.concat(chunks)
+    .toString('utf8')
+    .replace(/^\uFEFF/, '');
   expect(text.split('\r\n')[1]).toBe(
     '2026-09-21 10:00,Jane Doe,2001,,Payment,Cash,,succeeded,125.00,10.00,0.00,Paid at pickup',
   );

@@ -41,7 +41,8 @@ export function DetailsStep({
   onChange: (next: DetailsInput) => void;
   /** Services + add-ons (for the coupon preview). */
   itemIds: string[];
-  categoryId: string;
+  /** null when the shop has no vehicle categories. */
+  categoryId: string | null;
   notice: string | null;
   onBack: () => void;
   onContinue: () => void;
@@ -140,7 +141,9 @@ export function DetailsStep({
           label="Mobile phone"
           error={errors.phone}
           help={
-            isNanpCountry(profile.country) ? undefined : 'Include your country code, starting with +.'
+            isNanpCountry(profile.country)
+              ? undefined
+              : 'Include your country code, starting with +.'
           }
         >
           <PhoneInput value={value.phone} onChange={(phone) => update({ phone })} />

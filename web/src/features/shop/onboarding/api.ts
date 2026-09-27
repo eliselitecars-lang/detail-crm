@@ -47,16 +47,21 @@ export async function saveShopDetails(shopId: string, values: OnboardingValues):
   if (error) throw toAppError(error);
 }
 
-/** Replaces the shop's weekly hours (idempotent, so a failed onboarding can retry). */
+/**
+ * Replaces the shop's weekly hours atomically (replace_business_hours, 0092):
+ * the old rows are deleted and the new ones inserted in one transaction, so a
+ * rejected week (overlap 23P01, closes before opens 23514) leaves the stored
+ * hours untouched. Idempotent, so a failed onboarding can retry. `[]` = closed
+ * all week. Owner/admin only (42501). Rows may carry ONLY weekday / opens_at /
+ * closes_at, so they are rebuilt explicitly.
+ */
 export async function replaceBusinessHours(
   shopId: string,
   rows: readonly BusinessHoursRow[],
 ): Promise<void> {
-  const removed = await supabase.from('business_hours').delete().eq('shop_id', shopId);
-  if (removed.error) throw toAppError(removed.error);
-  if (rows.length === 0) return;
-  const { error } = await supabase
-    .from('business_hours')
-    .insert(rows.map((row) => ({ ...row, shop_id: shopId })));
+  const { error } = await supabase.rpc('replace_business_hours', {
+    p_shop_id: shopId,
+    p_rows: rows.map(({ weekday, opens_at, closes_at }) => ({ weekday, opens_at, closes_at })),
+  });
   if (error) throw toAppError(error);
 }

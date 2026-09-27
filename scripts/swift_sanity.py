@@ -18,6 +18,10 @@ mechanical mistakes that would otherwise burn a macOS CI run:
     frames, types nested inside generic functions, `AnyJSON` without
     `import Supabase`, and `safeAreaInset` combined with preference-key
     observers in one file
+  * edge-function calls: every `functions.invoke(` / `EdgeFunctions.invoke(`
+    / `MoneyEdge.invoke(` in app code names its function with a string
+    literal, and that function exists (supabase/functions/<name>/index.ts);
+    only the wrappers themselves pass their `functionName` parameter on
   * FEATURE_STUB markers: counted and reported; `--strict` fails if any
     remain
 
@@ -305,7 +309,36 @@ def check_forbidden(path: Path, code_lines: list[str], source: str, report: Repo
                                  "(state-driven layout loop risk) — restructure")
 
 
-def check_swift_file(path: Path, report: Report, is_app: bool) -> None:
+EDGE_INVOKE = re.compile(r"\b(?:functions|EdgeFunctions|MoneyEdge)\.invoke\(\s*")
+EDGE_LITERAL = re.compile(r'"([A-Za-z0-9_-]+)"')
+EDGE_IDENT = re.compile(r"[A-Za-z_]\w*")
+# The wrappers forward their own parameter; every caller passes a literal.
+EDGE_WRAPPER_PARAM = "functionName"
+
+
+def check_edge_calls(path: Path, code: str, source: str, report: Report, functions_dir: Path | None) -> None:
+    """Edge-function names must be literals naming an existing function."""
+    if len(code) != len(source):
+        return  # positions differ (never expected): nothing reliable to check
+    for match in EDGE_INVOKE.finditer(code):
+        start = match.end()
+        line = code.count("\n", 0, start) + 1
+        if code.startswith('"', start):
+            literal = EDGE_LITERAL.match(source, start)
+            if not literal:
+                report.error(path, line, "edge function name must be a plain string literal")
+                continue
+            name = literal.group(1)
+            if functions_dir is not None and not (functions_dir / name / "index.ts").is_file():
+                report.error(path, line, f"edge function '{name}' does not exist (supabase/functions/{name}/index.ts)")
+            continue
+        ident = EDGE_IDENT.match(code, start)
+        if ident and ident.group(0) == EDGE_WRAPPER_PARAM:
+            continue
+        report.error(path, line, "edge function name chosen at run time — pass a string literal so it can be checked")
+
+
+def check_swift_file(path: Path, report: Report, is_app: bool, functions_dir: Path | None = None) -> None:
     report.swift_files += 1
     source = path.read_text(encoding="utf-8")
     if STUB_MARKER in source:
@@ -321,6 +354,7 @@ def check_swift_file(path: Path, report: Report, is_app: bool) -> None:
     check_structure(path, source_lines, code_lines, report, is_app)
     if is_app:
         check_forbidden(path, code_lines, source, report)
+        check_edge_calls(path, code, source, report, functions_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -452,12 +486,13 @@ def run(root: Path) -> Report:
     if not ios.is_dir():
         report.error(ios, None, "ios/ directory not found")
         return report
+    functions_dir = root / "supabase" / "functions"
     for path in sorted(ios.rglob("*.swift")):
         parts = set(path.parts)
         if ".build" in parts or "DerivedData" in parts or "SourcePackages" in parts:
             continue
         is_app = "DetailCore" not in parts and "Package.swift" != path.name
-        check_swift_file(path, report, is_app)
+        check_swift_file(path, report, is_app, functions_dir if functions_dir.is_dir() else None)
     for path in sorted(ios.rglob("project.pbxproj")):
         check_pbxproj(path, report)
     return report
@@ -528,8 +563,11 @@ def self_test() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / filename
             path.write_text(source, encoding="utf-8")
+            functions = Path(tmp) / "functions"
+            (functions / "payments").mkdir(parents=True)
+            (functions / "payments" / "index.ts").write_text("", encoding="utf-8")
             report = Report()
-            check_swift_file(path, report, app)
+            check_swift_file(path, report, app, functions)
             return report
 
     # Balanced code with tricky strings/comments.
@@ -597,6 +635,18 @@ def self_test() -> int:
         "func make<T>(_ v: T) -> Int {\n    struct Box { var x = 1 }\n    return Box().x\n}\n").errors))
     expect("type in plain function allowed", not run_swift(
         "func make() -> Int {\n    struct Box { var x = 1 }\n    return Box().x\n}\n").errors)
+    expect("known edge function passes", not run_swift(
+        'let r: R = try await MoneyEdge.invoke("payments", body: b)\n').errors)
+    expect("multi-line edge call passes", not run_swift(
+        'let r: R = try await Supa.client.functions.invoke(\n    "payments",\n    options: o\n)\n').errors)
+    expect("unknown edge function detected", any("does not exist" in e for e in run_swift(
+        'let r: R = try await EdgeFunctions.invoke("nope", body: b)\n').errors))
+    expect("run-time edge function name detected", any("run time" in e for e in run_swift(
+        'let r: R = try await EdgeFunctions.invoke(name, body: b)\n').errors))
+    expect("wrapper parameter allowed", not run_swift(
+        'let r: R = try await EdgeFunctions.invoke(functionName, body: body)\n').errors)
+    expect("edge call in a comment ignored", not run_swift(
+        '// EdgeFunctions.invoke("nope", body: b)\nlet x = 1\n').errors)
     stub = run_swift("// FEATURE_STUB: later\nstruct V {}\n")
     expect("stub counted", len(stub.stubs) == 1 and not stub.errors)
 

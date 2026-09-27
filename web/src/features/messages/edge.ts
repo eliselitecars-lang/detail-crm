@@ -7,15 +7,18 @@
  * never renders templates or chooses the recipient address.
  *
  * Body (strict): { action: 'send', shop_id, customer_id?, job_id?, channel,
- *                  template_key? | body (+ subject for email) }
+ *                  template_key? | body (+ subject for email), request_nonce? }
  * Response: { message_id, channel, status, error }
- * Refusals: 422 `unprocessable` with a human message (opted out, no address,
- * SMS not configured, template off…) — shown as-is via edgeFunctionError.
+ * Refusals: 422 `unprocessable` with a human message and `details.reason`
+ * (opted_out, no_address, sms_not_configured, template_disabled,
+ * job_required + details.variables, missing_link + details.variables,
+ * no_marketing_consent, appointment_closed…) — thrown as EdgeFunctionError.
+ * `request_nonce` (one per compose, reused on retry) makes a replay return
+ * the first message instead of sending again (messages.request_nonce).
  */
 import { z } from 'zod';
 import { Constants } from '@/lib/database.types';
-import { edgeFunctionError } from '@/lib/errors';
-import { supabase } from '@/lib/supabase';
+import { invokeEdge } from '@/features/quotes/shared/edge';
 import type { MessageChannel, MessageTemplateKey } from './model';
 
 export type SendContent =
@@ -28,6 +31,8 @@ export interface SendMessageInput {
   channel: MessageChannel;
   jobId: string | null;
   content: SendContent;
+  /** One per compose, reused on retry (8–64 of A-Z a-z 0-9 _ -). */
+  requestNonce?: string;
 }
 
 /** The JSON body for `messaging` → `send` (only fields the strict schema accepts). */
@@ -45,6 +50,7 @@ export function sendMessageBody(input: SendMessageInput): Record<string, string>
     body.body = input.content.body;
     if (input.channel === 'email' && input.content.subject) body.subject = input.content.subject;
   }
+  if (input.requestNonce) body.request_nonce = input.requestNonce;
   return body;
 }
 
@@ -58,9 +64,8 @@ export const sendResultSchema = z.object({
 
 export type SendMessageResult = z.infer<typeof sendResultSchema>;
 
+/** Throws EdgeFunctionError (with `reason` / `details`) when the server refuses. */
 export async function sendMessage(input: SendMessageInput): Promise<SendMessageResult> {
-  const result = await supabase.functions.invoke('messaging', { body: sendMessageBody(input) });
-  if (result.error) throw await edgeFunctionError(result.error);
-  const data: unknown = result.data;
-  return sendResultSchema.parse(data);
+  const { action, ...params } = sendMessageBody(input);
+  return invokeEdge('messaging', action ?? 'send', params, sendResultSchema);
 }

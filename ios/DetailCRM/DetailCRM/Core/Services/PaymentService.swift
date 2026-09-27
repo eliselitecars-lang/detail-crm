@@ -4,12 +4,14 @@
 //
 //  Payments: the ledger, manual (cash/check/…) payments, and the card
 //  actions of the `payments` edge function (PaymentSheet on the shop's
-//  connected Stripe account, charge a saved card, refunds). Every amount is
-//  derived server-side; the app may only request a partial amount or a tip,
-//  which the server bounds (0 < amount ≤ balance, 0 ≤ tip ≤ balance).
+//  connected Stripe account, charge a saved card, refunds, saved-card
+//  removal). Every amount is derived server-side; the app may only request
+//  a partial amount or a tip, which the server bounds (0 < amount ≤
+//  balance, 0 ≤ tip ≤ balance).
 //
-//  Also home to the small edge-function helper (`MoneyEdge`) and the client
-//  link builder (`MoneyLinks`) shared by the money services.
+//  Also home to the small edge-function helper (`MoneyEdge`), the client
+//  link builder (`MoneyLinks`) and the quote / invoice message sender
+//  (`MoneyDocumentMessage`) shared by the money services.
 //
 
 import Foundation
@@ -17,33 +19,6 @@ import Supabase
 import DetailCore
 
 // MARK: - Edge-function calls
-
-/// Error body every edge function returns: `{ error, code, details }`.
-private struct MoneyEdgeErrorBody: Decodable {
-    let error: String?
-    let code: String?
-    let details: MoneyEdgeErrorDetails?
-}
-
-private struct MoneyEdgeErrorDetails: Decodable {
-    let reason: String?
-}
-
-/// A refused edge-function request with the server's human message, its
-/// stable `code` (e.g. `payment_failed`, `conflict`) and `details.reason`.
-struct MoneyEdgeError: LocalizedError, Equatable {
-    let status: Int
-    let code: String?
-    let reason: String?
-    let message: String
-
-    var errorDescription: String? { message }
-
-    /// Off-session charge needs the customer (3-D Secure): send a pay link.
-    var needsCustomerAuthentication: Bool {
-        reason == "authentication_required"
-    }
-}
 
 enum MoneyEdge {
 
@@ -53,49 +28,21 @@ enum MoneyEdge {
         id.uuidString.lowercased()
     }
 
-    /// A url-safe per-request nonce so a network retry of the same tap
-    /// reuses Stripe's idempotency key while a new tap gets a new one.
+    /// A url-safe per-request nonce (32 hex characters) so a network retry
+    /// of the same tap reuses Stripe's idempotency key / the message the
+    /// database already queued, while a new tap gets a new one.
     static func newNonce() -> String {
         UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
     /// Invokes an edge function with a JSON body and decodes the reply;
-    /// non-2xx replies become `MoneyEdgeError` with the server's wording.
+    /// non-2xx replies become `EdgeFunctionError` with the server's wording
+    /// (see `EdgeErrorDecoder`).
     static func invoke<Body: Encodable, Reply: Decodable>(
         _ functionName: String,
         body: Body
     ) async throws -> Reply {
-        do {
-            let reply: Reply = try await Supa.client.functions.invoke(
-                functionName,
-                options: FunctionInvokeOptions(body: body)
-            )
-            return reply
-        } catch let error as FunctionsError {
-            throw readable(error)
-        }
-    }
-
-    static func readable(_ error: FunctionsError) -> Error {
-        switch error {
-        case .httpError(let status, let data):
-            let body = try? JSONDecoder().decode(MoneyEdgeErrorBody.self, from: data)
-            let message = body?.error?.trimmedNonEmpty
-                ?? "The request failed (\(status)). Try again."
-            return MoneyEdgeError(
-                status: status,
-                code: body?.code,
-                reason: body?.details?.reason,
-                message: ErrorText.sentence(message)
-            )
-        case .relayError:
-            return MoneyEdgeError(
-                status: 0,
-                code: "relay_error",
-                reason: nil,
-                message: "Couldn't reach the server. Try again."
-            )
-        }
+        try await EdgeFunctions.invoke(functionName, body: body)
     }
 }
 
@@ -123,194 +70,83 @@ enum MoneyLinks {
 // MARK: - Quote / invoice messages
 
 /// Sends a quote or invoice to the customer with the shop's `quote_sent` /
-/// `invoice_sent` wording and the document's own client link.
-///
-/// The messaging function's template path only knows job-level variables
-/// (a quote being sent has no job; an ad-hoc invoice has none either), so
-/// — like the web app — the template is rendered here with the link and the
-/// server's totals (`TemplateRenderer` matches `render_template` exactly)
-/// and sent as a free-form message (manager+; consent and opt-outs are
-/// still enforced by the server).
+/// `invoice_sent` wording. The database renders and queues the message
+/// (`enqueue_document_message`, through the `messaging` function's `send`
+/// with `quote_id` / `invoice_id`) with the document's own link, total and
+/// balance, so the text is exactly what the web app sends. Manager+ only;
+/// consent and opt-outs are enforced by the server.
 enum MoneyDocumentMessage {
 
-    struct Request: Sendable {
-        var template: MoneyDocumentTemplate
-        var customerID: UUID
-        /// Links the message to the job's history when there is one.
-        var jobID: UUID?
+    struct Request: Hashable, Sendable {
+        var kind: MoneyDocumentTemplate
+        /// The quote id (`quoteSent`) or invoice id (`invoiceSent`).
+        var id: UUID
         var channel: MoneyMessageChannel
-        var link: URL
-        /// Server totals (invoices only; formatted like the server does).
-        var amountCents: Int?
-        var balanceCents: Int?
     }
 
-    static func send(shopID: UUID, request: Request) async throws -> MoneyMessageResult {
-        async let templateTask = template(shopID: shopID, key: request.template, channel: request.channel)
-        async let shopTask = shop(shopID: shopID)
-        async let customerTask = QuoteService.customer(shopID: shopID, customerID: request.customerID)
-        let (template, shop, customer) = try await (templateTask, shopTask, customerTask)
-        guard let customer else { throw AppError.notFound("That customer") }
-        if let template, !template.enabled {
-            let kind = request.channel == .sms ? "text" : "email"
-            let noun = request.template.documentNoun
-            throw AppError.message(
-                "Your shop's \"\(noun) sent\" \(kind) is turned off. Turn it on in Settings, or share the link yourself."
-            )
-        }
-
-        let values = variables(request: request, customer: customer, shop: shop)
-        let body: String
-        var subject: String?
-        if let template {
-            body = TemplateRenderer.render(template.body, values: values)
-            subject = template.subject.map { TemplateRenderer.render($0, values: values) }
-        } else {
-            let first = values["customer_first_name"] ?? "there"
-            body = "Hi \(first), here is your \(request.template.documentNoun) from \(shop.name): \(request.link.absoluteString)"
-        }
-        guard body.trimmedNonEmpty != nil else {
-            throw AppError.message("The message template produced an empty message.")
-        }
-        if request.channel == .sms {
-            subject = nil
-            if body.count > 1600 {
-                throw AppError.invalidInput("The text is longer than 1,600 characters. Shorten the template or send an email.")
-            }
-        } else if subject?.trimmedNonEmpty == nil {
-            subject = "Your \(request.template.documentNoun) from \(shop.name)"
-        }
-
-        struct Body: Encodable {
-            let action = "send"
-            let shop_id: String
-            let customer_id: String
-            let job_id: String?
-            let channel: String
-            let subject: String?
-            let body: String
-        }
-        return try await MoneyEdge.invoke(
-            "messaging",
-            body: Body(
-                shop_id: MoneyEdge.wire(shopID),
-                customer_id: MoneyEdge.wire(request.customerID),
-                job_id: request.jobID.map { MoneyEdge.wire($0) },
-                channel: request.channel.rawValue,
-                subject: subject,
-                body: body
-            )
+    /// Sends the message. `nonce` is one per compose, reused on a retry of
+    /// it: the database then returns the message it already queued instead
+    /// of sending a second copy.
+    static func send(shopID: UUID, request: Request, nonce: String) async throws -> MoneyMessageResult {
+        let body = MoneyDocumentSendBody(
+            shop_id: MoneyEdge.wire(shopID),
+            channel: request.channel.rawValue,
+            template_key: request.kind.rawValue,
+            quote_id: request.kind == .quoteSent ? MoneyEdge.wire(request.id) : nil,
+            invoice_id: request.kind == .invoiceSent ? MoneyEdge.wire(request.id) : nil,
+            request_nonce: nonce
         )
-    }
-
-    /// The shop's wording for this template and channel (nil when missing).
-    static func template(
-        shopID: UUID,
-        key: MoneyDocumentTemplate,
-        channel: MoneyMessageChannel
-    ) async throws -> MoneyTemplateRow? {
-        let rows: [MoneyTemplateRow] = try await Supa.client
-            .from("message_templates")
-            .select(MoneyTemplateRow.selectColumns)
-            .eq("shop_id", value: shopID.uuidString)
-            .eq("key", value: key.rawValue)
-            .eq("channel", value: channel.rawValue)
-            .limit(1)
-            .execute()
-            .value
-        return rows.first
-    }
-
-    static func shop(shopID: UUID) async throws -> MoneyMessageShopRow {
-        let rows: [MoneyMessageShopRow] = try await Supa.client
-            .from("shops")
-            .select(MoneyMessageShopRow.selectColumns)
-            .eq("id", value: shopID.uuidString)
-            .limit(1)
-            .execute()
-            .value
-        guard let shop = rows.first else { throw AppError.notFound("Your shop") }
-        return shop
-    }
-
-    /// Template variables, formatted like the server's comms variables
-    /// (`comms_customer_vars` + the document's link and totals).
-    static func variables(
-        request: Request,
-        customer: QuoteCustomerRef,
-        shop: MoneyMessageShopRow
-    ) -> [String: String] {
-        let first = customer.firstName?.trimmedNonEmpty
-            ?? customer.company?.trimmedNonEmpty
-            ?? customer.lastName?.trimmedNonEmpty
-            ?? "there"
-        let person = [customer.firstName?.trimmedNonEmpty, customer.lastName?.trimmedNonEmpty]
-            .compactMap { $0 }
-            .joined(separator: " ")
-        var values: [String: String] = [
-            "customer_first_name": first,
-            "customer_name": person.isEmpty ? (customer.company?.trimmedNonEmpty ?? "") : person,
-            "shop_name": shop.name,
-            "shop_phone": shop.phone?.trimmedNonEmpty.map { PhoneNumber.format($0) } ?? "",
-            "review_link": shop.reviewURL?.trimmedNonEmpty ?? "",
-            "booking_page_link": bookingPageLink(slug: shop.slug) ?? "",
-        ]
-        values[request.template.linkVariable] = request.link.absoluteString
-        if let amount = request.amountCents {
-            values["amount"] = serverMoneyText(cents: amount, currency: shop.currency)
+        do {
+            return try await MoneyEdge.invoke("messaging", body: body)
+        } catch let error as EdgeFunctionError where error.reason == "template_disabled" {
+            throw AppError.message(disabledText(request))
         }
-        if let balance = request.balanceCents {
-            values["balance"] = serverMoneyText(cents: max(balance, 0), currency: shop.currency)
-        }
-        return values
     }
 
-    private static func bookingPageLink(slug: String) -> String? {
-        guard let base = AppConfig.webAppURL, let slug = slug.trimmedNonEmpty else { return nil }
-        return base.appendingPathComponent("book").appendingPathComponent(slug).absoluteString
+    /// What the message will say (`preview_document_message`), rendered by
+    /// the server with the document's link as it reads once sent. nil when
+    /// the shop has no such template.
+    static func preview(request: Request) async throws -> MoneyDocumentPreview? {
+        let params = MoneyDocumentPreviewParams(
+            p_quote_id: request.kind == .quoteSent ? request.id : nil,
+            p_invoice_id: request.kind == .invoiceSent ? request.id : nil,
+            p_channel: request.channel.rawValue
+        )
+        do {
+            let rows: [MoneyDocumentPreview] = try await Supa.client
+                .rpc("preview_document_message", params: params)
+                .execute()
+                .value
+            return rows.first
+        } catch let error as PostgrestError where error.code == "P0002" && error.message.lowercased().contains("template") {
+            return nil
+        }
     }
 
-    /// Same text as SQL `format_money` (e.g. "$1,234.56", "EUR"-style code
-    /// prefix for currencies without a symbol), so a message reads the same
-    /// whether the app or the server rendered it.
-    static func serverMoneyText(cents: Int, currency: String) -> String {
-        let code = currency.lowercased()
-        let symbol: String
-        switch code {
-        case "usd", "cad", "aud", "nzd": symbol = "$"
-        case "eur": symbol = "€"
-        case "gbp": symbol = "£"
-        case "jpy": symbol = "¥"
-        default: symbol = code.uppercased() + " "
-        }
-        let magnitude = cents.magnitude
-        let number: String
-        if zeroDecimalCurrencies.contains(code) {
-            number = grouped(magnitude)
-        } else {
-            let fraction = magnitude % 100
-            number = grouped(magnitude / 100) + "." + (fraction < 10 ? "0" : "") + String(fraction)
-        }
-        return (cents < 0 ? "-" : "") + symbol + number
+    /// "Your shop's "quote sent" text is turned off. …"
+    static func disabledText(_ request: Request) -> String {
+        let kind = request.channel == .sms ? "text" : "email"
+        return "Your shop's \"\(request.kind.documentNoun) sent\" \(kind) is turned off. Turn it on in Settings, or share the link yourself."
     }
+}
 
-    private static let zeroDecimalCurrencies: Set<String> = [
-        "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg", "rwf",
-        "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
-    ]
+/// `messaging` / `send` for a document. nil fields are omitted (the
+/// function's schema is strict and rejects nulls and unknown keys).
+private struct MoneyDocumentSendBody: Encodable {
+    var action = "send"
+    let shop_id: String
+    let channel: String
+    let template_key: String
+    let quote_id: String?
+    let invoice_id: String?
+    let request_nonce: String
+}
 
-    /// 1234567 → "1,234,567".
-    private static func grouped(_ value: UInt) -> String {
-        let digits = Array(String(value))
-        var text = ""
-        for (index, digit) in digits.enumerated() {
-            if index > 0 && (digits.count - index) % 3 == 0 {
-                text.append(",")
-            }
-            text.append(digit)
-        }
-        return text
-    }
+/// Exactly one of the two ids is sent (nil ids are omitted).
+private struct MoneyDocumentPreviewParams: Encodable {
+    let p_quote_id: UUID?
+    let p_invoice_id: UUID?
+    let p_channel: String
 }
 
 // MARK: - Payment service
@@ -558,8 +394,50 @@ enum PaymentService {
         )
     }
 
+    /// Releases a job before it is cancelled / marked no-show
+    /// (`cancel_open_payments` with `job_id`; collectors only): cancels its
+    /// unconfirmed card attempts (deposits and its invoice's sheets) and
+    /// expires its open deposit / pay links, so nobody can pay for an
+    /// appointment that is not happening. Payments already processing are
+    /// reported in `inProgress`; ones that went through in `succeeded`. A
+    /// shop without Stripe answers with zeros.
+    @discardableResult
+    static func cancelOpenPayments(shopID: UUID, jobID: UUID) async throws -> MoneyOpenPaymentsRelease {
+        struct Body: Encodable {
+            let action = "cancel_open_payments"
+            let shop_id: String
+            let job_id: String
+        }
+        return try await MoneyEdge.invoke(
+            "payments",
+            body: Body(shop_id: MoneyEdge.wire(shopID), job_id: MoneyEdge.wire(jobID))
+        )
+    }
+
+    /// Manager+: removes a customer's saved card (`remove_saved_card`): the
+    /// card is detached from the customer in Stripe, then removed from the
+    /// CRM. Returns false when the CRM no longer listed it (already gone).
+    @discardableResult
+    static func removeSavedCard(shopID: UUID, customerID: UUID, paymentMethodID: String) async throws -> Bool {
+        struct Body: Encodable {
+            let action = "remove_saved_card"
+            let shop_id: String
+            let customer_id: String
+            let payment_method_id: String
+        }
+        let reply: MoneySavedCardRemoval = try await MoneyEdge.invoke(
+            "payments",
+            body: Body(
+                shop_id: MoneyEdge.wire(shopID),
+                customer_id: MoneyEdge.wire(customerID),
+                payment_method_id: paymentMethodID
+            )
+        )
+        return reply.removed
+    }
+
     /// Manager+: charges a saved card off-session (default card when
-    /// `paymentMethodID` is nil). Throws `MoneyEdgeError` with
+    /// `paymentMethodID` is nil). Throws `EdgeFunctionError` with
     /// `needsCustomerAuthentication` when the bank wants the customer.
     static func chargeSavedCard(
         shopID: UUID,

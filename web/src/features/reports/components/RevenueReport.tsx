@@ -1,9 +1,16 @@
 import { BarChart3 } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { EmptyState, SectionCard, Table, type Column } from '@/components/ui';
-import { formatCents, sumCents } from '@/lib/money';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  SectionCard,
+  Table,
+  type Column,
+} from '@/components/ui';
+import { formatCents } from '@/lib/money';
 import { useShop } from '@/features/shop/shopContext';
-import { useRevenueReport } from '../api';
+import { useRevenueReport, useRevenueTotals } from '../api';
 import { centsCell, toCsv } from '../csv';
 import { countOf, formatCount, type RevenueRow } from '../model';
 import { bucketLabel, rangeFileSuffix, type Bucket, type DateRange } from '../ranges';
@@ -16,35 +23,73 @@ const SERIES = [
   { key: 'tips_cents', label: 'Tips', color: 'var(--dc-money)', stack: undefined },
 ] as const;
 
+type TotalsQuery = ReturnType<typeof useRevenueTotals>;
+
 export function RevenueReport({ range, bucket }: { range: DateRange; bucket: Bucket }) {
   const query = useRevenueReport(range, bucket);
+  // The summary cards come from their own RPC (report_revenue_totals), so a
+  // failure there shows an error on the cards without hiding the chart.
+  const totals = useRevenueTotals(range);
   return (
     <ReportState query={query} title="Revenue">
-      {() => <RevenueBody rows={query.data ?? []} range={range} bucket={bucket} />}
+      {() => <RevenueBody rows={query.data ?? []} totals={totals} range={range} bucket={bucket} />}
     </ReportState>
+  );
+}
+
+function TotalTiles({ totals }: { totals: TotalsQuery }) {
+  const { currency } = useShop();
+  const money = (cents: number) => formatCents(cents, { currency });
+  if (totals.isPending) return <LoadingState label="Loading revenue totals…" />;
+  if (totals.isError) {
+    return (
+      <ErrorState
+        compact
+        error={totals.error}
+        title="Couldn’t load the revenue totals"
+        onRetry={() => void totals.refetch()}
+        retrying={totals.isRefetching}
+      />
+    );
+  }
+  const t = totals.data;
+  return (
+    <StatGrid label="Revenue totals">
+      <StatTile
+        label="Net revenue"
+        value={money(t.net_cents)}
+        hint="Gross minus refunds, excluding tips"
+      />
+      <StatTile
+        label="Gross"
+        value={money(t.gross_cents)}
+        hint={countOf(t.payments_count, 'payment')}
+      />
+      <StatTile label="Refunds" value={money(t.refunds_cents)} />
+      <StatTile label="Tips" value={money(t.tips_cents)} hint="Never counted as revenue" />
+    </StatGrid>
   );
 }
 
 function RevenueBody({
   rows,
+  totals,
   range,
   bucket,
 }: {
   rows: RevenueRow[];
+  totals: TotalsQuery;
   range: DateRange;
   bucket: Bucket;
 }) {
   const { currency } = useShop();
   const money = (cents: number) => formatCents(cents, { currency });
-  const totals = {
-    gross: sumCents(rows.map((r) => r.gross_cents)),
-    refunds: sumCents(rows.map((r) => r.refunds_cents)),
-    net: sumCents(rows.map((r) => r.net_cents)),
-    tips: sumCents(rows.map((r) => r.tips_cents)),
-    count: rows.reduce((n, r) => n + r.payments_count, 0),
-  };
+  // Any payment at all? The totals say so; until they load, the periods do.
+  const paymentsCount = totals.data
+    ? totals.data.payments_count
+    : rows.reduce((n, r) => n + r.payments_count, 0);
 
-  if (totals.count === 0)
+  if (paymentsCount === 0)
     return (
       <SectionCard title="Revenue">
         <EmptyState
@@ -90,20 +135,7 @@ function RevenueBody({
 
   return (
     <div className="flex flex-col gap-5">
-      <StatGrid label="Revenue totals">
-        <StatTile
-          label="Net revenue"
-          value={money(totals.net)}
-          hint="Gross minus refunds, excluding tips"
-        />
-        <StatTile
-          label="Gross"
-          value={money(totals.gross)}
-          hint={countOf(totals.count, 'payment')}
-        />
-        <StatTile label="Refunds" value={money(totals.refunds)} />
-        <StatTile label="Tips" value={money(totals.tips)} hint="Never counted as revenue" />
-      </StatGrid>
+      <TotalTiles totals={totals} />
 
       <SectionCard
         title="Revenue over time"
@@ -125,7 +157,11 @@ function RevenueBody({
           <div
             className="h-64 w-full sm:h-72"
             role="img"
-            aria-label={`Revenue chart: net ${money(totals.net)}, refunds ${money(totals.refunds)}, tips ${money(totals.tips)}. The table below lists every period.`}
+            aria-label={
+              totals.data
+                ? `Revenue chart: net ${money(totals.data.net_cents)}, refunds ${money(totals.data.refunds_cents)}, tips ${money(totals.data.tips_cents)}. The table below lists every period.`
+                : 'Revenue chart. The table below lists every period.'
+            }
           >
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={rows} margin={{ top: 4, right: 4, bottom: 0, left: 0 }} barGap={2}>

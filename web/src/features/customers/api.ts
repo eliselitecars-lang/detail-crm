@@ -35,6 +35,7 @@ export const customerKeys = {
     [...customerKeys.all(shopId), 'list', f] as const,
   tags: (shopId: string) => [...customerKeys.all(shopId), 'tags'] as const,
   detail: (shopId: string, id: string) => [...customerKeys.all(shopId), 'detail', id] as const,
+  summary: (shopId: string, id: string) => [...customerKeys.all(shopId), 'summary', id] as const,
 };
 
 export const vehicleKeys = {
@@ -119,10 +120,9 @@ export function useCustomerList(shopId: string, filters: CustomerListFilters) {
       );
 
       if (filters.sort.key === 'name') {
-        query = query
-          .order('last_name', { ascending, nullsFirst: false })
-          .order('first_name', { ascending, nullsFirst: false })
-          .order('company', { ascending, nullsFirst: false });
+        // sort_name: generated "last (or company, or first) first" key, indexed
+        // with (shop_id, sort_name, id) — company-only customers sort by company.
+        query = query.order('sort_name', { ascending });
       } else {
         query = query.order(filters.sort.key, { ascending });
       }
@@ -300,6 +300,44 @@ export function useSetVehicleArchived(shopId: string) {
   });
 }
 
+// ---------------------------------------------------------------- summary (manager+)
+
+const cents = z.number().int();
+export const customerSummarySchema = z.object({
+  customer_id: z.string(),
+  lifetime_paid_cents: cents,
+  tips_cents: cents,
+  refunded_cents: cents,
+  open_balance_cents: cents,
+  overdue_balance_cents: cents,
+  completed_jobs: z.number().int(),
+  upcoming_jobs: z.number().int(),
+  first_visit_at: z.string().nullable(),
+  last_visit_at: z.string().nullable(),
+  next_job_at: z.string().nullable(),
+  open_quotes: z.number().int(),
+  active_memberships: z.number().int(),
+});
+export type CustomerSummary = z.infer<typeof customerSummarySchema>;
+
+/**
+ * customer_summary RPC (0092): lifetime paid, open / overdue balance, visit
+ * counts and dates, computed server-side. Owner/admin/manager only (42501 for
+ * technicians), so callers gate it with a manager+ capability.
+ */
+export function useCustomerSummary(shopId: string, customerId: string, enabled = true) {
+  return useQuery({
+    queryKey: customerKeys.summary(shopId, customerId),
+    enabled,
+    queryFn: async (): Promise<CustomerSummary> => {
+      const rows = unwrap(await supabase.rpc('customer_summary', { p_customer_id: customerId }));
+      const row = z.array(customerSummarySchema).parse(rows ?? [])[0];
+      if (!row) throw new AppError('That customer could not be found.', { kind: 'not_found' });
+      return row;
+    },
+  });
+}
+
 // ---------------------------------------------------------------- history tabs
 
 const HISTORY_LIMIT = 100;
@@ -401,7 +439,9 @@ export function useCustomerCards(shopId: string, customerId: string, enabled: bo
       unwrap(
         await supabase
           .from('customer_payment_methods')
-          .select('id, brand, last4, exp_month, exp_year, is_default, created_at')
+          .select(
+            'id, stripe_payment_method_id, brand, last4, exp_month, exp_year, is_default, created_at',
+          )
           .eq('shop_id', shopId)
           .eq('customer_id', customerId)
           .order('is_default', { ascending: false })
@@ -444,6 +484,36 @@ export function useCreateCardSetupLink(shopId: string, customerId: string) {
       }
       return parsed.data;
     },
+  });
+}
+
+const removeCardSchema = z.object({ removed: z.boolean() });
+
+/**
+ * payments → remove_saved_card (manager+): detaches the card from the
+ * customer's Stripe customer on the shop's account, then drops it from the
+ * CRM. `removed: false` means it was already gone (a retry).
+ */
+export function useRemoveSavedCard(shopId: string, customerId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (paymentMethodId: string) => {
+      const data = await invokeEdge('payments', {
+        action: 'remove_saved_card',
+        shop_id: shopId,
+        customer_id: customerId,
+        payment_method_id: paymentMethodId,
+      });
+      const parsed = removeCardSchema.safeParse(data);
+      if (!parsed.success) {
+        throw new AppError('The payments service returned an unexpected response.', {
+          kind: 'server',
+        });
+      }
+      return parsed.data;
+    },
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: historyKeys.cards(shopId, customerId) }),
   });
 }
 

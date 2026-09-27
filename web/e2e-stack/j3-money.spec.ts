@@ -313,20 +313,11 @@ test('J3: invoice paid by card via Checkout + webhook, cash on another, refund, 
   expect(pageErrors).toEqual([]);
 });
 
-// OPEN PRODUCT DEFECT (scripts/stack/README.md "Known issues" → "Due-on-receipt
-// invoices are overdue at once"). invoices_maintain
-// (supabase/migrations/0012_money_invoices_payments.sql ~L403-406) sets
-// due_at = issued_at + invoice_due_days, so with the default 0 the due time is
-// the issue instant and isInvoiceOverdue() (web/src/features/invoices/api.ts)
-// is true milliseconds later.
-// test.fail (not .fixme): the spec RUNS every time and is reported as an
-// expected failure while the defect reproduces; once the product is fixed it
-// passes, Playwright reports "expected to fail, but passed" and the run fails
-// — then delete the test.fail() line. The marker is set INSIDE the body, right
-// before the defect assertion: any failure in the setup above it (signup, RPCs,
-// selectors) is a normal, unexpected failure instead of being swallowed as
-// "expected". Run it on its own with
-// `npx playwright test -c playwright.stack.config.ts -g J3b` to see the defect.
+// Regression (fixed, I-55): with the default invoice_due_days = 0 an invoice
+// is due at the END of its local issue date (invoices_compute in
+// 0012_money_invoices_payments.sql sets due_at to 23:59:59 shop time), so
+// isInvoiceOverdue() and dashboard_summary do not flag it overdue on the day
+// it is issued; it becomes overdue from the next local midnight.
 test('J3b: a due-on-receipt invoice is not flagged overdue right after it is issued', async ({
   page,
 }) => {
@@ -349,10 +340,6 @@ test('J3b: a due-on-receipt invoice is not flagged overdue right after it is iss
   await loginViaUi(page, owner);
   await page.goto(`/app/invoices/${invoice.id}`);
   await expect(page.getByRole('heading', { name: /^Invoice #\d+$/, level: 1 })).toBeVisible();
-  test.fail(
-    true,
-    'OPEN DEFECT: due-on-receipt invoice is Overdue at once (scripts/stack/README.md)',
-  );
   await expect(page.getByText('Overdue', { exact: true })).toHaveCount(0);
   // The dashboard's "Overdue" tile (dashboard_summary.overdue_invoices, due_at < now) agrees.
   const summary = await rpcOk<{ overdue_invoices: { count: number } }>(
@@ -363,15 +350,11 @@ test('J3b: a due-on-receipt invoice is not flagged overdue right after it is iss
   expect(summary.overdue_invoices.count).toBe(0);
 });
 
-// OPEN PRODUCT DEFECT (scripts/stack/README.md "Known issues" → "Staff-sent
-// invoice/quote messages keep empty placeholder lines"). The send dialog
-// renders the template in the browser with the render_template RPC
-// (web/src/features/quotes/shared/api.ts renderTemplate, called from
-// SendDocumentDialog.tsx ~L118) and sends the result as a free-form body, so
-// the 0033 comms_omit_unavailable_values rule documented in
-// 0032_comms_templates.sql (lines 37-48) is never applied.
-// test.fail: see J3b — runs every time; fails the run once the defect is fixed;
-// marked right before the defect assertion so setup failures still fail.
+// Regression (fixed, I-1 / I-56): the send dialog no longer renders the
+// template in the browser. The server renders invoice_sent for the invoice
+// (preview_document_message for the preview, messaging.send with invoice_id
+// for the send), applying comms_omit_unavailable_values, so a shop without a
+// phone gets no "Call us at ." line.
 test('J3c: an emailed invoice from a shop without a phone omits the "Call us" line', async ({
   page,
 }) => {
@@ -406,10 +389,6 @@ test('J3c: an emailed invoice from a shop without a phone omits the "Call us" li
     async () => (await providerLog('resend')).filter((r) => JSON.stringify(r.body).includes(email)),
     (list) => list.length > 0,
     'invoice email recorded by the Resend mock',
-  );
-  test.fail(
-    true,
-    'OPEN DEFECT: staff-sent messages keep empty placeholder lines (scripts/stack/README.md)',
   );
   expect(JSON.stringify(mail[0]?.body)).not.toContain('Call us at .');
 });

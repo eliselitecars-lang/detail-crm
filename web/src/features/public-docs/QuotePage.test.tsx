@@ -2,17 +2,17 @@ import { screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute } from '@/test/render';
 import QuotePage from './QuotePage';
-import { mockRpc, pgError, resetPublicMocks } from './shared/testing';
+import { mockRpc, pgError, resetSupabaseMock } from '@/test/supabaseMock';
 import { DOC_TOKEN, OPT_A, quoteFixture } from './testFixtures';
 
-vi.mock('@/lib/supabase', () => import('@/features/public-docs/shared/testSupabase'));
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
 function render(path = `/q/${DOC_TOKEN}`) {
   return renderRoute(<QuotePage />, { path, routePath: '/q/:token', shop: null });
 }
 
 beforeEach(() => {
-  resetPublicMocks();
+  resetSupabaseMock();
 });
 
 describe('QuotePage', () => {
@@ -110,7 +110,7 @@ describe('QuotePage', () => {
   });
 
   it('shows not found for an unknown quote', async () => {
-    mockRpc({ public_get_quote: pgError('P0002', 'quote not found') });
+    mockRpc({ public_get_quote: pgError('PT404', 'quote not found') });
     render();
     expect(await screen.findByText('We couldn’t find this quote')).toBeInTheDocument();
   });

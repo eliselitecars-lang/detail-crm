@@ -85,20 +85,17 @@ export function VehicleSection({
             }}
           />
         )}
-        <FormField
-          label="Vehicle size"
-          required
-          help={
-            categories.length === 0 ? 'Add vehicle sizes in Settings to price services.' : undefined
-          }
-        >
-          <Select
-            value={categoryId}
-            onChange={(e) => onCategory(e.target.value)}
-            placeholder="Choose a size"
-            options={categories.map((c) => ({ value: c.id, label: c.name }))}
-          />
-        </FormField>
+        {/* Without vehicle sizes every service is priced at its base price. */}
+        {categories.length > 0 && (
+          <FormField label="Vehicle size" required>
+            <Select
+              value={categoryId}
+              onChange={(e) => onCategory(e.target.value)}
+              placeholder="Choose a size"
+              options={categories.map((c) => ({ value: c.id, label: c.name }))}
+            />
+          </FormField>
+        )}
       </div>
     </SectionCard>
   );
@@ -262,14 +259,16 @@ function NewVehicleForm({
           onChange={(e) => set({ plate: e.target.value })}
         />
       </FormField>
-      <FormField label="Size" className="col-span-2">
-        <Select
-          value={form.categoryId}
-          onChange={(e) => set({ categoryId: e.target.value })}
-          placeholder="Choose a size"
-          options={categories.map((c) => ({ value: c.id, label: c.name }))}
-        />
-      </FormField>
+      {categories.length > 0 && (
+        <FormField label="Size" className="col-span-2">
+          <Select
+            value={form.categoryId}
+            onChange={(e) => set({ categoryId: e.target.value })}
+            placeholder="Choose a size"
+            options={categories.map((c) => ({ value: c.id, label: c.name }))}
+          />
+        </FormField>
+      )}
       <div className="col-span-2 flex gap-2 sm:col-span-4">
         <Button loading={create.isPending} onClick={() => void submit()}>
           Save vehicle

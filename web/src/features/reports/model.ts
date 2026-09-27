@@ -40,6 +40,16 @@ export const revenueRowSchema = z.object({
 });
 export type RevenueRow = z.infer<typeof revenueRowSchema>;
 
+/** report_revenue_totals (0093): the whole period in one row (same rules as report_revenue). */
+export const revenueTotalsSchema = z.object({
+  gross_cents: zNum,
+  refunds_cents: zNum,
+  net_cents: zNum,
+  tips_cents: zNum,
+  payments_count: zNum,
+});
+export type RevenueTotals = z.infer<typeof revenueTotalsSchema>;
+
 export const paymentsRowSchema = z.object({
   method: z.enum(PAYMENT_METHODS),
   payments_count: zNum,
@@ -51,6 +61,12 @@ export const paymentsRowSchema = z.object({
   collected_cents: zNum,
   deposits_cents: zNum,
   memberships_cents: zNum,
+  /**
+   * Card money lost to chargebacks (payments.disputed_cents). Informational:
+   * disputes never change balances or net revenue. Optional for servers
+   * before 0093.
+   */
+  disputes_lost_cents: zNum.optional().default(0),
 });
 export type PaymentsRow = z.infer<typeof paymentsRowSchema>;
 

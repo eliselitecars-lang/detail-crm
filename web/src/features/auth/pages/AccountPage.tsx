@@ -1,0 +1,216 @@
+import { ArrowLeft, Store, Trash2 } from 'lucide-react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { Link, useLocation } from 'react-router';
+import { PublicLayout } from '@/components/layout/PublicLayout';
+import { Button, Dialog, FormField, Input, SectionCard } from '@/components/ui';
+import { errorMessage } from '@/lib/errors';
+import { storageKeys, writeLocal } from '@/lib/storage';
+import { ownedShopsOf, useDeleteAccount, type OwnedShop } from '../accountApi';
+import { useAuth } from '../authContext';
+import { ACCOUNT_DELETED_LOGIN, reloadTo } from '../leave';
+
+/** What the person types to confirm (case-insensitive). */
+export const DELETE_CONFIRMATION = 'DELETE';
+
+/** Where "Back" goes: the page that linked here (UserMenu / portal pass `from`). */
+function backTarget(state: unknown): string | null {
+  const from = (state as { from?: unknown } | null)?.from;
+  return typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') ? from : null;
+}
+
+/**
+ * /account — the signed-in user's own account, for every role (staff and
+ * portal clients). Deleting the account is required by App Store guideline
+ * 5.1.1(v); the server refuses while the user still owns a shop.
+ */
+export default function AccountPage() {
+  const { user } = useAuth();
+  const location = useLocation();
+  const back = backTarget(location.state);
+  useEffect(() => {
+    document.title = 'Your account';
+  }, []);
+
+  return (
+    <PublicLayout shop={{ name: 'Your account' }}>
+      <div className="flex flex-col gap-4 sm:gap-5">
+        <div className="flex flex-col gap-2">
+          {back && (
+            <Link
+              to={back}
+              className="text-primary-ink inline-flex w-fit items-center gap-1 text-sm hover:underline"
+            >
+              <ArrowLeft className="size-4" aria-hidden="true" />
+              Back
+            </Link>
+          )}
+          <h1 className="text-ink text-xl font-semibold sm:text-2xl">Your account</h1>
+          {user?.email && <p className="text-muted text-sm break-all">Signed in as {user.email}</p>}
+        </div>
+        <DeleteAccountCard />
+      </div>
+    </PublicLayout>
+  );
+}
+
+function DeleteAccountCard() {
+  const [open, setOpen] = useState(false);
+  return (
+    <SectionCard
+      title="Delete account"
+      description="Permanently deletes your sign-in and profile. This cannot be undone."
+    >
+      <div className="flex flex-col gap-4 text-sm">
+        <ul className="text-muted flex list-disc flex-col gap-1.5 pl-5">
+          <li>You are signed out everywhere and can no longer sign in with this email.</li>
+          <li>You are removed from every shop team you belong to.</li>
+          <li>
+            Records a shop keeps for its business (appointments, invoices, payments) stay with that
+            shop; your client portal link to them is removed.
+          </li>
+          <li>If you own a shop, transfer its ownership or delete the shop first.</li>
+        </ul>
+        <div>
+          <Button variant="danger" onClick={() => setOpen(true)}>
+            <Trash2 className="size-4" aria-hidden="true" />
+            Delete account…
+          </Button>
+        </div>
+      </div>
+      {open && <DeleteAccountDialog onClose={() => setOpen(false)} />}
+    </SectionCard>
+  );
+}
+
+function DeleteAccountDialog({ onClose }: { onClose: () => void }) {
+  const { signOut } = useAuth();
+  const remove = useDeleteAccount();
+  const [typed, setTyped] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const formId = useId();
+  const matches = typed.trim().toUpperCase() === DELETE_CONFIRMATION;
+  const blockers = remove.isError ? ownedShopsOf(remove.error) : null;
+
+  const close = () => {
+    if (remove.isPending) return;
+    onClose();
+  };
+
+  const onSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!matches || remove.isPending) return;
+    try {
+      await remove.mutateAsync();
+    } catch {
+      return; // shown in the dialog
+    }
+    // The account is gone: clear the local session even if the server no
+    // longer accepts the token, then start over on the sign-in page with a
+    // full load (no cache of the deleted account survives in memory).
+    await signOut().catch(() => undefined);
+    reloadTo(ACCOUNT_DELETED_LOGIN);
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={close}
+      role="alertdialog"
+      size="sm"
+      title="Delete your account?"
+      description="Your sign-in and profile are permanently deleted."
+      dismissible={!remove.isPending}
+      initialFocus={inputRef}
+      footer={
+        <>
+          <Button variant="secondary" onClick={close} disabled={remove.isPending}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            form={formId}
+            variant="danger"
+            disabled={!matches}
+            loading={remove.isPending}
+          >
+            Delete account permanently
+          </Button>
+        </>
+      }
+    >
+      <form
+        id={formId}
+        noValidate
+        onSubmit={(e) => void onSubmit(e)}
+        className="flex flex-col gap-3"
+      >
+        <FormField label={`Type ${DELETE_CONFIRMATION} to confirm`}>
+          <Input
+            ref={inputRef}
+            value={typed}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(e) => setTyped(e.target.value)}
+          />
+        </FormField>
+        {blockers ? (
+          <OwnsShops shops={blockers} />
+        ) : (
+          remove.isError && (
+            <p
+              role="alert"
+              className="bg-danger-soft text-danger-ink rounded-control px-3 py-2 text-sm"
+            >
+              {errorMessage(remove.error)}
+            </p>
+          )
+        )}
+      </form>
+    </Dialog>
+  );
+}
+
+/** The 409 owns_shops answer: each shop with the two ways out. */
+function OwnsShops({ shops }: { shops: OwnedShop[] }) {
+  const { user } = useAuth();
+  // The app opens on the last-used shop: pick this one before going there.
+  const pick = (shopId: string) => {
+    if (user?.id) writeLocal(storageKeys.lastShop(user.id), shopId);
+  };
+  return (
+    <div role="alert" className="bg-warning-soft text-warning-ink rounded-control px-3 py-2.5">
+      <p className="text-sm font-medium">
+        You own {shops.length === 1 ? 'a shop' : 'these shops'}. Transfer ownership or delete{' '}
+        {shops.length === 1 ? 'it' : 'them'} first.
+      </p>
+      <ul className="mt-2 flex flex-col gap-2" aria-label="Shops you own">
+        {shops.map((shop) => (
+          <li key={shop.shop_id} className="flex flex-col gap-1">
+            <span className="text-ink flex items-center gap-1.5 text-sm font-medium">
+              <Store className="size-4 shrink-0" aria-hidden="true" />
+              {shop.name}
+            </span>
+            <span className="flex flex-wrap gap-x-4 gap-y-1 pl-5 text-sm">
+              <Link
+                to="/app/team"
+                onClick={() => pick(shop.shop_id)}
+                className="text-primary-ink font-medium hover:underline"
+                aria-label={`Transfer ownership of ${shop.name}`}
+              >
+                Transfer ownership
+              </Link>
+              <Link
+                to="/app/settings/delete-shop"
+                onClick={() => pick(shop.shop_id)}
+                className="text-primary-ink font-medium hover:underline"
+                aria-label={`Delete ${shop.name}`}
+              >
+                Delete shop
+              </Link>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}

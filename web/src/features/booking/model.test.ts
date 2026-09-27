@@ -250,6 +250,15 @@ describe('classifyBookingError', () => {
     expect(classifyBookingError(err('PT429', 'Too many online bookings.')).kind).toBe(
       'rate_limited',
     );
+    expect(classifyBookingError(err('PT404', 'Shop not found.'))).toMatchObject({
+      kind: 'not_found',
+      message: 'Shop not found.',
+    });
+    // A raw PostgREST error with PT404 is classified the same way.
+    expect(
+      classifyBookingError({ code: 'PT404', message: 'saved vehicle not found', details: null })
+        .kind,
+    ).toBe('not_found');
   });
 
   it('routes 22023 messages to the step that can fix them', () => {

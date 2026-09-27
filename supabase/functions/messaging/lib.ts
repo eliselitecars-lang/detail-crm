@@ -85,6 +85,7 @@ export function rpcRefusal(operation: string, error: PgError): Error {
     case "42501":
       return new HttpError("forbidden", "Your role does not allow this message.", { cause: error });
     case "P0002":
+    case "PT404": // public RPCs' not-found (0042 convention)
       return new HttpError("not_found", "The customer or job was not found.", { cause: error });
     case "22P02":
     case "22023":

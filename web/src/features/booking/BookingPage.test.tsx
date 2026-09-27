@@ -2,13 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute } from '@/test/render';
 import { navigation } from '@/features/public-docs/shared/checkout';
-import {
-  edge,
-  mockRpc,
-  pgError,
-  resetPublicMocks,
-  type RpcCall,
-} from '@/features/public-docs/shared/testing';
+import { mockRpc, pgError, resetSupabaseMock, supabase, type RpcCall } from '@/test/supabaseMock';
 import BookingPage from './BookingPage';
 import {
   catalogFixture,
@@ -20,7 +14,7 @@ import {
   WAX,
 } from './testFixtures';
 
-vi.mock('@/lib/supabase', () => import('@/features/public-docs/shared/testSupabase'));
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
 type User = ReturnType<typeof renderRoute>['user'];
 
@@ -104,14 +98,14 @@ async function fillDetails(user: User) {
 }
 
 beforeEach(() => {
-  resetPublicMocks();
+  resetSupabaseMock();
 });
 
 describe('BookingPage', () => {
   it('walks through the wizard and books with the server’s totals', async () => {
     const { calls, user } = setup();
     const assign = vi.spyOn(navigation, 'assign').mockImplementation(() => undefined);
-    edge.invoke.mockResolvedValue({
+    supabase.functions.invoke.mockResolvedValue({
       data: {
         url: 'https://checkout.stripe.com/c/pay/cs_test',
         expires_at: 1,
@@ -167,9 +161,40 @@ describe('BookingPage', () => {
     await waitFor(() =>
       expect(assign).toHaveBeenCalledWith('https://checkout.stripe.com/c/pay/cs_test'),
     );
-    expect(edge.invoke).toHaveBeenCalledWith('payments', {
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
       body: expect.objectContaining({ action: 'booking_deposit_checkout', token: TOKEN }),
     });
+  }, 20_000);
+
+  it('books a shop with no vehicle categories without sending a category', async () => {
+    const { calls, user } = setup({
+      public_booking_catalog: { data: { ...catalogFixture(), vehicle_categories: [] } },
+    });
+    await screen.findByRole('heading', { name: 'Tell us about your vehicle' });
+    expect(screen.queryByRole('radiogroup', { name: 'Vehicle type' })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText(/^Make/), 'Toyota');
+    await user.type(screen.getByLabelText(/^Model/), 'Camry');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    await screen.findByRole('heading', { name: 'Choose your services' });
+    // Base prices apply; a package with no base price can't be chosen.
+    expect(screen.getByRole('checkbox', { name: /Ceramic coating/ })).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: /Full detail/ }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await pickFirstTime(user);
+    await fillDetails(user);
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Review and book' });
+    await user.click(screen.getByRole('button', { name: 'Request appointment' }));
+    expect(await screen.findByRole('heading', { name: 'Request received' })).toBeInTheDocument();
+
+    const slots = calls.find((c) => c.fn === 'get_available_slots');
+    expect(slots?.args).not.toHaveProperty('p_vehicle_category_id');
+    const coupon = calls.find((c) => c.fn === 'public_validate_coupon');
+    expect(coupon?.args).not.toHaveProperty('p_vehicle_category_id');
+    const create = calls.find((c) => c.fn === 'create_online_booking');
+    const vehicle = (create?.args.p_payload as { vehicle: Record<string, unknown> }).vehicle;
+    expect(vehicle).toEqual({ year: null, make: 'Toyota', model: 'Camry', color: null });
   }, 20_000);
 
   it('sends the visitor back to pick another time when the slot was just taken', async () => {
@@ -235,7 +260,7 @@ describe('BookingPage', () => {
   });
 
   it('explains an unknown booking link', async () => {
-    setup({ public_shop_profile: pgError('P0002', 'shop not found') });
+    setup({ public_shop_profile: pgError('PT404', 'shop not found') });
     expect(await screen.findByText('We couldn’t find this booking page')).toBeInTheDocument();
   });
 

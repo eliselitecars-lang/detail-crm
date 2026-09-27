@@ -178,3 +178,11 @@ import_map = "./functions/deno.json"
 [functions.storage-purge]
 verify_jwt = false
 import_map = "./functions/deno.json"
+
+# Any signed-in user, their own account only (delete_account: App Store
+# guideline 5.1.1(v)). Every caller has a Supabase session, so the gateway
+# rejects calls without one first; the function verifies the caller again
+# and checks shop ownership as that user (account_deletion_blockers).
+[functions.account]
+verify_jwt = true
+import_map = "./functions/deno.json"

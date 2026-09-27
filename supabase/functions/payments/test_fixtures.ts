@@ -80,6 +80,8 @@ export interface FixtureOptions {
   depositPending?: boolean;
   /** Refunds on the connected account (GET /refunds lists them; POST adds). */
   refunds?: Row[];
+  /** Payment methods on the connected account (GET / detach), by id. */
+  paymentMethods?: Record<string, Row>;
   /** The handler's clock (default: NOW). Stripe objects created get it too. */
   now?: () => number;
 }
@@ -100,6 +102,7 @@ export interface Fixture {
   /** Checkout Sessions created through POST (GET /checkout/sessions/:id reads them). */
   created: Record<string, Row>;
   refunds: Row[];
+  paymentMethods: Record<string, Row>;
 }
 
 function member(key: keyof typeof USERS, shopId: string, role: string): Row {
@@ -310,7 +313,10 @@ export function fixture(options: FixtureOptions = {}): Fixture {
       },
       public_get_booking: (args) => {
         record("public_get_booking", args);
-        if (args.p_token !== JOB_TOKEN) throw new FakeRpcError("P0002", "booking not found");
+        // 0042: a public RPC's not-found is PT404 (HTTP 404)
+        if (args.p_token !== JOB_TOKEN) {
+          throw new FakeRpcError("PT404", "booking not found", { status: 404 });
+        }
         return {
           deposit: {
             required_cents: 5_000,
@@ -323,6 +329,17 @@ export function fixture(options: FixtureOptions = {}): Fixture {
         record("sync_stripe_subscription", args);
         return { status: args.p_status, cancel_at_period_end: args.p_cancel_at_period_end };
       },
+      // 0011: deletes the saved card (service role); false when not saved.
+      remove_customer_payment_method: (args, ctx) => {
+        record("remove_customer_payment_method", args);
+        const rows = ctx.db.table("customer_payment_methods");
+        const kept = rows.filter((r) =>
+          !(r.shop_id === args.p_shop_id &&
+            r.stripe_payment_method_id === args.p_stripe_payment_method_id)
+        );
+        ctx.db.seed("customer_payment_methods", kept);
+        return kept.length !== rows.length;
+      },
     },
   });
 
@@ -330,8 +347,13 @@ export function fixture(options: FixtureOptions = {}): Fixture {
   const intents = options.intents ?? {};
   const created: Record<string, Row> = {};
   const refunds = options.refunds ?? [];
+  const paymentMethods = options.paymentMethods ?? {};
   const now = options.now ?? (() => NOW);
-  installStripe(db, { sessions, intents, created, refunds, now }, options.subscriptions ?? {});
+  installStripe(
+    db,
+    { sessions, intents, created, refunds, paymentMethods, now },
+    options.subscriptions ?? {},
+  );
 
   const logs = memoryLogger();
   const handler = makeHandler({
@@ -366,6 +388,7 @@ export function fixture(options: FixtureOptions = {}): Fixture {
     intents,
     created,
     refunds,
+    paymentMethods,
   };
 }
 
@@ -384,15 +407,45 @@ interface StripeState {
   intents: Record<string, Row>;
   created: Record<string, Row>;
   refunds: Row[];
+  paymentMethods: Record<string, Row>;
   now: () => number;
 }
 
 function installStripe(
   db: FakeSupabase,
-  { sessions, intents, created, refunds, now }: StripeState,
+  { sessions, intents, created, refunds, paymentMethods, now }: StripeState,
   subscriptions: Record<string, string>,
 ): void {
   const http = db.http;
+  const noSuchPaymentMethod = (id: string | undefined) =>
+    jsonResponse(
+      stripeErrorBody("invalid_request_error", `No such PaymentMethod: '${id}'`, {
+        code: "resource_missing",
+        param: "id",
+      }),
+      404,
+    );
+  http.on("GET", `${STRIPE}/payment_methods/:id`, (_req, { params }) => {
+    const pm = paymentMethods[params.id ?? ""];
+    return pm
+      ? jsonResponse({ id: params.id, object: "payment_method", type: "card", ...pm })
+      : noSuchPaymentMethod(params.id);
+  });
+  http.on("POST", `${STRIPE}/payment_methods/:id/detach`, (_req, { params }) => {
+    const pm = paymentMethods[params.id ?? ""];
+    if (!pm) return noSuchPaymentMethod(params.id);
+    if (!pm.customer) {
+      return jsonResponse(
+        stripeErrorBody(
+          "invalid_request_error",
+          "The payment method you provided is not attached to a customer so detachment is impossible.",
+        ),
+        400,
+      );
+    }
+    pm.customer = null;
+    return jsonResponse({ id: params.id, object: "payment_method", type: "card", ...pm });
+  });
   http.on("GET", `${STRIPE}/checkout/sessions/:id`, (_req, { params }) => {
     const found = sessions.find((x) => x.id === params.id) ?? created[params.id ?? ""];
     return found

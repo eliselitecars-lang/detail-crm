@@ -91,6 +91,17 @@ jobs:
           PY
           fi
 
+      # The committed Package.resolved pins every package; upload what this
+      # run actually resolved so a version drift is visible (the file is
+      # used as-is, without -onlyUsePackageVersionsFromResolvedFile).
+      - name: Upload resolved package versions
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-resolved
+          path: ${{ env.PROJECT }}/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Build for iOS Simulator (no signing)
         run: |
           set -o pipefail

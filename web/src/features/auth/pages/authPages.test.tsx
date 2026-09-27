@@ -28,6 +28,15 @@ describe('LoginPage', () => {
     expect(supabase.auth.signInWithPassword).not.toHaveBeenCalled();
   });
 
+  it('confirms a deleted account', () => {
+    renderRoute(<LoginPage />, {
+      routePath: '/login',
+      path: '/login?account=deleted',
+      shop: null,
+    });
+    expect(screen.getByRole('status')).toHaveTextContent('Your account was deleted.');
+  });
+
   it('signs in and goes to the safe `next` path', async () => {
     const { user } = renderRoute(<LoginPage />, {
       routePath: '/login',

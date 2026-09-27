@@ -345,12 +345,10 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
           open={pending === 'send'}
           onClose={() => setPending(null)}
           kind="invoice"
+          documentId={invoice.id}
           documentLabel={label}
           customer={customer.data}
           link={link}
-          amountCents={invoice.total_cents}
-          balanceCents={invoice.balance_cents}
-          jobId={invoice.job_id}
           resend={invoice.status !== 'draft'}
           onMarkSent={() => markSent.mutateAsync()}
         />

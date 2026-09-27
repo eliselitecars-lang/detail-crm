@@ -51,7 +51,11 @@ const PRICING = {
   totals: { subtotal_cents: 24000, discount_cents: 0, tax_cents: 2100, total_cents: 26100 },
 };
 
-function setup(path: string, resources: unknown[] = []) {
+function setup(
+  path: string,
+  resources: unknown[] = [],
+  categories: unknown[] = [{ id: 'cat-1', name: 'Car', sort: 1 }],
+) {
   const rpc: Record<string, unknown> = { shop_team: TEAM, price_services: PRICING };
   supabase.rpc.mockImplementation((...args: unknown[]) =>
     createBuilder({ data: rpc[String(args[0])] ?? null }),
@@ -72,7 +76,7 @@ function setup(path: string, resources: unknown[] = []) {
       },
     ],
   });
-  setTableResult('vehicle_categories', { data: [{ id: 'cat-1', name: 'Car', sort: 1 }] });
+  setTableResult('vehicle_categories', { data: categories });
   setTableResult('services', {
     data: [
       {
@@ -100,6 +104,22 @@ function setup(path: string, resources: unknown[] = []) {
 beforeEach(() => resetSupabaseMock());
 
 describe('NewJobPage', () => {
+  it('prices at base prices without a size when the shop has no vehicle sizes', async () => {
+    const { user } = setup('/app/jobs/new', [], []);
+    await user.type(screen.getByRole('combobox', { name: /Customer/ }), 'Jane');
+    await user.click(await screen.findByRole('option', { name: /Jane Doe/ }));
+    await user.click(await screen.findByRole('checkbox', { name: /Full detail/ }));
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('price_services', {
+        p_shop: 'shop-1',
+        p_customer_id: 'cust-1',
+        p_service_ids: ['svc-1'],
+      }),
+    );
+    expect(screen.queryByLabelText(/Vehicle size/)).not.toBeInTheDocument();
+    expect(await screen.findByText('$261.00')).toBeInTheDocument();
+  });
+
   it('prefills the calendar slot in shop time, prices services on the server and creates the job', async () => {
     const { user, router } = setup(
       '/app/jobs/new?start=2026-09-28T14:00:00.000Z&end=2026-09-28T16:00:00.000Z',

@@ -6,14 +6,15 @@ import { renderSettings } from './testing/renderSettings';
 import {
   builders,
   createBuilder,
-  invoke,
+  edgeHttpError,
   resetSupabaseMock,
   setTableResult,
   supabase,
-  upload,
-} from './testing/supabaseMock';
+} from '@/test/supabaseMock';
 
-vi.mock('@/lib/supabase', () => import('./testing/supabaseMock'));
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
+
+const invoke = supabase.functions.invoke;
 vi.mock('./externalRedirect', () => ({ redirectTo: vi.fn() }));
 
 const SHOP: ShopSettings = {
@@ -134,11 +135,15 @@ describe('BusinessProfilePage', () => {
     if (!input) throw new Error('file input missing');
     await user.upload(input, new File(['png'], 'logo.png', { type: 'image/png' }));
     await waitFor(() =>
-      expect(upload).toHaveBeenCalledWith('shop-1/logo.png', expect.any(File), {
-        upsert: true,
-        contentType: 'image/png',
-        cacheControl: '60',
-      }),
+      expect(supabase.storage.from('shop-assets').upload).toHaveBeenCalledWith(
+        'shop-1/logo.png',
+        expect.any(File),
+        {
+          upsert: true,
+          contentType: 'image/png',
+          cacheControl: '60',
+        },
+      ),
     );
     await waitFor(() =>
       expect(
@@ -521,15 +526,13 @@ describe('DeleteShopPage', () => {
     expect(builders.memberships).toBeUndefined();
   });
 
-  it('blocks deletion while memberships still bill through Stripe', async () => {
+  it('says how many memberships will be cancelled in Stripe (deletion stays possible)', async () => {
     setTableResult('memberships', { data: null, count: 2 });
     renderSettings('/app/settings/delete-shop');
-    expect(await screen.findByText(/2 memberships still bill customers/)).toBeVisible();
-    expect(screen.getByRole('link', { name: 'Memberships page' })).toHaveAttribute(
-      'href',
-      '/app/memberships',
-    );
-    expect(screen.getByRole('button', { name: /Delete shop/ })).toBeDisabled();
+    expect(
+      await screen.findByText(/2 active memberships will be cancelled in Stripe/),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: /Delete shop/ })).toBeEnabled();
     const query = builders.memberships?.[0];
     expect(query?.neq).toHaveBeenCalledWith('status', 'cancelled');
     expect(query?.not).toHaveBeenCalledWith('stripe_subscription_id', 'is', null);
@@ -550,14 +553,19 @@ describe('DeleteShopPage', () => {
     await user.type(input, 'Glacier');
     expect(confirm).toBeDisabled();
 
-    setTableResult('shops', { data: [{ id: 'shop-1' }] });
+    invoke.mockResolvedValueOnce({
+      data: { deleted: true, memberships_cancelled: 0, sessions_expired: 0 },
+      error: null,
+    });
     await user.type(input, ' Detailing');
     expect(confirm).toBeEnabled();
     await user.click(confirm);
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/app'));
-    const del = builders.shops?.find((b) => b.delete.mock.calls.length > 0);
-    expect(del?.eq).toHaveBeenCalledWith('id', 'shop-1');
+    expect(invoke).toHaveBeenCalledWith('payments', {
+      body: { action: 'delete_shop', shop_id: 'shop-1', confirm_name: 'Glacier Detailing' },
+    });
+    expect(builders.shops?.some((b) => b.delete.mock.calls.length > 0) ?? false).toBe(false);
     expect(refetch).toHaveBeenCalled();
   });
 
@@ -566,11 +574,18 @@ describe('DeleteShopPage', () => {
     const { user, router } = renderSettings('/app/settings/delete-shop');
     await user.click(await screen.findByRole('button', { name: /Delete shop/ }));
     const dialog = await screen.findByRole('alertdialog');
-    setTableResult('shops', { data: [] });
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: edgeHttpError(409, {
+        error: 'A payment for this is already being processed. Refresh in a moment.',
+        code: 'conflict',
+        details: { reason: 'payment_in_progress' },
+      }),
+    });
     await user.type(within(dialog).getByLabelText(/Type the shop name/), 'Glacier Detailing');
     await user.keyboard('{Enter}');
     expect(
-      await within(dialog).findByText('Only the shop owner can delete this shop.'),
+      await within(dialog).findByText(/still being processed.*Nothing was deleted\./),
     ).toBeVisible();
     expect(router.state.location.pathname).toBe('/app/settings/delete-shop');
   });

@@ -11,8 +11,15 @@ import {
 } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { formatDateTime } from '@/lib/dates';
+import { EdgeFunctionError } from '@/features/quotes/shared/edge';
 import { useShop } from '@/features/shop/shopContext';
-import { useSetStatus, useStatusTransitions, type JobDetail } from '../../api';
+import { useCan } from '@/features/shop/useCan';
+import {
+  useReleaseJobPayments,
+  useSetStatus,
+  useStatusTransitions,
+  type JobDetail,
+} from '../../api';
 import {
   allowedTransitions,
   statusNeedsSchedule,
@@ -35,9 +42,43 @@ export function StatusControl({ job }: StatusControlProps) {
   const toast = useToast();
   const transitions = useStatusTransitions();
   const setStatus = useSetStatus(job.id);
+  const release = useReleaseJobPayments(job.id);
+  const canCollect = useCan('payments.collect');
   const [confirming, setConfirming] = useState<StatusTransition | null>(null);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [reason, setReason] = useState('');
+  /** A card payment on the job is still processing: the side exit must wait. */
+  const [held, setHeld] = useState(false);
+  const busy = setStatus.isPending || release.isPending;
+
+  /**
+   * Before cancelling / no-show: release the job's open card payments and pay
+   * links. False (with the reason shown) when the status must not change yet.
+   */
+  const releasePayments = async (): Promise<boolean> => {
+    if (!canCollect) return true; // this role never starts card payments
+    try {
+      const result = await release.mutateAsync();
+      if (result.in_progress > 0) {
+        setHeld(true);
+        return false;
+      }
+      if (result.succeeded > 0) {
+        toast.info(
+          result.succeeded === 1 ? 'A card payment was recorded' : 'Card payments were recorded',
+          'Money that had already gone through for this job is on its invoice or deposit.',
+        );
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof EdgeFunctionError && error.reason === 'payment_in_progress') {
+        setHeld(true);
+      } else {
+        toast.error(error);
+      }
+      return false;
+    }
+  };
 
   const allowed = allowedTransitions(transitions.data ?? [], job.status, role);
   const steps = statusSteps(job.status, allowed);
@@ -45,6 +86,8 @@ export function StatusControl({ job }: StatusControlProps) {
   const noShowEdge = allowed.find((t) => t.to_status === 'no_show') ?? null;
 
   const move = async (status: JobStatus, cancelReason?: string) => {
+    setHeld(false);
+    if ((status === 'cancelled' || status === 'no_show') && !(await releasePayments())) return;
     try {
       await setStatus.mutateAsync({
         status,
@@ -93,7 +136,7 @@ export function StatusControl({ job }: StatusControlProps) {
         <ol className="flex flex-wrap gap-1.5">
           {steps.map((step, i) => {
             const needsSchedule = statusNeedsSchedule(step.status) && !job.scheduled_start;
-            const clickable = step.transition !== null && !needsSchedule && !setStatus.isPending;
+            const clickable = step.transition !== null && !needsSchedule && !busy;
             const content = (
               <>
                 <span
@@ -174,7 +217,7 @@ export function StatusControl({ job }: StatusControlProps) {
         open={confirming !== null}
         onClose={() => setConfirming(null)}
         onConfirm={() => (confirming ? move(confirming.to_status) : undefined)}
-        loading={setStatus.isPending}
+        loading={busy}
         tone={confirming?.to_status === 'no_show' ? 'danger' : 'primary'}
         title={
           confirming?.to_status === 'no_show'
@@ -183,34 +226,36 @@ export function StatusControl({ job }: StatusControlProps) {
         }
         description={
           confirming?.to_status === 'no_show'
-            ? 'The customer did not show up for this appointment.'
+            ? 'The customer did not show up for this appointment. Open deposit and pay links for it stop working.'
             : 'Timestamps for the later steps are cleared.'
         }
         confirmLabel={confirming?.to_status === 'no_show' ? 'Mark no-show' : 'Move back'}
-      />
+      >
+        {held && confirming?.to_status === 'no_show' && <PaymentHeld />}
+      </ConfirmDialog>
 
       <Dialog
         open={cancelOpen}
-        onClose={() => setCancelOpen(false)}
+        onClose={() => {
+          setCancelOpen(false);
+          setHeld(false);
+        }}
         title="Cancel this job?"
-        description="The job leaves the calendar. Unsigned forms become void."
+        description="The job leaves the calendar. Unsigned forms become void, and open deposit and pay links for it stop working."
         size="sm"
-        dismissible={!setStatus.isPending}
+        dismissible={!busy}
         footer={
           <>
             <Button variant="secondary" onClick={() => setCancelOpen(false)}>
               Keep job
             </Button>
-            <Button
-              variant="danger"
-              loading={setStatus.isPending}
-              onClick={() => void move('cancelled', reason)}
-            >
+            <Button variant="danger" loading={busy} onClick={() => void move('cancelled', reason)}>
               Cancel job
             </Button>
           </>
         }
       >
+        {held && <PaymentHeld />}
         <FormField label="Reason" help="Optional. Shown on the job's activity.">
           <Textarea
             rows={3}
@@ -221,5 +266,16 @@ export function StatusControl({ job }: StatusControlProps) {
         </FormField>
       </Dialog>
     </div>
+  );
+}
+
+function PaymentHeld() {
+  return (
+    <p
+      role="alert"
+      className="bg-warning-soft text-warning-ink rounded-control mb-3 px-3 py-2 text-sm"
+    >
+      A card payment is in progress — wait for it to finish.
+    </p>
   );
 }

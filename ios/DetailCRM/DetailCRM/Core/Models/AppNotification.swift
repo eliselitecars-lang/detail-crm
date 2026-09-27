@@ -59,6 +59,11 @@ struct AppNotification: Codable, Hashable, Sendable, Identifiable {
     var title: String
     var body: String?
     var jobID: UUID?
+    /// What the notification is about, for deep links (0031; any may be
+    /// null, e.g. after the record was deleted).
+    var customerID: UUID?
+    var quoteID: UUID?
+    var invoiceID: UUID?
     var readAt: Date?
     var createdAt: Date
 
@@ -70,15 +75,55 @@ struct AppNotification: Codable, Hashable, Sendable, Identifiable {
         case title
         case body
         case jobID = "job_id"
+        case customerID = "customer_id"
+        case quoteID = "quote_id"
+        case invoiceID = "invoice_id"
         case readAt = "read_at"
         case createdAt = "created_at"
     }
 
-    static let selectColumns = "id,shop_id,user_id,kind,title,body,job_id,read_at,created_at"
+    static let selectColumns =
+        "id,shop_id,user_id,kind,title,body,job_id,customer_id,quote_id,invoice_id,read_at,created_at"
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        shopID = try c.decode(UUID.self, forKey: .shopID)
+        userID = try c.decode(UUID.self, forKey: .userID)
+        kind = try c.decode(String.self, forKey: .kind)
+        title = try c.decode(String.self, forKey: .title)
+        body = try c.decodeIfPresent(String.self, forKey: .body)
+        jobID = try c.decodeIfPresent(UUID.self, forKey: .jobID)
+        customerID = try c.decodeIfPresent(UUID.self, forKey: .customerID)
+        quoteID = try c.decodeIfPresent(UUID.self, forKey: .quoteID)
+        invoiceID = try c.decodeIfPresent(UUID.self, forKey: .invoiceID)
+        readAt = try c.decodeIfPresent(Date.self, forKey: .readAt)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+    }
 
     var kindValue: AppNotificationKind {
         AppNotificationKind(rawValue: kind) ?? .general
     }
 
     var isUnread: Bool { readAt == nil }
+
+    /// Where tapping the notification goes (same precedence as the web
+    /// app): a new message opens that customer's conversation; a quote
+    /// answer the quote, else its job; a payment the invoice, else the job;
+    /// everything else the job, else the customer. nil = nothing to open.
+    var route: AppRoute? {
+        switch kindValue {
+        case .inboundMessage:
+            return customerID.map { AppRoute.conversation($0) }
+        case .quoteApproved, .quoteDeclined:
+            if let quoteID { return .quote(quoteID) }
+            return jobID.map { AppRoute.job($0) }
+        case .paymentReceived:
+            if let invoiceID { return .invoice(invoiceID) }
+            return jobID.map { AppRoute.job($0) }
+        case .newBooking, .bookingCancelled, .formSigned, .general:
+            if let jobID { return .job(jobID) }
+            return customerID.map { AppRoute.customer($0) }
+        }
+    }
 }

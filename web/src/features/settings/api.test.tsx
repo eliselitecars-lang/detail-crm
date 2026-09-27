@@ -1,11 +1,13 @@
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ShopContext } from '@/features/shop/shopContext';
 import { AppError } from '@/lib/errors';
 import { createTestQueryClient, shopValue } from '@/test/render';
+import { toEdgeError } from '@/features/quotes/shared/edge';
 import {
+  deleteShopErrorMessage,
   settingsKeys,
   stripeLinkSchema,
   useArchiveResource,
@@ -17,16 +19,16 @@ import {
   useDeleteVehicleCategory,
   useSaveBusinessHours,
 } from './api';
-import { HOURS_NOT_RESTORED_MESSAGE } from './hoursPlan';
 import {
   builders,
-  createBuilder,
+  edgeHttpError,
+  mockRpc,
+  pgError,
   resetSupabaseMock,
   supabase,
-  type MockResult,
-} from './testing/supabaseMock';
+} from '@/test/supabaseMock';
 
-vi.mock('@/lib/supabase', () => import('./testing/supabaseMock'));
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
 const SHOP = 'shop-1';
 
@@ -50,25 +52,7 @@ function invalidated(queryClient: QueryClient, key: readonly unknown[]): boolean
   return queryClient.getQueryState(key)?.isInvalidated ?? false;
 }
 
-/** Makes successive `supabase.from(table)` calls resolve to `results` in order. */
-const defaultFrom = supabase.from.getMockImplementation();
-function queueTable(table: string, results: MockResult[]) {
-  const queue = [...results];
-  supabase.from.mockImplementation((name: string) => {
-    if (name === table && queue.length > 0) {
-      const builder = createBuilder(queue.shift());
-      (builders[name] ??= []).push(builder);
-      return builder;
-    }
-    if (!defaultFrom) throw new Error('supabase.from has no default implementation');
-    return defaultFrom(name);
-  });
-}
-
 beforeEach(() => resetSupabaseMock());
-afterEach(() => {
-  if (defaultFrom) supabase.from.mockImplementation(defaultFrom);
-});
 
 describe('query keys', () => {
   it('does not share the jobs feature resource-picker key', () => {
@@ -152,90 +136,53 @@ describe('cross-feature invalidation', () => {
 });
 
 describe('useSaveBusinessHours', () => {
-  const stored = [
-    { id: 'h-mon', weekday: 1, opens_at: '08:00:00', closes_at: '17:00:00' },
-    { id: 'h-tue', weekday: 2, opens_at: '08:00:00', closes_at: '17:00:00' },
-  ];
   const next = [
     { weekday: 1, opens_at: '08:00', closes_at: '17:00' },
-    { weekday: 2, opens_at: '09:00', closes_at: '18:00' },
+    { weekday: 6, opens_at: '10:00', closes_at: '24:00' },
   ];
-  const constraintError = {
-    code: '23P01',
-    message: 'conflicting key value violates exclusion constraint "business_hours_no_overlap"',
-  };
 
-  it('re-reads stored rows and only replaces the intervals that changed', async () => {
-    queueTable('business_hours', [{ data: stored }, { data: null }, { data: null }]);
-    const { wrapper } = setup();
-    const { result } = renderHook(() => useSaveBusinessHours(), { wrapper });
-    await act(() => result.current.mutateAsync({ rows: next }));
-
-    const [read, del, ins] = builders.business_hours ?? [];
-    expect(read?.select).toHaveBeenCalledWith('id, weekday, opens_at, closes_at');
-    expect(read?.eq).toHaveBeenCalledWith('shop_id', SHOP);
-    expect(del?.delete).toHaveBeenCalled();
-    expect(del?.eq).toHaveBeenCalledWith('shop_id', SHOP);
-    expect(del?.in).toHaveBeenCalledWith('id', ['h-tue']);
-    expect(ins?.insert).toHaveBeenCalledWith([
-      { weekday: 2, opens_at: '09:00', closes_at: '18:00', shop_id: SHOP },
-    ]);
-  });
-
-  it('writes nothing when the week is unchanged', async () => {
-    queueTable('business_hours', [{ data: stored }]);
-    const { wrapper } = setup();
-    const { result } = renderHook(() => useSaveBusinessHours(), { wrapper });
-    await act(() =>
-      result.current.mutateAsync({
-        rows: [
-          { weekday: 1, opens_at: '08:00', closes_at: '17:00' },
-          { weekday: 2, opens_at: '08:00', closes_at: '17:00' },
-        ],
-      }),
-    );
-    expect(builders.business_hours).toHaveLength(1);
-  });
-
-  it('puts the removed rows back when the insert fails and reports the insert error', async () => {
-    queueTable('business_hours', [
-      { data: stored },
-      { data: null },
-      { data: null, error: constraintError },
-      { data: null },
-    ]);
-    const { wrapper } = setup();
-    const { result } = renderHook(() => useSaveBusinessHours(), { wrapper });
-    let caught: unknown;
-    await act(async () => {
-      caught = await result.current.mutateAsync({ rows: next }).catch((e: unknown) => e);
-    });
-    const restore = builders.business_hours?.[3];
-    expect(restore?.insert).toHaveBeenCalledWith([
-      { weekday: 2, opens_at: '08:00:00', closes_at: '17:00:00', shop_id: SHOP },
-    ]);
-    expect(caught).toBeInstanceOf(AppError);
-    expect((caught as AppError).message).not.toBe(HOURS_NOT_RESTORED_MESSAGE);
-  });
-
-  it('says the changed days are closed when the restore also fails', async () => {
-    queueTable('business_hours', [
-      { data: stored },
-      { data: null },
-      { data: null, error: constraintError },
-      { data: null, error: { code: '08006', message: 'connection failure' } },
-    ]);
+  it('replaces the week in one replace_business_hours call and refreshes hours', async () => {
+    const calls = mockRpc({ replace_business_hours: { data: [] } });
     const { queryClient, wrapper } = setup();
     const calendarHours = ['shop', SHOP, 'settings', 'business_hours'];
     seed(queryClient, [calendarHours]);
     const { result } = renderHook(() => useSaveBusinessHours(), { wrapper });
+    // Extra keys on a row (e.g. a stored id) are never sent: the RPC refuses them.
+    await act(() =>
+      result.current.mutateAsync({
+        rows: [{ ...next[0]!, id: 'h-mon' } as (typeof next)[number], next[1]!],
+      }),
+    );
+    expect(calls).toEqual([
+      { fn: 'replace_business_hours', args: { p_shop_id: SHOP, p_rows: next } },
+    ]);
+    expect(builders.business_hours).toBeUndefined();
+    expect(invalidated(queryClient, calendarHours)).toBe(true);
+  });
+
+  it('sends an empty week to close every day', async () => {
+    const calls = mockRpc({ replace_business_hours: { data: [] } });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useSaveBusinessHours(), { wrapper });
+    await act(() => result.current.mutateAsync({ rows: [] }));
+    expect(calls[0]?.args).toEqual({ p_shop_id: SHOP, p_rows: [] });
+  });
+
+  it('reports a rejected week (the stored hours stay as they were)', async () => {
+    mockRpc({
+      replace_business_hours: pgError(
+        '23P01',
+        'conflicting key value violates exclusion constraint "business_hours_no_overlap"',
+      ),
+    });
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useSaveBusinessHours(), { wrapper });
     let caught: unknown;
     await act(async () => {
       caught = await result.current.mutateAsync({ rows: next }).catch((e: unknown) => e);
     });
-    expect((caught as AppError).message).toBe(HOURS_NOT_RESTORED_MESSAGE);
-    // …and everything showing hours refetches the (now partial) week.
-    expect(invalidated(queryClient, calendarHours)).toBe(true);
+    expect(caught).toBeInstanceOf(AppError);
+    expect((caught as AppError).message).toBe('That overlaps with an existing entry.');
   });
 });
 
@@ -261,32 +208,54 @@ describe('stripeLinkSchema', () => {
 });
 
 describe('useDeleteShop', () => {
-  it('reports a permission error when RLS deleted nothing', async () => {
-    queueTable('shops', [{ data: [] }]);
+  it('reports a refusal and keeps the memberships list as it was', async () => {
+    supabase.functions.invoke.mockResolvedValueOnce({
+      data: null,
+      error: edgeHttpError(403, {
+        error: 'Your role does not allow this action.',
+        code: 'forbidden',
+      }),
+    });
     const { wrapper, refetch } = setup();
     const { result } = renderHook(() => useDeleteShop(), { wrapper });
     let caught: unknown;
     await act(async () => {
-      caught = await result.current.mutateAsync().catch((e: unknown) => e);
+      caught = await result.current.mutateAsync('Glacier Detailing').catch((e: unknown) => e);
     });
     expect((caught as AppError).kind).toBe('permission');
     expect(refetch).not.toHaveBeenCalled();
   });
 
-  it('deletes the shop, refetches memberships and drops the shop cache', async () => {
-    queueTable('shops', [{ data: [{ id: SHOP }] }]);
+  it('deletes through payments.delete_shop, refetches memberships and drops the shop cache', async () => {
+    supabase.functions.invoke.mockResolvedValueOnce({
+      data: { deleted: true, memberships_cancelled: 2, sessions_expired: 1 },
+      error: null,
+    });
     const { wrapper, refetch, queryClient } = setup();
     const jobs = ['shop', SHOP, 'jobs', 'list', {}];
     const other = ['shop', 'shop-2', 'jobs', 'list', {}];
     seed(queryClient, [jobs, other]);
     const { result } = renderHook(() => useDeleteShop(), { wrapper });
-    await act(() => result.current.mutateAsync());
-    const del = builders.shops?.[0];
-    expect(del?.delete).toHaveBeenCalled();
-    expect(del?.eq).toHaveBeenCalledWith('id', SHOP);
-    expect(del?.select).toHaveBeenCalledWith('id');
+    await act(() => result.current.mutateAsync('Glacier Detailing'));
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+      body: { action: 'delete_shop', shop_id: SHOP, confirm_name: 'Glacier Detailing' },
+    });
+    // No direct table delete: the server cancels billing first.
+    expect(builders.shops).toBeUndefined();
     await waitFor(() => expect(refetch).toHaveBeenCalled());
     expect(queryClient.getQueryData(jobs)).toBeUndefined();
     expect(queryClient.getQueryData(other)).toEqual(['cached']);
+  });
+
+  it('explains payment_in_progress and name_mismatch refusals', async () => {
+    const refusal = async (status: number, reason: string) =>
+      toEdgeError(edgeHttpError(status, { error: 'server text', code: 'x', details: { reason } }));
+    expect(deleteShopErrorMessage(await refusal(409, 'payment_in_progress'))).toMatch(
+      /still being processed.*Nothing was deleted/,
+    );
+    expect(deleteShopErrorMessage(await refusal(422, 'name_mismatch'))).toBe(
+      'The name you typed doesn’t match this shop’s name. Nothing was deleted.',
+    );
+    expect(deleteShopErrorMessage(await refusal(422, 'other'))).toBe('server text');
   });
 });

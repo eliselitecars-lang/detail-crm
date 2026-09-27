@@ -36,7 +36,8 @@ const KIND_LABEL: Record<string, string> = {
 
 /**
  * Pick catalog services; unit prices come from the price_services RPC for
- * the chosen vehicle category (membership inclusions applied server-side).
+ * the chosen vehicle category, or base prices when the shop has no vehicle
+ * sizes (membership inclusions applied server-side).
  * Services without a price for that category cannot be added from here.
  */
 export function CatalogDialog(props: CatalogDialogProps) {
@@ -72,9 +73,11 @@ function CatalogPicker({
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<unknown>(null);
 
+  // A shop without vehicle sizes prices every service at its base price.
+  const noSizes = categories.isSuccess && categories.data.length === 0;
   const pricing = usePriceServices(
-    categoryId && selected.length > 0
-      ? { customerId, vehicleCategoryId: categoryId, vehicleId, serviceIds: selected }
+    (categoryId || noSizes) && selected.length > 0
+      ? { customerId, vehicleCategoryId: categoryId || null, vehicleId, serviceIds: selected }
       : null,
   );
 
@@ -153,19 +156,21 @@ function CatalogPicker({
 
   return (
     <div className="flex flex-col gap-4">
-      <FormField
-        label="Vehicle size"
-        required
-        help="Catalog prices differ by vehicle size."
-        error={categoryId ? undefined : 'Choose a vehicle size to see prices.'}
-      >
-        <Select
-          value={categoryId}
-          onChange={(event) => setCategoryId(event.target.value)}
-          placeholder="Choose a size"
-          options={(categories.data ?? []).map((c) => ({ value: c.id, label: c.name }))}
-        />
-      </FormField>
+      {!noSizes && (
+        <FormField
+          label="Vehicle size"
+          required
+          help="Catalog prices differ by vehicle size."
+          error={categoryId ? undefined : 'Choose a vehicle size to see prices.'}
+        >
+          <Select
+            value={categoryId}
+            onChange={(event) => setCategoryId(event.target.value)}
+            placeholder="Choose a size"
+            options={(categories.data ?? []).map((c) => ({ value: c.id, label: c.name }))}
+          />
+        </FormField>
+      )}
       <SearchInput label="Search services" value={search} onChange={setSearch} debounceMs={0} />
       <fieldset className="border-line rounded-control max-h-72 overflow-y-auto border">
         <legend className="sr-only">Services</legend>

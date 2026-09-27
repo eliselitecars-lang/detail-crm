@@ -4,6 +4,7 @@ import { renderRoute } from '@/test/render';
 import {
   builders,
   createBuilder,
+  mockRpc,
   resetSupabaseMock,
   setTableResult,
   supabase,
@@ -128,6 +129,44 @@ describe('CampaignNewPage', () => {
       body: 'Book your spring detail',
       audience: { tags: ['vip'] },
       scheduled_at: null,
+    });
+  });
+
+  it('previews the rendered text, its length and the limit from the server', async () => {
+    const calls = mockRpc({
+      preview_campaign_audience: { data: 3 },
+      preview_campaign_message: (args) => ({
+        data: {
+          subject: null,
+          body: `${String(args.p_body).replace('{{shop_name}}', 'Glacier Detailing')}\nReply STOP to opt out.`,
+          body_length: 1590,
+          max_body_length: 1577,
+          footer_added: true,
+          truncated: true,
+        },
+      }),
+    });
+    const { user } = renderRoute(<CampaignNewPage />);
+    await user.type(
+      await screen.findByRole('textbox', { name: /^Message/ }),
+      'Deals at {{{{shop_name}}',
+    );
+    const preview = await screen.findByRole('region', { name: 'Message preview' });
+    expect(preview).toHaveTextContent('Deals at Glacier Detailing');
+    expect(preview).toHaveTextContent('Reply STOP to opt out.');
+    expect(within(preview).getByRole('alert')).toHaveTextContent(
+      '13 characters over the limit and will be cut off',
+    );
+    expect(
+      screen.getByText(/1,590\/1,577 characters · “Reply STOP to opt out.” is added/),
+    ).toBeInTheDocument();
+    // Debounced: one request for the finished text, not one per keystroke.
+    const previews = calls.filter((c) => c.fn === 'preview_campaign_message');
+    expect(previews.length).toBeLessThanOrEqual(2);
+    expect(previews.at(-1)?.args).toEqual({
+      p_shop_id: 'shop-1',
+      p_channel: 'sms',
+      p_body: 'Deals at {{shop_name}}',
     });
   });
 

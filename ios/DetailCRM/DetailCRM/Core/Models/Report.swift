@@ -84,10 +84,16 @@ struct ReportDateRange: Equatable, Sendable {
         max(1, clock.days(from: firstDay, to: clock.addingDays(1, to: lastDay)).count)
     }
 
-    /// Chart bucket the revenue report uses for this range length.
+    /// The server refuses daily buckets over more than this many days
+    /// (`report_revenue`: "use weekly or monthly").
+    static let maxDailyBucketDays = 366
+
+    /// Chart bucket the revenue report uses for this range length: days up
+    /// to a month, weeks up to about half a year, then months. A range the
+    /// server would refuse daily buckets for is never sent as `.day`.
     func bucket(_ clock: ShopClock) -> ReportBucket {
         let days = dayCount(clock)
-        if days <= 31 { return .day }
+        if days <= 31 && days <= Self.maxDailyBucketDays { return .day }
         if days <= 190 { return .week }
         return .month
     }
@@ -172,6 +178,27 @@ struct ReportRevenueRow: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+// MARK: - report_revenue_totals
+
+/// Totals for the whole range, computed by the server (never summed from
+/// the buckets).
+// rpc: report_revenue_totals
+struct ReportRevenueTotals: Codable, Hashable, Sendable {
+    var grossCents: Int
+    var refundsCents: Int
+    var netCents: Int
+    var tipsCents: Int
+    var paymentsCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case grossCents = "gross_cents"
+        case refundsCents = "refunds_cents"
+        case netCents = "net_cents"
+        case tipsCents = "tips_cents"
+        case paymentsCount = "payments_count"
+    }
+}
+
 // MARK: - report_payments
 
 // rpc: report_payments
@@ -186,6 +213,9 @@ struct ReportPaymentRow: Codable, Identifiable, Hashable, Sendable {
     var collectedCents: Int
     var depositsCents: Int
     var membershipsCents: Int
+    /// Lost chargebacks (Stripe disputes). Informational: disputes never
+    /// change balances or the amounts above.
+    var disputesLostCents: Int
 
     var id: String { method }
 
@@ -200,6 +230,22 @@ struct ReportPaymentRow: Codable, Identifiable, Hashable, Sendable {
         case collectedCents = "collected_cents"
         case depositsCents = "deposits_cents"
         case membershipsCents = "memberships_cents"
+        case disputesLostCents = "disputes_lost_cents"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        method = try c.decode(String.self, forKey: .method)
+        paymentsCount = try c.decode(Int.self, forKey: .paymentsCount)
+        grossCents = try c.decode(Int.self, forKey: .grossCents)
+        refundsCents = try c.decode(Int.self, forKey: .refundsCents)
+        netCents = try c.decode(Int.self, forKey: .netCents)
+        tipsCents = try c.decode(Int.self, forKey: .tipsCents)
+        tipRefundsCents = try c.decode(Int.self, forKey: .tipRefundsCents)
+        collectedCents = try c.decode(Int.self, forKey: .collectedCents)
+        depositsCents = try c.decode(Int.self, forKey: .depositsCents)
+        membershipsCents = try c.decode(Int.self, forKey: .membershipsCents)
+        disputesLostCents = try c.decodeIfPresent(Int.self, forKey: .disputesLostCents) ?? 0
     }
 
     var methodName: String {

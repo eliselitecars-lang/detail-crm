@@ -280,54 +280,59 @@ export function useUpdateQuote(quoteId: string) {
 
 export type StaffQuoteStatus = 'draft' | 'approved' | 'declined';
 
-export interface SetQuoteStatusInput {
-  status: StaffQuoteStatus;
-  approvedByName?: string | null;
-  declinedReason?: string | null;
-  /**
-   * approved only: the customer's choice on optional lines (just the ones
-   * that change). Written before the status move — lines lock once approved,
-   * and convert_quote_to_job copies only required + selected optional lines.
-   */
-  optionalChoices?: ReadonlyArray<{ id: string; selected: boolean }>;
-}
+export type SetQuoteStatusInput =
+  /** Revise back to draft (direct update; quotes_status_machine clears the response). */
+  | { status: 'draft' }
+  | {
+      status: 'approved';
+      approvedByName?: string | null;
+      /**
+       * Every optional line the customer chose (the full list: the server
+       * selects exactly these and deselects the other optional lines).
+       */
+      selectedOptionalLineIds: readonly string[];
+    }
+  | { status: 'declined'; declinedReason?: string | null };
 
-/** Staff status moves allowed by quotes_status_machine (revise / record response). */
+/**
+ * Staff status moves. Recording the customer's answer goes through
+ * staff_record_quote_response (0093): the optional-line choices, the name or
+ * reason and the status change happen in one transaction with the quote
+ * locked (22023 when the quote was already answered or has expired). Revising
+ * to draft stays a direct update.
+ */
 export function useSetQuoteStatus(quoteId: string) {
   const { shopId } = useShop();
   const invalidate = useInvalidateQuotes();
   return useMutation({
     mutationFn: async (input: SetQuoteStatusInput) => {
-      if (input.status === 'approved' && input.optionalChoices?.length) {
-        for (const choice of input.optionalChoices) {
-          unwrap(
-            await supabase
-              .from('quote_line_items')
-              .update({ selected: choice.selected })
-              .eq('shop_id', shopId)
-              .eq('quote_id', quoteId)
-              .eq('id', choice.id)
-              .eq('optional', true),
-          );
-        }
+      if (input.status === 'draft') {
+        return unwrapRequired(
+          await supabase
+            .from('quotes')
+            .update({ status: 'draft' })
+            .eq('shop_id', shopId)
+            .eq('id', quoteId)
+            .select('*')
+            .maybeSingle(),
+          'quote',
+        );
       }
-      return unwrapRequired(
-        await supabase
-          .from('quotes')
-          .update({
-            status: input.status,
-            ...(input.status === 'approved'
-              ? { approved_by_name: input.approvedByName ?? null }
-              : {}),
-            ...(input.status === 'declined'
-              ? { declined_reason: input.declinedReason ?? null }
-              : {}),
-          })
-          .eq('shop_id', shopId)
-          .eq('id', quoteId)
-          .select('*')
-          .maybeSingle(),
-        'quote',
+      const text =
+        input.status === 'approved' ? input.approvedByName?.trim() : input.declinedReason?.trim();
+      return unwrap(
+        await supabase.rpc('staff_record_quote_response', {
+          p_quote_id: quoteId,
+          p_action: input.status === 'approved' ? 'approve' : 'decline',
+          ...(input.status === 'approved'
+            ? { p_selected_optional_line_ids: [...input.selectedOptionalLineIds] }
+            : {}),
+          ...(text
+            ? input.status === 'approved'
+              ? { p_approved_by_name: text }
+              : { p_declined_reason: text }
+            : {}),
+        }),
       );
     },
     onSettled: invalidate,

@@ -38,8 +38,6 @@ function mockTables(next: Record<string, MockResult>) {
     builder.maybeSingle.mockImplementation(() =>
       createBuilder({ data: Array.isArray(result.data) ? (result.data[0] ?? null) : null }),
     );
-    // The shared mock has no .contains() (membership_plans usage count).
-    Object.assign(builder, { contains: vi.fn(() => builder) });
     (builders[table] ??= []).push(builder);
     return builder;
   });
@@ -157,11 +155,22 @@ describe('ServiceDetailPage', () => {
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
   });
 
-  it('only lets owners and admins upload images', async () => {
-    renderAs('manager');
-    expect(
-      await screen.findByText('Only an owner or admin can change images.'),
-    ).toBeInTheDocument();
+  it('lets managers upload service images to <shop>/services/', async () => {
+    const { user } = renderAs('manager');
+    await screen.findByRole('button', { name: 'Upload image' });
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+    if (!input) throw new Error('file input missing');
+    await user.upload(input, new File(['png'], 'car.png', { type: 'image/png' }));
+    await waitFor(() =>
+      expect(supabase.storage.from('shop-assets').upload).toHaveBeenCalledWith(
+        'shop-1/services/pkg-1.png',
+        expect.any(File),
+        { upsert: true, contentType: 'image/png', cacheControl: '3600' },
+      ),
+    );
+    await waitFor(() =>
+      expect((builders.services ?? []).some((b) => b.update.mock.calls.length > 0)).toBe(true),
+    );
   });
 
   it('shows not found as an error', async () => {

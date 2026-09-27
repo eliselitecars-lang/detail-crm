@@ -11,10 +11,14 @@ import { supabase } from '@/lib/supabase';
 
 export const notificationSchema = z.object({
   id: z.string(),
+  // Any string: a kind added later must not break the bell (links fall back to none).
   kind: z.string(),
   title: z.string(),
   body: z.string().nullable(),
   job_id: z.string().nullable(),
+  customer_id: z.string().nullable().default(null),
+  quote_id: z.string().nullable().default(null),
+  invoice_id: z.string().nullable().default(null),
   read_at: z.string().nullable(),
   created_at: z.string(),
 });
@@ -29,7 +33,9 @@ export function useBellNotifications(shopId: string, userId: string, enabled: bo
     queryFn: async () => {
       const { data, error } = await supabase
         .from('notifications')
-        .select('id, kind, title, body, job_id, read_at, created_at')
+        .select(
+          'id, kind, title, body, job_id, customer_id, quote_id, invoice_id, read_at, created_at',
+        )
         .eq('shop_id', shopId)
         .eq('user_id', userId)
         .order('created_at', { ascending: false })

@@ -28,9 +28,19 @@
  * for the shop, no sent quote / issued invoice for the job...) is refused
  * before anything is queued: 422 `missing_link` with `details.variables`.
  *
- * Idempotent for retries: repeating the same send (same caller, customer,
- * channel, job, template/body) within DUPLICATE_WINDOW_MS returns the
- * original message instead of delivering a second copy (earlierDuplicate).
+ * Quotes and invoices (`quote_id` / `invoice_id`, owner/admin/manager only):
+ * the quote_sent / invoice_sent template is rendered and queued by the
+ * database (enqueue_document_message, 0090) with the document's own link,
+ * amount and balance; clients never render or send the text themselves. A
+ * draft quote or a draft / void invoice has no link yet: 422 `missing_link`.
+ *
+ * Idempotent for retries: a `request_nonce` (one per compose, reused on a
+ * retry) makes the database return the message that nonce already queued
+ * (messages.request_nonce, 0033), and that message is never delivered twice
+ * (claimOne only claims a still-queued row). Without a nonce, repeating the
+ * same send (same caller, customer, channel, job, template/body) within
+ * DUPLICATE_WINDOW_MS returns the original message instead of delivering a
+ * second copy (earlierDuplicate).
  */
 import { z } from "zod";
 import {
@@ -43,11 +53,11 @@ import {
   ROLES,
 } from "../_shared/auth.ts";
 import { errors, HttpError } from "../_shared/errors.ts";
-import { uuid } from "../_shared/schemas.ts";
+import { requestNonce, uuid } from "../_shared/schemas.ts";
 import { userClient } from "../_shared/supabase.ts";
 import { placeholdersIn } from "../_shared/templates.ts";
 import { type Channel, claimOne, deliverClaimed, type MessageStatus } from "./deliver.ts";
-import { DbError, rpcRefusal, type Services } from "./lib.ts";
+import { DbError, type PgError, rpcRefusal, type Services } from "./lib.ts";
 
 /** Every template key except `invite` (staff invites are emailed by the invites function). */
 export const SENDABLE_TEMPLATE_KEYS = [
@@ -123,22 +133,51 @@ export const APPOINTMENT_TEMPLATE_KEYS: readonly string[] = [
   "job_started",
 ];
 
+/** The template each document is sent with (enqueue_document_message). */
+export const DOCUMENT_TEMPLATE_KEYS = { quote: "quote_sent", invoice: "invoice_sent" } as const;
+
 export const SMS_MAX_LENGTH = 1600;
 export const EMAIL_MAX_LENGTH = 50_000;
 export const SUBJECT_MAX_LENGTH = 500;
 
 export const sendInput = z.object({
-  /** Optional: derived from the job/customer when omitted. */
+  /** Optional: derived from the job/customer (or the quote/invoice) when omitted. */
   shop_id: uuid.optional(),
   customer_id: uuid.optional(),
   job_id: uuid.optional(),
+  /** Send this quote (template quote_sent); the customer comes from the quote. */
+  quote_id: uuid.optional(),
+  /** Send this invoice (template invoice_sent); the customer comes from the invoice. */
+  invoice_id: uuid.optional(),
   channel: z.enum(["sms", "email"]),
   template_key: z.enum(SENDABLE_TEMPLATE_KEYS).optional(),
   subject: z.string().max(SUBJECT_MAX_LENGTH).optional(),
   body: z.string().max(EMAIL_MAX_LENGTH).optional(),
+  /** One per compose, reused on a retry of it: the database queues it once. */
+  request_nonce: requestNonce.optional(),
 }).strict().superRefine((input, ctx) => {
   const issue = (path: string, message: string) =>
     ctx.addIssue({ code: "custom", path: [path], message });
+  if (input.quote_id !== undefined || input.invoice_id !== undefined) {
+    if (input.quote_id !== undefined && input.invoice_id !== undefined) {
+      issue("invoice_id", "send either quote_id or invoice_id, not both");
+      return;
+    }
+    const key = input.quote_id !== undefined
+      ? DOCUMENT_TEMPLATE_KEYS.quote
+      : DOCUMENT_TEMPLATE_KEYS.invoice;
+    const path = input.quote_id !== undefined ? "quote_id" : "invoice_id";
+    if (input.template_key !== key) {
+      issue("template_key", `${path} is sent with template_key ${key}`);
+    }
+    if (input.body !== undefined) issue("body", "quotes and invoices are sent with their template");
+    if (input.subject !== undefined) issue("subject", "templates provide their own subject");
+    if (input.job_id !== undefined) issue("job_id", `the ${path.slice(0, -3)} decides its job`);
+    if (input.customer_id !== undefined) {
+      issue("customer_id", `the ${path.slice(0, -3)} decides its customer`);
+    }
+    return;
+  }
   if (input.template_key !== undefined) {
     if (input.body !== undefined) issue("body", "send either template_key or body, not both");
     if (input.subject !== undefined) issue("subject", "templates provide their own subject");
@@ -299,19 +338,79 @@ async function loadJob(svc: Services, shopId: string, jobId: string): Promise<Jo
   return data as JobRow;
 }
 
+/** A quote or invoice being sent (send's `quote_id` / `invoice_id`). */
+export interface DocumentRef {
+  kind: "quote" | "invoice";
+  id: string;
+}
+
+interface DocumentRow {
+  id: string;
+  shop_id: string;
+  customer_id: string;
+  status: string;
+}
+
+function documentOf(input: SendInput): DocumentRef | null {
+  if (input.quote_id !== undefined) return { kind: "quote", id: input.quote_id };
+  if (input.invoice_id !== undefined) return { kind: "invoice", id: input.invoice_id };
+  return null;
+}
+
+const DOCUMENT_LABELS = { quote: "Quote", invoice: "Invoice" } as const;
+
+/** The document in the shop (service role, scoped); `not_found` otherwise. */
+async function loadDocument(svc: Services, shopId: string, doc: DocumentRef): Promise<DocumentRow> {
+  const columns = "id, shop_id, customer_id, status";
+  const { data, error } = doc.kind === "quote"
+    ? await svc.admin.from("quotes").select(columns)
+      .eq("shop_id", shopId).eq("id", doc.id).maybeSingle()
+    : await svc.admin.from("invoices").select(columns)
+      .eq("shop_id", shopId).eq("id", doc.id).maybeSingle();
+  if (error) throw new DbError(`${doc.kind} lookup`, error);
+  if (!data) throw errors.notFound(`${DOCUMENT_LABELS[doc.kind]} not found.`);
+  return data as DocumentRow;
+}
+
+/** What the caller sees when the message's own row is missing / not theirs. */
+function notFoundLabel(input: SendInput): string {
+  const doc = documentOf(input);
+  if (doc) return `${DOCUMENT_LABELS[doc.kind]} not found.`;
+  return input.job_id ? "Job not found." : "Customer not found.";
+}
+
+/** shop_id of one row by id (service role); null when there is none. */
+async function shopOfRow(
+  svc: Services,
+  input: SendInput,
+): Promise<{ data: unknown; error: PgError | null }> {
+  if (input.quote_id !== undefined) {
+    return await svc.admin.from("quotes").select("shop_id").eq("id", input.quote_id).maybeSingle();
+  }
+  if (input.invoice_id !== undefined) {
+    return await svc.admin.from("invoices").select("shop_id").eq("id", input.invoice_id)
+      .maybeSingle();
+  }
+  if (input.job_id !== undefined) {
+    return await svc.admin.from("jobs").select("shop_id").eq("id", input.job_id).maybeSingle();
+  }
+  if (input.customer_id !== undefined) {
+    return await svc.admin.from("customers").select("shop_id").eq("id", input.customer_id)
+      .maybeSingle();
+  }
+  throw errors.badRequest("customer_id or job_id is required.");
+}
+
 /**
- * The shop the message is for: the job's shop, else the customer's shop
- * (service-role lookup by id). Missing rows are `not_found`.
+ * The shop the message is for: the quote's / invoice's shop, else the job's,
+ * else the customer's (service-role lookup by id). Missing rows are
+ * `not_found`.
  */
 async function deriveShopId(svc: Services, input: SendInput): Promise<string> {
-  const [table, id, label] = input.job_id
-    ? ["jobs", input.job_id, "Job"] as const
-    : ["customers", input.customer_id, "Customer"] as const;
-  if (!id) throw errors.badRequest("customer_id or job_id is required.");
-  const { data, error } = await svc.admin.from(table).select("shop_id").eq("id", id).maybeSingle();
-  if (error) throw new DbError(`${table} lookup`, error);
+  const { data, error } = await shopOfRow(svc, input);
+  if (error) throw new DbError("shop lookup", error);
   const shopId = (data as { shop_id?: unknown } | null)?.shop_id;
-  if (typeof shopId !== "string") throw errors.notFound(`${label} not found.`);
+  if (typeof shopId !== "string") throw errors.notFound(notFoundLabel(input));
   return shopId;
 }
 
@@ -331,7 +430,7 @@ async function authorize(
   }
   const shopId = await deriveShopId(svc, input);
   const membership = await getMembership(svc.admin, shopId, caller.id);
-  if (!membership) throw errors.notFound(input.job_id ? "Job not found." : "Customer not found.");
+  if (!membership) throw errors.notFound(notFoundLabel(input));
   if (!hasRole(membership, ROLES.anyStaff)) {
     throw errors.forbidden("Your role does not allow this action.");
   }
@@ -347,8 +446,12 @@ export async function send(
   const { scoped: input, membership } = await authorize(svc, caller, rawInput);
   const isManager = hasRole(membership, ROLES.managerPlus);
   const channel: Channel = input.channel;
+  const doc = documentOf(input);
 
   if (!isManager) {
+    if (doc) {
+      throw errors.forbidden("Only owners, admins and managers can send quotes and invoices.");
+    }
     if (!input.template_key || !TECHNICIAN_TEMPLATE_KEYS.includes(input.template_key)) {
       throw errors.forbidden(
         "Technicians can only send the on-my-way, job-started and job-complete messages.",
@@ -361,38 +464,41 @@ export async function send(
     await requireJobAccess(svc.admin, membership, input.job_id);
   }
 
-  if (
-    input.template_key !== undefined && !input.job_id &&
-    !CUSTOMER_TEMPLATE_KEYS.includes(input.template_key)
-  ) {
-    // Without a job its dates, vehicle, links and amounts would go out blank.
-    throw refusal("job_required", channel);
-  }
-
-  let job: JobRow | null = null;
-  if (input.job_id) {
-    job = await loadJob(svc, input.shop_id, input.job_id);
-    if (input.customer_id && input.customer_id !== job.customer_id) {
-      throw refusal("job_customer_mismatch", channel);
+  let customerId: string | undefined;
+  let document: DocumentRow | null = null;
+  if (doc) {
+    document = await loadDocument(svc, input.shop_id, doc);
+    customerId = document.customer_id;
+  } else {
+    if (
+      input.template_key !== undefined && !input.job_id &&
+      !CUSTOMER_TEMPLATE_KEYS.includes(input.template_key)
+    ) {
+      // Without a job its dates, vehicle, links and amounts would go out blank.
+      throw refusal("job_required", channel);
     }
+    let job: JobRow | null = null;
+    if (input.job_id) {
+      job = await loadJob(svc, input.shop_id, input.job_id);
+      if (input.customer_id && input.customer_id !== job.customer_id) {
+        throw refusal("job_customer_mismatch", channel);
+      }
+    }
+    customerId = input.customer_id ?? job?.customer_id;
   }
-  const customerId = input.customer_id ?? job?.customer_id;
   if (!customerId) throw errors.badRequest("customer_id or job_id is required.");
 
   if (input.template_key !== undefined) {
-    await checkTemplateVariables(svc, input, input.template_key, customerId, channel);
+    await checkTemplateVariables(svc, input, input.template_key, customerId, channel, document);
   }
 
   const messageId = await queue(svc, req, input, caller.id, customerId, channel);
 
-  const original = await earlierDuplicate(
-    svc,
-    input.shop_id,
-    caller.id,
-    customerId,
-    channel,
-    messageId,
-  );
+  // With a request_nonce the database already returned the message this
+  // compose queued (or the one it queued on an earlier attempt).
+  const original = input.request_nonce === undefined
+    ? await earlierDuplicate(svc, input.shop_id, caller.id, customerId, channel, messageId)
+    : null;
   if (original) {
     svc.log.info("message_send_deduplicated", {
       message_id: original.id,
@@ -413,6 +519,7 @@ export async function send(
     shop_id: input.shop_id,
     channel,
     template_key: input.template_key ?? null,
+    ...(doc ? { [`${doc.kind}_id`]: doc.id } : {}),
     status: result.status,
   });
   return { message_id: messageId, channel, status: result.status, error: result.error };
@@ -426,9 +533,12 @@ export async function send(
  * Refuses a template send whose placeholders would render blank, before
  * anything is queued (the database renders a missing / null variable as ''):
  *   - without a job, any placeholder that is not a CUSTOMER_TEMPLATE_VARS
- *     variable (e.g. follow_up's "your {{vehicle}}") -> `job_required`;
- *   - a LINK_VARS placeholder whose value is blank for this customer / job
- *     (e.g. {{review_link}} while the shop has no review URL) -> `missing_link`.
+ *     variable (e.g. follow_up's "your {{vehicle}}") -> `job_required`
+ *     (not for quotes / invoices: the database renders them with their own
+ *     variables, comms_document_vars);
+ *   - a LINK_VARS placeholder whose value is blank for this customer / job /
+ *     document (e.g. {{review_link}} while the shop has no review URL, or the
+ *     {{quote_link}} of a draft quote) -> `missing_link`.
  * Reads the shop's own wording for the channel (service role, shop-scoped).
  * A missing or disabled template is left to the database (template_disabled).
  */
@@ -438,6 +548,7 @@ async function checkTemplateVariables(
   templateKey: string,
   customerId: string,
   channel: Channel,
+  document: DocumentRow | null,
 ): Promise<void> {
   const { data, error } = await svc.admin.from("message_templates")
     .select("subject, body, enabled")
@@ -450,7 +561,7 @@ async function checkTemplateVariables(
     `${template.body ?? ""}\n${channel === "email" ? (template.subject ?? "") : ""}`,
   );
 
-  if (!input.job_id) {
+  if (!input.job_id && !document) {
     // A marketing email gets its own {{unsubscribe_link}} from the database
     // (enqueue_customer_template, 0033), with or without a job.
     const marketingEmail = channel === "email" && MARKETING_TEMPLATE_KEYS.includes(templateKey);
@@ -464,7 +575,12 @@ async function checkTemplateVariables(
 
   const links = names.filter((name) => Object.hasOwn(LINK_VARS, name));
   if (links.length === 0) return;
-  const { data: vars, error: varsError } = input.job_id
+  const { data: vars, error: varsError } = document
+    ? await svc.admin.rpc("comms_document_vars", {
+      p_quote_id: input.quote_id ?? null,
+      p_invoice_id: input.invoice_id ?? null,
+    })
+    : input.job_id
     ? await svc.admin.rpc("comms_job_vars", { p_job_id: input.job_id })
     : await svc.admin.rpc("comms_customer_vars", {
       p_shop_id: input.shop_id,
@@ -478,10 +594,21 @@ async function checkTemplateVariables(
   });
   if (blank.length > 0) {
     throw refusal("missing_link", channel, undefined, {
-      message: LINK_VARS[blank[0] as string],
+      message: missingLinkMessage(blank[0] as string, document),
       details: { variables: blank },
     });
   }
+}
+
+/** What staff must do before a message with this blank link can go out. */
+function missingLinkMessage(variable: string, document: DocumentRow | null): string {
+  if (document && variable === "quote_link") return "Mark the quote as sent first.";
+  if (document && variable === "invoice_link") {
+    return document.status === "void"
+      ? "This invoice is void; it can no longer be sent."
+      : "Issue the invoice first.";
+  }
+  return LINK_VARS[variable] ?? REFUSAL_MESSAGES.missing_link("sms");
 }
 
 // ---------------------------------------------------------------------------
@@ -533,9 +660,10 @@ function comparableBody(m: RecentMessage): string {
  * the EARLIEST such message is the one to keep: this request's row is
  * withdrawn (deleted while still 'queued'; it never reached a provider) and
  * the earlier message is returned. Concurrent duplicates agree on the
- * earliest row, so exactly one of them sends. There is no request-nonce
- * column on messages yet (see the open issue), so identity is the content.
- * A lookup failure never blocks the send (logged, the message goes out).
+ * earliest row, so exactly one of them sends. Only for sends without a
+ * request_nonce (identity is then the content); a nonce makes the database
+ * the judge (messages.request_nonce). A lookup failure never blocks the send
+ * (logged, the message goes out).
  */
 async function earlierDuplicate(
   svc: Services,
@@ -601,6 +729,7 @@ async function queue(
   customerId: string,
   channel: Channel,
 ): Promise<string> {
+  const nonce = input.request_nonce ?? null;
   const refused = async (error: { code?: string | null }, operation: string) => {
     const mapped = rpcRefusal(operation, error);
     if (mapped instanceof HttpError && mapped.code === "unprocessable") {
@@ -630,6 +759,7 @@ async function queue(
       p_subject: channel === "email" ? (input.subject ?? null) : null,
       p_body: input.body ?? "",
       p_job_id: input.job_id ?? null,
+      p_request_nonce: nonce,
     });
     if (error) throw await refused(error, "queue_message");
     const id = (data as { id?: unknown } | null)?.id;
@@ -640,7 +770,26 @@ async function queue(
   let data: unknown;
   let error: { code?: string | null; message?: string } | null;
   let operation: string;
-  if (input.job_id) {
+  if (input.quote_id !== undefined || input.invoice_id !== undefined) {
+    // As the caller: the RPC re-checks that they manage the document's shop
+    // and renders the quote_sent / invoice_sent template with the document's
+    // link, amount and balance (0090).
+    operation = "enqueue_document_message";
+    const user = userClient(req, { env: svc.env, fetch: svc.deps.fetch });
+    ({ data, error } = await user.rpc(operation, {
+      p_quote_id: input.quote_id ?? null,
+      p_invoice_id: input.invoice_id ?? null,
+      p_channel: channel,
+      p_request_nonce: nonce,
+    }));
+    if (error?.code === "55000") {
+      // The wording needs customer links and the platform has no app URL.
+      throw refusal("missing_link", channel, error, {
+        message:
+          "Customer links are not set up on this platform yet, so this message cannot be sent.",
+      });
+    }
+  } else if (input.job_id) {
     // As the caller: the RPC re-checks role, assignment and technician keys.
     operation = "enqueue_template_message";
     const user = userClient(req, { env: svc.env, fetch: svc.deps.fetch });
@@ -648,6 +797,7 @@ async function queue(
       p_job_id: input.job_id,
       p_key: input.template_key,
       p_channel: channel,
+      p_request_nonce: nonce,
     }));
   } else {
     // Customer-level template (no job; CUSTOMER_TEMPLATE_KEYS only, checked
@@ -661,6 +811,7 @@ async function queue(
       p_key: input.template_key,
       p_channel: channel,
       p_sent_by: callerId,
+      p_request_nonce: nonce,
     }));
   }
   if (error) throw await refused(error, operation);

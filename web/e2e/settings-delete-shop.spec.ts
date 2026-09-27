@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, SHOP, type Role } from './support/fixtures';
-import { mockSupabase } from './support/mockSupabase';
+import { mockSupabase, reply, type MockReply } from './support/mockSupabase';
 
 // Sorted after "Glacier Detailing", so the page opens on SHOP and the shell
 // falls back to this one once SHOP is gone.
@@ -12,15 +12,21 @@ const SECOND_SHOP = {
 };
 
 interface Recorded {
-  deletes: string[];
+  /** Bodies sent to the payments function. */
+  calls: unknown[];
+  /** Direct table deletes (there must be none: the server deletes). */
+  tableDeletes: string[];
 }
 
 async function setup(
   page: Page,
   role: Role,
-  { billingMemberships = 0 }: { billingMemberships?: number } = {},
+  {
+    billingMemberships = 0,
+    refusal = null,
+  }: { billingMemberships?: number; refusal?: MockReply | null } = {},
 ): Promise<Recorded> {
-  const recorded: Recorded = { deletes: [] };
+  const recorded: Recorded = { calls: [], tableDeletes: [] };
   let deleted = false;
   await mockSupabase(page, {
     user: OWNER,
@@ -32,12 +38,16 @@ async function setup(
           : [membershipRow(OWNER, role, SHOP), membershipRow(OWNER, 'owner', SECOND_SHOP)],
       notifications: [],
       shops: ({ method, url }) => {
-        if (method === 'DELETE') {
-          recorded.deletes.push(url.searchParams.get('id') ?? '');
-          deleted = true;
-          return [{ id: SHOP.id }];
-        }
+        if (method === 'DELETE') recorded.tableDeletes.push(url.search);
         return [SHOP];
+      },
+    },
+    functions: {
+      payments: ({ body }) => {
+        recorded.calls.push(body);
+        if (refusal) return refusal;
+        deleted = true;
+        return { deleted: true, memberships_cancelled: billingMemberships, sessions_expired: 0 };
       },
     },
   });
@@ -62,16 +72,42 @@ test.describe('settings — delete shop', () => {
 
     await expect(page.getByText(`${SHOP.name} was deleted`)).toBeVisible();
     await expect(page).not.toHaveURL(/\/settings\/delete-shop/);
-    expect(recorded.deletes).toEqual([`eq.${SHOP.id}`]);
+    expect(recorded.calls).toEqual([
+      { action: 'delete_shop', shop_id: SHOP.id, confirm_name: SHOP.name },
+    ]);
+    expect(recorded.tableDeletes).toEqual([]);
     await expect(page.getByText(SECOND_SHOP.name).first()).toBeVisible();
   });
 
-  test('deletion is blocked while memberships still bill through Stripe', async ({ page }) => {
-    const recorded = await setup(page, 'owner', { billingMemberships: 1 });
+  test('billing memberships are cancelled in Stripe as part of the deletion', async ({ page }) => {
+    const recorded = await setup(page, 'owner', { billingMemberships: 2 });
     await page.goto('/app/settings/delete-shop');
-    await expect(page.getByText(/1 membership still bills a customer/)).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Delete shop…' })).toBeDisabled();
-    expect(recorded.deletes).toEqual([]);
+    await expect(page.getByText(/2 active memberships will be cancelled in Stripe/)).toBeVisible();
+    await page.getByRole('button', { name: 'Delete shop…' }).click();
+    const dialog = page.getByRole('alertdialog', { name: `Delete ${SHOP.name}?` });
+    await dialog.getByLabel(/Type the shop name/).fill(SHOP.name);
+    await dialog.getByRole('button', { name: 'Delete shop permanently' }).click();
+    await expect(page.getByText(`${SHOP.name} was deleted`)).toBeVisible();
+    expect(recorded.calls).toHaveLength(1);
+  });
+
+  test('a card payment still processing refuses the deletion', async ({ page }) => {
+    const recorded = await setup(page, 'owner', {
+      refusal: reply(409, {
+        error: 'A payment for this is already being processed. Refresh in a moment.',
+        code: 'conflict',
+        details: { reason: 'payment_in_progress' },
+      }),
+    });
+    await page.goto('/app/settings/delete-shop');
+    await page.getByRole('button', { name: 'Delete shop…' }).click();
+    const dialog = page.getByRole('alertdialog', { name: `Delete ${SHOP.name}?` });
+    await dialog.getByLabel(/Type the shop name/).fill(SHOP.name);
+    await dialog.getByRole('button', { name: 'Delete shop permanently' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('still being processed');
+    await expect(dialog.getByRole('alert')).toContainText('Nothing was deleted.');
+    await expect(page).toHaveURL(/\/settings\/delete-shop/);
+    expect(recorded.calls).toHaveLength(1);
   });
 
   test('admins do not see the section', async ({ page }) => {

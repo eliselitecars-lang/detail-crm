@@ -35,6 +35,15 @@ const revenue = [
   },
 ];
 
+/** report_revenue_totals for the fixture period (the server sums; the page never does). */
+const totals = {
+  gross_cents: 62500,
+  refunds_cents: 5000,
+  net_cents: 57500,
+  tips_cents: 2000,
+  payments_count: 4,
+};
+
 const teamRow = {
   member_id: 'm-tech',
   display_name: 'Theo Tech',
@@ -101,6 +110,7 @@ beforeEach(() => {
   resetSupabaseMock();
   rpcResults({
     report_revenue: revenue,
+    report_revenue_totals: [totals],
     report_team: [teamRow],
     report_outstanding: outstanding,
   });
@@ -125,6 +135,76 @@ describe('ReportsPage', () => {
       p_to: '2026-03-03',
       p_bucket: 'day',
     });
+    expect(supabase.rpc).toHaveBeenCalledWith('report_revenue_totals', {
+      p_shop_id: 'shop-1',
+      p_from: '2026-03-01',
+      p_to: '2026-03-03',
+    });
+  });
+
+  it('takes the summary cards from report_revenue_totals, not the buckets', async () => {
+    rpcResults({
+      report_revenue: revenue,
+      report_revenue_totals: [{ ...totals, net_cents: 99900 }],
+    });
+    renderAs('manager');
+    const tiles = await screen.findByLabelText('Revenue totals');
+    expect(within(tiles).getByText('$999.00')).toBeInTheDocument();
+  });
+
+  it('keeps the chart when only the totals fail, with a retry on the cards', async () => {
+    supabase.rpc.mockImplementation(((fn: string) =>
+      createBuilder(
+        fn === 'report_revenue_totals'
+          ? { error: { code: 'XX000', message: 'boom', details: null, hint: null } }
+          : { data: fn === 'report_revenue' ? revenue : null },
+      )) as never);
+    renderAs('manager');
+    expect(await screen.findByText('Couldn’t load the revenue totals')).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Revenue by period' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Try again/ })).toBeInTheDocument();
+  });
+
+  it('shows lost disputes on the payments report when there are any', async () => {
+    const method = (over: Record<string, unknown>) => ({
+      method: 'card',
+      payments_count: 2,
+      gross_cents: 40000,
+      refunds_cents: 0,
+      net_cents: 40000,
+      tips_cents: 0,
+      tip_refunds_cents: 0,
+      collected_cents: 40000,
+      deposits_cents: 0,
+      memberships_cents: 0,
+      disputes_lost_cents: 0,
+      ...over,
+    });
+    rpcResults({ report_payments: [method({ disputes_lost_cents: 15000 })] });
+    renderAs('manager', `${RANGE}&tab=payments`);
+    const tiles = await screen.findByLabelText('Payment totals');
+    expect(within(tiles).getByText('Lost disputes')).toBeInTheDocument();
+    expect(within(tiles).getByText('$150.00')).toBeInTheDocument();
+  });
+
+  it('hides lost disputes when there are none (or the server predates them)', async () => {
+    const { disputes_lost_cents: _omitted, ...older } = {
+      method: 'cash',
+      payments_count: 1,
+      gross_cents: 1000,
+      refunds_cents: 0,
+      net_cents: 1000,
+      tips_cents: 0,
+      tip_refunds_cents: 0,
+      collected_cents: 1000,
+      deposits_cents: 0,
+      memberships_cents: 0,
+      disputes_lost_cents: 0,
+    };
+    rpcResults({ report_payments: [older] });
+    renderAs('manager', `${RANGE}&tab=payments`);
+    await screen.findByLabelText('Payment totals');
+    expect(screen.queryByText('Lost disputes')).not.toBeInTheDocument();
   });
 
   it('shows an empty state when nothing was paid', async () => {
@@ -137,6 +217,9 @@ describe('ReportsPage', () => {
         tips_cents: 0,
         payments_count: 0,
       })),
+      report_revenue_totals: [
+        { gross_cents: 0, refunds_cents: 0, net_cents: 0, tips_cents: 0, payments_count: 0 },
+      ],
     });
     renderAs('owner');
     expect(await screen.findByText('No payments in this period')).toBeInTheDocument();
@@ -222,15 +305,18 @@ describe('ReportsPage', () => {
     expect(router.state.location.search).toContain('bucket=month');
   });
 
-  it('disables daily grouping for long ranges and coerces ?bucket=day', async () => {
-    rpcResults({ report_revenue: [{ ...revenue[0], bucket_start: '2026-09-01' }] });
-    renderAs('manager', 'range=custom&from=2023-01-01&to=2026-09-27&bucket=day');
+  it('disables daily grouping beyond 366 days and switches ?bucket=day to weeks', async () => {
+    rpcResults({
+      report_revenue: [{ ...revenue[0], bucket_start: '2026-09-21' }],
+      report_revenue_totals: [totals],
+    });
+    renderAs('manager', 'range=custom&from=2025-09-01&to=2026-09-27&bucket=day');
     await screen.findByLabelText('Revenue totals');
     expect(supabase.rpc).toHaveBeenCalledWith('report_revenue', {
       p_shop_id: 'shop-1',
-      p_from: '2023-01-01',
+      p_from: '2025-09-01',
       p_to: '2026-09-27',
-      p_bucket: 'month',
+      p_bucket: 'week',
     });
     const groupBy = screen.getByRole('combobox', { name: 'Group by' });
     expect(within(groupBy).getByRole('option', { name: 'Daily (range too long)' })).toBeDisabled();
@@ -239,7 +325,7 @@ describe('ReportsPage', () => {
 
   it('shows an error instead of understated totals when rows are cut off', async () => {
     // Server returned only the first day of a three-day range.
-    rpcResults({ report_revenue: [revenue[0]] });
+    rpcResults({ report_revenue: [revenue[0]], report_revenue_totals: [totals] });
     renderAs('manager');
     expect(await screen.findByText(/too many periods to show/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Revenue totals')).not.toBeInTheDocument();

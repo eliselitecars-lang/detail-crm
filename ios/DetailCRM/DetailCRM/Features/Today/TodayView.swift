@@ -139,8 +139,18 @@ struct TodayView: View {
     private func decline(_ request: DashboardSummaryBookingRequest, reason: String) async -> Bool {
         do {
             let shopID = try appState.requireShopID()
+            // An online booking may have an open deposit link: release it
+            // first so nobody pays for a declined appointment.
+            var recorded = 0
+            if appState.can(.manageInvoices) {
+                recorded = try await JobService.releaseOpenPayments(shopID: shopID, jobID: request.job.id)
+            }
             try await DashboardService.declineBooking(shopID: shopID, jobID: request.job.id, reason: reason)
-            toasts.show("Booking declined")
+            if recorded > 0 {
+                toasts.show("Booking declined. " + JobDetailView.recordedPaymentsText(recorded), style: .info, duration: .seconds(6))
+            } else {
+                toasts.show("Booking declined")
+            }
             await load()
             return true
         } catch {

@@ -16,7 +16,7 @@ import {
   parseJobFilters,
   photoExtension,
   photoProblem,
-  reorderLineSorts,
+  movedLineOrder,
   scheduleToUtc,
   servicesSummary,
   signaturePath,
@@ -257,62 +257,18 @@ describe('parseInspectionDetails', () => {
   });
 });
 
-describe('reorderLineSorts', () => {
-  const apply = (
-    rows: { id: string; sort: number }[],
-    changes: { id: string; sort: number }[],
-  ): string[] =>
-    rows
-      .map((r) => ({ ...r, sort: changes.find((c) => c.id === r.id)?.sort ?? r.sort }))
-      // the list query orders by sort, then created_at (= original position)
-      .map((r, i) => ({ ...r, i }))
-      .sort((a, b) => a.sort - b.sort || a.i - b.i)
-      .map((r) => r.id);
+describe('movedLineOrder', () => {
+  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
 
-  it('moves up when every sort is equal (column default 0)', () => {
-    const rows = [
-      { id: 'a', sort: 0 },
-      { id: 'b', sort: 0 },
-      { id: 'c', sort: 0 },
-    ];
-    const changes = reorderLineSorts(rows, 1, -1);
-    expect(apply(rows, changes)).toEqual(['b', 'a', 'c']);
-    expect(changes).toEqual([
-      { id: 'b', sort: 1 },
-      { id: 'a', sort: 2 },
-      { id: 'c', sort: 3 },
-    ]);
-  });
-
-  it('moves down past a neighbour with the same sort without colliding with a third line', () => {
-    const rows = [
-      { id: 'a', sort: 1 },
-      { id: 'b', sort: 1 },
-      { id: 'c', sort: 2 },
-    ];
-    expect(apply(rows, reorderLineSorts(rows, 0, 1))).toEqual(['b', 'a', 'c']);
-    expect(apply(rows, reorderLineSorts(rows, 2, -1))).toEqual(['a', 'c', 'b']);
-  });
-
-  it('writes only the rows that change when sorts are already 1..n', () => {
-    const rows = [
-      { id: 'a', sort: 1 },
-      { id: 'b', sort: 2 },
-      { id: 'c', sort: 3 },
-      { id: 'd', sort: 4 },
-    ];
-    expect(reorderLineSorts(rows, 2, -1)).toEqual([
-      { id: 'c', sort: 2 },
-      { id: 'b', sort: 3 },
-    ]);
+  it('returns the full id list with the line moved one step', () => {
+    expect(movedLineOrder(rows, 1, -1)).toEqual(['b', 'a', 'c']);
+    expect(movedLineOrder(rows, 1, 1)).toEqual(['a', 'c', 'b']);
+    expect(movedLineOrder(rows, 0, 1)).toEqual(['b', 'a', 'c']);
   });
 
   it('ignores moves off either end', () => {
-    const rows = [
-      { id: 'a', sort: 1 },
-      { id: 'b', sort: 2 },
-    ];
-    expect(reorderLineSorts(rows, 0, -1)).toEqual([]);
-    expect(reorderLineSorts(rows, 1, 1)).toEqual([]);
+    expect(movedLineOrder(rows, 0, -1)).toBeNull();
+    expect(movedLineOrder(rows, 2, 1)).toBeNull();
+    expect(movedLineOrder([], 0, 1)).toBeNull();
   });
 });

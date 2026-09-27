@@ -22,8 +22,9 @@
  * Used by payment_sheet and charge_saved_card (a new attempt supersedes older
  * ones), the public invoice / deposit checkouts (a pay link supersedes an
  * open sheet; money already processing blocks it), the cancel_open_payments
- * action (sheet dismissed, before void / edits) and the sweep_payment_sheets
- * cron action (sheets abandoned without either).
+ * action (sheet dismissed, before void / edits, before a job is cancelled or
+ * changes customer), delete_shop (every open attempt of the shop) and the
+ * sweep_payment_sheets cron action (sheets abandoned without either).
  */
 import { onAccount, type Stripe } from "../_shared/stripe.ts";
 import {
@@ -85,13 +86,14 @@ const UNCONFIRMED = new Set([
 async function openRows(
   s: Services,
   shopId: string,
-  scope: { column: "invoice_id" | "job_id"; id: string },
+  scope: { column: "invoice_id" | "job_id"; id: string } | null,
 ): Promise<PendingCardRow[]> {
-  const { data, error } = await s.admin
+  let query = s.admin
     .from("payments")
     .select(PENDING_COLUMNS)
-    .eq("shop_id", shopId)
-    .eq(scope.column, scope.id)
+    .eq("shop_id", shopId);
+  if (scope) query = query.eq(scope.column, scope.id);
+  const { data, error } = await query
     .in("status", ["pending", "failed"])
     .in("method", ["card", "card_present"])
     .neq("kind", "membership")
@@ -120,6 +122,11 @@ export function pendingJobRows(
   jobId: string,
 ): Promise<PendingCardRow[]> {
   return openRows(s, shopId, { column: "job_id", id: jobId });
+}
+
+/** Every unsettled card row of a shop (shop deletion). */
+export function pendingShopRows(s: Services, shopId: string): Promise<PendingCardRow[]> {
+  return openRows(s, shopId, null);
 }
 
 /**
@@ -350,6 +357,15 @@ export async function settleJob(
   jobId: string,
 ): Promise<SettleSummary> {
   return await settleRows(s, account, await pendingJobRows(s, shopId, jobId), {});
+}
+
+/** Settles every unsettled card row of a shop (before the shop is deleted). */
+export async function settleShop(
+  s: Services,
+  account: AccountRow,
+  shopId: string,
+): Promise<SettleSummary> {
+  return await settleRows(s, account, await pendingShopRows(s, shopId), {});
 }
 
 /** Cron: settle abandoned payment_sheet rows across shops, one failure never stops the batch. */

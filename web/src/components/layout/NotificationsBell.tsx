@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router';
 import { Button, ErrorState, IconButton, LoadingState } from '@/components/ui';
 import { useEscapeKey, useOutsideClick } from '@/components/ui/overlay';
 import { useAuth } from '@/features/auth/authContext';
+import { notificationLink, type NotificationKind } from '@/features/notifications/links';
 import { useShop } from '@/features/shop/shopContext';
 import { cn } from '@/lib/cn';
 import { formatRelative } from '@/lib/dates';
@@ -50,7 +51,8 @@ export function NotificationsBell() {
   const openItem = (item: NotificationItem) => {
     if (!item.read_at) markRead.mutate(item.id);
     setOpen(false);
-    if (item.job_id) void navigate(`/app/jobs/${item.job_id}`);
+    const link = notificationLink({ ...item, kind: item.kind as NotificationKind });
+    if (link) void navigate(link.href);
   };
 
   return (

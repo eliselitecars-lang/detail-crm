@@ -1,19 +1,18 @@
 import { defineConfig, devices } from '@playwright/test';
+import { CONFIGURED_PORT, UNCONFIGURED_PORT } from './e2e/support/ports';
 
 /**
  * Smoke tests against the Vite dev server with a MOCKED Supabase backend
  * (e2e/support/mockSupabase.ts intercepts every *.supabase.co request).
  *
- * Two servers:
- *  - :5173 configured with a fake project URL (all normal specs)
- *  - :5174 with the env vars blank (Setup screen spec)
+ * Two servers (PW_PORT moves both, e.g. when 5173 is taken; see e2e/support/ports.ts):
+ *  - :PW_PORT (5173) configured with a fake project URL (all normal specs)
+ *  - :PW_PORT + 1 (5174) with the env vars blank (Setup screen spec)
  *
  * Browsers: CI runs `npx playwright install --with-deps chromium`. Locally,
  * PLAYWRIGHT_BROWSERS_PATH may point at a preinstalled build; set
  * PW_CHROMIUM_EXECUTABLE to force a specific Chromium binary.
  */
-const CONFIGURED_PORT = 5173;
-const UNCONFIGURED_PORT = 5174;
 export const E2E_SUPABASE_URL = 'https://e2e-mock.supabase.co';
 
 const executablePath = process.env.PW_CHROMIUM_EXECUTABLE;

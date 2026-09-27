@@ -434,13 +434,7 @@ export function useUpdateInspection(jobId: string) {
   const { shopId } = useShop();
   const invalidate = useInvalidateJob(jobId);
   return useMutation({
-    mutationFn: async ({
-      id,
-      patch,
-    }: {
-      id: string;
-      patch: Partial<InspectionDetails>;
-    }) => {
+    mutationFn: async ({ id, patch }: { id: string; patch: Partial<InspectionDetails> }) => {
       unwrap(await supabase.from('inspections').update(patch).eq('shop_id', shopId).eq('id', id));
     },
     onSettled: invalidate,

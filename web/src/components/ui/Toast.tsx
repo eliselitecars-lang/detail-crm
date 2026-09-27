@@ -1,5 +1,5 @@
 import { CheckCircle2, CircleAlert, Info, X } from 'lucide-react';
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { cn } from '@/lib/cn';
 import { errorMessage } from '@/lib/errors';
 import { IconButton } from './IconButton';
@@ -16,16 +16,37 @@ const icons = {
   info: <Info className="text-primary size-5" aria-hidden="true" />,
 };
 
+const MAX_TOASTS = 5;
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const seq = useRef(0);
   const timers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  /** Ids on screen, oldest first (mirrors `toasts`, readable outside a state updater). */
+  const visible = useRef<number[]>([]);
 
-  const dismiss = useCallback((id: number) => {
+  const clearTimer = useCallback((id: number) => {
     const timer = timers.current.get(id);
-    if (timer) clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     timers.current.delete(id);
-    setToasts((list) => list.filter((t) => t.id !== id));
+  }, []);
+
+  const dismiss = useCallback(
+    (id: number) => {
+      clearTimer(id);
+      visible.current = visible.current.filter((v) => v !== id);
+      setToasts((list) => list.filter((t) => t.id !== id));
+    },
+    [clearTimer],
+  );
+
+  // Nothing may fire after the provider unmounts (tests, route teardown).
+  useEffect(() => {
+    const pending = timers.current;
+    return () => {
+      for (const timer of pending.values()) clearTimeout(timer);
+      pending.clear();
+    };
   }, []);
 
   const show = useCallback(
@@ -33,16 +54,23 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       seq.current += 1;
       const id = seq.current;
       const tone = input.tone ?? 'info';
-      setToasts((list) => [...list.slice(-4), { ...input, id, tone }]);
+      // At most MAX_TOASTS on screen: the oldest are dropped with their timers.
+      const kept = [...visible.current, id];
+      for (const dropped of kept.splice(0, Math.max(0, kept.length - MAX_TOASTS))) {
+        clearTimer(dropped);
+      }
+      visible.current = kept;
+      setToasts((list) => [...list.slice(-(MAX_TOASTS - 1)), { ...input, id, tone }]);
       const duration = input.duration ?? (tone === 'error' ? 8000 : 5000);
-      if (duration > 0)
+      if (duration > 0) {
         timers.current.set(
           id,
           setTimeout(() => dismiss(id), duration),
         );
+      }
       return id;
     },
-    [dismiss],
+    [clearTimer, dismiss],
   );
 
   const api = useMemo<ToastApi>(

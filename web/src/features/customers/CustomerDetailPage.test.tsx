@@ -4,6 +4,9 @@ import { membership, renderRoute, shopValue, signedInAuth } from '@/test/render'
 import {
   builders,
   createBuilder,
+  edgeHttpError,
+  mockRpc,
+  pgError,
   resetSupabaseMock,
   setTableResult,
   supabase,
@@ -12,8 +15,7 @@ import CustomerDetailPage from './CustomerDetailPage';
 
 vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
-const invoke = vi.fn();
-Object.assign(supabase, { functions: { invoke } });
+const invoke = supabase.functions.invoke;
 
 beforeEach(() => {
   resetSupabaseMock();
@@ -95,6 +97,56 @@ describe('CustomerDetailPage', () => {
     expect(screen.getByRole('tab', { name: 'Saved cards' })).toBeInTheDocument();
   });
 
+  it('shows the server-computed totals for managers', async () => {
+    const calls = mockRpc({
+      customer_summary: {
+        data: [
+          {
+            customer_id: 'c-1',
+            lifetime_paid_cents: 125_000,
+            tips_cents: 5_000,
+            refunded_cents: 2_500,
+            open_balance_cents: 30_000,
+            overdue_balance_cents: 10_000,
+            completed_jobs: 4,
+            upcoming_jobs: 1,
+            first_visit_at: '2026-01-10T15:00:00Z',
+            last_visit_at: '2026-03-02T15:00:00Z',
+            next_job_at: '2026-04-20T14:00:00Z',
+            open_quotes: 2,
+            active_memberships: 1,
+          },
+        ],
+      },
+    });
+    setup('manager');
+    const card = (await screen.findByRole('heading', { name: 'At a glance' })).closest('section');
+    if (!card) throw new Error('summary card missing');
+    const totals = within(card);
+    expect(await totals.findByText('$1,250.00')).toBeInTheDocument();
+    expect(totals.getByText('incl. $50.00 tips · $25.00 refunded')).toBeInTheDocument();
+    const balance = totals.getByText('$300.00');
+    expect(balance).toHaveClass('text-danger-ink');
+    expect(totals.getByText('$100.00 overdue')).toBeInTheDocument();
+    expect(totals.getByText('4')).toBeInTheDocument();
+    expect(totals.getByText('Next job')).toBeInTheDocument();
+    expect(totals.getByText('Apr 20, 2026')).toBeInTheDocument();
+    expect(totals.getByText('Last visit Mar 2, 2026')).toBeInTheDocument();
+    expect(totals.getByText('2 open quotes · 1 membership')).toBeInTheDocument();
+    expect(calls).toContainEqual({ fn: 'customer_summary', args: { p_customer_id: 'c-1' } });
+  });
+
+  it('offers a retry when the totals fail to load', async () => {
+    mockRpc({ customer_summary: pgError('XX000', 'boom') });
+    const { user } = setup();
+    const card = (await screen.findByRole('heading', { name: 'At a glance' })).closest('section');
+    if (!card) throw new Error('summary card missing');
+    await within(card).findByRole('button', { name: /try again/i });
+    mockRpc({ customer_summary: { data: [] } });
+    await user.click(within(card).getByRole('button', { name: /try again/i }));
+    expect(await within(card).findByText('That customer could not be found.')).toBeInTheDocument();
+  });
+
   it('shows not found for a missing customer', async () => {
     renderRoute(<CustomerDetailPage />, {
       path: '/app/customers/nope',
@@ -114,6 +166,9 @@ describe('CustomerDetailPage', () => {
     expect(screen.queryByRole('link', { name: 'Messages' })).not.toBeInTheDocument();
     const tabs = screen.getAllByRole('tab').map((t) => t.textContent);
     expect(tabs).toEqual(['Overview', 'Vehicles', 'Jobs']);
+    // customer_summary is manager+ (the RPC refuses technicians): not requested.
+    expect(screen.queryByRole('heading', { name: 'At a glance' })).not.toBeInTheDocument();
+    expect(supabase.rpc).not.toHaveBeenCalledWith('customer_summary', expect.anything());
   });
 
   it('archives after confirmation', async () => {
@@ -193,6 +248,71 @@ describe('CustomerDetailPage', () => {
     await user.type(within(dialog).getByLabelText('VIN'), '1HGCM82633A004352');
     await user.click(within(dialog).getByRole('button', { name: 'Decode VIN' }));
     expect(await within(dialog).findByText(/Couldn’t reach the VIN service/)).toBeInTheDocument();
+  });
+
+  it('removes a saved card after confirmation (manager+)', async () => {
+    setTableResult('customer_payment_methods', {
+      data: [
+        {
+          id: 'cpm-1',
+          stripe_payment_method_id: 'pm_1Visa',
+          brand: 'visa',
+          last4: '4242',
+          exp_month: 4,
+          exp_year: 2030,
+          is_default: true,
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+    invoke.mockResolvedValueOnce({ data: { removed: true }, error: null });
+    const { user } = setup('manager', '/app/customers/c-1?tab=cards');
+    await user.click(await screen.findByRole('button', { name: 'Remove Visa ending in 4242' }));
+    const confirm = await screen.findByRole('alertdialog', { name: 'Remove saved card?' });
+    const before = (builders.customer_payment_methods ?? []).length;
+    await user.click(within(confirm).getByRole('button', { name: 'Remove card' }));
+    expect(await screen.findByText('Visa ending in 4242 removed')).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith('payments', {
+      body: {
+        action: 'remove_saved_card',
+        shop_id: 'shop-1',
+        customer_id: 'c-1',
+        payment_method_id: 'pm_1Visa',
+      },
+    });
+    await waitFor(() =>
+      expect((builders.customer_payment_methods ?? []).length).toBeGreaterThan(before),
+    );
+  });
+
+  it('keeps the confirmation open with the server message when removal fails', async () => {
+    setTableResult('customer_payment_methods', {
+      data: [
+        {
+          id: 'cpm-1',
+          stripe_payment_method_id: 'pm_1Visa',
+          brand: 'visa',
+          last4: '4242',
+          exp_month: 4,
+          exp_year: 2030,
+          is_default: false,
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: edgeHttpError(403, {
+        error: 'Your role does not allow this action.',
+        code: 'forbidden',
+      }),
+    });
+    const { user } = setup('manager', '/app/customers/c-1?tab=cards');
+    await user.click(await screen.findByRole('button', { name: 'Remove Visa ending in 4242' }));
+    const confirm = await screen.findByRole('alertdialog', { name: 'Remove saved card?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Remove card' }));
+    expect(await screen.findByText('Your role does not allow this action.')).toBeInTheDocument();
+    expect(confirm).toBeInTheDocument();
   });
 
   it('texts a card-setup link through payments + messaging', async () => {

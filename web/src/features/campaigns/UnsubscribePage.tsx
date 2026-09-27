@@ -1,8 +1,10 @@
 import { CircleAlert, MailCheck, MailX } from 'lucide-react';
 import { useEffect, useRef, type ReactNode } from 'react';
 import { useParams } from 'react-router';
-import { Button, Card, ErrorState } from '@/components/ui';
-import { useUnsubscribe } from './api';
+import { Button, Card, ErrorState, LoadingState } from '@/components/ui';
+import { toAppError } from '@/lib/errors';
+import { shopAssetUrl } from '@/lib/supabase';
+import { useUnsubscribe, useUnsubscribeInfo, type UnsubscribeInfo } from './api';
 import { isUnsubscribeToken } from './model';
 
 /**
@@ -28,21 +30,50 @@ export default function UnsubscribePage() {
 }
 
 function UnsubscribeFlow({ token }: { token: string }) {
+  const info = useUnsubscribeInfo(token);
+
+  if (info.isPending) return <LoadingState label="Checking your link…" />;
+  if (info.isError) {
+    return toAppError(info.error).kind === 'not_found' ? (
+      <InvalidLink />
+    ) : (
+      <ErrorState
+        error={info.error}
+        title="We couldn’t open this link"
+        onRetry={() => void info.refetch()}
+        retrying={info.isFetching}
+        compact
+      />
+    );
+  }
+  return <UnsubscribeForm token={token} info={info.data} />;
+}
+
+function Unsubscribed({ shopName, focus }: { shopName: string; focus: boolean }) {
+  return (
+    <Outcome
+      icon={<MailCheck aria-hidden="true" />}
+      tone="success"
+      title="You’re unsubscribed"
+      body={`You won’t get any more emails from ${shopName} at this address. If you change your mind, contact ${shopName} and ask to be added back.`}
+      focus={focus}
+    />
+  );
+}
+
+function UnsubscribeForm({ token, info }: { token: string; info: UnsubscribeInfo }) {
   const unsubscribe = useUnsubscribe();
+  const logo = shopAssetUrl(info.shop_logo_path);
 
   if (unsubscribe.isSuccess) {
     return unsubscribe.data ? (
-      <Outcome
-        icon={<MailCheck aria-hidden="true" />}
-        tone="success"
-        title="You’re unsubscribed"
-        body="You won’t get any more emails from this business at this address. If you change your mind, contact the business and ask to be added back."
-        focus
-      />
+      <Unsubscribed shopName={info.shop_name} focus />
     ) : (
       <InvalidLink focus />
     );
   }
+  // Already opted out (an earlier visit, or a reply of STOP / a complaint).
+  if (info.unsubscribed) return <Unsubscribed shopName={info.shop_name} focus={false} />;
 
   if (unsubscribe.isError) {
     return (
@@ -58,10 +89,19 @@ function UnsubscribeFlow({ token }: { token: string }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {logo && (
+        <img
+          src={logo}
+          alt={`${info.shop_name} logo`}
+          className="h-12 w-auto max-w-[12rem] self-start object-contain"
+        />
+      )}
       <div>
-        <h1 className="text-ink text-lg font-semibold tracking-tight">Unsubscribe from emails</h1>
+        <h1 className="text-ink text-lg font-semibold tracking-tight">
+          Unsubscribe from {info.shop_name} emails
+        </h1>
         <p className="text-muted mt-1 text-sm">
-          Stop receiving emails from this business at the address this email was sent to.
+          Stop receiving emails from {info.shop_name} at the address this email was sent to.
         </p>
       </div>
       <Button

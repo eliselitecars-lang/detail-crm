@@ -210,8 +210,12 @@ struct JobCancelSheet: View {
             return
         }
         do {
-            try await model.changeStatus(to: .cancelled, cancelReason: reason)
-            toasts.show("Job cancelled")
+            let recorded = try await model.changeStatus(to: .cancelled, cancelReason: reason)
+            if recorded > 0 {
+                toasts.show("Job cancelled. " + JobDetailView.recordedPaymentsText(recorded), style: .info, duration: .seconds(6))
+            } else {
+                toasts.show("Job cancelled")
+            }
             dismiss()
         } catch {
             errorMessage = ErrorText.message(for: error)

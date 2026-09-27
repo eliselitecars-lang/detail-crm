@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { membershipRow, OWNER, SHOP } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase } from './support/mockSupabase';
 
 const CUSTOMER = {
   id: '30000000-0000-4000-8000-000000000001',
@@ -59,29 +59,19 @@ test('owner signs a customer up and gets a checkout link', async ({ page }) => {
         };
       },
     },
-  });
-  await page.route(`${SUPABASE_URL}/functions/v1/**`, async (route) => {
-    const request = route.request();
-    if (request.method() === 'OPTIONS') {
-      return route.fulfill({
-        status: 204,
-        headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
-      });
-    }
-    functionCalls.push(request.postDataJSON());
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      headers: { 'access-control-allow-origin': '*' },
-      body: JSON.stringify({
-        url: 'https://checkout.stripe.com/c/pay/cs_test_1',
-        expires_at: 1790000000,
-        amount_cents: 4900,
-        interval: 'month',
-        interval_count: 1,
-        currency: 'usd',
-      }),
-    });
+    functions: {
+      payments: ({ body }) => {
+        functionCalls.push(body);
+        return {
+          url: 'https://checkout.stripe.com/c/pay/cs_test_1',
+          expires_at: 1790000000,
+          amount_cents: 4900,
+          interval: 'month',
+          interval_count: 1,
+          currency: 'usd',
+        };
+      },
+    },
   });
 
   await page.goto('/app/memberships');

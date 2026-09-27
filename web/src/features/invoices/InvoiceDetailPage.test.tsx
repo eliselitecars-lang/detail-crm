@@ -1,9 +1,14 @@
-import { FunctionsHttpError } from '@supabase/supabase-js';
 import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { supabase as appSupabase } from '@/lib/supabase';
 import { membership, renderRoute, shopValue } from '@/test/render';
-import { createBuilder, resetSupabaseMock, setTableResult, supabase } from '@/test/supabaseMock';
+import {
+  builders,
+  createBuilder,
+  edgeHttpError,
+  resetSupabaseMock,
+  setTableResult,
+  supabase,
+} from '@/test/supabaseMock';
 import {
   customerRow,
   invoiceLineRow,
@@ -12,12 +17,9 @@ import {
 } from '@/features/quotes/testFixtures';
 import InvoiceDetailPage from './InvoiceDetailPage';
 
-vi.mock('@/lib/supabase', async () => {
-  const mod = await import('@/test/supabaseMock');
-  return { ...mod, supabase: Object.assign(mod.supabase, { functions: { invoke: vi.fn() } }) };
-});
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
-const invoke = vi.mocked(appSupabase.functions.invoke);
+const invoke = supabase.functions.invoke;
 
 function setup(
   options: {
@@ -56,10 +58,6 @@ function setup(
     routePath: '/app/invoices/:invoiceId',
     shop: shopValue({ membership: current }),
   });
-}
-
-function edgeHttpError(status: number, body: Record<string, unknown>) {
-  return new FunctionsHttpError(new Response(JSON.stringify(body), { status }));
 }
 
 beforeEach(() => {
@@ -132,17 +130,12 @@ describe('InvoiceDetailPage', () => {
   it('offers to text the pay link when the bank requires authentication', async () => {
     invoke.mockResolvedValueOnce({
       data: null,
-      error: new FunctionsHttpError(
-        new Response(
-          JSON.stringify({
-            error:
-              "The card's bank requires the customer to confirm this payment. Send them a payment link instead.",
-            code: 'payment_failed',
-            details: { reason: 'authentication_required' },
-          }),
-          { status: 402 },
-        ),
-      ),
+      error: edgeHttpError(402, {
+        error:
+          "The card's bank requires the customer to confirm this payment. Send them a payment link instead.",
+        code: 'payment_failed',
+        details: { reason: 'authentication_required' },
+      }),
       response: undefined,
     });
     const { user } = setup();
@@ -162,6 +155,30 @@ describe('InvoiceDetailPage', () => {
       payment_method_id: 'pm_123',
       amount_cents: 20000,
     });
+  });
+
+  it('drops a saved card Stripe no longer has and refetches the list', async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: edgeHttpError(422, {
+        error: 'That saved card is no longer available; it was removed.',
+        code: 'unprocessable',
+        details: { reason: 'saved_card_removed' },
+      }),
+    });
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: 'Charge card' }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByRole('radio', { name: /Visa •••• 4242/ });
+    const cardQueries = () => (builders.customer_payment_methods ?? []).length;
+    const before = cardQueries();
+    setTableResult('customer_payment_methods', { data: [] });
+    await user.click(within(dialog).getByRole('button', { name: 'Charge $200.00' }));
+    expect(
+      await within(dialog).findByText('That saved card is no longer available; it was removed.'),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(cardQueries()).toBeGreaterThan(before));
+    expect(await within(dialog).findByText('No saved card')).toBeInTheDocument();
   });
 
   it('refunds a card payment through the payments function (owner)', async () => {

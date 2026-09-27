@@ -5,36 +5,14 @@ import {
   builders,
   createBuilder,
   resetSupabaseMock,
+  setFunctionResult,
   setTableResult,
   supabase,
 } from '@/test/supabaseMock';
 import JobDetailPage from './JobDetailPage';
 import { jobDetailRow, TEAM, TRANSITIONS } from './testFixtures';
 
-vi.mock('@/lib/supabase', async () => {
-  const mod = await import('@/test/supabaseMock');
-  const bucket = {
-    createSignedUrls: vi.fn((paths: string[]) =>
-      Promise.resolve({
-        data: paths.map((path) => ({
-          path,
-          signedUrl: `https://signed.test/${path}`,
-          error: null,
-        })),
-        error: null,
-      }),
-    ),
-    upload: vi.fn(() => Promise.resolve({ data: { path: 'x' }, error: null })),
-    remove: vi.fn(() => Promise.resolve({ data: [], error: null })),
-  };
-  return {
-    ...mod,
-    supabase: Object.assign(mod.supabase, {
-      functions: { invoke: vi.fn() },
-      storage: { from: vi.fn(() => bucket) },
-    }),
-  };
-});
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
 const SUMMARY = {
   job_id: 'job-1',
@@ -57,6 +35,8 @@ function setup(
     role?: 'owner' | 'manager' | 'technician';
     job?: ReturnType<typeof jobDetailRow>;
     rpc?: Record<string, unknown>;
+    /** Keep job_line_items as the test set them. */
+    keepLines?: boolean;
   } = {},
 ) {
   const job = options.job ?? jobDetailRow();
@@ -71,24 +51,7 @@ function setup(
   );
   setTableResult('jobs', { data: job });
   setTableResult('job_status_transitions', { data: TRANSITIONS });
-  setTableResult('job_line_items', {
-    data: [
-      {
-        id: 'line-1',
-        service_id: 'svc-1',
-        vehicle_id: 'veh-1',
-        name: 'Full detail',
-        description: null,
-        quantity: 1,
-        unit_price_cents: 25000,
-        discount_cents: 0,
-        taxable: true,
-        duration_minutes: 120,
-        sort: 1,
-        total_cents: 25000,
-      },
-    ],
-  });
+  if (!options.keepLines) setTableResult('job_line_items', { data: [LINE] });
   setTableResult('job_assignments', { data: [{ id: 'a-1', member_id: 'member-2' }] });
   setTableResult('job_checklist_items', {
     data: [
@@ -114,6 +77,34 @@ function setup(
   });
 }
 
+const LINE = {
+  id: 'line-1',
+  service_id: 'svc-1',
+  vehicle_id: 'veh-1',
+  name: 'Full detail',
+  description: null,
+  quantity: 1,
+  unit_price_cents: 25000,
+  discount_cents: 0,
+  taxable: true,
+  duration_minutes: 120,
+  sort: 1,
+  total_cents: 25000,
+};
+
+/** A cancel_open_payments answer for job-1 (nothing released unless overridden). */
+function released(counts: Partial<Record<'cancelled' | 'succeeded' | 'in_progress', number>> = {}) {
+  return {
+    invoice_id: null,
+    job_id: 'job-1',
+    cancelled: 0,
+    succeeded: 0,
+    in_progress: 0,
+    sessions_expired: 0,
+    ...counts,
+  };
+}
+
 beforeEach(() => resetSupabaseMock());
 
 describe('JobDetailPage', () => {
@@ -136,6 +127,7 @@ describe('JobDetailPage', () => {
   });
 
   it('lets a manager move the status forward and cancel with a reason', async () => {
+    setFunctionResult('payments', { data: released() });
     const { user } = setup();
     const next = await screen.findByRole('button', { name: 'Mark as Confirmed' });
     await user.click(next);
@@ -155,6 +147,54 @@ describe('JobDetailPage', () => {
         { status: 'cancelled', cancel_reason: 'Customer rescheduled' },
       ]);
     });
+    // Open card payments / pay links are released first.
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+      body: { action: 'cancel_open_payments', shop_id: 'shop-1', job_id: 'job-1' },
+    });
+  });
+
+  it('refuses to cancel while a card payment on the job is processing', async () => {
+    setFunctionResult('payments', { data: released({ in_progress: 1 }) });
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Cancel this job?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel job' }));
+    expect(
+      await within(dialog).findByText('A card payment is in progress — wait for it to finish.'),
+    ).toBeInTheDocument();
+    const updates = (builders.jobs ?? []).flatMap((b) => b.update.mock.calls);
+    expect(updates).toEqual([]);
+  });
+
+  it('says so when money was recorded, then marks the no-show', async () => {
+    setFunctionResult('payments', { data: released({ succeeded: 1 }) });
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: 'No-show' }));
+    const confirm = await screen.findByRole('alertdialog', { name: 'Mark as no-show?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Mark no-show' }));
+    expect(await screen.findByText('A card payment was recorded')).toBeInTheDocument();
+    await waitFor(() => {
+      const calls = (builders.jobs ?? []).flatMap((b) => b.update.mock.calls);
+      expect(calls).toContainEqual([{ status: 'no_show' }]);
+    });
+  });
+
+  it('moves a line with one reorder_job_line_items call', async () => {
+    setTableResult('job_line_items', {
+      data: [
+        { ...LINE, id: 'line-1', name: 'Full detail', sort: 0 },
+        { ...LINE, id: 'line-2', name: 'Hand wax', sort: 0 },
+      ],
+    });
+    const { user } = setup({ keepLines: true });
+    await user.click(await screen.findByRole('button', { name: 'Move Hand wax up' }));
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('reorder_job_line_items', {
+        p_job_id: 'job-1',
+        p_ids: ['line-2', 'line-1'],
+      }),
+    );
+    expect((builders.job_line_items ?? []).some((b) => b.update.mock.calls.length > 0)).toBe(false);
   });
 
   it('gives technicians only their forward steps and no money or editing', async () => {

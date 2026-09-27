@@ -4,10 +4,16 @@
  * (technicians have no inbox). Everything lives under the `messages` domain
  * key so the realtime subscription refreshes it all.
  */
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type InfiniteData,
+} from '@tanstack/react-query';
 import { z } from 'zod';
 import { useToast } from '@/components/ui';
-import { Constants } from '@/lib/database.types';
 import { unwrap } from '@/lib/db';
 import { toAppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
@@ -15,26 +21,28 @@ import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
 import { sendMessage, type SendMessageInput } from './edge';
 import {
-  buildThreads,
-  inboxMessageSchema,
+  inboxThreadRowSchema,
   MESSAGE_COLUMNS,
   messageSchema,
+  SENDABLE_TEMPLATE_KEYS,
   THREAD_CUSTOMER_COLUMNS,
   threadCustomerSchema,
+  threadFromRow,
   threadKey,
-  unreadRowSchema,
-  unreadThreadsOutside,
-  type InboxMessage,
+  threadsFromPages,
+  type InboxThreadRow,
   type MessageChannel,
   type ThreadRef,
 } from './model';
 
-export const INBOX_PAGE = 300;
+/** Conversations per inbox_threads page ("Load older conversations" fetches the next). */
+export const INBOX_PAGE_SIZE = 50;
 const THREAD_LIMIT = 200;
 
 export const messageKeys = {
   all: (shopId: string) => shopKey(shopId, 'messages'),
-  inbox: (shopId: string, limit: number) => [...messageKeys.all(shopId), 'inbox', limit] as const,
+  inbox: (shopId: string) => [...messageKeys.all(shopId), 'inbox'] as const,
+  unread: (shopId: string) => [...messageKeys.all(shopId), 'unread-count'] as const,
   thread: (shopId: string, key: string) => [...messageKeys.all(shopId), 'thread', key] as const,
   customer: (shopId: string, id: string) => [...messageKeys.all(shopId), 'customer', id] as const,
   templates: (shopId: string) => [...messageKeys.all(shopId), 'templates'] as const,
@@ -49,69 +57,44 @@ export const messageKeys = {
 // Inbox (thread list)
 // ---------------------------------------------------------------------------
 
-/** Unread rows read for counts and for unread threads outside the page. */
-const UNREAD_LIMIT = 2000;
-/** At most this many unread conversations are added beyond the newest page. */
-const MAX_UNREAD_EXTRA_THREADS = 500;
-/** Ids per `in.(…)` filter (keeps the request URL short). */
-const ID_CHUNK = 100;
+type InboxPages = InfiniteData<InboxThreadRow[], string | null>;
 
-const INBOX_COLUMNS = `${MESSAGE_COLUMNS}, customer:customers!messages_customer_fk(${THREAD_CUSTOMER_COLUMNS})`;
-
-async function fetchInbox(shopId: string, limit: number) {
-  const [recent, unread] = await Promise.all([
-    supabase
-      .from('messages')
-      .select(INBOX_COLUMNS)
-      .eq('shop_id', shopId)
-      .order('created_at', { ascending: false })
-      .limit(limit),
-    supabase
-      .from('messages')
-      .select('id, customer_id, from_address, created_at', { count: 'exact' })
-      .eq('shop_id', shopId)
-      .eq('direction', 'inbound')
-      .is('read_at', null)
-      .order('created_at', { ascending: false })
-      .limit(UNREAD_LIMIT),
-  ]);
-  const messages = z.array(inboxMessageSchema).parse(unwrap(recent) ?? []);
-  const unreadRows = z.array(unreadRowSchema).parse(unwrap(unread) ?? []);
-
-  // Threads with unread messages always appear, even when the newest page is
-  // all campaign sends: add each missing one via its newest unread message.
-  const presentKeys = new Set(buildThreads(messages, []).map((t) => t.key));
-  const extraIds = unreadThreadsOutside(presentKeys, unreadRows, MAX_UNREAD_EXTRA_THREADS);
-  const chunks: string[][] = [];
-  for (let i = 0; i < extraIds.length; i += ID_CHUNK) chunks.push(extraIds.slice(i, i + ID_CHUNK));
-  const extra: InboxMessage[] = (
-    await Promise.all(
-      chunks.map(async (ids) => {
-        const result = await supabase
-          .from('messages')
-          .select(INBOX_COLUMNS)
-          .eq('shop_id', shopId)
-          .in('id', ids);
-        return z.array(inboxMessageSchema).parse(unwrap(result) ?? []);
-      }),
-    )
-  ).flat();
-
-  return {
-    threads: buildThreads([...messages, ...extra], unreadRows),
-    /** More history exists beyond `limit` (offer "Load older conversations"). */
-    truncated: messages.length >= limit,
-    /** Every unread inbound message of the shop, not just the listed threads'. */
-    unreadTotal: unread.count ?? unreadRows.length,
-  };
+/**
+ * The conversation list: inbox_threads (0090) returns the newest message of
+ * each conversation and its unread count, newest first, keyset-paged by
+ * `p_before` (the last row's last_created_at). Owner/admin/manager only.
+ */
+export function useInbox() {
+  const { shopId } = useShop();
+  return useInfiniteQuery({
+    queryKey: messageKeys.inbox(shopId),
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam }): Promise<InboxThreadRow[]> => {
+      const rows = unwrap(
+        await supabase.rpc('inbox_threads', {
+          p_shop_id: shopId,
+          p_limit: INBOX_PAGE_SIZE,
+          ...(pageParam ? { p_before: pageParam } : {}),
+        }),
+      );
+      return z.array(inboxThreadRowSchema).parse(rows ?? []);
+    },
+    getNextPageParam: (last) =>
+      last.length >= INBOX_PAGE_SIZE ? (last.at(-1)?.last_created_at ?? undefined) : undefined,
+    select: (data) => threadsFromPages(data.pages),
+  });
 }
 
-export function useInbox(limit: number) {
+/** Unread inbound messages across the shop (inbox_unread_count). */
+export function useInboxUnreadCount() {
   const { shopId } = useShop();
   return useQuery({
-    queryKey: messageKeys.inbox(shopId, limit),
-    queryFn: () => fetchInbox(shopId, limit),
-    placeholderData: keepPreviousData,
+    queryKey: messageKeys.unread(shopId),
+    queryFn: async (): Promise<number> =>
+      z
+        .number()
+        .int()
+        .parse(unwrap(await supabase.rpc('inbox_unread_count', { p_shop_id: shopId }))),
   });
 }
 
@@ -119,12 +102,22 @@ export function useInbox(limit: number) {
 // One thread
 // ---------------------------------------------------------------------------
 
+/** PostgREST `or` operand: the value double-quoted (addresses contain + and @). */
+function quoted(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 async function fetchThread(shopId: string, ref: ThreadRef) {
   let query = supabase.from('messages').select(MESSAGE_COLUMNS).eq('shop_id', shopId);
+  // A conversation without a customer: what that address sent us and what we sent it.
   query =
     ref.kind === 'customer'
       ? query.eq('customer_id', ref.customerId)
-      : query.is('customer_id', null).eq('from_address', ref.from);
+      : query
+          .is('customer_id', null)
+          .or(
+            `and(direction.eq.inbound,from_address.eq.${quoted(ref.from)}),and(direction.eq.outbound,to_address.eq.${quoted(ref.from)})`,
+          );
   const result = await query.order('created_at', { ascending: false }).limit(THREAD_LIMIT);
   const rows = z.array(messageSchema).parse(unwrap(result) ?? []);
   return {
@@ -185,26 +178,38 @@ export function useMarkThreadRead() {
       if (error) throw toAppError(error);
     },
     onMutate: async (ref) => {
-      const inboxKey = [...messageKeys.all(shopId), 'inbox'];
-      await queryClient.cancelQueries({ queryKey: inboxKey });
-      const snapshot = queryClient.getQueriesData<Awaited<ReturnType<typeof fetchInbox>>>({
-        queryKey: inboxKey,
-      });
+      const inboxKey = messageKeys.inbox(shopId);
+      const unreadKey = messageKeys.unread(shopId);
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: inboxKey }),
+        queryClient.cancelQueries({ queryKey: unreadKey }),
+      ]);
+      const inbox = queryClient.getQueryData<InboxPages>(inboxKey);
+      const unread = queryClient.getQueryData<number>(unreadKey);
       const key = threadKey(ref);
-      for (const [queryKey, data] of snapshot) {
-        if (!data) continue;
-        const cleared = data.threads.find((t) => t.key === key)?.unread ?? 0;
-        queryClient.setQueryData(queryKey, {
-          ...data,
-          threads: data.threads.map((t) => (t.key === key ? { ...t, unread: 0 } : t)),
-          unreadTotal: Math.max(0, data.unreadTotal - cleared),
+      let cleared = 0;
+      if (inbox) {
+        queryClient.setQueryData<InboxPages>(inboxKey, {
+          ...inbox,
+          pages: inbox.pages.map((page) =>
+            page.map((row) => {
+              const thread = threadFromRow(row);
+              if (thread?.key !== key || row.unread_count === 0) return row;
+              cleared += row.unread_count;
+              return { ...row, unread_count: 0 };
+            }),
+          ),
         });
       }
-      return { snapshot };
+      if (unread !== undefined) {
+        queryClient.setQueryData<number>(unreadKey, Math.max(0, unread - cleared));
+      }
+      return { inbox, unread };
     },
     onError: (_error, _ref, context) => {
-      for (const [queryKey, data] of context?.snapshot ?? []) {
-        queryClient.setQueryData(queryKey, data);
+      if (context?.inbox) queryClient.setQueryData(messageKeys.inbox(shopId), context.inbox);
+      if (context?.unread !== undefined) {
+        queryClient.setQueryData(messageKeys.unread(shopId), context.unread);
       }
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: messageKeys.all(shopId) }),
@@ -235,9 +240,7 @@ export function useSendMessage() {
   });
 }
 
-const TEMPLATE_KEYS_FOR_CUSTOMERS = Constants.public.Enums.message_template_key.filter(
-  (k) => k !== 'invite',
-);
+const TEMPLATE_KEYS_FOR_CUSTOMERS = SENDABLE_TEMPLATE_KEYS;
 
 export function useMessageTemplates() {
   const { shopId } = useShop();

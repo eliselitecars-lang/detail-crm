@@ -103,10 +103,10 @@ enum CustomerService {
         let ordered: PostgrestTransformBuilder
         switch query.sort {
         case .name:
+            // sort_name: last name, else company, else first name (lower
+            // case, then the first name) — generated and indexed server-side.
             ordered = request
-                .order("last_name", ascending: true, nullsFirst: false)
-                .order("first_name", ascending: true, nullsFirst: false)
-                .order("company", ascending: true, nullsFirst: false)
+                .order("sort_name", ascending: true)
                 .order("id", ascending: true)
         case .newest:
             ordered = request
@@ -295,19 +295,29 @@ enum CustomerService {
         return memberships.map { CustomerMembershipItem(membership: $0, plan: plansByID[$0.planID]) }
     }
 
-    /// Number of saved cards (manager+ can read; card details stay in Stripe).
-    static func savedCardCount(shopID: UUID, customerID: UUID) async throws -> Int {
-        let response = try await Supa.client
-            .from("customer_payment_methods")
-            .select("id", head: true, count: .exact)
-            .eq("shop_id", value: shopID.uuidString)
-            .eq("customer_id", value: customerID.uuidString)
+    /// Saved cards (manager+ can read; card details stay in Stripe — only
+    /// brand, last 4 and expiry are stored).
+    static func savedCards(shopID: UUID, customerID: UUID) async throws -> [SavedCard] {
+        try await InvoiceService.savedCards(shopID: shopID, customerID: customerID)
+    }
+
+    /// The customer's overview (`customer_summary`, manager+): lifetime
+    /// paid, open / overdue balance, visits, upcoming jobs.
+    static func summary(customerID: UUID) async throws -> CustomerSummary {
+        let rows: [CustomerSummary] = try await Supa.client
+            .rpc("customer_summary", params: CustomerSummaryParams(p_customer_id: customerID))
             .execute()
-        return response.count ?? 0
+            .value
+        guard let summary = rows.first else { throw AppError.notFound("That customer") }
+        return summary
     }
 }
 
 // MARK: - Private row types (file scope: never nest types in generic functions)
+
+private struct CustomerSummaryParams: Encodable {
+    let p_customer_id: UUID
+}
 
 // table: customers
 private struct CustomerTagsRow: Decodable {

@@ -329,48 +329,52 @@ enum JobService {
     }
 
     /// Sends a job template through the messaging function (technicians:
-    /// on-my-way / started / complete on their assigned jobs only).
+    /// on-my-way / started / complete on their assigned jobs only). `nonce`
+    /// is one per compose, reused on a retry, so the server never queues
+    /// the message twice. Refusals arrive as `EdgeFunctionError`.
     static func sendTemplate(
         shopID: UUID,
         jobID: UUID,
         key: JobMessageTemplateKey,
-        channel: JobMessageChannel
+        channel: JobMessageChannel,
+        nonce: String
     ) async throws -> JobMessageSendResult {
         let body = JobMessageSendBody(
             action: "send",
-            shop_id: shopID.uuidString,
-            job_id: jobID.uuidString,
+            shop_id: shopID.uuidString.lowercased(),
+            job_id: jobID.uuidString.lowercased(),
             channel: channel.rawValue,
-            template_key: key.rawValue
+            template_key: key.rawValue,
+            request_nonce: nonce
         )
-        do {
-            let reply: JobMessageSendReply = try await Supa.client.functions.invoke(
-                "messaging",
-                options: FunctionInvokeOptions(body: body)
-            )
-            return JobMessageSendResult(
-                messageID: reply.message_id.flatMap { UUID(uuidString: $0) },
-                status: reply.status ?? "queued",
-                error: reply.error
-            )
-        } catch let error as FunctionsError {
-            throw readableFunctionError(error)
-        }
+        let reply: JobMessageSendReply = try await EdgeFunctions.invoke("messaging", body: body)
+        return JobMessageSendResult(
+            messageID: reply.message_id.flatMap { UUID(uuidString: $0) },
+            status: reply.status ?? "queued",
+            error: reply.error
+        )
     }
 
-    /// Turns the edge function's `{"error": "...", "code": "..."}` body
-    /// into a readable `AppError`.
-    static func readableFunctionError(_ error: FunctionsError) -> Error {
-        if case .httpError(let code, let data) = error {
-            if let decoded = try? JSONDecoder().decode(JobFunctionErrorBody.self, from: data),
-               let message = decoded.error?.trimmedNonEmpty {
-                return AppError.message(ErrorText.sentence(message))
+    // MARK: - Releasing card payments
+
+    static let paymentInProgressMessage =
+        "A card payment for this job is still processing. Wait for it to finish, then try again."
+
+    /// Before a job is cancelled / marked no-show: releases its open card
+    /// payments and pay links (`cancel_open_payments` with `job_id`).
+    /// Throws while a card payment is still processing (the status must not
+    /// change yet); returns how many attempts turned out to have taken the
+    /// money (now recorded on the job's deposit / invoice).
+    static func releaseOpenPayments(shopID: UUID, jobID: UUID) async throws -> Int {
+        do {
+            let release = try await PaymentService.cancelOpenPayments(shopID: shopID, jobID: jobID)
+            if release.inProgress > 0 {
+                throw AppError.message(paymentInProgressMessage)
             }
-            if code == 401 { return AppError.notSignedIn }
-            if code == 403 { return AppError.message("You don't have permission to do that.") }
-            return AppError.message("That didn't go through. Try again.")
+            return release.succeeded
+        } catch let error as EdgeFunctionError where error.reason == "payment_in_progress" {
+            throw AppError.message(paymentInProgressMessage)
         }
-        return AppError.message("Couldn't reach the server. Try again.")
     }
 
     // MARK: - New job: customers
@@ -812,6 +816,7 @@ private struct JobMessageSendBody: Encodable {
     let job_id: String
     let channel: String
     let template_key: String
+    let request_nonce: String
 }
 
 private struct JobMessageSendReply: Decodable {
@@ -821,7 +826,3 @@ private struct JobMessageSendReply: Decodable {
     let error: String?
 }
 
-private struct JobFunctionErrorBody: Decodable {
-    let error: String?
-    let code: String?
-}

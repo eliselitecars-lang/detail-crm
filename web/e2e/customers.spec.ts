@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, TECH } from './support/fixtures';
-import { mockSupabase } from './support/mockSupabase';
+import { mockSupabase, reply } from './support/mockSupabase';
 
 const CUSTOMER = {
   id: '30000000-0000-4000-8000-000000000001',
@@ -166,27 +166,18 @@ test.describe('customers', () => {
       tables: {
         shop_members: [membershipRow(OWNER, 'owner')],
         notifications: [],
-        customers: [CUSTOMER],
+        // PostgREST answers an offset beyond the total with 416 when counting.
+        customers: ({ url, method }) =>
+          method === 'GET' && Number(url.searchParams.get('offset')) >= 26
+            ? reply(416, {
+                code: 'PGRST103',
+                message: 'Requested range not satisfiable',
+                details: 'An offset of 200 was requested, but there are only 26 rows.',
+                hint: null,
+              })
+            : [CUSTOMER],
       },
       counts: { customers: 26 },
-    });
-    // PostgREST answers an offset beyond the total with 416 when counting.
-    await page.route('https://e2e-mock.supabase.co/rest/v1/customers?*', async (route) => {
-      const url = new URL(route.request().url());
-      if (route.request().method() === 'GET' && Number(url.searchParams.get('offset')) >= 26) {
-        return route.fulfill({
-          status: 416,
-          contentType: 'application/json',
-          headers: { 'access-control-allow-origin': '*' },
-          body: JSON.stringify({
-            code: 'PGRST103',
-            message: 'Requested range not satisfiable',
-            details: 'An offset of 200 was requested, but there are only 26 rows.',
-            hint: null,
-          }),
-        });
-      }
-      return route.fallback();
     });
     await page.goto('/app/customers?page=9');
     await expect(page).toHaveURL(/\/app\/customers\?page=2$/);

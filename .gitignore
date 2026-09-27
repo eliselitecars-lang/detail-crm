@@ -34,3 +34,7 @@ scripts/stack/.cache/
 supabase/functions/.stack-ca.pem
 web/playwright-report-stack/
 web/test-results-stack/
+
+# Python bytecode (scripts/*.py)
+__pycache__/
+*.pyc

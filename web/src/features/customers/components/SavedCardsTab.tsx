@@ -1,9 +1,10 @@
-import { Copy, CreditCard, MessageSquareText } from 'lucide-react';
+import { Copy, CreditCard, MessageSquareText, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import {
   Badge,
   Button,
   Card,
+  ConfirmDialog,
   Dialog,
   EmptyState,
   ErrorState,
@@ -11,9 +12,15 @@ import {
   useToast,
 } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { useCan } from '@/features/shop/useCan';
 import { errorMessage } from '@/lib/errors';
 import { formatPhone } from '@/lib/phone';
-import { useCreateCardSetupLink, useCustomerCards, useSendCustomerSms } from '../api';
+import {
+  useCreateCardSetupLink,
+  useCustomerCards,
+  useRemoveSavedCard,
+  useSendCustomerSms,
+} from '../api';
 import { cardSetupMessage, type CustomerRow } from '../model';
 
 const BRAND_LABELS: Record<string, string> = {
@@ -44,11 +51,31 @@ function why(customer: CustomerRow): string | null {
   return null;
 }
 
+interface CardToRemove {
+  paymentMethodId: string;
+  label: string;
+}
+
 export function SavedCardsTab({ customer }: { customer: CustomerRow }) {
   const { shopId } = useShop();
+  const toast = useToast();
+  const canRemove = useCan('cards.charge');
   const cards = useCustomerCards(shopId, customer.id, true);
+  const removeCard = useRemoveSavedCard(shopId, customer.id);
   const [open, setOpen] = useState(false);
+  const [removing, setRemoving] = useState<CardToRemove | null>(null);
   const blocked = why(customer);
+
+  const confirmRemove = async () => {
+    if (!removing) return;
+    try {
+      await removeCard.mutateAsync(removing.paymentMethodId);
+      toast.success(`${removing.label} removed`);
+      setRemoving(null);
+    } catch (error) {
+      toast.error(error);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-3">
@@ -94,12 +121,30 @@ export function SavedCardsTab({ customer }: { customer: CustomerRow }) {
                   </span>
                   {card.is_default && <Badge tone="info">Default</Badge>}
                 </span>
-                {card.exp_month && card.exp_year && (
-                  <span className="text-muted tabular text-sm">
-                    Expires {String(card.exp_month).padStart(2, '0')}/
-                    {String(card.exp_year).slice(-2)}
-                  </span>
-                )}
+                <span className="flex items-center gap-3">
+                  {card.exp_month && card.exp_year && (
+                    <span className="text-muted tabular text-sm">
+                      Expires {String(card.exp_month).padStart(2, '0')}/
+                      {String(card.exp_year).slice(-2)}
+                    </span>
+                  )}
+                  {canRemove && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      leadingIcon={<Trash2 className="size-4" aria-hidden="true" />}
+                      aria-label={`Remove ${brandLabel(card.brand)} ending in ${card.last4 ?? '••••'}`}
+                      onClick={() =>
+                        setRemoving({
+                          paymentMethodId: card.stripe_payment_method_id,
+                          label: `${brandLabel(card.brand)} ending in ${card.last4 ?? '••••'}`,
+                        })
+                      }
+                    >
+                      Remove
+                    </Button>
+                  )}
+                </span>
               </li>
             ))}
           </ul>
@@ -107,6 +152,20 @@ export function SavedCardsTab({ customer }: { customer: CustomerRow }) {
       </Card>
 
       {open && <SendSetupLinkDialog customer={customer} onClose={() => setOpen(false)} />}
+      <ConfirmDialog
+        open={removing !== null}
+        onClose={() => setRemoving(null)}
+        onConfirm={confirmRemove}
+        loading={removeCard.isPending}
+        tone="danger"
+        title="Remove saved card?"
+        description={
+          removing
+            ? `${removing.label} is removed from this customer in Stripe and can no longer be charged. The customer can save a card again with a new link.`
+            : undefined
+        }
+        confirmLabel="Remove card"
+      />
     </div>
   );
 }

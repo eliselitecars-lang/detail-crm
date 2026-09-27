@@ -108,11 +108,36 @@ struct ShopPickerView: View {
                         await appState.signOut()
                     }
                 }
+                Button("Delete account", role: .destructive) {
+                    confirmation = ConfirmationRequest(
+                        title: "Delete your account?",
+                        message: "This can't be undone. Your sign-in and profile are deleted and you're removed from every shop. A shop owner must first transfer ownership or delete the shop.",
+                        confirmTitle: "Delete account",
+                        isDestructive: true
+                    ) {
+                        await deleteAccount()
+                    }
+                }
             } label: {
                 Image(systemName: "person.crop.circle")
                     .accessibilityLabel("Account")
             }
         }
+    }
+}
+
+extension ShopPickerView {
+    /// Deletes the account (the `account` function refuses while the person
+    /// owns a shop), then signs out.
+    fileprivate func deleteAccount() async {
+        do {
+            try await AccountService.deleteAccount()
+        } catch {
+            toasts.show(ErrorText.message(for: error), style: .error, duration: .seconds(8))
+            return
+        }
+        toasts.show("Your account was deleted.")
+        await appState.signOut()
     }
 }
 

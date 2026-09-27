@@ -173,3 +173,58 @@ describe('sentenceCase', () => {
     expect(sentenceCase('Done!')).toBe('Done!');
   });
 });
+
+describe('edgeFunctionError status fallbacks (non-envelope bodies)', () => {
+  const httpError = (status: number, body: unknown) => ({
+    name: 'FunctionsHttpError',
+    context: new Response(typeof body === 'string' ? body : JSON.stringify(body), { status }),
+  });
+
+  it('maps the gateway 401 body to an expired session', async () => {
+    const e = await edgeFunctionError(httpError(401, { code: 401, message: 'Invalid JWT' }));
+    expect(e.kind).toBe('session_expired');
+    expect(e.message).toBe('Your session has expired. Sign in again.');
+    expect(e.status).toBe(401);
+  });
+
+  it('maps a gateway 403 / 404 / 429 without our envelope by status', async () => {
+    const forbidden = await edgeFunctionError(httpError(403, { msg: 'forbidden' }));
+    expect(forbidden.kind).toBe('permission');
+    expect(forbidden.message).toBe("You don't have permission to do that.");
+    const missing = await edgeFunctionError(
+      httpError(404, { code: 'NOT_FOUND', message: 'Requested function was not found' }),
+    );
+    expect(missing.kind).toBe('not_found');
+    expect(missing.message).toBe('Not found.');
+    const limited = await edgeFunctionError(httpError(429, 'Too Many Requests'));
+    expect(limited.kind).toBe('rate_limited');
+  });
+
+  it('never shows gateway text for 5xx', async () => {
+    const e = await edgeFunctionError(httpError(502, { message: 'upstream connect error' }));
+    expect(e.kind).toBe('server');
+    expect(e.message).toBe(GENERIC_ERROR_MESSAGE);
+    const html = await edgeFunctionError(httpError(504, '<html>Gateway Timeout</html>'));
+    expect(html.message).toBe(GENERIC_ERROR_MESSAGE);
+  });
+
+  it('uses message / msg for other statuses and keeps our envelope text', async () => {
+    const e = await edgeFunctionError(httpError(400, { message: 'body is not valid JSON' }));
+    expect(e.kind).toBe('validation');
+    expect(e.message).toBe('Body is not valid JSON.');
+    const envelope = await edgeFunctionError(
+      httpError(401, { error: 'Sign in to continue.', code: 'unauthorized' }),
+    );
+    expect(envelope.message).toBe('Sign in to continue.');
+    expect(envelope.kind).toBe('session_expired');
+  });
+});
+
+describe('PT404 (public RPC not found)', () => {
+  it('is a not_found error showing our message', () => {
+    const e = toAppError({ code: 'PT404', message: 'quote not found', details: null, hint: null });
+    expect(e.kind).toBe('not_found');
+    expect(e.message).toBe('Quote not found.');
+    expect(isNonRetryable(e)).toBe(true);
+  });
+});

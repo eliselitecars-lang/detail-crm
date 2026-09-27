@@ -1,18 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { supabase as appSupabase } from '@/lib/supabase';
 import { renderRoute } from '@/test/render';
-import { builders, resetSupabaseMock, setTableResult } from '@/test/supabaseMock';
+import { builders, resetSupabaseMock, setTableResult, supabase } from '@/test/supabaseMock';
 import { customerRow, planRow } from '@/features/quotes/testFixtures';
 import { billingLabel } from './api';
 import MembershipsPage from './MembershipsPage';
 
-vi.mock('@/lib/supabase', async () => {
-  const mod = await import('@/test/supabaseMock');
-  return { ...mod, supabase: Object.assign(mod.supabase, { functions: { invoke: vi.fn() } }) };
-});
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
-const invoke = vi.mocked(appSupabase.functions.invoke);
+const invoke = supabase.functions.invoke;
 
 beforeEach(() => {
   resetSupabaseMock();

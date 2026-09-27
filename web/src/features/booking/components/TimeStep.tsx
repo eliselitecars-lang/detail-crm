@@ -35,7 +35,8 @@ export function TimeStep({
   maxDaysAhead: number | null;
   /** Services + add-ons. */
   itemIds: string[];
-  categoryId: string;
+  /** null when the shop has no vehicle categories. */
+  categoryId: string | null;
   weekStart: string;
   onWeekChange: (start: string) => void;
   slot: SlotChoice | null;

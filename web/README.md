@@ -123,7 +123,8 @@ export const routes: FeatureRoutes = {
 
 Route map: `/login`, `/signup`, `/forgot-password`, `/reset-password`,
 `/invite/:token`, `/book/:slug`, `/booking/:token`, `/q/:token`, `/i/:token`,
-`/f/:token`, `/portal`, `/app` (dashboard), `/app/{calendar,jobs,customers,
+`/f/:token`, `/u/:token` (email unsubscribe), `/portal`, `/account` (every
+signed-in role: delete account), `/app` (dashboard), `/app/{calendar,jobs,customers,
 quotes,invoices,payments,memberships,messages,campaigns,reports,team,timesheets,
 catalog,settings,notifications}`, `/app/onboarding`.
 
@@ -165,7 +166,16 @@ server narrows rows" (e.g. technicians see only assigned jobs).
 - Throw on errors with `unwrap(result)` / `toAppError(error)` so `error`
   states show friendly text (`errorMessage(err)`); RLS denials never leak
   policy names, and `RAISE EXCEPTION` messages from our SQL are shown as-is.
-  Edge function errors: `await edgeFunctionError(error)`.
+  Public RPCs raise `PT404` (HTTP 404) for unknown links: kind `not_found`.
+  Edge functions: `invokeEdge(fn, action, params, schema)` from
+  `@/features/quotes/shared/edge` throws `EdgeFunctionError` (`reason` /
+  `details` from the `{ error, code, details }` envelope). A body that is not
+  our envelope (the gateway's `{ message }`, HTML) falls back to the HTTP
+  status: 401 → session expired, 403 → permission, 404 → not found, 429 →
+  rate limited, 5xx → generic.
+- Messages that may be retried carry a `request_nonce` (one per compose,
+  `newRequestNonce()`), reused on a retry after a network error and renewed
+  after a send or a definitive refusal, so the server never sends twice.
 - Validate untyped results (RPC `jsonb`, embedded selects) with zod at the boundary.
 
 ### Query keys
@@ -228,6 +238,9 @@ Forms: react-hook-form + zod (`zodResolver`) with shared field schemas in
 `zPercentBps`, …). Wrap controls in `<FormField label error>`; use
 `<Controller>` for MoneyInput/PhoneInput/Combobox.
 
+Class names: `cn(...)` from `@/lib/cn` (clsx + tailwind-merge, token-aware), so a
+component's `className` prop overrides its defaults (`cn('px-2', className)`).
+
 Styling: Tailwind utilities over design tokens only (`bg-surface`, `text-ink`,
 `text-muted`, `border-line`, `bg-primary`, `bg-money`, `text-success-ink`,
 `rounded-card`, `rounded-control`, …) — defined in `src/index.css` for light and
@@ -241,11 +254,24 @@ pick up the tokens automatically.
   `TZ=Pacific/Honolulu` so "browser zone ≠ shop zone" is always exercised.
 - `renderRoute(ui, { path, routePath, auth, shop, routes })` from
   `@/test/render` gives a memory router + Query + Toast + Auth/Shop contexts.
-- Mock the backend with `vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'))`,
-  then drive `supabase.auth.*`, `supabase.rpc.mockReturnValueOnce(createBuilder({ data }))`
-  and `setTableResult('jobs', { data: [...] })`; assert on `builders.<table>`.
+- Mock the backend with `vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'))`
+  (one shared double — no per-feature copies), call `resetSupabaseMock()` in
+  `beforeEach`, then drive:
+  - tables: `setTableResult('jobs', { data: [...] })`; assert on `builders.<table>`;
+  - RPCs: `mockRpc({ fn: { data } | pgError('PT404', 'quote not found') | (args) => … })`
+    (returns the recorded calls) or `supabase.rpc.mockReturnValueOnce(createBuilder({ data }))`;
+  - edge functions: `setFunctionResult('payments', { data })`, or per call
+    `supabase.functions.invoke.mockResolvedValueOnce({ data: null, error: edgeHttpError(422, { error, code, details: { reason } }) })`;
+  - storage: `supabase.storage.from('shop-assets').upload` / `remove` / `createSignedUrl(s)`
+    (one mock per bucket, reset with the rest).
 - Query by role/label (accessible names), not test ids.
-- E2E: `mockSupabase(page, { user, tables, rpc, counts, accounts })` from
-  `e2e/support/mockSupabase.ts` intercepts auth, PostgREST, RPC and realtime.
-  Locally Playwright uses the browsers in `PLAYWRIGHT_BROWSERS_PATH`
+- E2E: `mockSupabase(page, { user, tables, rpc, counts, accounts, functions, storage })` from
+  `e2e/support/mockSupabase.ts` intercepts auth, PostgREST, RPC, edge functions
+  (`/functions/v1/<name>`, unknown names → 404), storage and realtime. Any
+  handler may answer `reply(status, body)` for an error, e.g. an edge refusal
+  `reply(422, { error, code: 'unprocessable', details: { reason } })`, the
+  gateway's `reply(401, { code: 401, message: 'Invalid JWT' })` or a PostgREST
+  `reply(404, { code: 'PT404', message })` — no `page.route` workarounds per spec.
+  `PW_PORT` moves the two dev servers (default 5173 and 5174) when those ports
+  are taken. Locally Playwright uses the browsers in `PLAYWRIGHT_BROWSERS_PATH`
   (`PW_CHROMIUM_EXECUTABLE` overrides the binary); CI installs Chromium.

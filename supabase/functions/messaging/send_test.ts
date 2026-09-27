@@ -7,6 +7,10 @@ import type { SendResponse } from "./send.ts";
 import {
   CUSTOMER,
   CUSTOMER_PHONE,
+  DRAFT_INVOICE,
+  DRAFT_QUOTE,
+  INVOICE,
+  INVOICE_TOKEN,
   JOB,
   message,
   NO_EMAIL_CUSTOMER,
@@ -14,13 +18,17 @@ import {
   OPTED_OUT_JOB,
   OTHER_SHOP,
   OTHER_SHOP_CUSTOMER,
+  OTHER_SHOP_QUOTE,
   queuedMessage,
+  QUOTE,
+  QUOTE_TOKEN,
   RESEND_URL,
   setup,
   SHOP,
   SHOP_NUMBER,
   TWILIO_MESSAGES_URL,
   UNASSIGNED_JOB,
+  VOID_INVOICE,
 } from "./test_fixtures.ts";
 
 const APP = "https://app.example.com";
@@ -936,4 +944,271 @@ Deno.test("send: different content, another sender, a failed original or an old 
   assert(late.message_id !== stale.id);
   const dup = await responseJson<SendResponse>(await handler(sms("tok-manager", "Ready soon")));
   assertEquals([dup.message_id, dup.status], [recent.id, "sent"]);
+});
+
+// ---------------------------------------------------------------------------
+// Quotes and invoices (server-rendered quote_sent / invoice_sent)
+// ---------------------------------------------------------------------------
+
+Deno.test("send: a quote goes out as quote_sent rendered by the database, as the caller", async () => {
+  const { db, handler } = setup();
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", { quote_id: QUOTE, channel: "sms", template_key: "quote_sent" }),
+    ),
+  );
+  assertEquals([out.channel, out.status, out.error], ["sms", "sent", null]);
+  const row = message(db, out.message_id);
+  assertEquals([row.template_key, row.customer_id, row.job_id], ["quote_sent", CUSTOMER, null]);
+  const sms = db.http.callsTo("POST", TWILIO_MESSAGES_URL)[0];
+  assertEquals(
+    sms?.form.get("Body"),
+    `Your quote for $450.00: https://app.example.com/q/${QUOTE_TOKEN}`,
+  );
+  const call = db.requests.find((r) => r.target === "enqueue_document_message");
+  assertEquals([call?.role, call?.userId], [
+    "authenticated",
+    "10000000-0000-4000-8000-000000000002",
+  ]);
+});
+
+Deno.test("send: an invoice without a job goes out with its link, amount and balance", async () => {
+  const { db, handler } = setup();
+  // No shop_id: the shop is derived from the invoice.
+  const res = await handler(
+    jsonRequest("messaging", {
+      action: "send",
+      invoice_id: INVOICE,
+      channel: "sms",
+      template_key: "invoice_sent",
+    }, { token: "tok-owner", origin: APP }),
+  );
+  const out = await responseJson<SendResponse>(res);
+  assertEquals(out.status, "sent");
+  assertEquals(
+    db.http.callsTo("POST", TWILIO_MESSAGES_URL)[0]?.form.get("Body"),
+    `Your invoice: $300.00, $200.00 due. Pay: https://app.example.com/i/${INVOICE_TOKEN}`,
+  );
+  assertEquals(message(db, out.message_id).template_key, "invoice_sent");
+});
+
+Deno.test("send: technicians never send quotes or invoices", async () => {
+  const { db, handler } = setup();
+  for (
+    const body of [
+      { quote_id: QUOTE, template_key: "quote_sent" },
+      { invoice_id: INVOICE, template_key: "invoice_sent" },
+    ]
+  ) {
+    await expectError(
+      await handler(sendRequest("tok-tech", { ...body, channel: "sms" })),
+      403,
+      "forbidden",
+    );
+  }
+  assertEquals(db.requests.some((r) => r.target === "enqueue_document_message"), false);
+  assertEquals(db.table("messages").length, 0);
+});
+
+Deno.test("send: a document template that is turned off is 422 template_disabled", async () => {
+  const { db, handler } = setup();
+  const err = await expectError(
+    await handler(
+      sendRequest("tok-manager", {
+        invoice_id: INVOICE,
+        channel: "email",
+        template_key: "invoice_sent",
+      }),
+    ),
+    422,
+    "unprocessable",
+  );
+  assertEquals(err.details, { reason: "template_disabled" });
+  assertEquals(db.table("messages").length, 0);
+});
+
+Deno.test("send: a draft quote, a draft or a void invoice has no link yet (422 missing_link)", async () => {
+  const { db, handler } = setup();
+  for (
+    const [body, message, variable] of [
+      [
+        { quote_id: DRAFT_QUOTE, template_key: "quote_sent" },
+        "Mark the quote as sent first.",
+        "quote_link",
+      ],
+      [
+        { invoice_id: DRAFT_INVOICE, template_key: "invoice_sent" },
+        "Issue the invoice first.",
+        "invoice_link",
+      ],
+      [
+        { invoice_id: VOID_INVOICE, template_key: "invoice_sent" },
+        "This invoice is void; it can no longer be sent.",
+        "invoice_link",
+      ],
+    ] as const
+  ) {
+    const err = await expectError(
+      await handler(sendRequest("tok-manager", { ...body, channel: "sms" })),
+      422,
+      "unprocessable",
+    );
+    assertEquals([err.error, err.details], [message, {
+      reason: "missing_link",
+      variables: [variable],
+    }]);
+  }
+  assertEquals(db.requests.some((r) => r.target === "enqueue_document_message"), false);
+  assertEquals(
+    db.requests.filter((r) => r.target === "comms_document_vars").every((r) =>
+      r.role === "service_role"
+    ),
+    true,
+  );
+  assertEquals(db.table("messages").length, 0);
+});
+
+Deno.test("send: customer links not configured on the platform (55000) is 422 missing_link", async () => {
+  const { db, handler } = setup();
+  db.onRpc("enqueue_document_message", () => {
+    throw new FakeRpcError("55000", "customer links are not set up on this platform yet");
+  });
+  const err = await expectError(
+    await handler(
+      sendRequest("tok-manager", { quote_id: QUOTE, channel: "sms", template_key: "quote_sent" }),
+    ),
+    422,
+    "unprocessable",
+  );
+  assertEquals(err.details, { reason: "missing_link" });
+});
+
+Deno.test("send: another shop's quote is not found; document input rules", async () => {
+  const { handler } = setup();
+  await expectError(
+    await handler(
+      sendRequest("tok-manager", {
+        quote_id: OTHER_SHOP_QUOTE,
+        channel: "sms",
+        template_key: "quote_sent",
+      }),
+    ),
+    404,
+    "not_found",
+  );
+  // Derived shop: an outsider learns nothing about the quote.
+  await expectError(
+    await handler(
+      jsonRequest("messaging", {
+        action: "send",
+        quote_id: QUOTE,
+        channel: "sms",
+        template_key: "quote_sent",
+      }, { token: "tok-outsider", origin: APP }),
+    ),
+    404,
+    "not_found",
+  );
+  for (
+    const body of [
+      { quote_id: QUOTE, template_key: "invoice_sent" },
+      { quote_id: QUOTE },
+      { invoice_id: INVOICE, template_key: "quote_sent" },
+      { quote_id: QUOTE, invoice_id: INVOICE, template_key: "quote_sent" },
+      { quote_id: QUOTE, template_key: "quote_sent", job_id: JOB },
+      { quote_id: QUOTE, template_key: "quote_sent", customer_id: CUSTOMER },
+      { invoice_id: INVOICE, template_key: "invoice_sent", body: "Pay now" },
+      { quote_id: QUOTE, template_key: "quote_sent", request_nonce: "short" },
+    ]
+  ) {
+    await expectError(
+      await handler(sendRequest("tok-manager", { ...body, channel: "sms" })),
+      400,
+      "validation_failed",
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// request_nonce (messages.request_nonce, 0033)
+// ---------------------------------------------------------------------------
+
+Deno.test("send: a retry with the same request_nonce returns the same message and sends once", async () => {
+  for (
+    const body of [
+      { customer_id: CUSTOMER, body: "See you at 10!" },
+      { job_id: JOB, template_key: "job_completed", channel: "email" },
+      { customer_id: CUSTOMER, template_key: "follow_up" },
+      { quote_id: QUOTE, template_key: "quote_sent" },
+    ]
+  ) {
+    const { db, handler } = setup();
+    const request = { channel: "sms", ...body, request_nonce: "compose-4f2a9c1e" };
+    const first = await responseJson<SendResponse>(
+      await handler(sendRequest("tok-manager", request)),
+    );
+    const retry = await responseJson<SendResponse>(
+      await handler(sendRequest("tok-manager", request)),
+    );
+    assertEquals(first.status, "sent", JSON.stringify(body));
+    assertEquals([retry.message_id, retry.status], [first.message_id, "sent"]);
+    assertEquals(db.table("messages").length, 1);
+    const provider = body.channel === "email" ? RESEND_URL : TWILIO_MESSAGES_URL;
+    assertEquals(db.http.callsTo("POST", provider).length, 1);
+    const call = db.requests.filter((r) => r.kind === "rpc").find((r) =>
+      [
+        "queue_message",
+        "enqueue_template_message",
+        "enqueue_customer_template",
+        "enqueue_document_message",
+      ]
+        .includes(r.target)
+    );
+    assert(call, "queued through a queue RPC");
+  }
+});
+
+Deno.test("send: a new request_nonce is a new message, even with the same content", async () => {
+  const { db, handler } = setup();
+  for (const nonce of ["compose-00000001", "compose-00000002"]) {
+    const out = await responseJson<SendResponse>(
+      await handler(
+        sendRequest("tok-manager", {
+          customer_id: CUSTOMER,
+          channel: "sms",
+          body: "See you at 10!",
+          request_nonce: nonce,
+        }),
+      ),
+    );
+    assertEquals(out.status, "sent");
+  }
+  // The content-based dedup is not applied when the client gives nonces.
+  assertEquals(db.table("messages").length, 2);
+  assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 2);
+});
+
+Deno.test("send: a nonce replay of a message still queued delivers it (it never went out)", async () => {
+  const { db, handler } = setup({
+    messages: [
+      queuedMessage({
+        id: "90000000-0000-4000-8000-000000000001",
+        sent_by: "10000000-0000-4000-8000-000000000002",
+        request_nonce: "compose-queued01",
+        body: "See you at 10!",
+      }),
+    ],
+  });
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "sms",
+        body: "See you at 10!",
+        request_nonce: "compose-queued01",
+      }),
+    ),
+  );
+  assertEquals([out.message_id, out.status], ["90000000-0000-4000-8000-000000000001", "sent"]);
+  assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 1);
 });

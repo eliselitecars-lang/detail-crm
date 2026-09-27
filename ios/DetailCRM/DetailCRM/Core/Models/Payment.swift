@@ -357,14 +357,6 @@ enum MoneyDocumentTemplate: String, Hashable, Sendable {
     case quoteSent = "quote_sent"
     case invoiceSent = "invoice_sent"
 
-    /// The template variable that carries the client link.
-    var linkVariable: String {
-        switch self {
-        case .quoteSent: return "quote_link"
-        case .invoiceSent: return "invoice_link"
-        }
-    }
-
     var documentNoun: String {
         switch self {
         case .quoteSent: return "quote"
@@ -373,38 +365,37 @@ enum MoneyDocumentTemplate: String, Hashable, Sendable {
     }
 }
 
-// table: message_templates
-struct MoneyTemplateRow: Codable, Hashable, Sendable {
+/// What a quote / invoice message will say, rendered by the server.
+// rpc: preview_document_message
+struct MoneyDocumentPreview: Codable, Hashable, Sendable {
+    /// The shop's template for this channel is turned on.
+    var enabled: Bool
+    /// The customer's number / email for the channel (nil when missing).
+    var toAddress: String?
+    /// Email only.
     var subject: String?
     var body: String
-    var enabled: Bool
 
     enum CodingKeys: String, CodingKey {
+        case enabled
+        case toAddress = "to_address"
         case subject
         case body
-        case enabled
     }
-
-    static let selectColumns = "subject,body,enabled"
 }
 
-// table: shops
-struct MoneyMessageShopRow: Codable, Hashable, Sendable {
-    var name: String
-    var slug: String
-    var phone: String?
-    var currency: String
-    var reviewURL: String?
+/// `payments` → `remove_saved_card`.
+struct MoneySavedCardRemoval: Decodable, Hashable, Sendable {
+    var removed: Bool
 
-    enum CodingKeys: String, CodingKey {
-        case name
-        case slug
-        case phone
-        case currency
-        case reviewURL = "review_url"
+    private enum Keys: String, CodingKey {
+        case removed
     }
 
-    static let selectColumns = "name,slug,phone,currency,review_url"
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        removed = try c.decodeIfPresent(Bool.self, forKey: .removed) ?? false
+    }
 }
 
 /// Channel for templated customer messages.

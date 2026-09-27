@@ -1,7 +1,8 @@
 /**
  * Stripe Connect event handlers. Each one maps a verified event on a shop's
- * connected account to the service_role money helpers in migrations 0011 and
- * 0013 (upsert_stripe_payment, apply_stripe_refund,
+ * connected account to the service_role money helpers in migrations 0011,
+ * 0013 and 0093 (upsert_stripe_payment, apply_stripe_refund,
+ * set_stripe_refund_total, apply_stripe_dispute,
  * upsert_customer_payment_method, sync_stripe_subscription) or to
  * shop_stripe_accounts.
  *
@@ -21,7 +22,10 @@
  *    so the webhook answers 500 and Stripe redelivers.
  *  - Money whose linked job / invoice / membership was deleted while the
  *    payment was open is kept as the customer's unapplied payment (with a
- *    note), never failed forever on the foreign key.
+ *    note): upsert_stripe_payment drops the stale links itself, and when
+ *    nothing it names is left (P0002) the payer is found by Stripe customer
+ *    or the money is logged as unlinkable and acknowledged, never retried
+ *    forever.
  *  - Money for a job / invoice whose customer changed while the payment was
  *    open (a deposit link opened for the previous customer) is kept as the
  *    payer's unapplied payment (with a note), never failed forever on 23514.
@@ -33,13 +37,18 @@
  *  - Saved cards follow Stripe: a detached card (removed in the PaymentSheet
  *    or the dashboard, or its Stripe customer deleted) is removed, and a card
  *    is only saved while it is still attached.
- *  - Disputes are flagged on the payment (note + staff notification). A lost
- *    dispute cannot lower the payment yet (no DB primitive): it is flagged.
+ *  - Disputes are flagged on the payment (note + staff notification) and
+ *    their outcome is recorded in payments.disputed_cents (apply_stripe_dispute,
+ *    0093): the money a lost dispute took back. Balances and revenue are not
+ *    changed by a dispute; staff decide whether to bill the customer again.
+ *  - Once a card payment settles an invoice in full, the invoice's other
+ *    PaymentSheets still waiting for a card are cancelled (and recorded
+ *    cancelled), so an open sheet on another device cannot charge it twice.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Logger } from "../_shared/log.ts";
 import { formatCents } from "../_shared/money.ts";
-import { onAccount, type Stripe } from "../_shared/stripe.ts";
+import { idempotencyKey, onAccount, type Stripe } from "../_shared/stripe.ts";
 import {
   cancelsAtPeriodEnd,
   type CardDetails,
@@ -348,7 +357,9 @@ async function recordPayment(
       const code = err instanceof DbError ? err.code : null;
       if (code === null || recovered.has(code)) throw err;
       recovered.add(code);
-      const relinked = code === "23503"
+      // P0002: none of the linked records exists any more (the SQL drops
+      // stale links itself); 23503: one was deleted after that check.
+      const relinked = code === "P0002" || code === "23503"
         ? await dropDeletedLinks(ctx, write, md)
         : code === "23514"
         ? await leaveChangedParent(ctx, write, md)
@@ -370,6 +381,22 @@ async function recordPayment(
       md = relinked.md;
       notes.push(relinked.note);
     }
+  }
+
+  // Links the SQL dropped because their record was deleted (a booking
+  // deleted while its deposit link was open): say so on the payment.
+  const dropped = await deletedLinksOf(ctx, write.shopId, md, row);
+  if (dropped.length > 0) {
+    ctx.log.warn("stripe_payment_relinked", {
+      payment_intent: write.paymentIntentId,
+      deleted: dropped,
+    });
+    notes.push(
+      dropped.length === 1 && dropped[0] === "customer"
+        ? "Paid through a link opened for a customer who has since been deleted: " +
+          "check who paid before applying it"
+        : `Received for a deleted ${dropped.join(" / ")}: apply it to an invoice or refund it`,
+    );
   }
 
   const otherMethod = nonCardMethodType(write.charge);
@@ -400,9 +427,37 @@ interface Relinked {
   note: string;
 }
 
+const ROW_COLUMNS = {
+  invoiceId: "invoice_id",
+  jobId: "job_id",
+  membershipId: "membership_id",
+  customerId: "customer_id",
+} as const;
+
 /**
- * 23503: a record the metadata links to was deleted after the payment
- * started (e.g. a booking deleted while its deposit link was still open).
+ * The linked records the metadata names that the recorded payment does not
+ * carry because they no longer exist in the shop (upsert_stripe_payment drops
+ * them). Only differing links are looked up, so a payment recorded as named
+ * costs no query.
+ */
+async function deletedLinksOf(
+  ctx: WebhookContext,
+  shopId: string,
+  md: CrmMetadata,
+  row: PaymentRow,
+): Promise<string[]> {
+  const deleted: string[] = [];
+  for (const { key, table, label } of LINK_TABLES) {
+    const id = md[key];
+    if (id === null || row[ROW_COLUMNS[key]] === id) continue;
+    if (!(await existsInShop(ctx, table, id, shopId))) deleted.push(label);
+  }
+  return deleted;
+}
+
+/**
+ * P0002 / 23503: records the metadata links to were deleted after the
+ * payment started (e.g. a booking deleted while its deposit link was still open).
  * The insert can never succeed as is, so the money is kept as an unapplied
  * payment of the customer instead of failing on every redelivery. Returns
  * the linkage without the records that no longer exist in the shop (null
@@ -576,7 +631,8 @@ async function syncRefund(
  * came with may have been relinked to another customer (e.g. the payer was
  * deleted and the deposit fell to the job's new customer). Saving it there
  * would show the payer's card as someone else's and make charge_saved_card
- * pick a card Stripe refuses for that customer.
+ * pick a card Stripe refuses for that customer. The SQL helper enforces the
+ * same rule (p_stripe_customer_id).
  */
 async function saveCard(
   ctx: WebhookContext,
@@ -607,6 +663,8 @@ async function saveCard(
       p_exp_month: card.expMonth,
       p_exp_year: card.expYear,
       p_make_default: false,
+      // 0011: refused (22023) unless it is the customer's Stripe customer
+      p_stripe_customer_id: cardOwner,
     });
   } catch (err) {
     if (err instanceof DbError && err.code === "P0002") {
@@ -727,11 +785,118 @@ async function onPaymentIntent(
   if (status === "succeeded") {
     await syncRefund(ctx, piId, charge);
     await saveCardFromIntent(ctx, shopId, pi, charge, payment);
+    await cancelSiblingSheets(ctx, shopId, payment);
   }
   return applied(ctx, reconfirmable ? "payment_declined_open" : `payment_${status}`, {
     payment_intent: piId,
     payment_id: payment.id,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Sibling PaymentSheets of a settled invoice
+// ---------------------------------------------------------------------------
+
+/** Sheet states in which no card was given yet (requires_action is mid-3DS: left alone). */
+const WAITING_SHEET = new Set<string>(["requires_payment_method", "requires_confirmation"]);
+
+interface SheetRow {
+  id: string;
+  shop_id: string;
+  invoice_id: string | null;
+  job_id: string | null;
+  customer_id: string;
+  kind: "deposit" | "payment" | "membership";
+  method: "card" | "card_present";
+  amount_cents: number;
+  tip_cents: number;
+  stripe_payment_intent_id: string;
+}
+
+/**
+ * Money just landed on an invoice. When nothing is left to pay (status paid
+ * or balance <= 0), the invoice's other PaymentSheets still waiting for a card
+ * (another device, a sheet left open) are cancelled in Stripe (idempotency key
+ * sheet_cancel:<pi>) and recorded cancelled, so they can no longer overpay
+ * it. Only payment_sheet intents in requires_payment_method /
+ * requires_confirmation are touched; anything else (processing, 3DS in
+ * progress, other flows) is left to the payments sweep. Deposits need no
+ * pass of their own: a deposit payment attaches to the job's invoice
+ * (payments_before_write), and deposit links are Checkout Sessions that
+ * supersede each other. Best effort: a failure is logged, never fails the
+ * delivery (the money is already recorded; sweep_payment_sheets releases a
+ * sheet left open).
+ */
+async function cancelSiblingSheets(
+  ctx: WebhookContext,
+  shopId: string,
+  payment: PaymentRow,
+): Promise<void> {
+  if (!payment.invoice_id || !RECEIVED.has(payment.status)) return;
+  const { data: invoice, error } = await ctx.admin
+    .from("invoices")
+    .select("id, status, balance_cents")
+    .eq("id", payment.invoice_id)
+    .eq("shop_id", shopId)
+    .maybeSingle<{ id: string; status: string; balance_cents: number }>();
+  if (error) throw new DbError("invoices lookup", error);
+  if (!invoice || (invoice.status !== "paid" && invoice.balance_cents > 0)) return;
+  const { data: rows, error: rowsError } = await ctx.admin
+    .from("payments")
+    .select(
+      "id, shop_id, invoice_id, job_id, customer_id, kind, method, amount_cents, tip_cents, stripe_payment_intent_id",
+    )
+    .eq("shop_id", shopId)
+    .eq("invoice_id", invoice.id)
+    .eq("status", "pending")
+    .in("method", ["card", "card_present"])
+    .neq("kind", "membership")
+    .returns<SheetRow[]>();
+  if (rowsError) throw new DbError("pending payments lookup", rowsError);
+  for (const row of rows ?? []) {
+    if (!row.stripe_payment_intent_id || row.id === payment.id) continue;
+    try {
+      const account = onAccount(connectedAccount(ctx));
+      const intent = await ctx.stripe.paymentIntents.retrieve(
+        row.stripe_payment_intent_id,
+        {},
+        account,
+      );
+      if (intent.metadata?.source !== "payment_sheet" || !WAITING_SHEET.has(intent.status)) {
+        continue;
+      }
+      await ctx.stripe.paymentIntents.cancel(
+        intent.id,
+        { cancellation_reason: "duplicate" },
+        onAccount(connectedAccount(ctx), {
+          idempotencyKey: await idempotencyKey("sheet_cancel", intent.id),
+        }),
+      );
+      await rpc(ctx, "upsert_stripe_payment", {
+        p_shop_id: shopId,
+        p_payment_intent_id: row.stripe_payment_intent_id,
+        p_status: "cancelled",
+        p_amount_cents: row.amount_cents,
+        p_tip_cents: row.tip_cents,
+        p_kind: row.kind,
+        p_method: row.method,
+        p_invoice_id: row.invoice_id,
+        p_job_id: row.job_id,
+        p_customer_id: row.customer_id,
+      });
+      ctx.log.info("sibling_sheet_cancelled", {
+        payment_intent: row.stripe_payment_intent_id,
+        payment_id: row.id,
+        invoice_id: invoice.id,
+      });
+    } catch (err) {
+      ctx.log.warn("sibling_sheet_cancel_failed", {
+        payment_intent: row.stripe_payment_intent_id,
+        invoice_id: invoice.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 /** Is there a payment row for this intent in the shop? */
@@ -813,6 +978,7 @@ async function checkoutPayment(
   if (status === "succeeded") {
     await syncRefund(ctx, piId, charge);
     await saveCardFromIntent(ctx, shopId, pi, charge, payment);
+    await cancelSiblingSheets(ctx, shopId, payment);
   }
   return applied(ctx, `checkout_payment_${status}`, {
     payment_intent: piId,
@@ -991,12 +1157,6 @@ interface RefundRow {
 
 const REFUND_COLUMNS = "id, shop_id, status, amount_cents, tip_cents, refunded_cents";
 
-/** payment_refund_status (0012), for the reversal write below. */
-export function refundStatus(amountCents: number, tipCents: number, refundedCents: number): string {
-  if (refundedCents <= 0) return "succeeded";
-  return refundedCents >= amountCents + tipCents ? "refunded" : "partially_refunded";
-}
-
 async function onChargeRefunded(ctx: WebhookContext, charge: Stripe.Charge): Promise<Outcome> {
   return await reconcileChargeRefunds(
     ctx,
@@ -1135,13 +1295,11 @@ async function refundRow(
 
 /**
  * Lower refunded_cents to Stripe's current total. apply_stripe_refund (0013)
- * cannot (it keeps the greater value), so this writes the row directly with
- * the service role, keeping the 0012 invariants (status derived with
- * payment_refund_status's rules; only received payments; 0 <= total). The
- * write is a compare-and-set on the refunded total it read: if another
- * writer (the staff refund action, a concurrent delivery) changed the row in
- * between, nothing is written and the delivery fails so Stripe redelivers and
- * the charge is read again.
+ * cannot (it keeps the greater value), so this uses set_stripe_refund_total
+ * (0093), a compare-and-set on the refunded total it read: if another writer
+ * (the staff refund action, a concurrent delivery) changed the row in
+ * between, it raises 40001 and the delivery fails, so Stripe redelivers and
+ * the charge is read again. The SQL derives the status (payment_refund_status).
  */
 async function reverseRefund(
   ctx: WebhookContext,
@@ -1153,26 +1311,18 @@ async function reverseRefund(
   if (row.shop_id !== shopId || !RECEIVED.has(row.status)) {
     throw new Error("refund reversal on a payment that is not a received payment of this shop");
   }
-  const status = refundStatus(row.amount_cents, row.tip_cents, refundedCents);
-  const { data, error } = await ctx.admin
-    .from("payments")
-    .update({ refunded_cents: refundedCents, status })
-    .eq("id", row.id)
-    .eq("shop_id", shopId)
-    .eq("stripe_payment_intent_id", piId)
-    .eq("refunded_cents", row.refunded_cents)
-    .eq("status", row.status)
-    .select("id");
-  if (error) throw new DbError("payments refund reversal", error);
-  if (!data || data.length === 0) {
-    throw new Error("payment refund changed concurrently; the event will be retried");
-  }
+  const updated = await rpc<RefundRow>(ctx, "set_stripe_refund_total", {
+    p_shop_id: shopId,
+    p_payment_intent_id: piId,
+    p_expected_refunded_cents: row.refunded_cents,
+    p_refunded_cents_total: refundedCents,
+  });
   ctx.log.warn("stripe_refund_reversed", {
     payment_intent: piId,
     payment_id: row.id,
     previous_refunded_cents: row.refunded_cents,
     refunded_cents_total: refundedCents,
-    status,
+    status: updated?.status ?? null,
   });
 }
 
@@ -1189,8 +1339,19 @@ interface DisputePaymentRow {
   id: string;
   shop_id: string;
   job_id: string | null;
+  invoice_id: string | null;
+  customer_id: string;
+  stripe_payment_intent_id: string | null;
   note: string | null;
 }
+
+/** The payments row apply_stripe_dispute returns (the column read here). */
+interface DisputeOutcome {
+  disputed_cents: number;
+}
+
+const DISPUTE_PAYMENT_COLUMNS =
+  "id, shop_id, job_id, invoice_id, customer_id, stripe_payment_intent_id, note";
 
 /** The staff-facing line for a dispute's current state (no personal data). */
 export function disputeNoteLine(dispute: {
@@ -1220,7 +1381,7 @@ export function disputeNoteLine(dispute: {
       return `${head} inquiry closed without a chargeback.`;
     case "lost":
       return `${head} LOST. The card issuer took the money back from the shop's Stripe ` +
-        "balance, but this payment still counts as received here: correct the job's balance.";
+        "balance. The payment still counts toward the invoice: bill the customer again if needed.";
     default:
       return `${head} ${String(dispute.status).replaceAll("_", " ")}.`;
   }
@@ -1246,12 +1407,20 @@ const DISPUTE_ALERTS: Record<string, string> = {
 
 /**
  * A customer disputed a card payment. The dispute's CURRENT state is re-read
- * (events can arrive out of order) and written as one line of the payment's
- * note, so staff see that evidence is due, and owners/admins are notified
- * when it opens and when it is decided. A lost dispute takes the money (and
- * Stripe's fee) back without any refund, so the charge's refunded total does
- * not move and nothing here can lower the payment: there is no DB primitive
- * for a chargeback yet, so it is flagged (note, notification, error log).
+ * (events can arrive out of order), so every charge.dispute.* event applies
+ * the same outcome whatever its type or order:
+ *   - apply_stripe_dispute (0093) records it on the payment: `lost` sets
+ *     disputed_cents to what the dispute took back (never more than the
+ *     charge not yet refunded); `won` / `warning_closed` clear it; open
+ *     states leave it alone (funds_withdrawn / funds_reinstated therefore
+ *     follow the dispute's current status). Balances, net amounts and
+ *     revenue do not change: staff decide whether to bill again.
+ *   - one line of the payment's note says where the dispute stands, so staff
+ *     see that evidence is due;
+ *   - owners/admins are notified when it opens and when it is decided, with
+ *     the payment's customer and invoice as deep links.
+ * A lost dispute takes the money (and Stripe's fee) back without any refund,
+ * so the charge's refunded total does not move.
  */
 async function onDisputeChanged(ctx: WebhookContext, event: Stripe.Dispute): Promise<Outcome> {
   const shopId = await shopForAccount(ctx);
@@ -1282,8 +1451,23 @@ async function onDisputeChanged(ctx: WebhookContext, event: Stripe.Dispute): Pro
   if (dispute.status === "lost") ctx.log.error("stripe_dispute_lost", fields);
   else ctx.log.warn("stripe_dispute", fields);
 
+  // Idempotent: a replay (or an event without a state change) writes nothing.
+  const recorded = payment.stripe_payment_intent_id
+    ? await rpc<DisputeOutcome>(ctx, "apply_stripe_dispute", {
+      p_shop_id: shopId,
+      p_payment_intent_id: payment.stripe_payment_intent_id,
+      p_dispute_status: dispute.status,
+      p_amount_cents: dispute.amount,
+    })
+    : null;
+
   const note = withDisputeLine(payment.note, line);
-  if (note === payment.note) return ignore(ctx, "dispute_unchanged", { dispute: dispute.id });
+  if (note === payment.note) {
+    return ignore(ctx, "dispute_unchanged", {
+      dispute: dispute.id,
+      disputed_cents: recorded ? recorded.disputed_cents : null,
+    });
+  }
 
   // Notify before writing the note: a failed note write retries and may
   // notify twice, but a notification is never lost.
@@ -1298,6 +1482,9 @@ async function onDisputeChanged(ctx: WebhookContext, event: Stripe.Dispute): Pro
       p_title: title,
       p_body: line,
       p_job_id: payment.job_id,
+      // deep links (0031): the payment's customer and invoice
+      p_customer_id: payment.customer_id,
+      p_invoice_id: payment.invoice_id,
     });
   }
   let update = ctx.admin
@@ -1329,7 +1516,7 @@ async function disputedPayment(
     if (!value) continue;
     const { data, error } = await ctx.admin
       .from("payments")
-      .select("id, shop_id, job_id, note")
+      .select(DISPUTE_PAYMENT_COLUMNS)
       .eq(column, value)
       .eq("shop_id", shopId)
       .limit(1)

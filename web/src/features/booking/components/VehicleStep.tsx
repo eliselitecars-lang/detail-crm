@@ -38,7 +38,11 @@ export function VehicleStep({
   return (
     <StepFrame
       title="Tell us about your vehicle"
-      description="Pricing depends on the size and type of vehicle."
+      description={
+        requireCategory
+          ? 'Pricing depends on the size and type of vehicle.'
+          : 'So we know what we’ll be working on.'
+      }
       onContinue={next}
     >
       {notice && <Banner tone="warning" title={notice} />}

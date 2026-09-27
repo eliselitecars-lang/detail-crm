@@ -134,8 +134,10 @@ extension PricingService {
     }
 }
 
-/// Every argument is sent (nulls explicit) so PostgREST resolves the
-/// five-argument function.
+/// `p_shop`, `p_customer_id` (explicit null for a walk-in price) and
+/// `p_service_ids` are always sent; the category and vehicle are omitted
+/// when unknown (their SQL defaults are null — a shop without vehicle
+/// categories prices at the base price).
 // rpc: price_services
 private struct JobPriceServicesParams: Encodable {
     let shopID: UUID
@@ -156,8 +158,8 @@ private struct JobPriceServicesParams: Encodable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(shopID, forKey: .shopID)
         try container.encode(customerID, forKey: .customerID)
-        try container.encode(vehicleCategoryID, forKey: .vehicleCategoryID)
+        try container.encodeIfPresent(vehicleCategoryID, forKey: .vehicleCategoryID)
         try container.encode(serviceIDs, forKey: .serviceIDs)
-        try container.encode(vehicleID, forKey: .vehicleID)
+        try container.encodeIfPresent(vehicleID, forKey: .vehicleID)
     }
 }

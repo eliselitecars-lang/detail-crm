@@ -52,6 +52,20 @@ function dailyRevenue({ body }: { body: unknown }) {
   return rows as never;
 }
 
+/** report_revenue_totals for the sample payments (the page never sums buckets). */
+const revenueTotals = [
+  {
+    gross_cents: 62500,
+    refunds_cents: 5000,
+    net_cents: 57500,
+    tips_cents: 2000,
+    payments_count: 4,
+  },
+];
+const noRevenue = [
+  { gross_cents: 0, refunds_cents: 0, net_cents: 0, tips_cents: 0, payments_count: 0 },
+];
+
 const methods = ['card', 'card_present', 'cash', 'check', 'bank_transfer', 'other'].map((m) => ({
   method: m,
   payments_count: m === 'card' ? 3 : m === 'cash' ? 1 : 0,
@@ -99,6 +113,7 @@ test.describe('reports', () => {
       tables: { shop_members: [membershipRow(OWNER, 'owner')], notifications: [] },
       rpc: {
         report_revenue: log('report_revenue', revenue),
+        report_revenue_totals: log('report_revenue_totals', revenueTotals),
         report_payments: log('report_payments', methods),
         report_sales_by_service: log('report_sales_by_service', [
           {
@@ -188,7 +203,7 @@ test.describe('reports', () => {
     await expect(tiles).toContainText('$625.00');
     // The chart renders real bars.
     await expect(page.locator('.recharts-bar-rectangle').first()).toBeVisible();
-    expect(calls[0]).toEqual({
+    expect(calls.find((c) => c.fn === 'report_revenue')).toEqual({
       fn: 'report_revenue',
       body: {
         p_shop_id: expect.any(String),
@@ -196,6 +211,11 @@ test.describe('reports', () => {
         p_to: '2026-03-02',
         p_bucket: 'day',
       },
+    });
+    expect(calls.find((c) => c.fn === 'report_revenue_totals')?.body).toEqual({
+      p_shop_id: expect.any(String),
+      p_from: '2026-03-01',
+      p_to: '2026-03-02',
     });
 
     const downloadPromise = page.waitForEvent('download');
@@ -276,7 +296,11 @@ test.describe('reports', () => {
     await mockSupabase(page, {
       user: OWNER,
       tables: { shop_members: [membershipRow(OWNER, 'owner')], notifications: [] },
-      rpc: { report_revenue: dailyRevenue, report_payments: methods },
+      rpc: {
+        report_revenue: dailyRevenue,
+        report_revenue_totals: revenueTotals,
+        report_payments: methods,
+      },
     });
     await page.setViewportSize({ width: 360, height: 780 });
     const overflow = () =>
@@ -301,6 +325,7 @@ test.describe('reports', () => {
           queried = true;
           return [];
         },
+        report_revenue_totals: noRevenue,
       },
     });
     await page.goto('/app/reports');
@@ -315,7 +340,9 @@ test.describe('reports', () => {
     expect(queried).toBe(true);
   });
 
-  test('long ranges cannot be grouped by day (server rows are capped)', async ({ page }) => {
+  test('ranges over 366 days cannot be grouped by day (report_revenue refuses)', async ({
+    page,
+  }) => {
     const buckets: unknown[] = [];
     await mockSupabase(page, {
       user: OWNER,
@@ -325,15 +352,17 @@ test.describe('reports', () => {
           buckets.push((body as { p_bucket: string }).p_bucket);
           return [] as never;
         },
+        report_revenue_totals: noRevenue,
       },
     });
-    await page.goto('/app/reports?range=custom&from=2023-01-01&to=2026-09-27&bucket=day');
+    await page.goto('/app/reports?range=custom&from=2025-09-01&to=2026-09-27&bucket=day');
     await expect(page.getByText('No payments in this period')).toBeVisible();
-    expect(buckets).toEqual(['month']);
+    // ?bucket=day over 392 days falls back to weeks
+    expect(buckets).toEqual(['week']);
     const groupBy = page.getByRole('combobox', { name: 'Group by' });
-    await expect(groupBy).toHaveValue('month');
+    await expect(groupBy).toHaveValue('week');
     await expect(groupBy.getByRole('option', { name: 'Daily (range too long)' })).toBeDisabled();
-    await groupBy.selectOption('week');
-    await expect.poll(() => buckets.at(-1)).toBe('week');
+    await groupBy.selectOption('month');
+    await expect.poll(() => buckets.at(-1)).toBe('month');
   });
 });

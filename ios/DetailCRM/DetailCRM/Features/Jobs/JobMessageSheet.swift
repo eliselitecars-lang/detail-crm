@@ -19,6 +19,9 @@ struct JobMessageSheet: View {
     @State private var channel: JobMessageChannel = .sms
     @State private var preview: LoadState<JobMessagePreview?> = .idle
     @State private var errorMessage: String?
+    /// Reused when Send is tapped again on the same channel, so the server
+    /// never queues the message twice (see `InboxComposeAttempt`).
+    @State private var lastAttempt: InboxComposeAttempt?
 
     var body: some View {
         NavigationStack {
@@ -125,8 +128,13 @@ struct JobMessageSheet: View {
 
     private func send() async {
         errorMessage = nil
+        let attempt = InboxComposeAttempt.next(
+            after: lastAttempt,
+            fingerprint: [model.jobID.uuidString, key.rawValue, channel.rawValue]
+        )
+        lastAttempt = attempt
         do {
-            let result = try await model.sendMessage(key, channel: channel)
+            let result = try await model.sendMessage(key, channel: channel, nonce: attempt.nonce)
             if result.didFail {
                 errorMessage = result.error.map { ErrorText.sentence($0) } ?? "The message couldn't be delivered."
                 return

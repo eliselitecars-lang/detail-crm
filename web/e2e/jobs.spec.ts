@@ -1,15 +1,8 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { membershipRow, OWNER, SHOP, TECH } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, type Handler, type Json } from './support/mockSupabase';
 
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type Row = { [key: string]: Json };
-
-const CORS = {
-  'access-control-allow-origin': '*',
-  'access-control-allow-headers': '*',
-  'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-};
 
 const ownerMember = membershipRow(OWNER, 'owner');
 const techMember = membershipRow(TECH, 'technician');
@@ -166,44 +159,37 @@ const SUMMARY: Row = {
   balance_cents: 24000,
 };
 
-/** Storage API double: records uploads, signs any path. */
-async function mockStorage(page: Page, uploads: string[]) {
-  await page.route(`${SUPABASE_URL}/storage/v1/**`, async (route) => {
-    const request = route.request();
-    if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: CORS });
-    const url = new URL(request.url());
+/** Storage API double for job photos: records uploads, signs any path. */
+function photoStorage(uploads: string[]): Handler {
+  return ({ url, method, body }) => {
     if (url.pathname.includes('/object/sign/')) {
-      const body = (request.postDataJSON() ?? {}) as { paths?: string[] };
-      return route.fulfill({
-        status: 200,
-        headers: CORS,
-        contentType: 'application/json',
-        body: JSON.stringify(
-          (body.paths ?? []).map((path) => ({
-            path,
-            signedURL: `/object/sign/job-photos/${path}?token=t`,
-            error: null,
-          })),
-        ),
-      });
+      const paths = (body as { paths?: string[] } | null)?.paths ?? [];
+      return paths.map((path) => ({
+        path,
+        signedURL: `/object/sign/job-photos/${path}?token=t`,
+        error: null,
+      }));
     }
     const match = /\/storage\/v1\/object\/job-photos\/(.+)$/.exec(url.pathname);
-    if (request.method() === 'POST' && match?.[1]) {
+    if (method === 'POST' && match?.[1]) {
       uploads.push(decodeURIComponent(match[1]));
-      return route.fulfill({
-        status: 200,
-        headers: CORS,
-        contentType: 'application/json',
-        body: JSON.stringify({ Key: `job-photos/${match[1]}`, Id: 'obj-1' }),
-      });
+      return { Key: `job-photos/${match[1]}`, Id: 'obj-1' };
     }
-    return route.fulfill({
-      status: 200,
-      headers: CORS,
-      contentType: 'application/json',
-      body: '[]',
-    });
-  });
+    return [];
+  };
+}
+
+/** cancel_open_payments answer for the job (nothing to release unless overridden). */
+function released(counts: Partial<Record<'cancelled' | 'succeeded' | 'in_progress', number>> = {}) {
+  return {
+    invoice_id: null,
+    job_id: JOB_ID,
+    cancelled: 0,
+    succeeded: 0,
+    in_progress: 0,
+    sessions_expired: 0,
+    ...counts,
+  };
 }
 
 /** Table handlers for the job detail page. */
@@ -318,8 +304,8 @@ test.describe('jobs', () => {
           totals: { subtotal_cents: 24000, discount_cents: 0, tax_cents: 0, total_cents: 24000 },
         },
       },
+      storage: photoStorage([]),
     });
-    await mockStorage(page, []);
 
     await page.goto('/app/jobs/new?start=2026-09-28T14:00:00.000Z');
     // 14:00Z is 09:00 in the shop's zone (America/Chicago), not Honolulu's 04:00
@@ -385,8 +371,8 @@ test.describe('jobs', () => {
         },
       },
       rpc: { shop_team: TEAM, job_payment_summary: [SUMMARY] },
+      storage: photoStorage([]),
     });
-    await mockStorage(page, []);
 
     await page.goto('/app/jobs');
     const table = page.getByRole('table', { name: 'Jobs' });
@@ -421,8 +407,8 @@ test.describe('jobs', () => {
       user: OWNER,
       tables: { ...detailTables(job, patches, photos), shop_members: [ownerMember] },
       rpc: { shop_team: TEAM, job_payment_summary: [SUMMARY] },
+      storage: photoStorage(uploads),
     });
-    await mockStorage(page, uploads);
 
     await page.goto(`/app/jobs/${JOB_ID}`);
     await expect(page.getByRole('heading', { name: 'Job #1001', level: 1 })).toBeVisible();
@@ -521,27 +507,18 @@ test.describe('jobs', () => {
         },
       },
       rpc: { shop_team: TEAM },
-    });
-    await page.route(`${SUPABASE_URL}/storage/v1/**`, async (route) => {
-      const request = route.request();
-      if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: CORS });
-      const url = new URL(request.url());
-      if (request.method() === 'POST' && url.pathname.includes('/object/signatures/')) {
-        uploads.push(decodeURIComponent(url.pathname.split('/object/signatures/')[1] ?? ''));
-      }
-      const body = url.pathname.includes('/object/sign/')
-        ? (((request.postDataJSON() ?? {}) as { paths?: string[] }).paths?.map((path) => ({
-            path,
-            signedURL: `/object/sign/signatures/${path}?token=t`,
-            error: null,
-          })) ?? [])
-        : { Key: 'ok', Id: 'obj' };
-      return route.fulfill({
-        status: 200,
-        headers: CORS,
-        contentType: 'application/json',
-        body: JSON.stringify(body),
-      });
+      storage: ({ url, method, body }) => {
+        if (method === 'POST' && url.pathname.includes('/object/signatures/')) {
+          uploads.push(decodeURIComponent(url.pathname.split('/object/signatures/')[1] ?? ''));
+        }
+        return url.pathname.includes('/object/sign/')
+          ? ((body as { paths?: string[] } | null)?.paths?.map((path) => ({
+              path,
+              signedURL: `/object/sign/signatures/${path}?token=t`,
+              error: null,
+            })) ?? [])
+          : { Key: 'ok', Id: 'obj' };
+      },
     });
 
     await page.goto(`/app/jobs/${JOB_ID}`);
@@ -607,50 +584,86 @@ test.describe('jobs', () => {
     ).toBeVisible();
   });
 
-  test('owner moves a service up when every line has the default sort', async ({ page }) => {
+  test('owner moves a service up with one atomic reorder', async ({ page }) => {
     const lines: Row[] = [
       { ...LINE, sort: 0 },
       { ...LINE, id: '41000000-0000-4000-8000-000000000002', name: 'Ceramic coating', sort: 0 },
     ];
-    const sortPatches: { id: string; sort: Json }[] = [];
+    const reorders: unknown[] = [];
     const job = jobRow();
     await mockSupabase(page, {
       user: OWNER,
       tables: {
         ...detailTables(job, [], []),
         shop_members: [ownerMember],
-        job_line_items: ({ method, body, url }) => {
-          if (method === 'PATCH') {
-            const id = (url.searchParams.get('id') ?? '').replace(/^eq\./, '');
-            const patch = body as Row;
-            sortPatches.push({ id, sort: patch.sort ?? null });
-            const target = lines.find((l) => l.id === id);
-            if (target) Object.assign(target, patch);
-            return [];
-          }
-          // ordered like the real query: sort, then created_at (array order)
-          return lines
+        // ordered like the real query: sort, then created_at (array order)
+        job_line_items: () =>
+          lines
             .map((l, i) => ({ l, i }))
             .sort((a, b) => Number(a.l.sort) - Number(b.l.sort) || a.i - b.i)
-            .map(({ l }) => l);
+            .map(({ l }) => l),
+      },
+      rpc: {
+        shop_team: TEAM,
+        job_payment_summary: [SUMMARY],
+        reorder_job_line_items: ({ body }) => {
+          reorders.push(body);
+          const ids = (body as { p_ids: string[] }).p_ids;
+          for (const line of lines) line.sort = ids.indexOf(line.id as string);
+          return null;
         },
       },
-      rpc: { shop_team: TEAM, job_payment_summary: [SUMMARY] },
+      storage: photoStorage([]),
     });
-    await mockStorage(page, []);
 
     await page.goto(`/app/jobs/${JOB_ID}`);
     const services = page.getByRole('region', { name: 'Services' });
     await page.getByRole('button', { name: 'Move Ceramic coating up' }).click();
-    await expect.poll(() => sortPatches.length).toBe(2);
-    expect(sortPatches).toEqual([
-      { id: '41000000-0000-4000-8000-000000000002', sort: 1 },
-      { id: LINE.id as string, sort: 2 },
+    await expect.poll(() => reorders.length).toBe(1);
+    expect(reorders).toEqual([
+      { p_job_id: JOB_ID, p_ids: ['41000000-0000-4000-8000-000000000002', LINE.id as string] },
     ]);
     await expect(page.getByRole('button', { name: 'Move Ceramic coating up' })).toBeDisabled();
     await expect(services.getByText(/Ceramic coating|Full detail/).first()).toHaveText(
       /Ceramic coating/,
     );
+  });
+
+  test('cancelling a job releases its open card payments first', async ({ page }) => {
+    const patches: Row[] = [];
+    const releases: unknown[] = [];
+    let processing = 1;
+    const job = jobRow();
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: { ...detailTables(job, patches, []), shop_members: [ownerMember] },
+      rpc: { shop_team: TEAM, job_payment_summary: [SUMMARY] },
+      functions: {
+        payments: ({ body }) => {
+          releases.push(body);
+          return released({ in_progress: processing, cancelled: 1 });
+        },
+      },
+      storage: photoStorage([]),
+    });
+
+    await page.goto(`/app/jobs/${JOB_ID}`);
+    await page.getByRole('button', { name: 'Cancel job' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Cancel this job?' });
+    await dialog.getByRole('button', { name: 'Cancel job' }).click();
+    // A card payment still processing: nothing changes yet.
+    await expect(
+      dialog.getByText('A card payment is in progress — wait for it to finish.'),
+    ).toBeVisible();
+    expect(patches).toEqual([]);
+
+    processing = 0;
+    await dialog.getByRole('button', { name: 'Cancel job' }).click();
+    await expect.poll(() => patches).toContainEqual({ status: 'cancelled', cancel_reason: null });
+    expect(releases).toEqual([
+      { action: 'cancel_open_payments', shop_id: SHOP.id, job_id: JOB_ID },
+      { action: 'cancel_open_payments', shop_id: SHOP.id, job_id: JOB_ID },
+    ]);
   });
 
   test('assigned technician on a phone: forward steps only, sends "on my way", no money', async ({
@@ -663,18 +676,13 @@ test.describe('jobs', () => {
       user: TECH,
       tables: { ...detailTables(job, patches, []), shop_members: [techMember] },
       rpc: { shop_team: TEAM },
-    });
-    await mockStorage(page, []);
-    await page.route(`${SUPABASE_URL}/functions/v1/messaging`, async (route) => {
-      if (route.request().method() === 'OPTIONS')
-        return route.fulfill({ status: 204, headers: CORS });
-      sent.push(route.request().postDataJSON());
-      return route.fulfill({
-        status: 200,
-        headers: CORS,
-        contentType: 'application/json',
-        body: JSON.stringify({ message_id: 'msg-1', channel: 'sms', status: 'sent', error: null }),
-      });
+      functions: {
+        messaging: ({ body }) => {
+          sent.push(body);
+          return { message_id: 'msg-1', channel: 'sms', status: 'sent', error: null };
+        },
+      },
+      storage: photoStorage([]),
     });
 
     await page.setViewportSize({ width: 360, height: 800 });

@@ -18,12 +18,22 @@ import type { Row } from '@/lib/db';
 
 export type NotificationRow = Pick<
   Row<'notifications'>,
-  'id' | 'kind' | 'title' | 'body' | 'job_id' | 'read_at' | 'created_at'
+  | 'id'
+  | 'kind'
+  | 'title'
+  | 'body'
+  | 'job_id'
+  | 'customer_id'
+  | 'quote_id'
+  | 'invoice_id'
+  | 'read_at'
+  | 'created_at'
 >;
 
 type NotificationPages = InfiniteData<NotificationRow[], number>;
 
-const COLUMNS = 'id, kind, title, body, job_id, read_at, created_at';
+const COLUMNS =
+  'id, kind, title, body, job_id, customer_id, quote_id, invoice_id, read_at, created_at';
 export const UNREAD_PAGE_SIZE = 50;
 export const READ_PAGE_SIZE = 30;
 

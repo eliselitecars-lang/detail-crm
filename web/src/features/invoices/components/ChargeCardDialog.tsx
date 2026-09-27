@@ -91,6 +91,11 @@ function ChargeCardForm({
         // A definitive answer (declined, needs authentication…): a new attempt is a new charge.
         setNonce(newRequestNonce());
         setFailure(error);
+        if (error.reason === 'saved_card_removed') {
+          // Stripe no longer has that card for this customer; the server dropped it.
+          setPicked(null);
+          void cards.refetch();
+        }
       } else {
         // Network/server trouble: keep the nonce so a retry cannot double-charge.
         toast.error(error);
@@ -103,26 +108,37 @@ function ChargeCardForm({
     return <ErrorState compact error={cards.error} onRetry={() => void cards.refetch()} />;
   if (list.length === 0) {
     return (
-      <EmptyState
-        compact
-        icon={<CreditCard aria-hidden="true" />}
-        title="No saved card"
-        description="This customer has no card on file. Send the invoice so they can pay online."
-        action={
-          <Button
-            onClick={() => {
-              onClose();
-              onTextPayLink();
-            }}
+      <div className="flex flex-col gap-3">
+        {failure?.reason === 'saved_card_removed' && (
+          <p
+            role="alert"
+            className="bg-danger-soft text-danger-ink rounded-control px-3 py-2.5 text-sm"
           >
-            Send pay link
-          </Button>
-        }
-      />
+            {errorMessage(failure)}
+          </p>
+        )}
+        <EmptyState
+          compact
+          icon={<CreditCard aria-hidden="true" />}
+          title="No saved card"
+          description="This customer has no card on file. Send the invoice so they can pay online."
+          action={
+            <Button
+              onClick={() => {
+                onClose();
+                onTextPayLink();
+              }}
+            >
+              Send pay link
+            </Button>
+          }
+        />
+      </div>
     );
   }
 
   const needsAuth = failure?.reason === 'authentication_required';
+  const cardRemoved = failure?.reason === 'saved_card_removed';
 
   return (
     <form
@@ -166,7 +182,9 @@ function ChargeCardForm({
           <p className="font-medium">
             {needsAuth
               ? 'The bank wants the customer to confirm this payment.'
-              : 'The charge didn’t go through.'}
+              : cardRemoved
+                ? 'That card can’t be charged anymore.'
+                : 'The charge didn’t go through.'}
           </p>
           <p className="mt-0.5">{errorMessage(failure)}</p>
           {needsAuth && (

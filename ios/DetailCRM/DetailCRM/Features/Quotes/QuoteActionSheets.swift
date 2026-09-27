@@ -23,6 +23,9 @@ struct QuoteSendSheet: View {
     @State private var notifyCustomer = true
     @State private var channel: MoneyMessageChannel = .sms
     @State private var errorText: String?
+    /// One per compose (reused when Send is tapped again after a failure,
+    /// so the server never queues the message twice); new per channel.
+    @State private var nonce = MoneyEdge.newNonce()
 
     var body: some View {
         NavigationStack {
@@ -48,12 +51,21 @@ struct QuoteSendSheet: View {
                     .pickerStyle(.segmented)
                     .disabled(!notifyCustomer)
                     .opacity(notifyCustomer ? 1 : 0.45)
-                    Text(destinationText)
-                        .font(Theme.Typography.footnote)
-                        .foregroundStyle(Theme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if notifyCustomer {
+                        MoneyDocumentMessagePreviewView(
+                            request: MoneyDocumentMessage.Request(kind: .quoteSent, id: quote.id, channel: channel)
+                        )
+                    } else {
+                        Text("No message is sent. Share the client link yourself from the quote.")
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .cardStyle()
+                .onChange(of: channel) {
+                    nonce = MoneyEdge.newNonce()
+                }
                 if let errorText {
                     InlineMessage(text: errorText)
                 }
@@ -73,24 +85,6 @@ struct QuoteSendSheet: View {
 
     private var isResend: Bool { quote.status != .draft }
 
-    private var destinationText: String {
-        guard notifyCustomer else {
-            return "No message is sent. Share the client link yourself from the quote."
-        }
-        switch channel {
-        case .sms:
-            if let phone = customer?.phone?.trimmedNonEmpty {
-                return "Your shop's \"quote sent\" text goes to \(phone)."
-            }
-            return "This customer has no mobile number on file."
-        case .email:
-            if let email = customer?.email?.trimmedNonEmpty {
-                return "Your shop's \"quote sent\" email goes to \(email)."
-            }
-            return "This customer has no email address on file."
-        }
-    }
-
     private func send() async {
         errorText = nil
         do {
@@ -106,7 +100,8 @@ struct QuoteSendSheet: View {
                 let result = try await QuoteService.sendQuoteMessage(
                     shopID: shopID,
                     quote: quote,
-                    channel: channel
+                    channel: channel,
+                    nonce: nonce
                 )
                 if result.failed {
                     messageProblem = result.error?.trimmedNonEmpty ?? "The message could not be delivered."
@@ -130,6 +125,9 @@ struct QuoteSendSheet: View {
 struct QuoteResponseSheet: View {
     let quote: Quote
     let customer: QuoteCustomerRef?
+    /// The quote's lines: an approval lets staff tick the optional items
+    /// the customer chose.
+    let lines: [QuoteLineItem]
     let isApproval: Bool
     let onDone: () async -> Void
 
@@ -140,6 +138,7 @@ struct QuoteResponseSheet: View {
     @State private var text = ""
     @State private var errorText: String?
     @State private var didPrefill = false
+    @State private var selectedOptionalIDs: Set<UUID> = []
 
     var body: some View {
         NavigationStack {
@@ -155,6 +154,28 @@ struct QuoteResponseSheet: View {
                         text: $text,
                         kind: .name
                     )
+                    if !optionalLines.isEmpty {
+                        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                            Text("Optional items the customer chose")
+                                .font(Theme.Typography.footnote.weight(.semibold))
+                                .foregroundStyle(Theme.textSecondary)
+                            ForEach(optionalLines) { line in
+                                Toggle(isOn: selectionBinding(line.id)) {
+                                    HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
+                                        Text(line.name)
+                                            .font(Theme.Typography.body)
+                                            .foregroundStyle(Theme.textPrimary)
+                                        Spacer(minLength: Theme.Spacing.sm)
+                                        if let total = line.totalCents {
+                                            MoneyText(cents: total, currencyCode: appState.currencyCode, size: .small)
+                                        }
+                                    }
+                                }
+                                .tint(Theme.glacier)
+                            }
+                        }
+                        .cardStyle()
+                    }
                 } else {
                     FormRow("Reason (optional)") {
                         TextField("Why the customer declined", text: $text, axis: .vertical)
@@ -184,15 +205,36 @@ struct QuoteResponseSheet: View {
                     if isApproval, let customer {
                         text = customer.displayName
                     }
+                    selectedOptionalIDs = Set(optionalLines.filter { $0.isSelected }.map { $0.id })
                 }
             }
         }
     }
 
+    private var optionalLines: [QuoteLineItem] {
+        lines.filter { $0.isOptional }.sorted { $0.sort < $1.sort }
+    }
+
+    private func selectionBinding(_ id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { selectedOptionalIDs.contains(id) },
+            set: { isOn in
+                if isOn {
+                    selectedOptionalIDs.insert(id)
+                } else {
+                    selectedOptionalIDs.remove(id)
+                }
+            }
+        )
+    }
+
     private var explanation: String {
-        isApproval
-            ? "Use this when the customer approved in person or by phone. All optional items stay as they are."
-            : "Use this when the customer turned the quote down in person or by phone."
+        if !isApproval {
+            return "Use this when the customer turned the quote down in person or by phone."
+        }
+        return optionalLines.isEmpty
+            ? "Use this when the customer approved in person or by phone."
+            : "Use this when the customer approved in person or by phone. Tick the optional items they chose; the total follows."
     }
 
     private func submit() async {
@@ -200,7 +242,14 @@ struct QuoteResponseSheet: View {
         do {
             let shopID = try appState.requireShopID()
             if isApproval {
-                try await QuoteService.recordApproval(shopID: shopID, quoteID: quote.id, approvedByName: text)
+                try await QuoteService.recordApproval(
+                    shopID: shopID,
+                    quoteID: quote.id,
+                    approvedByName: text,
+                    selectedOptionalIDs: optionalLines.isEmpty
+                        ? nil
+                        : optionalLines.map { $0.id }.filter { selectedOptionalIDs.contains($0) }
+                )
             } else {
                 try await QuoteService.recordDecline(shopID: shopID, quoteID: quote.id, reason: text)
             }

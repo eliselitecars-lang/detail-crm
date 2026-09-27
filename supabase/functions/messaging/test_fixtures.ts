@@ -25,6 +25,14 @@ export const OTHER_SHOP_CUSTOMER = "30000000-0000-4000-8000-000000000004";
 export const JOB = "40000000-0000-4000-8000-000000000001";
 export const UNASSIGNED_JOB = "40000000-0000-4000-8000-000000000002";
 export const OPTED_OUT_JOB = "40000000-0000-4000-8000-000000000003";
+export const QUOTE = "60000000-0000-4000-8000-000000000001";
+export const DRAFT_QUOTE = "60000000-0000-4000-8000-000000000002";
+export const OTHER_SHOP_QUOTE = "60000000-0000-4000-8000-000000000003";
+export const INVOICE = "70000000-0000-4000-8000-000000000001";
+export const DRAFT_INVOICE = "70000000-0000-4000-8000-000000000002";
+export const VOID_INVOICE = "70000000-0000-4000-8000-000000000003";
+export const QUOTE_TOKEN = "80000000-0000-4000-8000-000000000001";
+export const INVOICE_TOKEN = "80000000-0000-4000-8000-000000000002";
 
 export const SHOP_NUMBER = "+12055550100";
 export const CUSTOMER_PHONE = "+12055550111";
@@ -140,6 +148,63 @@ function jobVars(db: FakeSupabase, jobId: string): Row | null {
   };
 }
 
+/**
+ * messages.request_nonce (0033): an earlier message queued by the same
+ * sender with the same nonce in the shop is returned instead of a new one.
+ */
+function byNonce(
+  db: FakeSupabase,
+  shopId: string,
+  sentBy: string | null,
+  nonce: unknown,
+): Row | undefined {
+  if (nonce === undefined || nonce === null) return undefined;
+  if (typeof nonce !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(nonce)) {
+    throw new FakeRpcError("22023", "request_nonce must be 8-64 letters, digits, - or _");
+  }
+  return db.table("messages").find((m) =>
+    m.shop_id === shopId && (m.sent_by ?? null) === sentBy && m.request_nonce === nonce
+  );
+}
+
+/** comms_document_vars (0090): the document's variables, link null until sent / issued. */
+function documentVars(db: FakeSupabase, quoteId: unknown, invoiceId: unknown): Row {
+  if (
+    (quoteId === null || quoteId === undefined) === (invoiceId === null || invoiceId === undefined)
+  ) {
+    throw new FakeRpcError("22023", "give exactly one of a quote or an invoice");
+  }
+  const isQuote = quoteId !== null && quoteId !== undefined;
+  const doc = db.table(isQuote ? "quotes" : "invoices").find((d) =>
+    d.id === (isQuote ? quoteId : invoiceId)
+  );
+  if (!doc) throw new FakeRpcError("P0002", `${isQuote ? "quote" : "invoice"} not found`);
+  const jobId = isQuote ? doc.converted_job_id : doc.job_id;
+  const job = jobId
+    ? db.table("jobs").find((j) => j.id === jobId && j.customer_id === doc.customer_id)
+    : undefined;
+  const base = job
+    ? jobVars(db, String(job.id)) ?? {}
+    : customerVars(db, String(doc.shop_id), String(doc.customer_id));
+  const amount = `$${(Number(doc.total_cents) / 100).toFixed(2)}`;
+  if (isQuote) {
+    return {
+      ...base,
+      quote_link: doc.status === "draft" ? null : `${APP_BASE}/q/${doc.public_token}`,
+      amount,
+      balance: null,
+    };
+  }
+  return {
+    ...base,
+    invoice_link: doc.status === "draft" || doc.status === "void"
+      ? null
+      : `${APP_BASE}/i/${doc.public_token}`,
+    amount,
+    balance: `$${(Math.max(Number(doc.balance_cents), 0) / 100).toFixed(2)}`,
+  };
+}
+
 /** Emulates enqueue_customer_template's consent/address checks; returns the new id or null. */
 function enqueueTemplate(
   db: FakeSupabase,
@@ -149,7 +214,10 @@ function enqueueTemplate(
   channel: string,
   jobId: string | null,
   sentBy: string | null,
+  options: { nonce?: unknown; vars?: Row } = {},
 ): string | null {
+  const replay = byNonce(db, shopId, sentBy, options.nonce);
+  if (replay) return replay.id as string;
   const customer = db.table("customers").find((c) => c.id === customerId && c.shop_id === shopId);
   if (!customer) throw new FakeRpcError("P0002", "customer not found");
   const job = jobId ? db.table("jobs").find((j) => j.id === jobId) : undefined;
@@ -173,10 +241,28 @@ function enqueueTemplate(
   ) {
     return null;
   }
+  // 0033: the key's own link must render (a draft quote / invoice has none)
+  const required = key === "quote_sent"
+    ? "quote_link"
+    : key === "invoice_sent"
+    ? "invoice_link"
+    : null;
+  const vars = options.vars ??
+    (jobId ? jobVars(db, jobId) : customerVars(db, shopId, customerId)) ?? {};
+  if (required && `${template.body}`.includes(`{{${required}}}`) && !vars[required]) {
+    return null;
+  }
   // 0033: marketing email gets its own random unsubscribe token and link
   const unsubscribeToken = channel === "email" && MARKETING_KEYS.includes(key)
     ? crypto.randomUUID()
     : null;
+  let body = `${template.body}`.replaceAll(
+    "{{unsubscribe_link}}",
+    unsubscribeToken ? `${APP_BASE}/u/${unsubscribeToken}` : "",
+  );
+  for (const [name, value] of Object.entries(options.vars ?? {})) {
+    body = body.replaceAll(`{{${name}}}`, value === null ? "" : String(value));
+  }
   const row = insertMessage(db, {
     shop_id: shopId,
     customer_id: customerId,
@@ -185,13 +271,11 @@ function enqueueTemplate(
     template_key: key,
     to_address: channel === "sms" ? customer.phone : customer.email,
     subject: channel === "email" ? `${template.subject}` : null,
-    body: `${template.body}`.replaceAll(
-      "{{unsubscribe_link}}",
-      unsubscribeToken ? `${APP_BASE}/u/${unsubscribeToken}` : "",
-    ),
+    body,
     sent_by: sentBy,
     send_after: NOW.toISOString(),
     unsubscribe_token: unsubscribeToken,
+    request_nonce: options.nonce ?? null,
   });
   return row.id as string;
 }
@@ -291,6 +375,67 @@ export function setup(
         { id: UNASSIGNED_JOB, shop_id: SHOP, customer_id: CUSTOMER, status: "scheduled" },
         { id: OPTED_OUT_JOB, shop_id: SHOP, customer_id: OPTED_OUT_CUSTOMER, status: "scheduled" },
       ],
+      quotes: [
+        {
+          id: QUOTE,
+          shop_id: SHOP,
+          customer_id: CUSTOMER,
+          converted_job_id: null,
+          status: "sent",
+          total_cents: 45000,
+          public_token: QUOTE_TOKEN,
+        },
+        {
+          id: DRAFT_QUOTE,
+          shop_id: SHOP,
+          customer_id: CUSTOMER,
+          converted_job_id: null,
+          status: "draft",
+          total_cents: 12000,
+          public_token: "80000000-0000-4000-8000-000000000003",
+        },
+        {
+          id: OTHER_SHOP_QUOTE,
+          shop_id: OTHER_SHOP,
+          customer_id: OTHER_SHOP_CUSTOMER,
+          converted_job_id: null,
+          status: "sent",
+          total_cents: 1000,
+          public_token: "80000000-0000-4000-8000-000000000004",
+        },
+      ],
+      invoices: [
+        {
+          id: INVOICE,
+          shop_id: SHOP,
+          customer_id: CUSTOMER,
+          job_id: null,
+          status: "open",
+          total_cents: 30000,
+          balance_cents: 20000,
+          public_token: INVOICE_TOKEN,
+        },
+        {
+          id: DRAFT_INVOICE,
+          shop_id: SHOP,
+          customer_id: CUSTOMER,
+          job_id: JOB,
+          status: "draft",
+          total_cents: 5000,
+          balance_cents: 5000,
+          public_token: "80000000-0000-4000-8000-000000000005",
+        },
+        {
+          id: VOID_INVOICE,
+          shop_id: SHOP,
+          customer_id: CUSTOMER,
+          job_id: null,
+          status: "void",
+          total_cents: 5000,
+          balance_cents: 0,
+          public_token: "80000000-0000-4000-8000-000000000006",
+        },
+      ],
       job_assignments: [
         {
           id: "50000000-0000-4000-8000-000000000001",
@@ -337,6 +482,30 @@ export function setup(
           subject: null,
           body: "Checking in",
           enabled: true,
+        },
+        {
+          shop_id: SHOP,
+          key: "quote_sent",
+          channel: "sms",
+          subject: null,
+          body: "Your quote for {{amount}}: {{quote_link}}",
+          enabled: true,
+        },
+        {
+          shop_id: SHOP,
+          key: "invoice_sent",
+          channel: "sms",
+          subject: null,
+          body: "Your invoice: {{amount}}, {{balance}} due. Pay: {{invoice_link}}",
+          enabled: true,
+        },
+        {
+          shop_id: SHOP,
+          key: "invoice_sent",
+          channel: "email",
+          subject: "Your invoice",
+          body: "Pay {{balance}} here: {{invoice_link}}",
+          enabled: false,
         },
       ],
       messages: options.messages ?? [],
@@ -461,8 +630,8 @@ export function setup(
     );
     const word = String(args.p_body).trim().replace(/[\s\p{P}\p{S}]+$/u, "").toUpperCase();
     let action: string | null = null;
-    if (word === "START" || word === "UNSTOP") {
-      // 0033: START/UNSTOP opt back in (comms_unsuppress); YES is not handled there.
+    if (word === "START" || word === "UNSTOP" || word === "YES") {
+      // 0033: START / UNSTOP / YES (Twilio's opt-in keywords) opt back in.
       action = "opt_in";
       const customers = ctx.db.table("customers");
       for (const c of customers) {
@@ -498,23 +667,6 @@ export function setup(
     }];
   });
 
-  db.onRpc("comms_unsuppress", (args, ctx) => {
-    if (ctx.role !== "service_role") throw new FakeRpcError("42501", "permission denied");
-    const customers = ctx.db.table("customers");
-    let changed = false;
-    for (const c of customers) {
-      if (
-        c.shop_id === args.p_shop_id && args.p_channel === "sms" && c.phone === args.p_address &&
-        c.sms_opted_out_at
-      ) {
-        c.sms_opted_out_at = null;
-        changed = true;
-      }
-    }
-    ctx.db.seed("customers", customers);
-    return changed;
-  });
-
   db.onRpc("queue_message", (args, ctx) => {
     if (ctx.role !== "authenticated") throw new FakeRpcError("42501", "must be called as a user");
     const shopId = String(args.p_shop_id);
@@ -522,6 +674,8 @@ export function setup(
     if (!role || role === "technician") {
       throw new FakeRpcError("42501", "only owners, admins and managers can message customers");
     }
+    const replay = byNonce(ctx.db, shopId, ctx.userId, args.p_request_nonce);
+    if (replay) return replay;
     const customer = ctx.db.table("customers").find((c) =>
       c.id === args.p_customer_id && c.shop_id === shopId
     );
@@ -544,6 +698,7 @@ export function setup(
       body: args.p_body,
       sent_by: ctx.userId,
       send_after: NOW.toISOString(),
+      request_nonce: args.p_request_nonce ?? null,
     });
   });
 
@@ -576,6 +731,7 @@ export function setup(
       String(args.p_channel ?? "sms"),
       String(job.id),
       ctx.userId,
+      { nonce: args.p_request_nonce },
     );
   });
 
@@ -589,6 +745,44 @@ export function setup(
       String(args.p_channel ?? "sms"),
       (args.p_job_id as string | undefined) ?? null,
       (args.p_sent_by as string | undefined) ?? null,
+      { nonce: args.p_request_nonce },
+    );
+  });
+
+  db.onRpc("comms_document_vars", (args, ctx) => {
+    if (ctx.role !== "service_role") throw new FakeRpcError("42501", "permission denied");
+    return documentVars(ctx.db, args.p_quote_id, args.p_invoice_id);
+  });
+
+  // enqueue_document_message (0090), as the caller: manager+ of the
+  // document's shop (another shop's or an unknown document: P0002).
+  db.onRpc("enqueue_document_message", (args, ctx) => {
+    if (ctx.role !== "authenticated") throw new FakeRpcError("42501", "must be called as a user");
+    const isQuote = args.p_quote_id !== null && args.p_quote_id !== undefined;
+    const doc = ctx.db.table(isQuote ? "quotes" : "invoices").find((d) =>
+      d.id === (isQuote ? args.p_quote_id : args.p_invoice_id)
+    );
+    const role = doc ? roleOf(ctx.db, ctx.userId, String(doc.shop_id)) : null;
+    if (!doc || !role) throw new FakeRpcError("P0002", "document not found");
+    if (role === "technician") {
+      throw new FakeRpcError("42501", "only owners, admins and managers can send quotes");
+    }
+    const jobId = isQuote ? doc.converted_job_id : doc.job_id;
+    const job = jobId
+      ? ctx.db.table("jobs").find((j) => j.id === jobId && j.customer_id === doc.customer_id)
+      : undefined;
+    return enqueueTemplate(
+      ctx.db,
+      String(doc.shop_id),
+      String(doc.customer_id),
+      isQuote ? "quote_sent" : "invoice_sent",
+      String(args.p_channel ?? "sms"),
+      (job?.id as string | undefined) ?? null,
+      ctx.userId,
+      {
+        nonce: args.p_request_nonce,
+        vars: documentVars(ctx.db, args.p_quote_id, args.p_invoice_id),
+      },
     );
   });
 

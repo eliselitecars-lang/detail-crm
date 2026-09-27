@@ -106,11 +106,11 @@ struct QuoteDetailView: View {
                     await load()
                 }
             case .approve:
-                QuoteResponseSheet(quote: data.quote, customer: data.customer, isApproval: true) {
+                QuoteResponseSheet(quote: data.quote, customer: data.customer, lines: data.lines, isApproval: true) {
                     await load()
                 }
             case .decline:
-                QuoteResponseSheet(quote: data.quote, customer: data.customer, isApproval: false) {
+                QuoteResponseSheet(quote: data.quote, customer: data.customer, lines: data.lines, isApproval: false) {
                     await load()
                 }
             case .convert:

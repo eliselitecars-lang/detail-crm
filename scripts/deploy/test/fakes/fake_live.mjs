@@ -9,9 +9,9 @@ const env = (code, message, status) => ({ status, body: { error: message, code, 
 
 export async function startFakeLive({ ref, anon, service, token, app, faults = [] }) {
   const f = new Set(faults);
-  const verifyJwt = { invites: true, 'stripe-connect': true, payments: false, messaging: false, 'stripe-webhook': false, 'storage-purge': false };
+  const verifyJwt = { account: true, invites: true, 'stripe-connect': true, payments: false, messaging: false, 'stripe-webhook': false, 'storage-purge': false };
   if (f.has('webhook-verify-jwt')) verifyJwt['stripe-webhook'] = true;
-  const corsFns = new Set(['invites', 'messaging', 'payments', 'stripe-connect']);
+  const corsFns = new Set(['account', 'invites', 'messaging', 'payments', 'stripe-connect']);
   const authCfg = {
     site_url: app,
     uri_allow_list: `${app}/**,${app}/reset-password`,

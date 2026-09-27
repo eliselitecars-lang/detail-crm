@@ -1,5 +1,5 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { expect, test, type Page } from '@playwright/test';
+import { mockSupabase, reply } from './support/mockSupabase';
 
 /**
  * Online booking wizard (/book/:slug) against a mocked backend: every
@@ -142,65 +142,56 @@ function slotsFor(from: string) {
   ];
 }
 
-const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
-
-async function fulfillJson(route: Route, status: number, body: unknown) {
-  await route.fulfill({
-    status,
-    contentType: 'application/json',
-    headers: cors,
-    body: JSON.stringify(body),
-  });
-}
-
-async function setup(page: Page, options: { enabled?: boolean } = {}) {
+async function setup(page: Page, options: { enabled?: boolean; catalog?: typeof CATALOG } = {}) {
   const bookings: unknown[] = [];
   const slotRequests: unknown[] = [];
+  const couponRequests: unknown[] = [];
   const functionCalls: unknown[] = [];
   await mockSupabase(page, {
     rpc: {
       public_shop_profile: profile(options),
-      public_booking_catalog: CATALOG,
+      public_booking_catalog: options.catalog ?? CATALOG,
       get_available_slots: ({ body }) => {
         slotRequests.push(body);
         return slotsFor((body as { p_from: string }).p_from);
       },
-      public_validate_coupon: ({ body }) => preview((body as { p_code: string }).p_code),
+      public_validate_coupon: ({ body }) => {
+        couponRequests.push(body);
+        return preview((body as { p_code: string }).p_code);
+      },
+      // The first booking attempt loses the race for its slot (23P01 → HTTP
+      // 409); the retry succeeds.
+      create_online_booking: ({ body }) => {
+        bookings.push(body);
+        if (bookings.length === 1 && !options.catalog) {
+          return reply(409, {
+            code: '23P01',
+            message: 'that time is no longer available; please choose another time',
+            details: null,
+            hint: null,
+          });
+        }
+        return {
+          job_token: JOB_TOKEN,
+          job_number: 1042,
+          status: 'requested',
+          total_cents: 17100,
+          deposit_required_cents: 3420,
+        };
+      },
     },
-  });
-  // Registered after mockSupabase, so these win. The first booking attempt
-  // loses the race for its slot (23P01 → HTTP 409); the retry succeeds.
-  await page.route(`${SUPABASE_URL}/rest/v1/rpc/create_online_booking`, async (route) => {
-    if (route.request().method() === 'OPTIONS')
-      return route.fulfill({ status: 204, headers: cors });
-    bookings.push(route.request().postDataJSON());
-    if (bookings.length === 1) {
-      return fulfillJson(route, 409, {
-        code: '23P01',
-        message: 'that time is no longer available; please choose another time',
-        details: null,
-        hint: null,
-      });
-    }
-    return fulfillJson(route, 200, {
-      job_token: JOB_TOKEN,
-      job_number: 1042,
-      status: 'requested',
-      total_cents: 17100,
-      deposit_required_cents: 3420,
-    });
-  });
-  await page.route(`${SUPABASE_URL}/functions/v1/payments`, async (route) => {
-    if (route.request().method() === 'OPTIONS')
-      return route.fulfill({ status: 204, headers: cors });
-    functionCalls.push(route.request().postDataJSON());
-    return fulfillJson(route, 200, {
-      url: CHECKOUT_URL,
-      expires_at: 1_900_000_000,
-      amount_cents: 3420,
-      tip_cents: 0,
-      currency: 'usd',
-    });
+    functions: {
+      payments: ({ body }) => {
+        functionCalls.push(body);
+        return {
+          url: CHECKOUT_URL,
+          expires_at: 1_900_000_000,
+          amount_cents: 3420,
+          tip_cents: 0,
+          currency: 'usd',
+        };
+      },
+    },
   });
   await page.route('https://checkout.stripe.test/**', (route) =>
     route.fulfill({
@@ -209,7 +200,7 @@ async function setup(page: Page, options: { enabled?: boolean } = {}) {
       body: '<!doctype html><title>Stripe Checkout</title><h1>Stripe Checkout</h1>',
     }),
   );
-  return { bookings, slotRequests, functionCalls };
+  return { bookings, slotRequests, couponRequests, functionCalls };
 }
 
 test.describe('online booking', () => {
@@ -313,6 +304,39 @@ test.describe('online booking', () => {
     expect((functionCalls[0] as { request_nonce: string }).request_nonce).toMatch(
       /^[A-Za-z0-9_-]{8,64}$/,
     );
+  });
+
+  test('a shop without vehicle sizes books at base prices and sends no category', async ({
+    page,
+  }) => {
+    const { bookings, slotRequests, couponRequests } = await setup(page, {
+      catalog: { ...CATALOG, vehicle_categories: [] },
+    });
+    await page.goto(`/book/${SLUG}`);
+    await expect(page.getByRole('heading', { name: 'Tell us about your vehicle' })).toBeVisible();
+    await expect(page.getByRole('radio')).toHaveCount(0);
+    await page.getByLabel(/^Make/).fill('Toyota');
+    await page.getByLabel(/^Model/).fill('Camry');
+    await page.getByRole('button', { name: 'Continue' }).click();
+
+    await page.getByRole('checkbox', { name: /Full detail/ }).check();
+    await page.getByRole('button', { name: 'Continue' }).click();
+    const slots = page.getByRole('button', { name: / on [A-Z][a-z]+day, / });
+    await slots.first().click();
+    await page.getByRole('button', { name: 'Continue' }).click();
+    await page.getByLabel(/^First name/).fill('Jane');
+    await page.getByRole('textbox', { name: 'Email' }).fill('jane@example.com');
+    await page.getByRole('button', { name: 'Continue' }).click();
+    await page.getByRole('button', { name: 'Request appointment' }).click();
+    await expect(page.getByRole('heading', { name: 'Request received' })).toBeVisible();
+
+    expect(slotRequests[0]).not.toHaveProperty('p_vehicle_category_id');
+    expect(couponRequests.length).toBeGreaterThan(0);
+    for (const request of couponRequests) {
+      expect(request).not.toHaveProperty('p_vehicle_category_id');
+    }
+    const payload = (bookings[0] as { p_payload: { vehicle: Record<string, unknown> } }).p_payload;
+    expect(payload.vehicle).not.toHaveProperty('category_id');
   });
 
   test('a shop with online booking turned off shows a friendly closed page', async ({ page }) => {

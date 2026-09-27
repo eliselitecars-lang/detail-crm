@@ -1,11 +1,12 @@
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute, signedInAuth } from '@/test/render';
-import { mockRpc, pgError, resetPublicMocks } from '@/features/public-docs/shared/testing';
+import { mockRpc, pgError, resetSupabaseMock } from '@/test/supabaseMock';
 import type { PortalOverview } from './api';
 import PortalPage from './PortalPage';
+import { MEMBERSHIP_REFRESH_MS } from './returnNotice';
 
-vi.mock('@/lib/supabase', () => import('@/features/public-docs/shared/testSupabase'));
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
 const JOB_TOKEN = '11111111-2222-4333-8444-555555555555';
 
@@ -90,9 +91,9 @@ function overview(overrides: Partial<PortalOverview> = {}): PortalOverview {
   };
 }
 
-function render() {
+function render(path = '/portal') {
   return renderRoute(<PortalPage />, {
-    path: '/portal',
+    path,
     routePath: '/portal',
     shop: null,
     auth: signedInAuth('ana@example.com', 'client-1'),
@@ -100,7 +101,7 @@ function render() {
 }
 
 beforeEach(() => {
-  resetPublicMocks();
+  resetSupabaseMock();
 });
 
 describe('PortalPage', () => {
@@ -165,5 +166,76 @@ describe('PortalPage', () => {
     render();
     expect(await screen.findByText('Couldn’t load your account')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('confirms a saved card from the Stripe return URL and strips the parameter', async () => {
+    mockRpc({ portal_claim_customers: { data: 1 }, portal_overview: { data: overview() } });
+    const { router } = render('/portal?card=saved&tab=x');
+    expect(
+      await screen.findByText(
+        'Your card was saved. Glacier Detailing can now charge it for future visits.',
+      ),
+    ).toBeInTheDocument();
+    // only the return parameter is removed, with replace (no history entry)
+    await waitFor(() => expect(router.state.location.search).toBe('?tab=x'));
+    expect(router.state.historyAction).toBe('REPLACE');
+    // the banner stays after the URL is cleaned
+    expect(
+      screen.getByText(
+        'Your card was saved. Glacier Detailing can now charge it for future visits.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    ['card=canceled', 'No card was saved.'],
+    ['membership=canceled', 'Membership sign-up was cancelled; nothing was charged.'],
+  ])('shows an info banner for ?%s', async (query, text) => {
+    mockRpc({ portal_claim_customers: { data: 1 }, portal_overview: { data: overview() } });
+    const { router } = render(`/portal?${query}`);
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    await waitFor(() => expect(router.state.location.search).toBe(''));
+  });
+
+  it('ignores unknown return values', async () => {
+    mockRpc({ portal_claim_customers: { data: 1 }, portal_overview: { data: overview() } });
+    render('/portal?card=bogus&membership=maybe');
+    await screen.findByRole('list', { name: 'Upcoming appointments' });
+    expect(
+      screen.queryByText(/card was saved|No card was saved|membership/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it('re-reads the overview once, a few seconds after a membership sign-up', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const calls = mockRpc({
+        portal_claim_customers: { data: 1 },
+        portal_overview: { data: overview() },
+      });
+      render('/portal?membership=active');
+      expect(
+        await screen.findByText(
+          'Thanks! Your membership is being activated — it can take a minute to show as active.',
+        ),
+      ).toBeInTheDocument();
+      const overviews = () => calls.filter((c) => c.fn === 'portal_overview').length;
+      expect(overviews()).toBe(1);
+      await vi.advanceTimersByTimeAsync(MEMBERSHIP_REFRESH_MS);
+      await waitFor(() => expect(overviews()).toBe(2));
+      await vi.advanceTimersByTimeAsync(MEMBERSHIP_REFRESH_MS * 2);
+      expect(overviews()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('links to the account page from the footer', async () => {
+    mockRpc({ portal_claim_customers: { data: 1 }, portal_overview: { data: overview() } });
+    render();
+    expect(await screen.findByRole('link', { name: 'Account settings' })).toHaveAttribute(
+      'href',
+      '/account',
+    );
   });
 });

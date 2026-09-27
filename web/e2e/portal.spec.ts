@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { MockUser } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, reply } from './support/mockSupabase';
 
 /** Client portal (/portal) against a mocked backend. */
 
@@ -194,27 +194,73 @@ test.describe('client portal', () => {
   });
 
   test('an unconfirmed email is told to confirm it', async ({ page }) => {
-    await mockSupabase(page, { user: CLIENT, rpc: { portal_overview: EMPTY } });
-    await page.route(`${SUPABASE_URL}/rest/v1/rpc/portal_claim_customers`, (route) =>
-      route.request().method() === 'OPTIONS'
-        ? route.fulfill({
-            status: 204,
-            headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
-          })
-        : route.fulfill({
-            status: 403,
-            contentType: 'application/json',
-            headers: { 'access-control-allow-origin': '*' },
-            body: JSON.stringify({
-              code: '42501',
-              message: 'confirm your email address before linking your records',
-              details: null,
-              hint: null,
-            }),
-          }),
-    );
+    await mockSupabase(page, {
+      user: CLIENT,
+      rpc: {
+        portal_overview: EMPTY,
+        portal_claim_customers: reply(403, {
+          code: '42501',
+          message: 'confirm your email address before linking your records',
+          details: null,
+          hint: null,
+        }),
+      },
+    });
     await page.goto('/portal');
     await expect(page.getByText('Confirm your email to see your bookings')).toBeVisible();
     await expect(page.getByText('No bookings linked yet')).toBeVisible();
+  });
+
+  test('returning from Stripe with ?card=saved confirms it once', async ({ page }) => {
+    await mockSupabase(page, {
+      user: CLIENT,
+      rpc: { portal_claim_customers: 1, portal_overview: OVERVIEW },
+    });
+    await page.goto('/portal?card=saved');
+    await expect(
+      page.getByText('Your card was saved. Glacier Detailing can now charge it for future visits.'),
+    ).toBeVisible();
+    // The parameter is removed so a refresh doesn't repeat the banner.
+    await expect(page).toHaveURL(/\/portal$/);
+    await page.reload();
+    await expect(page.getByRole('list', { name: 'Upcoming appointments' })).toBeVisible();
+    await expect(page.getByText(/Your card was saved/)).toHaveCount(0);
+  });
+
+  test('a membership sign-up re-reads the overview once it is being activated', async ({
+    page,
+  }) => {
+    let overviews = 0;
+    await mockSupabase(page, {
+      user: CLIENT,
+      rpc: {
+        portal_claim_customers: 1,
+        portal_overview: () => {
+          overviews += 1;
+          return OVERVIEW;
+        },
+      },
+    });
+    await page.goto('/portal?membership=active');
+    await expect(
+      page.getByText(
+        'Thanks! Your membership is being activated — it can take a minute to show as active.',
+      ),
+    ).toBeVisible();
+    await expect(page).toHaveURL(/\/portal$/);
+    await expect.poll(() => overviews, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a cancelled card link says nothing was saved', async ({ page }) => {
+    await mockSupabase(page, {
+      user: CLIENT,
+      rpc: { portal_claim_customers: 1, portal_overview: OVERVIEW },
+    });
+    await page.goto('/portal?card=canceled');
+    await expect(page.getByText('No card was saved.')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Account settings' })).toHaveAttribute(
+      'href',
+      '/account',
+    );
   });
 });

@@ -483,7 +483,10 @@ export function useChargeSavedCard(invoiceId: string) {
 }
 
 export const cancelOpenPaymentsResultSchema = z.object({
-  invoice_id: z.string(),
+  /** The released invoice (null for a job without a non-void invoice). */
+  invoice_id: z.string().nullable(),
+  /** Set when a job was released (or the invoice belongs to a job). */
+  job_id: z.string().nullable().optional(),
   cancelled: z.number().int(),
   succeeded: z.number().int(),
   in_progress: z.number().int(),

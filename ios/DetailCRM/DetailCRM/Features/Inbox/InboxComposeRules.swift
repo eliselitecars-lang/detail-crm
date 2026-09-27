@@ -132,3 +132,19 @@ enum InboxComposeRules {
         return TemplateRenderer.render(template, values: values)
     }
 }
+
+/// One compose's idempotency nonce (`request_nonce` of `messaging` send).
+/// Sending the same content again after a failure reuses the nonce, so a
+/// message the server already queued is returned instead of sent twice;
+/// changed content (or a successful send) starts a new one.
+struct InboxComposeAttempt: Equatable, Sendable {
+    let fingerprint: [String]
+    let nonce: String
+
+    static func next(after previous: InboxComposeAttempt?, fingerprint: [String]) -> InboxComposeAttempt {
+        if let previous, previous.fingerprint == fingerprint {
+            return previous
+        }
+        return InboxComposeAttempt(fingerprint: fingerprint, nonce: MessageService.newNonce())
+    }
+}

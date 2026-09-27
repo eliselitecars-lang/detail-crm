@@ -9,10 +9,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { useShop, useShopContext } from '@/features/shop/shopContext';
 import type { BusinessHoursRow } from '@/features/shop/businessHours';
+import { replaceBusinessHours } from '@/features/shop/onboarding/api';
 import { unwrap, unwrapRequired, type InsertRow, type Row, type UpdateRow } from '@/lib/db';
-import { AppError, edgeFunctionError, toAppError } from '@/lib/errors';
+import { AppError, edgeFunctionError, errorMessage, toAppError } from '@/lib/errors';
+import { EdgeFunctionError, invokeEdge } from '@/features/quotes/shared/edge';
 import { shopKey } from '@/lib/queryKeys';
-import { HOURS_NOT_RESTORED_MESSAGE, planHoursReplace } from './hoursPlan';
 import { supabase } from '@/lib/supabase';
 
 /** `unwrap` for list selects: a successful select never yields null rows. */
@@ -279,63 +280,13 @@ export function useBusinessHours() {
   });
 }
 
-/**
- * Replaces the weekly hours. There is no transactional RPC for this yet, and
- * the `business_hours_no_overlap` exclusion constraint forces old rows out
- * before new ones go in, so the save:
- *   1. re-reads the stored rows (never trusts the page's possibly stale copy),
- *   2. deletes only intervals that changed and inserts only new ones
- *      (unchanged days are never touched — see planHoursReplace),
- *   3. if the insert fails, puts the removed rows back, and if THAT fails,
- *      says plainly that the changed days are now closed.
- */
+/** Replaces the weekly hours in one transaction (replace_business_hours, owner/admin). */
 export function useSaveBusinessHours() {
   const { shopId } = useShop();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({ rows }: { rows: readonly BusinessHoursRow[] }): Promise<void> => {
-      const stored = unwrapList(
-        await supabase
-          .from('business_hours')
-          .select('id, weekday, opens_at, closes_at')
-          .eq('shop_id', shopId),
-      );
-      const plan = planHoursReplace(stored, rows);
-      if (plan.remove.length > 0) {
-        unwrap(
-          await supabase
-            .from('business_hours')
-            .delete()
-            .eq('shop_id', shopId)
-            .in(
-              'id',
-              plan.remove.map((row) => row.id),
-            ),
-        );
-      }
-      if (plan.insert.length === 0) return;
-      const inserted = await supabase
-        .from('business_hours')
-        .insert(plan.insert.map((row) => ({ ...row, shop_id: shopId })));
-      if (!inserted.error) return;
-      if (plan.remove.length > 0) {
-        const restored = await supabase.from('business_hours').insert(
-          plan.remove.map((row) => ({
-            weekday: row.weekday,
-            opens_at: row.opens_at,
-            closes_at: row.closes_at,
-            shop_id: shopId,
-          })),
-        );
-        if (restored.error) {
-          throw new AppError(HOURS_NOT_RESTORED_MESSAGE, {
-            kind: 'server',
-            cause: inserted.error,
-          });
-        }
-      }
-      throw toAppError(inserted.error);
-    },
+    mutationFn: ({ rows }: { rows: readonly BusinessHoursRow[] }): Promise<void> =>
+      replaceBusinessHours(shopId, rows),
     // settings/* covers this page and the calendar's hours shading
     // (settings/business_hours); jobs/calendar re-reads availability.
     onSettled: () =>
@@ -999,10 +950,9 @@ export function useStripeLink() {
 // ---------------------------------------------------------------------------
 
 /**
- * Memberships that still bill (or may still bill) through a Stripe
- * subscription on the connected account. Deleting the shop removes the rows
- * but not the Stripe subscriptions, so customers would keep being charged —
- * the page refuses to delete while any exist.
+ * Memberships that bill (or may bill) through a Stripe subscription on the
+ * connected account: delete_shop cancels each of them in Stripe first, and
+ * the page says how many.
  */
 export function useBillingMembershipCount(enabled: boolean) {
   const { shopId } = useShop();
@@ -1022,26 +972,48 @@ export function useBillingMembershipCount(enabled: boolean) {
   });
 }
 
+export const deleteShopResultSchema = z.object({
+  deleted: z.literal(true),
+  memberships_cancelled: z.number().int(),
+  sessions_expired: z.number().int(),
+});
+export type DeleteShopResult = z.infer<typeof deleteShopResultSchema>;
+
+/** Friendly text for delete_shop refusals the owner can act on. */
+export function deleteShopErrorMessage(error: unknown): string {
+  if (error instanceof EdgeFunctionError) {
+    if (error.reason === 'payment_in_progress') {
+      return 'A card payment for this shop is still being processed. Wait a few minutes for it to finish, then try again. Nothing was deleted.';
+    }
+    if (error.reason === 'name_mismatch') {
+      return 'The name you typed doesn’t match this shop’s name. Nothing was deleted.';
+    }
+  }
+  return errorMessage(error);
+}
+
 /**
- * Deletes the current shop; every tenant table cascades. RLS lets only the
- * owner delete, and a denied delete affects 0 rows without an error, so the
- * deleted row is selected back to tell the two apart. Afterwards the shop's
- * cached queries are dropped and the membership list is refetched, which
- * switches to another shop (or to onboarding when none are left).
+ * Deletes the current shop through payments → delete_shop (owner only):
+ * the server first cancels every membership's Stripe subscription, settles
+ * or expires open card payments and pay links (409 payment_in_progress when
+ * one is still processing — nothing is deleted), then deletes the shop (every
+ * tenant row cascades; its SMS number is logged for release). `confirmName`
+ * must be the shop's name (422 name_mismatch otherwise). Afterwards the
+ * shop's cached queries are dropped and the membership list is refetched,
+ * which switches to another shop (or to onboarding when none are left).
  */
 export function useDeleteShop() {
   const { shopId } = useShop();
   const { refetch } = useShopContext();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (): Promise<void> => {
-      const deleted = unwrapList(
-        await supabase.from('shops').delete().eq('id', shopId).select('id'),
-      );
-      if (deleted.length === 0) {
-        throw new AppError('Only the shop owner can delete this shop.', { kind: 'permission' });
-      }
-    },
+    mutationFn: (confirmName: string): Promise<DeleteShopResult> =>
+      invokeEdge(
+        'payments',
+        'delete_shop',
+        { shop_id: shopId, confirm_name: confirmName },
+        deleteShopResultSchema,
+      ),
     onSuccess: async () => {
       // Membership list first: the shell moves off the deleted shop, so its
       // pages unmount before the shop's cache entries are dropped.

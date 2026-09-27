@@ -1,19 +1,19 @@
 /**
  * Queries shared by the money features: customer/vehicle pickers, the
  * service catalog, catalog pricing (price_services RPC), shop document
- * defaults and customer messaging (template render + messaging.send).
+ * defaults and customer messaging (server-rendered document messages +
+ * messaging.send).
  */
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { z } from 'zod';
 import { unwrap, unwrapRequired, type Row } from '@/lib/db';
-import { formatCents } from '@/lib/money';
-import { formatPhone } from '@/lib/phone';
+import { AppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
 import { unwrapList } from './db';
 import { invokeEdge } from './edge';
-import { customerName, escapeLike } from './format';
+import { escapeLike } from './format';
 
 // ---------------------------------------------------------------------------
 // Customers & vehicles
@@ -62,8 +62,8 @@ export const pickerKeys = {
   services: (shopId: string) => shopKey(shopId, 'catalog', 'money-services'),
   pricing: (shopId: string, args: unknown) => shopKey(shopId, 'catalog', 'money-pricing', args),
   docDefaults: (shopId: string) => shopKey(shopId, 'shop', 'money-doc-defaults'),
-  template: (shopId: string, key: string, channel: string) =>
-    shopKey(shopId, 'settings', 'money-template', key, channel),
+  documentPreview: (shopId: string, kind: string, id: string, channel: string) =>
+    shopKey(shopId, 'settings', 'money-document-preview', kind, id, channel),
 };
 
 /** Customer search for pickers (name / company / email / phone). */
@@ -82,10 +82,7 @@ export function useCustomerSearch(query: string, enabled = true) {
         .is('archived_at', null);
       if (term) request = request.ilike('search_text', `%${escapeLike(term)}%`);
       return unwrapList(
-        await request
-          .order('last_name', { ascending: true, nullsFirst: false })
-          .order('first_name', { ascending: true, nullsFirst: false })
-          .limit(20),
+        await request.order('sort_name', { ascending: true }).order('id').limit(20),
       );
     },
   });
@@ -212,7 +209,8 @@ export type PriceServicesResult = z.infer<typeof priceServicesSchema>;
 
 export interface PriceServicesArgs {
   customerId: string;
-  vehicleCategoryId: string;
+  /** null when the shop has no vehicle sizes: base prices apply (argument omitted). */
+  vehicleCategoryId: string | null;
   vehicleId: string | null;
   serviceIds: string[];
 }
@@ -234,7 +232,7 @@ export function usePriceServices(args: PriceServicesArgs | null) {
         await supabase.rpc('price_services', {
           p_shop: shopId,
           p_customer_id: args.customerId,
-          p_vehicle_category_id: args.vehicleCategoryId,
+          ...(args.vehicleCategoryId ? { p_vehicle_category_id: args.vehicleCategoryId } : {}),
           p_service_ids: args.serviceIds,
           ...(args.vehicleId ? { p_vehicle_id: args.vehicleId } : {}),
         }),
@@ -271,74 +269,54 @@ export function useDocDefaults() {
 }
 
 // ---------------------------------------------------------------------------
-// Messaging (quote_sent / invoice_sent)
+// Messaging (quote_sent / invoice_sent — rendered by the server)
 // ---------------------------------------------------------------------------
 
 export type DocTemplateKey = 'quote_sent' | 'invoice_sent';
 export type MessageChannel = 'sms' | 'email';
+export type DocumentKind = 'quote' | 'invoice';
 
-export type DocTemplate = Pick<Row<'message_templates'>, 'subject' | 'body' | 'enabled'>;
+export interface DocumentRef {
+  kind: DocumentKind;
+  id: string;
+}
 
-export function useDocTemplate(key: DocTemplateKey, channel: MessageChannel, enabled = true) {
+const documentArgs = (doc: DocumentRef) =>
+  doc.kind === 'quote' ? { p_quote_id: doc.id } : { p_invoice_id: doc.id };
+
+export const documentPreviewSchema = z.object({
+  enabled: z.boolean(),
+  to_address: z.string().nullable(),
+  subject: z.string().nullable(),
+  body: z.string(),
+});
+export type DocumentPreview = z.infer<typeof documentPreviewSchema>;
+
+/**
+ * The shop's quote_sent / invoice_sent message for this document exactly as
+ * the server will send it (preview_document_message, 0090): rendered from the
+ * document, its customer and job, with the client link always filled in and
+ * lines whose values are empty dropped. `enabled: false` = the template is
+ * turned off for this channel. Manager+ only.
+ */
+export function useDocumentPreview(doc: DocumentRef, channel: MessageChannel, enabled = true) {
   const { shopId } = useShop();
   return useQuery({
-    queryKey: pickerKeys.template(shopId, key, channel),
+    queryKey: pickerKeys.documentPreview(shopId, doc.kind, doc.id, channel),
     enabled,
-    queryFn: async (): Promise<DocTemplate | null> =>
-      unwrap(
-        await supabase
-          .from('message_templates')
-          .select('subject, body, enabled')
-          .eq('shop_id', shopId)
-          .eq('key', key)
-          .eq('channel', channel)
-          .maybeSingle(),
-      ),
+    queryFn: async (): Promise<DocumentPreview> => {
+      const rows = unwrap(
+        await supabase.rpc('preview_document_message', {
+          ...documentArgs(doc),
+          p_channel: channel,
+        }),
+      );
+      const row = z.array(documentPreviewSchema).parse(rows ?? [])[0];
+      if (!row)
+        throw new AppError('That message template could not be found.', { kind: 'not_found' });
+      return row;
+    },
   });
-}
-
-/** Values the document templates use ({{placeholders}}, see migration 0032). */
-export interface DocTemplateContext {
-  customer: { first_name: string | null; last_name: string | null; company: string | null };
-  shopName: string;
-  shopPhone: string | null;
-  link: string;
-  currency: string;
-  /** Server totals (invoice total / balance); omitted for quotes. */
-  amountCents?: number;
-  balanceCents?: number;
-}
-
-/** Template variables, formatted like the server's comms vars. */
-export function docTemplateVars(
-  key: DocTemplateKey,
-  ctx: DocTemplateContext,
-): Record<string, string> {
-  const first =
-    ctx.customer.first_name?.trim() ||
-    ctx.customer.company?.trim() ||
-    ctx.customer.last_name?.trim() ||
-    'there';
-  const vars: Record<string, string> = {
-    customer_first_name: first,
-    customer_name: customerName(ctx.customer),
-    shop_name: ctx.shopName,
-    shop_phone: ctx.shopPhone ? formatPhone(ctx.shopPhone) : '',
-  };
-  vars[key === 'quote_sent' ? 'quote_link' : 'invoice_link'] = ctx.link;
-  if (ctx.amountCents !== undefined) {
-    vars.amount = formatCents(ctx.amountCents, { currency: ctx.currency });
-  }
-  if (ctx.balanceCents !== undefined) {
-    vars.balance = formatCents(Math.max(ctx.balanceCents, 0), { currency: ctx.currency });
-  }
-  return vars;
-}
-
-/** Renders a template body with the SQL renderer (render_template RPC). */
-export async function renderTemplate(body: string, vars: Record<string, string>): Promise<string> {
-  const data = unwrap(await supabase.rpc('render_template', { p_body: body, p_vars: vars }));
-  return typeof data === 'string' ? data : '';
 }
 
 export const sendResponseSchema = z.object({
@@ -356,6 +334,8 @@ export interface SendMessageInput {
   body: string;
   subject?: string;
   jobId?: string | null;
+  /** One per compose, reused on retry (messages.request_nonce): a replay never sends twice. */
+  requestNonce?: string;
 }
 
 /** messaging.send (free-form, manager+). The server queues + delivers immediately. */
@@ -373,6 +353,39 @@ export function useSendCustomerMessage() {
           body: input.body,
           ...(input.channel === 'email' && input.subject ? { subject: input.subject } : {}),
           ...(input.jobId ? { job_id: input.jobId } : {}),
+          ...(input.requestNonce ? { request_nonce: input.requestNonce } : {}),
+        },
+        sendResponseSchema,
+      ),
+  });
+}
+
+export interface SendDocumentInput {
+  doc: DocumentRef;
+  channel: MessageChannel;
+  /** One per compose, reused on retry: a replay returns the first message. */
+  requestNonce: string;
+}
+
+/**
+ * messaging.send with quote_id / invoice_id: the server renders the shop's
+ * quote_sent / invoice_sent template for the document (enqueue_document_message)
+ * and delivers it. Refusals are 422 with details.reason (template_disabled,
+ * missing_link, opted_out, no_address, sms_not_configured…).
+ */
+export function useSendDocumentMessage() {
+  const { shopId } = useShop();
+  return useMutation({
+    mutationFn: ({ doc, channel, requestNonce }: SendDocumentInput) =>
+      invokeEdge(
+        'messaging',
+        'send',
+        {
+          shop_id: shopId,
+          channel,
+          template_key: doc.kind === 'quote' ? 'quote_sent' : 'invoice_sent',
+          ...(doc.kind === 'quote' ? { quote_id: doc.id } : { invoice_id: doc.id }),
+          request_nonce: requestNonce,
         },
         sendResponseSchema,
       ),

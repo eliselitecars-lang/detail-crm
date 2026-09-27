@@ -2,14 +2,13 @@ import { ImagePlus, Trash2 } from 'lucide-react';
 import { useId, useRef, useState } from 'react';
 import { Button, SectionCard, useToast } from '@/components/ui';
 import { shopAssetUrl } from '@/lib/supabase';
-import { useShop } from '@/features/shop/shopContext';
 import { useRemoveServiceImage, useUploadServiceImage } from '../api';
 import { imageFileError, type ServiceRow } from '../model';
 
 /**
- * Service photo in the public shop-assets bucket. The bucket's storage
- * policies only let owners/admins write, so managers see the image but not
- * the upload controls.
+ * Service photo in the public shop-assets bucket. Storage policies let
+ * owners, admins and managers write `<shop_id>/services/<file>` (0025), i.e.
+ * everyone with the catalog manage capability.
  */
 export function ServiceImageCard({
   service,
@@ -18,14 +17,13 @@ export function ServiceImageCard({
   service: ServiceRow;
   canManage: boolean;
 }) {
-  const { role } = useShop();
   const toast = useToast();
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const upload = useUploadServiceImage(service);
   const remove = useRemoveServiceImage(service);
   const [error, setError] = useState<string | null>(null);
-  const canUpload = canManage && (role === 'owner' || role === 'admin');
+  const canUpload = canManage;
 
   const url = shopAssetUrl(service.image_path);
   // The path is reused on replace; bust caches with the row's updated_at.
@@ -98,11 +96,7 @@ export function ServiceImageCard({
               </Button>
             )}
           </div>
-        ) : (
-          canManage && (
-            <p className="text-muted text-xs">Only an owner or admin can change images.</p>
-          )
-        )}
+        ) : null}
         {error ? (
           <p role="alert" className="text-danger-ink text-xs font-medium">
             {error}

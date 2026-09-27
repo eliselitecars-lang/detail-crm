@@ -221,6 +221,7 @@ Deno.test("cancel_open_payments: releases the invoice (sheet cancelled, pay + de
   const res = await f.call(release, "tech");
   assertEquals(await res.json(), {
     invoice_id: INVOICE,
+    job_id: JOB,
     cancelled: 1,
     succeeded: 0,
     in_progress: 0,
@@ -387,4 +388,100 @@ Deno.test("cancel_open_payments: a sheet whose card attempt failed can still be 
   if (intent) intent.status = "requires_payment_method";
   assertEquals((await (await f.call(release, "manager")).json()).cancelled, 1);
   assertEquals(upserts(f, "pi_1Old").map((a) => a.p_status), ["cancelled"]);
+});
+
+// ---------------------------------------------------------------------------
+// cancel_open_payments by job (before a job is cancelled or changes customer)
+// ---------------------------------------------------------------------------
+
+const releaseJob = { action: "cancel_open_payments", shop_id: SHOP, job_id: JOB };
+
+function jobSessions(): Row[] {
+  const session = (id: string, metadata: Row) => ({
+    id,
+    object: "checkout.session",
+    status: "open",
+    mode: "payment",
+    customer: "cus_1Saved",
+    metadata: { shop_id: SHOP, ...metadata },
+  });
+  return [
+    session("cs_1Deposit", { job_id: JOB, kind: "deposit" }),
+    session("cs_1Invoice", { invoice_id: INVOICE, job_id: JOB, kind: "payment" }),
+    session("cs_1OtherDeposit", {
+      job_id: "dddddddd-dddd-4ddd-8ddd-00000000000f",
+      kind: "deposit",
+    }),
+  ];
+}
+
+Deno.test("cancel_open_payments (job): the job's sheets, deposit links and invoice links are released", async () => {
+  const f = withOpenSheet("requires_payment_method", {
+    customer: { stripe_customer_id: "cus_1Saved" },
+    sessions: jobSessions(),
+  });
+  const res = await f.call(releaseJob, "manager");
+  assertEquals(await res.json(), {
+    invoice_id: INVOICE,
+    job_id: JOB,
+    cancelled: 1,
+    succeeded: 0,
+    in_progress: 0,
+    sessions_expired: 2,
+  });
+  assertEquals(f.sessions.map((x) => x.status), ["expired", "expired", "open"]);
+  assertEquals(upserts(f, "pi_1Old").map((a) => a.p_status), ["cancelled"]);
+});
+
+Deno.test("cancel_open_payments (job): without an invoice only the deposit links go; processing money is reported", async () => {
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    invoice: { job_id: null },
+    sessions: jobSessions(),
+    payments: [pendingRow("pi_1Busy", { invoice_id: null, kind: "deposit" })],
+    intents: { pi_1Busy: sheetIntent("processing") },
+  });
+  const body = await (await f.call(releaseJob, "tech")).json();
+  assertEquals(body, {
+    invoice_id: null,
+    job_id: JOB,
+    cancelled: 0,
+    succeeded: 0,
+    in_progress: 1,
+    sessions_expired: 1,
+  });
+  assertEquals(f.sessions.map((x) => x.status), ["expired", "open", "open"]);
+});
+
+Deno.test("cancel_open_payments (job): caller rules and input", async () => {
+  const f = fixture({ customer: { stripe_customer_id: "cus_1Saved" } });
+  // tech2 is not assigned to the job; techs may collect only on their jobs.
+  assertEquals((await errorOf(await f.call(releaseJob, "tech2")))[1], "forbidden");
+  const noCollect = fixture({ shop: { techs_can_collect_payments: false } });
+  assertEquals((await errorOf(await noCollect.call(releaseJob, "tech")))[1], "forbidden");
+  assertEquals((await errorOf(await f.call(releaseJob, "outsider")))[1], "forbidden");
+  assertEquals(
+    (await errorOf(
+      await f.call({ ...releaseJob, job_id: "dddddddd-dddd-4ddd-8ddd-00000000000f" }, "manager"),
+    )).slice(0, 2),
+    [404, "not_found"],
+  );
+  for (
+    const body of [
+      { action: "cancel_open_payments", shop_id: SHOP },
+      { ...releaseJob, invoice_id: INVOICE },
+    ]
+  ) {
+    assertEquals((await errorOf(await f.call(body, "manager")))[1], "validation_failed");
+  }
+  // A shop without Stripe has nothing to release.
+  const noStripe = fixture({ account: null });
+  assertEquals(await (await noStripe.call(releaseJob, "manager")).json(), {
+    invoice_id: INVOICE,
+    job_id: JOB,
+    cancelled: 0,
+    succeeded: 0,
+    in_progress: 0,
+    sessions_expired: 0,
+  });
 });

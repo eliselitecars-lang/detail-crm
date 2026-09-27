@@ -187,12 +187,14 @@ export function CatalogDialog({ job, nextSort, onClose }: CatalogDialogProps) {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [categoryId, setCategoryId] = useState(job.vehicle?.category_id ?? '');
+  // A shop without vehicle sizes prices every service at its base price.
+  const noSizes = categories.isSuccess && categories.data.length === 0;
 
   const pricing = usePricing(
-    categoryId && selected.length > 0
+    (categoryId || noSizes) && selected.length > 0
       ? {
           customerId: job.customer_id,
-          vehicleCategoryId: categoryId,
+          vehicleCategoryId: categoryId || null,
           vehicleId: job.vehicle_id,
           serviceIds: selected,
         }
@@ -255,17 +257,19 @@ export function CatalogDialog({ job, nextSort, onClose }: CatalogDialogProps) {
       }
     >
       <div className="flex flex-col gap-3">
-        <FormField
-          label="Vehicle size"
-          help={job.vehicle?.category_id ? undefined : 'Pick a size to price services.'}
-        >
-          <Select
-            value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-            placeholder="Choose a size"
-            options={(categories.data ?? []).map((c) => ({ value: c.id, label: c.name }))}
-          />
-        </FormField>
+        {!noSizes && (
+          <FormField
+            label="Vehicle size"
+            help={job.vehicle?.category_id ? undefined : 'Pick a size to price services.'}
+          >
+            <Select
+              value={categoryId}
+              onChange={(e) => setCategoryId(e.target.value)}
+              placeholder="Choose a size"
+              options={(categories.data ?? []).map((c) => ({ value: c.id, label: c.name }))}
+            />
+          </FormField>
+        )}
         <SearchInput label="Search services" value={search} onChange={setSearch} debounceMs={0} />
         {catalog.isPending ? (
           <LoadingState label="Loading catalog…" />

@@ -1,8 +1,9 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { createMemoryRouter, RouterProvider } from 'react-router';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Constants } from '@/lib/database.types';
 import {
   Button,
   ConfirmDialog,
@@ -11,12 +12,15 @@ import {
   FormField,
   Input,
   MoneyInput,
+  STATUS_MAP,
   StatusBadge,
+  statusTone,
   Table,
   Tabs,
   ToastProvider,
   useToast,
   type SortState,
+  type ToastApi,
 } from './index';
 
 describe('FormField', () => {
@@ -239,6 +243,15 @@ describe('StatusBadge', () => {
     expect(screen.getByText('Partially paid')).toBeInTheDocument();
     expect(screen.getByText('Waiting parts')).toBeInTheDocument();
   });
+
+  it('labels a cancelled message and covers every message status', () => {
+    render(<StatusBadge kind="message" status="cancelled" />);
+    expect(screen.getByText('Cancelled')).toBeInTheDocument();
+    expect(statusTone('message', 'cancelled')).toBe('neutral');
+    for (const status of Constants.public.Enums.message_status) {
+      expect(Object.keys(STATUS_MAP.message)).toContain(status);
+    }
+  });
 });
 
 describe('Table', () => {
@@ -320,5 +333,58 @@ describe('Toast', () => {
     expect(screen.getByRole('alert')).toHaveTextContent("You don't have permission to do that.");
     await user.click(screen.getAllByRole('button', { name: 'Dismiss notification' })[0]!);
     expect(screen.queryByText('Invoice sent')).not.toBeInTheDocument();
+  });
+});
+
+describe('Toast timers', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function renderToasts() {
+    const api: { current: ToastApi | null } = { current: null };
+    function Capture() {
+      api.current = useToast();
+      return null;
+    }
+    const view = render(
+      <ToastProvider>
+        <Capture />
+      </ToastProvider>,
+    );
+    const toast = () => {
+      if (!api.current) throw new Error('toast api not captured');
+      return api.current;
+    };
+    return { ...view, toast };
+  }
+
+  it('schedules nothing after the provider unmounts with toasts pending', () => {
+    vi.useFakeTimers();
+    const { toast, unmount } = renderToasts();
+    act(() => {
+      toast().success('Saved');
+      toast().error('Failed');
+    });
+    expect(vi.getTimerCount()).toBe(2);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('drops the timers of toasts pushed off the stack', () => {
+    vi.useFakeTimers();
+    const { toast } = renderToasts();
+    act(() => {
+      for (let i = 1; i <= 7; i += 1) toast().info(`Toast ${i}`);
+    });
+    expect(screen.getAllByRole('status')).toHaveLength(5);
+    expect(screen.queryByText('Toast 1')).not.toBeInTheDocument();
+    expect(screen.queryByText('Toast 2')).not.toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(5);
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(screen.queryAllByRole('status')).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

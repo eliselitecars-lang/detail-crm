@@ -21,6 +21,8 @@ struct ReportsRevenuePoint: Identifiable {
 
 struct ReportsRevenueCard: View {
     let state: LoadState<[ReportRevenueRow]>
+    /// Totals for the whole range from the server (`report_revenue_totals`).
+    let totals: LoadState<ReportRevenueTotals>
     let range: ReportDateRange
     let clock: ShopClock
     let currencyCode: String
@@ -33,7 +35,50 @@ struct ReportsRevenueCard: View {
             state: state,
             retry: retry
         ) { rows in
-            ReportsRevenueBody(rows: rows, bucket: range.bucket(clock), clock: clock, currencyCode: currencyCode)
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                ReportsRevenueTotalsView(state: totals, currencyCode: currencyCode)
+                ReportsRevenueBody(rows: rows, bucket: range.bucket(clock), clock: clock, currencyCode: currencyCode)
+            }
+        }
+    }
+}
+
+/// Net / gross / refunds / tips for the range, as the server totals them.
+private struct ReportsRevenueTotalsView: View {
+    let state: LoadState<ReportRevenueTotals>
+    let currencyCode: String
+
+    var body: some View {
+        switch state {
+        case .idle, .loading:
+            HStack(spacing: Theme.Spacing.sm) {
+                ProgressView()
+                Text("Loading totals…")
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        case .failed(let message):
+            InlineMessage(text: message, kind: .error)
+        case .loaded(let totals):
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Net revenue")
+                        .font(Theme.Typography.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer(minLength: Theme.Spacing.sm)
+                    MoneyText(cents: totals.netCents, currencyCode: currencyCode, size: .large, emphasis: .attention)
+                }
+                .accessibilityElement(children: .combine)
+                ReportsMoneyRow(label: "Gross", cents: totals.grossCents, currencyCode: currencyCode, emphasis: .secondary)
+                if totals.refundsCents != 0 {
+                    ReportsMoneyRow(label: "Refunds", cents: totals.refundsCents, currencyCode: currencyCode, emphasis: .secondary)
+                }
+                if totals.tipsCents != 0 {
+                    ReportsMoneyRow(label: "Tips (not in revenue)", cents: totals.tipsCents, currencyCode: currencyCode, emphasis: .secondary)
+                }
+                ReportsMetricRow(label: "Payments", value: "\(totals.paymentsCount)")
+            }
+            Divider()
         }
     }
 }
@@ -190,6 +235,9 @@ private struct ReportsPaymentRowView: View {
             }
             if row.membershipsCents != 0 {
                 ReportsMoneyRow(label: "Memberships", cents: row.membershipsCents, currencyCode: currencyCode, emphasis: .secondary)
+            }
+            if row.disputesLostCents > 0 {
+                ReportsMoneyRow(label: "Lost disputes", cents: row.disputesLostCents, currencyCode: currencyCode, emphasis: .secondary)
             }
         }
     }

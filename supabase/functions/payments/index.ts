@@ -7,14 +7,17 @@
  *   booking_deposit_checkout  PUBLIC by booking (job) token
  *   payment_sheet             manager+, or assigned technician when allowed
  *                             (saved cards / ephemeral key: manager+ only)
- *   cancel_open_payments      same as payment_sheet: release an invoice
+ *   cancel_open_payments      same as payment_sheet: release an invoice or a job
  *   sweep_payment_sheets      pg_cron (x-cron-secret)
  *   charge_saved_card         manager+
+ *   remove_saved_card         manager+
  *   setup_card                manager+
  *   setup_card_link           manager+
  *   refund                    owner/admin
  *   membership_checkout       manager+
  *   membership_cancel         manager+
+ *   delete_shop               owner (cancels billing, expires links, then
+ *                             deletes the shop)
  *
  * All amounts are derived from the database (invoice balance, deposit due,
  * plan price); a client may only request a partial amount (payment_sheet,
@@ -25,6 +28,7 @@
 import { createActionRouter, jsonAction } from "../_shared/actions.ts";
 import { createHandler } from "../_shared/http.ts";
 import { type Deps, services } from "./lib.ts";
+import { deleteShop, deleteShopInput } from "./shop_delete.ts";
 import {
   membershipCancel,
   membershipCancelInput,
@@ -46,6 +50,8 @@ import {
   paymentSheetInput,
   refund,
   refundInput,
+  removeSavedCard,
+  removeSavedCardInput,
   setupCard,
   setupCardInput,
   setupCardLink,
@@ -90,6 +96,10 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
       setupCardLinkInput,
       (input, ctx) => setupCardLink(services(deps, ctx), ctx.req, input),
     ),
+    remove_saved_card: jsonAction(
+      removeSavedCardInput,
+      (input, ctx) => removeSavedCard(services(deps, ctx), ctx.req, input),
+    ),
     refund: jsonAction(refundInput, (input, ctx) => refund(services(deps, ctx), ctx.req, input)),
     membership_checkout: jsonAction(
       membershipCheckoutInput,
@@ -98,6 +108,10 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     membership_cancel: jsonAction(
       membershipCancelInput,
       (input, ctx) => membershipCancel(services(deps, ctx), ctx.req, input),
+    ),
+    delete_shop: jsonAction(
+      deleteShopInput,
+      (input, ctx) => deleteShop(services(deps, ctx), ctx.req, input),
     ),
   });
   return createHandler(

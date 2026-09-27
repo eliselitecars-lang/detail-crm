@@ -18,6 +18,8 @@ enum AppRoute: Hashable {
     case customer(UUID)
     case quote(UUID)
     case invoice(UUID)
+    /// A customer's inbox conversation (owner / admin / manager).
+    case conversation(UUID)
 }
 
 struct AppRouteDestination: View {
@@ -33,6 +35,8 @@ struct AppRouteDestination: View {
             QuoteDetailView(quoteID: id)
         case .invoice(let id):
             InvoiceDetailView(invoiceID: id)
+        case .conversation(let customerID):
+            InboxThreadView(key: .customer(customerID))
         }
     }
 }

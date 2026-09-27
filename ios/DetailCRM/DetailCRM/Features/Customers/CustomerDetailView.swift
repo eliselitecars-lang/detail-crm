@@ -5,8 +5,10 @@
 //  One customer: contact card (call / text / email / Maps), tags, notes,
 //  vehicles (add / edit with VIN decode), job history, and — for roles
 //  that handle money — quotes, invoices, memberships (read-only summary;
-//  the Money screens own the details) and the saved-card count. Managers
-//  and above can edit, archive, start a new job or open the message thread.
+//  the Money screens own the details) and saved cards. Managers and above
+//  see the server's overview (lifetime paid, open balance, visits), can
+//  edit, archive, start a new job, open the message thread and remove a
+//  saved card.
 //
 
 import SwiftUI
@@ -63,7 +65,8 @@ struct CustomerDetailView: View {
             canSeeQuotes: appState.can(.manageQuotes),
             canSeeInvoices: appState.can(.manageInvoices),
             canSeeMemberships: appState.can(.manageMemberships),
-            canSeeSavedCards: appState.can(.useSavedCards)
+            canSeeSavedCards: appState.can(.useSavedCards),
+            canSeeSummary: appState.role?.isManagerOrAbove ?? false
         )
     }
 
@@ -72,7 +75,9 @@ struct CustomerDetailView: View {
             addVehicle: { sheet = .addVehicle },
             editVehicle: { vehicle in sheet = .editVehicle(vehicle) },
             newJob: { sheet = .newJob },
-            retryHistory: { await loadHistory() }
+            retryHistory: { await loadHistory() },
+            retrySummary: { await reloadSummary() },
+            removeCard: { card in confirmRemoveCard(card) }
         )
     }
 
@@ -138,9 +143,13 @@ struct CustomerDetailView: View {
         }
     }
 
-    /// A job created from the New job sheet shows up in the history.
+    /// A job created from the New job sheet shows up in the history (and
+    /// the overview's upcoming count).
     private func sheetDismissed() {
-        Task { await reloadJobs() }
+        Task {
+            await reloadJobs()
+            await reloadSummary()
+        }
     }
 
     private func vehicleSaved(_ saved: Vehicle) {
@@ -185,6 +194,46 @@ struct CustomerDetailView: View {
         }
     }
 
+    // MARK: Saved cards
+
+    private func confirmRemoveCard(_ card: SavedCard) {
+        confirmation = ConfirmationRequest(
+            title: "Remove \(card.label)?",
+            message: "The card is removed from this customer in Stripe, so it can't be charged again. The customer can save a card again from a pay link.",
+            confirmTitle: "Remove card",
+            isDestructive: true
+        ) {
+            await removeCard(card)
+        }
+    }
+
+    private func removeCard(_ card: SavedCard) async {
+        do {
+            let shopID = try appState.requireShopID()
+            try await PaymentService.removeSavedCard(
+                shopID: shopID,
+                customerID: customerID,
+                paymentMethodID: card.stripePaymentMethodID
+            )
+            if let cards = history.savedCards.value {
+                history.savedCards = .loaded(cards.filter { $0.id != card.id })
+            }
+            toasts.show("Card removed")
+        } catch {
+            toasts.showError(error)
+        }
+        await reloadSavedCards()
+    }
+
+    private func reloadSavedCards() async {
+        guard permissions.canSeeSavedCards, let shopID = try? appState.requireShopID() else { return }
+        let id = customerID
+        let result = await LoadState<[SavedCard]>.result {
+            try await CustomerService.savedCards(shopID: shopID, customerID: id)
+        }
+        history.savedCards.apply(result)
+    }
+
     // MARK: Loading
 
     private func loadAll() async {
@@ -220,6 +269,16 @@ struct CustomerDetailView: View {
             try await CustomerService.jobs(shopID: shopID, customerID: id)
         }
         history.jobs.apply(result)
+    }
+
+    private func reloadSummary() async {
+        guard permissions.canSeeSummary else { return }
+        let id = customerID
+        if history.summary.value == nil { history.summary = .loading }
+        let result = await LoadState<CustomerSummary>.result {
+            try await CustomerService.summary(customerID: id)
+        }
+        history.summary.apply(result)
     }
 
     /// Size classes for the vehicle editor and tag suggestions for the
@@ -263,6 +322,10 @@ struct CustomerDetailPermissions: Equatable {
     var canSeeInvoices: Bool
     var canSeeMemberships: Bool
     var canSeeSavedCards: Bool
+    /// The server's overview (`customer_summary`) is owner/admin/manager.
+    var canSeeSummary: Bool
+    /// Removing a saved card follows the saved-card capability (manager+).
+    var canRemoveCards: Bool { canSeeSavedCards }
 
     /// Money amounts on job rows follow invoice access.
     var canSeeJobTotals: Bool { canSeeInvoices }
@@ -273,6 +336,8 @@ struct CustomerDetailActions {
     let editVehicle: (Vehicle) -> Void
     let newJob: () -> Void
     let retryHistory: () async -> Void
+    let retrySummary: () async -> Void
+    let removeCard: (SavedCard) -> Void
 }
 
 /// Each history section loads (and fails) on its own, so one missing
@@ -283,7 +348,8 @@ struct CustomerDetailHistory {
     var quotes: LoadState<[CustomerQuoteSummary]> = .idle
     var invoices: LoadState<[CustomerInvoiceSummary]> = .idle
     var memberships: LoadState<[CustomerMembershipItem]> = .idle
-    var savedCards: LoadState<Int> = .idle
+    var savedCards: LoadState<[SavedCard]> = .idle
+    var summary: LoadState<CustomerSummary> = .idle
 }
 
 /// Loads every history section in parallel.
@@ -301,6 +367,7 @@ enum CustomerDetailLoader {
         async let invoices = loadInvoices(allowed: permissions.canSeeInvoices, shopID: shopID, customerID: customerID)
         async let memberships = loadMemberships(allowed: permissions.canSeeMemberships, shopID: shopID, customerID: customerID)
         async let savedCards = loadSavedCards(allowed: permissions.canSeeSavedCards, shopID: shopID, customerID: customerID)
+        async let summary = loadSummary(allowed: permissions.canSeeSummary, customerID: customerID)
 
         var next = current
         next.vehicles.apply(await vehicles)
@@ -309,6 +376,7 @@ enum CustomerDetailLoader {
         next.invoices.apply(await invoices)
         next.memberships.apply(await memberships)
         next.savedCards.apply(await savedCards)
+        next.summary.apply(await summary)
         return next
     }
 
@@ -345,10 +413,18 @@ enum CustomerDetailLoader {
         }
     }
 
-    private static func loadSavedCards(allowed: Bool, shopID: UUID, customerID: UUID) async -> LoadState<Int> {
-        guard allowed else { return .loaded(0) }
-        return await LoadState<Int>.result {
-            try await CustomerService.savedCardCount(shopID: shopID, customerID: customerID)
+    private static func loadSavedCards(allowed: Bool, shopID: UUID, customerID: UUID) async -> LoadState<[SavedCard]> {
+        guard allowed else { return .loaded([]) }
+        return await LoadState<[SavedCard]>.result {
+            try await CustomerService.savedCards(shopID: shopID, customerID: customerID)
+        }
+    }
+
+    /// Not loaded at all for roles below manager (the section is hidden).
+    private static func loadSummary(allowed: Bool, customerID: UUID) async -> LoadState<CustomerSummary> {
+        guard allowed else { return .idle }
+        return await LoadState<CustomerSummary>.result {
+            try await CustomerService.summary(customerID: customerID)
         }
     }
 }

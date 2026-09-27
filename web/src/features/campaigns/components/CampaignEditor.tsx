@@ -8,8 +8,10 @@ import {
   Button,
   ConfirmDialog,
   DateInput,
+  ErrorState,
   FormField,
   Input,
+  LoadingState,
   RadioGroup,
   SectionCard,
   Textarea,
@@ -19,8 +21,10 @@ import {
 import { formatDateTime, shopLocalToUtcIso, utcToShopLocal } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
 import { useShop } from '@/features/shop/shopContext';
+import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import {
   useAudiencePreview,
+  useCampaignPreview,
   useDeleteCampaign,
   useLaunchCampaign,
   useSaveCampaign,
@@ -33,14 +37,14 @@ import {
   audienceToForm,
   audienceToJson,
   CAMPAIGN_PLACEHOLDERS,
-  campaignBodyMax,
   campaignFormSchema,
+  EMAIL_BODY_MAX,
   EMPTY_AUDIENCE_FORM,
   hasPlaceholders,
-  hasUnsubscribeLink,
-  smsNeedsStopFooter,
+  SMS_BODY_MAX,
   type AudienceForm,
   type CampaignChannel,
+  type CampaignPreview,
 } from '../model';
 import { AudienceBuilder } from './AudienceBuilder';
 
@@ -93,6 +97,14 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
   });
   const channel = useWatch({ control, name: 'channel' });
   const body = useWatch({ control, name: 'body' }) ?? '';
+  const subject = useWatch({ control, name: 'subject' }) ?? '';
+  // The server renders the text as launch_campaign will (400 ms after typing stops).
+  const previewInput = useDebouncedValue(
+    { channel, body: body.trim(), subject: channel === 'email' ? subject.trim() || null : null },
+    400,
+  );
+  const preview = useCampaignPreview(previewInput);
+  const serverPreview = body.trim() !== '' && preview.data ? preview.data : null;
   const rangeError = audienceRangeError(audience);
   const audienceJson = audienceToJson(audienceFromForm(audience));
   const launchCount = useAudiencePreview(channel, audienceJson, confirmLaunch !== null);
@@ -185,16 +197,9 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
     });
   };
 
-  // The limit leaves room for the compliance footer the server appends.
-  const max = campaignBodyMax(channel, body.trim());
-  const footerNote =
-    channel === 'sms'
-      ? smsNeedsStopFooter(body)
-        ? ' · “Reply STOP to opt out.” is added automatically.'
-        : ''
-      : hasUnsubscribeLink(body)
-        ? ''
-        : ' · An unsubscribe link is added automatically.';
+  const lengthHelp = serverPreview
+    ? previewLengthHelp(channel, serverPreview)
+    : `${body.trim().length.toLocaleString()}/${(channel === 'sms' ? SMS_BODY_MAX : EMAIL_BODY_MAX).toLocaleString()} characters`;
   const placeholderNote = hasPlaceholders(body)
     ? ` Placeholders are filled in for each customer and make the ${
         channel === 'sms' ? 'text' : 'email'
@@ -243,7 +248,7 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
             label="Message"
             required
             error={errors.body?.message}
-            help={`${body.trim().length.toLocaleString()}/${max.toLocaleString()} characters${footerNote}${placeholderNote}`}
+            help={`${lengthHelp}${placeholderNote}`}
           >
             <Textarea
               rows={channel === 'sms' ? 5 : 10}
@@ -254,6 +259,13 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
               }}
             />
           </FormField>
+          <CampaignPreviewPanel
+            channel={channel}
+            preview={serverPreview}
+            loading={body.trim() !== '' && preview.isPending}
+            error={preview.isError ? preview.error : null}
+            onRetry={() => void preview.refetch()}
+          />
           <div>
             <p className="text-muted mb-2 text-xs font-medium">Insert a placeholder</p>
             <ul className="flex flex-wrap gap-2" aria-label="Placeholders">
@@ -400,5 +412,61 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
         />
       )}
     </form>
+  );
+}
+
+function previewLengthHelp(channel: CampaignChannel, preview: CampaignPreview): string {
+  const counts = `${preview.body_length.toLocaleString()}/${preview.max_body_length.toLocaleString()} characters`;
+  if (channel === 'sms') {
+    return preview.footer_added
+      ? `${counts} · “Reply STOP to opt out.” is added automatically.`
+      : counts;
+  }
+  return counts;
+}
+
+function CampaignPreviewPanel({
+  channel,
+  preview,
+  loading,
+  error,
+  onRetry,
+}: {
+  channel: CampaignChannel;
+  preview: CampaignPreview | null;
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+}) {
+  if (error) {
+    return (
+      <ErrorState compact error={error} title="Couldn’t preview the message" onRetry={onRetry} />
+    );
+  }
+  if (!preview) {
+    return loading ? <LoadingState label="Rendering preview…" /> : null;
+  }
+  return (
+    <section aria-label="Message preview" className="flex flex-col gap-2">
+      <p className="text-muted text-xs font-medium tracking-wide uppercase">
+        Preview{channel === 'email' ? ' (the unsubscribe link is added for each customer)' : ''}
+      </p>
+      <div className="bg-surface-2 rounded-control text-ink p-3 text-sm break-words whitespace-pre-wrap">
+        {preview.subject && <p className="mb-1 font-semibold">{preview.subject}</p>}
+        {preview.body}
+      </div>
+      {preview.truncated && (
+        <p role="alert" className="text-warning-ink text-sm">
+          This {channel === 'sms' ? 'text' : 'email'} is{' '}
+          {(preview.body_length - preview.max_body_length).toLocaleString()} characters over the
+          limit and will be cut off. Shorten it.
+        </p>
+      )}
+      {channel === 'sms' && preview.footer_added && (
+        <p className="text-muted text-xs">
+          “Reply STOP to opt out.” is added because the text has no opt-out instruction.
+        </p>
+      )}
+    </section>
   );
 }

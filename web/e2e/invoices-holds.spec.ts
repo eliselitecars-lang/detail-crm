@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, SHOP } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, type Json } from './support/mockSupabase';
 
 /**
  * Card-money safety on the invoice page: a hold left by an unconfirmed
@@ -117,40 +117,28 @@ async function setup(page: Page, payments: ReturnType<typeof payment>[]) {
       vehicles: [],
       customer_payment_methods: [],
     },
-  });
-  await page.route(`${SUPABASE_URL}/functions/v1/**`, async (route) => {
-    const request = route.request();
-    if (request.method() === 'OPTIONS') {
-      return route.fulfill({
-        status: 204,
-        headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
-      });
-    }
-    const body = request.postDataJSON() as Body;
-    calls.push(body);
-    const result =
-      body.action === 'cancel_open_payments'
-        ? {
-            invoice_id: INVOICE_ID,
-            cancelled: 1,
-            succeeded: 0,
-            in_progress: 0,
-            sessions_expired: 0,
-          }
-        : {
-            payment_id: payment().id,
-            refund_id: `re_${calls.length}`,
-            refund_status: 'succeeded',
-            amount_cents: body.amount_cents,
-            refunded_cents_total: 1000 * calls.length,
-            payment_status: 'partially_refunded',
-          };
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      headers: { 'access-control-allow-origin': '*' },
-      body: JSON.stringify(result),
-    });
+    functions: {
+      payments: ({ body }): Json => {
+        const call = body as Body;
+        calls.push(call);
+        return call.action === 'cancel_open_payments'
+          ? {
+              invoice_id: INVOICE_ID,
+              cancelled: 1,
+              succeeded: 0,
+              in_progress: 0,
+              sessions_expired: 0,
+            }
+          : {
+              payment_id: payment().id,
+              refund_id: `re_${calls.length}`,
+              refund_status: 'succeeded',
+              amount_cents: call.amount_cents as Json,
+              refunded_cents_total: 1000 * calls.length,
+              payment_status: 'partially_refunded',
+            };
+      },
+    },
   });
   return calls;
 }

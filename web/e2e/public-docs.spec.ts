@@ -1,5 +1,5 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { expect, test, type Page } from '@playwright/test';
+import { mockSupabase, reply, type Handler } from './support/mockSupabase';
 
 /** Public quote (/q), invoice (/i) and form (/f) pages against a mocked backend. */
 
@@ -10,8 +10,6 @@ const SHOP_ID = '10000000-0000-4000-8000-000000000001';
 const OPT_WHEELS = '54444444-4444-4444-8444-444444444441';
 const OPT_GLASS = '54444444-4444-4444-8444-444444444442';
 const CHECKOUT_URL = 'https://checkout.stripe.test/c/pay/cs_test_invoice';
-
-const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
 
 const SHOP = {
   name: 'Glacier Detailing',
@@ -156,30 +154,21 @@ function formDoc(overrides: Record<string, unknown> = {}, signed = false) {
   };
 }
 
-async function preflight(route: Route): Promise<boolean> {
-  if (route.request().method() !== 'OPTIONS') return false;
-  await route.fulfill({ status: 204, headers: cors });
-  return true;
+/** payments.invoice_checkout: records the bodies it received. */
+function checkout(calls: unknown[]): Handler {
+  return ({ body }) => {
+    calls.push(body);
+    return {
+      url: CHECKOUT_URL,
+      expires_at: 1_900_000_000,
+      amount_cents: 20000,
+      tip_cents: (body as { tip_cents: number }).tip_cents,
+      currency: 'usd',
+    };
+  };
 }
 
-async function mockCheckout(page: Page, calls: unknown[]) {
-  await page.route(`${SUPABASE_URL}/functions/v1/payments`, async (route) => {
-    if (await preflight(route)) return;
-    const body = route.request().postDataJSON() as { tip_cents: number };
-    calls.push(body);
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      headers: cors,
-      body: JSON.stringify({
-        url: CHECKOUT_URL,
-        expires_at: 1_900_000_000,
-        amount_cents: 20000,
-        tip_cents: body.tip_cents,
-        currency: 'usd',
-      }),
-    });
-  });
+async function mockStripeCheckout(page: Page) {
   await page.route('https://checkout.stripe.test/**', (route) =>
     route.fulfill({
       status: 200,
@@ -278,11 +267,35 @@ test.describe('public quote', () => {
   });
 });
 
+test.describe('public links that no longer exist (PT404)', () => {
+  const notFound = (message: string) =>
+    reply(404, { code: 'PT404', message, details: null, hint: null });
+
+  test('an unknown quote link shows the not-found page', async ({ page }) => {
+    await mockSupabase(page, { rpc: { public_get_quote: notFound('quote not found') } });
+    await page.goto(`/q/${QUOTE_TOKEN}`);
+    await expect(page.getByText('We couldn’t find this quote')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Approve quote' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Try again/ })).toHaveCount(0);
+  });
+
+  test('an unknown invoice link shows the not-found page', async ({ page }) => {
+    await mockSupabase(page, { rpc: { public_get_invoice: notFound('invoice not found') } });
+    await page.goto(`/i/${INVOICE_TOKEN}`);
+    await expect(page.getByText('We couldn’t find this invoice')).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Pay/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Try again/ })).toHaveCount(0);
+  });
+});
+
 test.describe('public invoice', () => {
   test('pays the balance with a 20% tip via Stripe Checkout', async ({ page }) => {
     const calls: unknown[] = [];
-    await mockSupabase(page, { rpc: { public_get_invoice: invoiceDoc() } });
-    await mockCheckout(page, calls);
+    await mockSupabase(page, {
+      rpc: { public_get_invoice: invoiceDoc() },
+      functions: { payments: checkout(calls) },
+    });
+    await mockStripeCheckout(page);
     await page.goto(`/i/${INVOICE_TOKEN}`);
     await expect(page.getByRole('heading', { name: 'Invoice #2001', level: 1 })).toBeVisible();
     await expect(page.getByText('Visa •••• 4242')).toBeVisible();
@@ -299,8 +312,11 @@ test.describe('public invoice', () => {
 
   test('a custom tip above the balance is refused before checkout', async ({ page }) => {
     const calls: unknown[] = [];
-    await mockSupabase(page, { rpc: { public_get_invoice: invoiceDoc() } });
-    await mockCheckout(page, calls);
+    await mockSupabase(page, {
+      rpc: { public_get_invoice: invoiceDoc() },
+      functions: { payments: checkout(calls) },
+    });
+    await mockStripeCheckout(page);
     await page.goto(`/i/${INVOICE_TOKEN}`);
     await page.getByText('Custom', { exact: true }).click();
     await page.getByLabel('Tip amount').fill('500');
@@ -367,20 +383,11 @@ test.describe('public form', () => {
           return formDoc({}, true);
         },
       },
-    });
-    await page.route(`${SUPABASE_URL}/storage/v1/object/signatures/**`, async (route) => {
-      if (await preflight(route)) return;
-      const path = new URL(route.request().url()).pathname.replace(
-        '/storage/v1/object/signatures/',
-        '',
-      );
-      uploads.push(decodeURIComponent(path));
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        headers: cors,
-        body: JSON.stringify({ Key: `signatures/${path}`, Id: 'obj-1' }),
-      });
+      storage: ({ url }) => {
+        const path = url.pathname.replace('/storage/v1/object/signatures/', '');
+        uploads.push(decodeURIComponent(path));
+        return { Key: `signatures/${path}`, Id: 'obj-1' };
+      },
     });
 
     await page.goto(`/f/${FORM_TOKEN}`);

@@ -5,7 +5,7 @@ import { Button, Card, EmptyState, PageHeader } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { useRealtime } from '@/lib/useRealtime';
 import { useShop } from '@/features/shop/shopContext';
-import { INBOX_PAGE, useInbox } from './api';
+import { useInbox, useInboxUnreadCount } from './api';
 import { NewConversationDialog } from './components/NewConversationDialog';
 import { ThreadList } from './components/ThreadList';
 import { ThreadView } from './components/ThreadView';
@@ -21,16 +21,16 @@ export default function MessagesPage() {
   const { shopId, timezone } = useShop();
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const [limit, setLimit] = useState(INBOX_PAGE);
   const [composing, setComposing] = useState(false);
 
-  const inbox = useInbox(limit);
+  const inbox = useInbox();
+  const unread = useInboxUnreadCount();
   useRealtime({ table: 'messages', shopId });
 
   const search = params.toString();
   const selected = useMemo(() => refFromSearch(new URLSearchParams(search)), [search]);
   const selectedKey = selected ? threadKey(selected) : null;
-  const totalUnread = inbox.data?.unreadTotal ?? 0;
+  const totalUnread = unread.data ?? 0;
 
   return (
     <>
@@ -55,16 +55,16 @@ export default function MessagesPage() {
           )}
         >
           <ThreadList
-            threads={inbox.data?.threads}
+            threads={inbox.data}
             isPending={inbox.isPending}
             error={inbox.error}
             onRetry={() => void inbox.refetch()}
             retrying={inbox.isRefetching}
             selectedKey={selectedKey}
             timeZone={timezone}
-            truncated={inbox.data?.truncated ?? false}
-            loadingMore={inbox.isFetching && inbox.isPlaceholderData}
-            onLoadMore={() => setLimit((n) => n + INBOX_PAGE)}
+            truncated={inbox.hasNextPage}
+            loadingMore={inbox.isFetchingNextPage}
+            onLoadMore={() => void inbox.fetchNextPage()}
             onNewConversation={() => setComposing(true)}
           />
         </div>

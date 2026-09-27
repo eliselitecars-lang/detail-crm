@@ -38,6 +38,7 @@ import {
   type PortalOverview,
   type PortalShop,
 } from './api';
+import { ReturnBanners } from './ReturnBanners';
 
 const PORTAL_BRANDING: PublicShopBranding = { name: 'My appointments' };
 
@@ -68,6 +69,11 @@ export default function PortalPage() {
             Sign out
           </Button>
         </div>
+
+        <ReturnBanners
+          userId={userId}
+          shopName={shops.length === 1 ? (shops[0]?.name ?? null) : null}
+        />
 
         {claim.isError && (
           <Banner
@@ -123,6 +129,17 @@ export default function PortalPage() {
         ) : (
           <PortalSections data={overview.data} />
         )}
+
+        <footer className="text-muted border-line flex flex-wrap items-center justify-between gap-2 border-t pt-4 text-sm">
+          <span>Signed in to manage your appointments.</span>
+          <Link
+            to="/account"
+            state={{ from: '/portal' }}
+            className="text-primary-ink hover:underline"
+          >
+            Account settings
+          </Link>
+        </footer>
       </div>
     </PublicLayout>
   );

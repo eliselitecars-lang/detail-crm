@@ -22,6 +22,7 @@ function PaymentsBody({ rows: all, range }: { rows: PaymentsRow[]; range: DateRa
   const money = (cents: number) => formatCents(cents, { currency });
   // The server returns every method (zeros included); show the ones used.
   const rows = all.filter((r) => r.payments_count > 0);
+  const disputesLost = sumCents(rows.map((r) => r.disputes_lost_cents));
 
   if (rows.length === 0)
     return (
@@ -81,6 +82,7 @@ function PaymentsBody({ rows: all, range }: { rows: PaymentsRow[]; range: DateRa
         'Collected',
         'Deposits',
         'Memberships',
+        'Lost disputes',
       ],
       rows.map((r) => [
         METHOD_LABELS[r.method],
@@ -93,6 +95,7 @@ function PaymentsBody({ rows: all, range }: { rows: PaymentsRow[]; range: DateRa
         centsCell(r.collected_cents),
         centsCell(r.deposits_cents),
         centsCell(r.memberships_cents),
+        centsCell(r.disputes_lost_cents),
       ]),
     );
 
@@ -107,6 +110,13 @@ function PaymentsBody({ rows: all, range }: { rows: PaymentsRow[]; range: DateRa
         <StatTile label="Net" value={money(sumCents(rows.map((r) => r.net_cents)))} />
         <StatTile label="Refunds" value={money(sumCents(rows.map((r) => r.refunds_cents)))} />
         <StatTile label="Tips" value={money(sumCents(rows.map((r) => r.tips_cents)))} />
+        {disputesLost > 0 && (
+          <StatTile
+            label="Lost disputes"
+            value={money(disputesLost)}
+            hint="Card payments the bank took back in a chargeback; balances are unchanged"
+          />
+        )}
       </StatGrid>
       <SectionCard
         title="Payments by method"

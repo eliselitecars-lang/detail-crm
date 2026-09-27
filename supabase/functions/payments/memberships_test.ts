@@ -301,3 +301,13 @@ Deno.test("membership_cancel: a cancelled membership Stripe still bills is stopp
   });
   assertEquals(ended.stripe("DELETE", "/subscriptions/:id").length, 0);
 });
+
+Deno.test("membership_checkout: the subscription link is card-only", async () => {
+  const f = fixture();
+  const res = await f.call(checkout, "manager");
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+  const session = f.stripe("POST", "/checkout/sessions")[0];
+  assertEquals(session?.form.get("payment_method_types[0]"), "card");
+  assertEquals(session?.form.get("payment_method_types[1]"), null);
+});

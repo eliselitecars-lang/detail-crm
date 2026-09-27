@@ -138,7 +138,7 @@ describe('deploy_backend.sh', () => {
     assert.match(r.out, /DRY RUN/);
     assert.match(r.out, /Would push these migrations:/);
     for (const m of MIGRATIONS) assert.ok(r.out.includes(m), `pending migration ${m} not listed`);
-    for (const fn of ['invites', 'messaging', 'payments', 'storage-purge', 'stripe-connect', 'stripe-webhook']) {
+    for (const fn of ['account', 'invites', 'messaging', 'payments', 'storage-purge', 'stripe-connect', 'stripe-webhook']) {
       assert.ok(r.out.includes(`would deploy ${fn} (verify_jwt=${!NO_JWT.includes(fn)})`), `plan for ${fn} missing:\n${r.out}`);
     }
     assert.match(r.out, /would create the Connect endpoint/);
@@ -168,7 +168,7 @@ describe('deploy_backend.sh', () => {
     const push = cli.findIndex((l) => /^db push/.test(l) && !l.includes('--dry-run'));
     assert.ok(push > idx(/^db push .*--dry-run/), cli.join('\n'));
     const deploys = cli.filter((l) => l.startsWith('functions deploy'));
-    assert.equal(deploys.length, 6, deploys.join('\n'));
+    assert.equal(deploys.length, 7, deploys.join('\n'));
     for (const l of deploys) {
       const fn = l.split(' ')[2];
       assert.equal(l.includes('--no-verify-jwt'), NO_JWT.includes(fn), `wrong JWT flag: ${l}`);

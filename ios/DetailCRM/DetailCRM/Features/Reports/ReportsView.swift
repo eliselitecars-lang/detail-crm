@@ -18,6 +18,7 @@ import DetailCore
 /// Per-card load states for one range.
 struct ReportsSnapshot {
     var revenue: LoadState<[ReportRevenueRow]> = .idle
+    var revenueTotals: LoadState<ReportRevenueTotals> = .idle
     var payments: LoadState<[ReportPaymentRow]> = .idle
     var services: LoadState<[ReportServiceRow]> = .idle
     var team: LoadState<[ReportTeamRow]> = .idle
@@ -37,6 +38,9 @@ enum ReportsLoader {
             async let revenue = LoadState<[ReportRevenueRow]>.result {
                 try await ReportService.revenue(shopID: shopID, from: from, to: to, bucket: bucket)
             }
+            async let revenueTotals = LoadState<ReportRevenueTotals>.result {
+                try await ReportService.revenueTotals(shopID: shopID, from: from, to: to)
+            }
             async let payments = LoadState<[ReportPaymentRow]>.result {
                 try await ReportService.payments(shopID: shopID, from: from, to: to)
             }
@@ -53,6 +57,7 @@ enum ReportsLoader {
                 try await ReportService.customers(shopID: shopID, from: from, to: to)
             }
             snapshot.revenue = await revenue
+            snapshot.revenueTotals = await revenueTotals
             snapshot.payments = await payments
             snapshot.services = await services
             snapshot.team = await team
@@ -102,7 +107,14 @@ struct ReportsView: View {
         let currency = appState.currencyCode
         let range = loadedRange ?? currentRange
         if includeShopReports {
-            AnyView(ReportsRevenueCard(state: snapshot.revenue, range: range, clock: clock, currencyCode: currency, retry: { await load() }))
+            AnyView(ReportsRevenueCard(
+                state: snapshot.revenue,
+                totals: snapshot.revenueTotals,
+                range: range,
+                clock: clock,
+                currencyCode: currency,
+                retry: { await load() }
+            ))
             AnyView(ReportsPaymentsCard(state: snapshot.payments, currencyCode: currency, retry: { await load() }))
             AnyView(ReportsServicesCard(state: snapshot.services, currencyCode: currency, retry: { await load() }))
             AnyView(ReportsTeamCard(state: snapshot.team, currencyCode: currency, ownOnly: false, retry: { await load() }))
@@ -125,6 +137,7 @@ struct ReportsView: View {
         // Show spinners for a new range; keep content while refreshing.
         if rangeChanged {
             next.revenue = .loading
+            next.revenueTotals = .loading
             next.payments = .loading
             next.services = .loading
             next.team = .loading
@@ -136,6 +149,7 @@ struct ReportsView: View {
         if Task.isCancelled { return }
         var merged = rangeChanged ? ReportsSnapshot() : snapshot
         merged.revenue.apply(fresh.revenue)
+        merged.revenueTotals.apply(fresh.revenueTotals)
         merged.payments.apply(fresh.payments)
         merged.services.apply(fresh.services)
         merged.team.apply(fresh.team)
@@ -149,7 +163,7 @@ struct ReportsView: View {
     }
 
     private func firstError(_ fresh: ReportsSnapshot) -> String? {
-        fresh.revenue.errorMessage ?? fresh.payments.errorMessage ?? fresh.services.errorMessage
+        fresh.revenue.errorMessage ?? fresh.revenueTotals.errorMessage ?? fresh.payments.errorMessage ?? fresh.services.errorMessage
             ?? fresh.team.errorMessage ?? fresh.outstanding.errorMessage ?? fresh.customers.errorMessage
     }
 }

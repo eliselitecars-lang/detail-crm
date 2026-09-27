@@ -316,8 +316,16 @@ struct JobDetailView: View {
 
     private func changeStatus(_ target: JobStatus) async {
         do {
-            try await model.changeStatus(to: target)
-            toasts.show("Job is now \(target.displayName.lowercased()).")
+            let recorded = try await model.changeStatus(to: target)
+            if recorded > 0 {
+                toasts.show(
+                    "Job is now \(target.displayName.lowercased()). " + JobDetailView.recordedPaymentsText(recorded),
+                    style: .info,
+                    duration: .seconds(6)
+                )
+            } else {
+                toasts.show("Job is now \(target.displayName.lowercased()).")
+            }
         } catch {
             toasts.showError(error)
         }
@@ -331,5 +339,15 @@ struct JobDetailView: View {
         } catch {
             toasts.showError(error)
         }
+    }
+}
+
+extension JobDetailView {
+    /// Said after cancelling / no-show when releasing the job's card
+    /// payments found money that had already gone through.
+    static func recordedPaymentsText(_ count: Int) -> String {
+        count == 1
+            ? "A card payment for this job had already gone through; it's recorded on the job."
+            : "\(count) card payments for this job had already gone through; they're recorded on the job."
     }
 }

@@ -130,21 +130,6 @@ function BookingWizardLoader({ slug, profile }: { slug: string; profile: ShopPro
       />
     );
   }
-  if (catalog.data.vehicle_categories.length === 0) {
-    // The server would price and schedule a "no category" booking, but the
-    // typed contract can't express it: get_available_slots and
-    // public_validate_coupon declare p_vehicle_category_id as a required uuid
-    // (no default), so the generated Args type has no null and PostgREST
-    // can't match a call that omits it. Until those parameters get
-    // `default null`, a shop needs at least one vehicle category to take
-    // online bookings.
-    return (
-      <BookingClosed
-        profile={profile}
-        message="Online booking isn’t fully set up yet. Please contact the shop to book."
-      />
-    );
-  }
   return <BookingWizard slug={slug} profile={profile} catalog={catalog.data} />;
 }
 
@@ -178,7 +163,8 @@ function BookingWizard({
     window.scrollTo({ top: 0 });
   };
 
-  const categoryId = state.vehicle.categoryId ?? '';
+  // null when the shop has no vehicle categories: prices use each item's base price.
+  const categoryId = state.vehicle.categoryId;
   const itemIds = [...state.serviceIds, ...state.addonIds];
 
   if (closed) return <BookingClosed profile={profile} />;

@@ -14,10 +14,12 @@ import { unwrapList } from './db';
 import { AppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
+import { cancelOpenPaymentsResultSchema } from '@/features/invoices/api';
+import { invokeEdge } from '@/features/quotes/shared/edge';
 import { useShop } from '@/features/shop/shopContext';
 import {
   JOB_STATUSES,
-  reorderLineSorts,
+  movedLineOrder,
   type JobFilters,
   type JobStatus,
   type StatusTransition,
@@ -254,7 +256,8 @@ export type PricedLine = z.infer<typeof pricedLineSchema>;
 
 export interface PricingArgs {
   customerId: string;
-  vehicleCategoryId: string;
+  /** null when the shop has no vehicle sizes: base prices apply (argument omitted). */
+  vehicleCategoryId: string | null;
   vehicleId: string | null;
   serviceIds: string[];
 }
@@ -264,7 +267,7 @@ export async function fetchPricing(shopId: string, args: PricingArgs): Promise<P
     await supabase.rpc('price_services', {
       p_shop: shopId,
       p_customer_id: args.customerId,
-      p_vehicle_category_id: args.vehicleCategoryId,
+      ...(args.vehicleCategoryId ? { p_vehicle_category_id: args.vehicleCategoryId } : {}),
       p_service_ids: args.serviceIds,
       ...(args.vehicleId ? { p_vehicle_id: args.vehicleId } : {}),
     }),
@@ -646,6 +649,36 @@ export function useReschedule() {
   });
 }
 
+/**
+ * payments.cancel_open_payments with `job_id`: before a job is cancelled or
+ * marked no-show, releases every unsettled card attempt of the job (deposit
+ * sheets, its invoice's sheets) and expires its open deposit / pay links, so
+ * nobody can pay for an appointment that is not happening. Payments already
+ * processing are reported (`in_progress`) — the caller must wait; payments
+ * that already went through are recorded (`succeeded`). A shop without Stripe
+ * answers with zeros. Collectors only (manager+, or a technician on an
+ * assigned job when the shop lets technicians take payments).
+ */
+export function useReleaseJobPayments(jobId: string) {
+  const { shopId } = useShop();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      invokeEdge(
+        'payments',
+        'cancel_open_payments',
+        { shop_id: shopId, job_id: jobId },
+        cancelOpenPaymentsResultSchema,
+      ),
+    onSettled: () =>
+      Promise.all(
+        (['jobs', 'invoices', 'payments'] as const).map((domain) =>
+          queryClient.invalidateQueries({ queryKey: shopKey(shopId, domain) }),
+        ),
+      ),
+  });
+}
+
 export function useSetStatus(jobId: string) {
   const { shopId } = useShop();
   const invalidate = useInvalidateJobs();
@@ -731,13 +764,12 @@ export function useUpdateLineItem() {
 }
 
 /**
- * Moves a line one step up / down. The whole list is renumbered 1..n
- * (reorderLineSorts) so equal or gapped sort values — the column defaults
- * to 0 — still move; only changed rows are written. If a write fails midway
- * the next move renumbers from the refetched order and converges.
+ * Moves a line one step up / down: reorder_job_line_items (0092) rewrites
+ * the whole order atomically from the complete id list (manager+; 22023 when
+ * the list is stale — another tab added or removed a line — so the refetch
+ * after an error shows the current lines).
  */
-export function useMoveLineItem() {
-  const { shopId } = useShop();
+export function useMoveLineItem(jobId: string) {
   const invalidate = useInvalidateJobs();
   return useMutation({
     mutationFn: async ({
@@ -745,19 +777,13 @@ export function useMoveLineItem() {
       index,
       delta,
     }: {
-      rows: readonly Pick<LineItem, 'id' | 'sort'>[];
+      rows: readonly Pick<LineItem, 'id'>[];
       index: number;
       delta: -1 | 1;
     }) => {
-      for (const change of reorderLineSorts(rows, index, delta)) {
-        unwrap(
-          await supabase
-            .from('job_line_items')
-            .update({ sort: change.sort })
-            .eq('shop_id', shopId)
-            .eq('id', change.id),
-        );
-      }
+      const ids = movedLineOrder(rows, index, delta);
+      if (!ids) return;
+      unwrap(await supabase.rpc('reorder_job_line_items', { p_job_id: jobId, p_ids: ids }));
     },
     onSettled: invalidate,
   });

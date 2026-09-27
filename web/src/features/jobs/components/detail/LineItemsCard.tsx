@@ -36,7 +36,7 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
   const canSeeMoney = useCan('invoices.viewAssigned');
   const toast = useToast();
   const lines = useLineItems(job.id);
-  const move = useMoveLineItem();
+  const move = useMoveLineItem(job.id);
   const remove = useDeleteLineItem();
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleting, setDeleting] = useState<LineItem | null>(null);

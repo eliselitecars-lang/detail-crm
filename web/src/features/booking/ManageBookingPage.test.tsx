@@ -2,18 +2,18 @@ import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute } from '@/test/render';
 import { navigation } from '@/features/public-docs/shared/checkout';
-import { edge, mockRpc, pgError, resetPublicMocks } from '@/features/public-docs/shared/testing';
+import { mockRpc, pgError, resetSupabaseMock, supabase } from '@/test/supabaseMock';
 import ManageBookingPage from './ManageBookingPage';
 import { bookingDocFixture, TOKEN } from './testFixtures';
 
-vi.mock('@/lib/supabase', () => import('@/features/public-docs/shared/testSupabase'));
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
 function render(path = `/booking/${TOKEN}`) {
   return renderRoute(<ManageBookingPage />, { path, routePath: '/booking/:token', shop: null });
 }
 
 beforeEach(() => {
-  resetPublicMocks();
+  resetSupabaseMock();
 });
 
 describe('ManageBookingPage', () => {
@@ -38,7 +38,7 @@ describe('ManageBookingPage', () => {
   it('starts the deposit checkout and redirects to Stripe', async () => {
     mockRpc({ public_get_booking: { data: bookingDocFixture() } });
     const assign = vi.spyOn(navigation, 'assign').mockImplementation(() => undefined);
-    edge.invoke.mockResolvedValue({
+    supabase.functions.invoke.mockResolvedValue({
       data: {
         url: 'https://checkout.stripe.com/c/pay/cs_dep',
         expires_at: 1,
@@ -53,7 +53,8 @@ describe('ManageBookingPage', () => {
     await waitFor(() =>
       expect(assign).toHaveBeenCalledWith('https://checkout.stripe.com/c/pay/cs_dep'),
     );
-    const body = (edge.invoke.mock.calls[0]?.[1] as { body: Record<string, unknown> }).body;
+    const body = (supabase.functions.invoke.mock.calls[0]?.[1] as { body: Record<string, unknown> })
+      .body;
     expect(body).toMatchObject({ action: 'booking_deposit_checkout', token: TOKEN });
     expect(body).not.toHaveProperty('amount_cents');
     expect(String(body.request_nonce)).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
@@ -62,7 +63,7 @@ describe('ManageBookingPage', () => {
   it('never follows a non-https checkout url', async () => {
     mockRpc({ public_get_booking: { data: bookingDocFixture() } });
     const assign = vi.spyOn(navigation, 'assign').mockImplementation(() => undefined);
-    edge.invoke.mockResolvedValue({
+    supabase.functions.invoke.mockResolvedValue({
       data: {
         url: 'javascript:alert(1)',
         expires_at: 1,

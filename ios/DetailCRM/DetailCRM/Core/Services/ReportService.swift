@@ -46,6 +46,19 @@ enum ReportService {
             .value
     }
 
+    /// Totals for the whole range (`report_revenue_totals`, one row): the
+    /// same received-payment rules as the buckets.
+    static func revenueTotals(shopID: UUID, from: String, to: String) async throws -> ReportRevenueTotals {
+        let rows: [ReportRevenueTotals] = try await Supa.client
+            .rpc("report_revenue_totals", params: RangeParams(p_shop_id: shopID, p_from: from, p_to: to))
+            .execute()
+            .value
+        guard let totals = rows.first else {
+            throw AppError.message("The revenue totals are unavailable. Try again.")
+        }
+        return totals
+    }
+
     /// Received payments per method.
     static func payments(shopID: UUID, from: String, to: String) async throws -> [ReportPaymentRow] {
         try await Supa.client

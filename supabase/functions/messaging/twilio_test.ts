@@ -363,8 +363,8 @@ function customerRow(db: ReturnType<typeof setup>["db"]) {
 
 const sid = (ch: string) => "SM" + ch.repeat(32);
 
-Deno.test("twilio_inbound: YES (a Twilio opt-in keyword) clears the SMS opt-out like START", async () => {
-  for (const reply of ["YES", "yes!", " Yes. "]) {
+Deno.test("twilio_inbound: START, UNSTOP and YES (Twilio's opt-in keywords) clear the SMS opt-out", async () => {
+  for (const reply of ["START", "unstop", "YES", "yes!", " Yes. "]) {
     const { db, handler, logs } = setup();
     await (await handler(
       await signedForm("twilio_inbound", inboundParams("STOP", { MessageSid: sid("1") })),
@@ -375,24 +375,21 @@ Deno.test("twilio_inbound: YES (a Twilio opt-in keyword) clears the SMS opt-out 
       await signedForm("twilio_inbound", inboundParams(reply, { MessageSid: sid("2") })),
     );
     assertEquals(await res.text(), EMPTY_TWIML);
+    // record_inbound_sms (0033) applies it, exactly like START.
     assertEquals(customerRow(db)?.sms_opted_out_at, null, reply);
-    const call = db.requests.find((r) => r.target === "comms_unsuppress");
-    assertEquals(call?.role, "service_role");
     assertEquals(logs.events("inbound_sms_recorded")[1]?.opt_action, "opt_in");
   }
 });
 
-Deno.test("twilio_inbound: START is left to the database; ordinary replies never opt in", async () => {
-  const { db, handler } = setup();
-  for (
-    const [body, ch] of [["STOP", "1"], ["START", "2"], ["Yes see you then", "3"]] as const
-  ) {
+Deno.test("twilio_inbound: an ordinary reply that starts with yes never opts in", async () => {
+  const { db, handler, logs } = setup();
+  for (const [body, ch] of [["STOP", "1"], ["Yes see you then", "2"]] as const) {
     await (await handler(
       await signedForm("twilio_inbound", inboundParams(body, { MessageSid: sid(ch) })),
     )).body?.cancel();
   }
-  assertEquals(customerRow(db)?.sms_opted_out_at, null); // by record_inbound_sms (START)
-  assertEquals(db.requests.some((r) => r.target === "comms_unsuppress"), false);
+  assertEquals(typeof customerRow(db)?.sms_opted_out_at, "string");
+  assertEquals(logs.events("inbound_sms_recorded")[1]?.opt_action, null);
 });
 
 Deno.test("twilio_inbound: a late retry of an old YES never undoes a newer STOP", async () => {
@@ -404,36 +401,11 @@ Deno.test("twilio_inbound: a late retry of an old YES never undoes a newer STOP"
   )).body?.cancel();
   assertEquals(typeof customerRow(db)?.sms_opted_out_at, "string");
 
-  // Twilio redelivers the first YES (same MessageSid) after the STOP.
+  // Twilio redelivers the first YES (same MessageSid) after the STOP: the
+  // database replays it per MessageSid without acting on the keyword again.
   const res = await handler(await signedForm("twilio_inbound", yes));
   assertEquals(res.status, 200);
   await res.body?.cancel();
   assertEquals(typeof customerRow(db)?.sms_opted_out_at, "string");
-  assertEquals(logs.events("sms_opt_in_skipped").length, 1);
-});
-
-Deno.test("twilio_inbound: a failed YES opt-in answers 500 so Twilio redelivers", async () => {
-  const { db, handler } = setup();
-  await (await handler(
-    await signedForm("twilio_inbound", inboundParams("STOP", { MessageSid: sid("1") })),
-  )).body?.cancel();
-  db.onRpc("comms_unsuppress", () => {
-    throw new Error("db down");
-  });
-  const yes = inboundParams("YES", { MessageSid: sid("2") });
-  const failed = await handler(await signedForm("twilio_inbound", yes));
-  assertEquals(failed.status, 500);
-  await failed.body?.cancel();
-  assertEquals(typeof customerRow(db)?.sms_opted_out_at, "string");
-
-  db.onRpc("comms_unsuppress", (args, ctx) => {
-    const rows = ctx.db.table("customers");
-    for (const c of rows) if (c.phone === args.p_address) c.sms_opted_out_at = null;
-    ctx.db.seed("customers", rows);
-    return true;
-  });
-  const retried = await handler(await signedForm("twilio_inbound", yes));
-  assertEquals(retried.status, 200);
-  await retried.body?.cancel();
-  assertEquals(customerRow(db)?.sms_opted_out_at, null);
+  assertEquals(logs.events("inbound_sms_recorded").at(-1)?.opt_action, null);
 });

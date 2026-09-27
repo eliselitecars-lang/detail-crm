@@ -105,6 +105,9 @@ enum ErrorText {
         if let appError = error as? AppError {
             return appError.errorDescription ?? "Something went wrong."
         }
+        if let edgeError = error as? EdgeFunctionError {
+            return edgeError.message
+        }
         if let urlError = error as? URLError {
             switch urlError.code {
             case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:

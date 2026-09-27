@@ -66,6 +66,7 @@ export function rpcError(what: string, error: DbError, messages: {
 } = {}): Error {
   switch (error.code) {
     case "P0002":
+    case "PT404": // public RPCs' not-found (HTTP 404; 0042 convention)
       return new HttpError("not_found", messages.notFound ?? "Not found.", { cause: error });
     case "42501":
       return new HttpError("forbidden", "You do not have permission to do that.", { cause: error });

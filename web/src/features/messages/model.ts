@@ -55,24 +55,11 @@ export type Message = z.infer<typeof messageSchema>;
 export const MESSAGE_COLUMNS =
   'id, customer_id, job_id, campaign_id, direction, channel, to_address, from_address, subject, body, status, error, template_key, read_at, send_after, sent_at, delivered_at, created_at';
 
-export const inboxMessageSchema = messageSchema.extend({
-  customer: threadCustomerSchema.nullable(),
-});
-export type InboxMessage = z.infer<typeof inboxMessageSchema>;
-
-export const unreadRowSchema = z.object({
-  id: z.string(),
-  customer_id: z.string().nullable(),
-  from_address: z.string().nullable(),
-  created_at: z.string(),
-});
-export type UnreadRow = z.infer<typeof unreadRowSchema>;
-
 /**
- * Which conversation a thread is. Customers are keyed by id; inbound texts
- * from numbers that match no customer (customer_id null) are grouped by the
- * sender's number until someone adds that customer (the server then attaches
- * them automatically).
+ * Which conversation a thread is. Customers are keyed by id; messages with no
+ * customer (a text from a number that matches no customer) are grouped by the
+ * counterpart address until someone adds that customer (the server then
+ * attaches them automatically).
  */
 export type ThreadRef =
   { kind: 'customer'; customerId: string } | { kind: 'unknown'; from: string };
@@ -81,89 +68,83 @@ export function threadKey(ref: ThreadRef): string {
   return ref.kind === 'customer' ? `c:${ref.customerId}` : `u:${ref.from}`;
 }
 
-export function refForMessage(m: {
-  customer_id: string | null;
-  direction: string;
-  from_address: string | null;
-}): ThreadRef | null {
-  if (m.customer_id) return { kind: 'customer', customerId: m.customer_id };
-  if (m.direction === 'inbound' && m.from_address) return { kind: 'unknown', from: m.from_address };
-  return null;
-}
+/** One inbox_threads row (0090): the newest message per conversation + unread count. */
+export const inboxThreadRowSchema = z.object({
+  /** 'c:<customer id>' or 'a:<address>' (email lower-cased, SMS as E.164). */
+  thread_key: z.string(),
+  customer_id: z.string().nullable(),
+  /** Counterpart address of the thread's newest message (inbound: sender; outbound: recipient). */
+  from_address: z.string().nullable(),
+  customer_first_name: z.string().nullable(),
+  customer_last_name: z.string().nullable(),
+  customer_company: z.string().nullable(),
+  last_message_id: z.string(),
+  last_direction: z.enum(Constants.public.Enums.message_direction),
+  last_channel: z.enum(Constants.public.Enums.message_channel),
+  last_status: z.enum(Constants.public.Enums.message_status),
+  /** The first 280 characters of the newest message. */
+  last_body: z.string(),
+  last_created_at: z.string(),
+  unread_count: z.number().int(),
+});
+export type InboxThreadRow = z.infer<typeof inboxThreadRowSchema>;
 
 export interface ThreadSummary {
   key: string;
   ref: ThreadRef;
-  customer: ThreadCustomer | null;
-  last: InboxMessage;
+  customer: Pick<ThreadCustomer, 'first_name' | 'last_name' | 'company'> | null;
+  last: {
+    id: string;
+    direction: Message['direction'];
+    channel: MessageChannel;
+    status: MessageStatus;
+    body: string;
+    created_at: string;
+  };
   unread: number;
 }
 
-/**
- * Groups messages (newest first) into one thread per customer / unknown
- * sender, newest thread first, with unread counts (inbound, read_at null).
- */
-export function buildThreads(
-  messages: readonly InboxMessage[],
-  unread: readonly Pick<UnreadRow, 'customer_id' | 'from_address'>[],
-): ThreadSummary[] {
-  const unreadByKey = new Map<string, number>();
-  for (const row of unread) {
-    const ref = refForMessage({ ...row, direction: 'inbound' });
-    if (!ref) continue;
-    const key = threadKey(ref);
-    unreadByKey.set(key, (unreadByKey.get(key) ?? 0) + 1);
+/** Maps an inbox_threads row to the thread list model (null for a row with no address). */
+export function threadFromRow(row: InboxThreadRow): ThreadSummary | null {
+  let ref: ThreadRef;
+  if (row.customer_id) {
+    ref = { kind: 'customer', customerId: row.customer_id };
+  } else {
+    const from =
+      row.from_address ?? (row.thread_key.startsWith('a:') ? row.thread_key.slice(2) : '');
+    if (!from) return null;
+    ref = { kind: 'unknown', from };
   }
-
-  const threads = new Map<string, ThreadSummary>();
-  const sorted = [...messages].sort((a, b) => b.created_at.localeCompare(a.created_at));
-  for (const message of sorted) {
-    const ref = refForMessage(message);
-    if (!ref) continue;
-    const key = threadKey(ref);
-    const existing = threads.get(key);
-    if (existing) {
-      if (!existing.customer && message.customer) existing.customer = message.customer;
-      continue;
-    }
-    threads.set(key, {
-      key,
-      ref,
-      customer: message.customer,
-      last: message,
-      unread: unreadByKey.get(key) ?? 0,
-    });
-  }
-  return [...threads.values()];
+  return {
+    key: threadKey(ref),
+    ref,
+    customer: row.customer_id
+      ? {
+          first_name: row.customer_first_name,
+          last_name: row.customer_last_name,
+          company: row.customer_company,
+        }
+      : null,
+    last: {
+      id: row.last_message_id,
+      direction: row.last_direction,
+      channel: row.last_channel,
+      status: row.last_status,
+      body: row.last_body,
+      created_at: row.last_created_at,
+    },
+    unread: row.unread_count,
+  };
 }
 
-/**
- * Ids of the newest unread message of every thread that has unread messages
- * but is not among `presentKeys` (the threads built from the newest page of
- * the whole inbox). A campaign launch inserts one outbound row per recipient
- * at once, which can push every older conversation — including ones with
- * unread replies — out of that page; fetching these rows keeps unread
- * conversations in the list whatever the page holds. Newest threads first,
- * at most `max`.
- */
-export function unreadThreadsOutside(
-  presentKeys: ReadonlySet<string>,
-  unread: readonly UnreadRow[],
-  max: number,
-): string[] {
-  const newest = new Map<string, UnreadRow>();
-  for (const row of unread) {
-    const ref = refForMessage({ ...row, direction: 'inbound' });
-    if (!ref) continue;
-    const key = threadKey(ref);
-    if (presentKeys.has(key)) continue;
-    const current = newest.get(key);
-    if (!current || row.created_at > current.created_at) newest.set(key, row);
+/** Threads from inbox pages (newest first), each conversation once. */
+export function threadsFromPages(pages: readonly (readonly InboxThreadRow[])[]): ThreadSummary[] {
+  const seen = new Map<string, ThreadSummary>();
+  for (const row of pages.flat()) {
+    const thread = threadFromRow(row);
+    if (thread && !seen.has(thread.key)) seen.set(thread.key, thread);
   }
-  return [...newest.values()]
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
-    .slice(0, max)
-    .map((row) => row.id);
+  return [...seen.values()];
 }
 
 export function customerName(
@@ -178,7 +159,9 @@ export function customerName(
 }
 
 /** One-line preview of a message for the thread list. */
-export function messagePreview(m: Pick<Message, 'body' | 'subject' | 'channel'>): string {
+export function messagePreview(
+  m: Pick<Message, 'body' | 'channel'> & { subject?: string | null },
+): string {
   const text = m.body.replace(/\s+/g, ' ').trim();
   if (text) return text;
   if (m.channel === 'email' && m.subject) return m.subject;
@@ -245,17 +228,34 @@ export const TEMPLATE_LABELS: Record<MessageTemplateKey, string> = {
   invite: 'Team invite',
 };
 
-/** Template keys whose wording refers to a job ({{job_date}}, {{services}}, links…). */
-export const JOB_TEMPLATE_KEYS: ReadonlySet<MessageTemplateKey> = new Set<MessageTemplateKey>([
-  'booking_request_received',
-  'booking_confirmed',
-  'appointment_reminder',
-  'on_the_way',
-  'job_started',
-  'job_completed',
-  'quote_sent',
-  'invoice_sent',
-  'payment_receipt',
+/**
+ * Templates staff may send from the inbox: every key except `invite` (staff
+ * invites are emailed by the invites function). Mirrors SENDABLE_TEMPLATE_KEYS
+ * in supabase/functions/messaging/send.ts.
+ */
+export const SENDABLE_TEMPLATE_KEYS: readonly MessageTemplateKey[] =
+  Constants.public.Enums.message_template_key.filter((key) => key !== 'invite');
+
+/**
+ * Templates that may be sent without a job (send.ts CUSTOMER_TEMPLATE_KEYS),
+ * as long as the shop's wording uses only customer-level placeholders; the
+ * server answers `job_required` otherwise.
+ */
+export const CUSTOMER_TEMPLATE_KEYS: ReadonlySet<MessageTemplateKey> = new Set<MessageTemplateKey>([
   'review_request',
   'follow_up',
+  'membership_welcome',
 ]);
+
+/**
+ * Templates about one job (dates, vehicle, services, booking / quote / invoice
+ * links, amounts): the server refuses them without a job (`job_required`).
+ */
+export const JOB_TEMPLATE_KEYS: ReadonlySet<MessageTemplateKey> = new Set<MessageTemplateKey>(
+  SENDABLE_TEMPLATE_KEYS.filter((key) => !CUSTOMER_TEMPLATE_KEYS.has(key)),
+);
+
+/** "{{job_date}}, {{vehicle}}" for refusal messages listing template variables. */
+export function formatTemplateVariables(variables: readonly string[]): string {
+  return variables.map((name) => `{{${name}}}`).join(', ');
+}

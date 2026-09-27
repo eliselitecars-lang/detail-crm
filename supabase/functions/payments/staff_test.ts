@@ -511,3 +511,152 @@ Deno.test("refund: a refund the database cannot record yet still succeeds (webho
   assertEquals(res.status, 200);
   assertEquals((await res.json()).payment_status, null);
 });
+
+// ---------------------------------------------------------------------------
+// Card-only payment method types
+// ---------------------------------------------------------------------------
+
+Deno.test("every PaymentIntent, SetupIntent and Checkout Session is card-only", async () => {
+  const f = fixture({ customer: { stripe_customer_id: "cus_1Saved" } });
+  await (await f.call(sheet, "manager")).body?.cancel();
+  await (await f.call(charge, "manager")).body?.cancel();
+  await (await f.call({ action: "setup_card", shop_id: SHOP, customer_id: CUSTOMER }, "manager"))
+    .body?.cancel();
+  await (await f.call(
+    { action: "setup_card_link", shop_id: SHOP, customer_id: CUSTOMER },
+    "manager",
+  )).body?.cancel();
+  const creates = [
+    ...f.stripe("POST", "/payment_intents"),
+    ...f.stripe("POST", "/setup_intents"),
+    ...f.stripe("POST", "/checkout/sessions"),
+  ];
+  assertEquals(creates.length, 4);
+  for (const call of creates) {
+    assertEquals(call.form.getAll("payment_method_types[0]"), ["card"], call.url.pathname);
+    assertEquals(call.form.get("payment_method_types[1]"), null);
+    assertEquals(call.form.get("automatic_payment_methods[enabled]"), null);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Saved cards gone in Stripe / removed by staff
+// ---------------------------------------------------------------------------
+
+Deno.test("charge_saved_card: a card Stripe no longer has for the customer is removed (422 saved_card_removed)", async () => {
+  for (
+    const error of [
+      stripeErrorBody("invalid_request_error", "No such PaymentMethod: 'pm_1Default'", {
+        code: "resource_missing",
+        param: "payment_method",
+      }),
+      stripeErrorBody(
+        "invalid_request_error",
+        "The provided PaymentMethod was previously used with a PaymentIntent without Customer attachment.",
+        { param: "payment_method" },
+      ),
+    ]
+  ) {
+    const f = fixture({ customer: { stripe_customer_id: "cus_1Saved" } });
+    f.db.http.once("POST", `${STRIPE}/payment_intents`, () => jsonResponse(error, 400));
+    const res = await f.call(charge, "manager");
+    const body = await res.json();
+    assertEquals([res.status, body.code, body.details], [422, "unprocessable", {
+      reason: "saved_card_removed",
+    }]);
+    assertEquals(body.error, "That saved card is no longer available; it was removed.");
+    const removed = f.rpcCalls.find((c) => c.name === "remove_customer_payment_method")?.args;
+    assertEquals(removed, { p_shop_id: SHOP, p_stripe_payment_method_id: "pm_1Default" });
+    assertEquals(
+      f.db.table("customer_payment_methods").some((c) =>
+        c.stripe_payment_method_id === "pm_1Default"
+      ),
+      false,
+    );
+  }
+});
+
+Deno.test("charge_saved_card: other invalid requests are not mistaken for a removed card", async () => {
+  const f = fixture({ customer: { stripe_customer_id: "cus_1Saved" } });
+  f.db.http.once("POST", `${STRIPE}/payment_intents`, () =>
+    jsonResponse(
+      stripeErrorBody("invalid_request_error", "No such customer: 'cus_1Saved'", {
+        code: "resource_missing",
+        param: "customer",
+      }),
+      400,
+    ));
+  const res = await f.call(charge, "manager");
+  assert(res.status >= 500 || res.status === 409, String(res.status));
+  await res.body?.cancel();
+  assertEquals(f.rpcCalls.some((c) => c.name === "remove_customer_payment_method"), false);
+});
+
+const removeCard = {
+  action: "remove_saved_card",
+  shop_id: SHOP,
+  customer_id: CUSTOMER,
+  payment_method_id: "pm_1Default",
+};
+
+Deno.test("remove_saved_card: detaches the card from the customer's Stripe customer, then removes it", async () => {
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    paymentMethods: { pm_1Default: { customer: "cus_1Saved" } },
+  });
+  const res = await f.call(removeCard, "manager");
+  assertEquals([res.status, await res.json()], [200, { removed: true }]);
+  const detach = f.stripe("POST", "/payment_methods/pm_1Default/detach")[0];
+  assertEquals(detach?.headers.get("stripe-account"), ACCT);
+  assertMatch(detach?.headers.get("idempotency-key") ?? "", /^dcrm:pm_detach:/);
+  assertEquals(f.paymentMethods.pm_1Default?.customer, null);
+  assertEquals(
+    f.db.requests.find((r) => r.target === "remove_customer_payment_method")?.role,
+    "service_role",
+  );
+  // A retry: the card is no longer saved, nothing else happens.
+  const again = await f.call(removeCard, "manager");
+  assertEquals(await again.json(), { removed: false });
+  assertEquals(f.stripe("POST", "/payment_methods/:id/detach").length, 1);
+});
+
+Deno.test("remove_saved_card: a card gone in Stripe or owned by another Stripe customer is only removed here", async () => {
+  const gone = fixture({ customer: { stripe_customer_id: "cus_1Saved" } });
+  assertEquals(await (await gone.call(removeCard, "admin")).json(), { removed: true });
+  assertEquals(gone.stripe("POST", "/payment_methods/:id/detach").length, 0);
+
+  const foreign = fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    paymentMethods: { pm_1Default: { customer: "cus_1SomeoneElse" } },
+  });
+  assertEquals(await (await foreign.call(removeCard, "owner")).json(), { removed: true });
+  assertEquals(foreign.stripe("POST", "/payment_methods/:id/detach").length, 0);
+  assertEquals(foreign.paymentMethods.pm_1Default?.customer, "cus_1SomeoneElse");
+
+  const noStripe = fixture({ account: null });
+  assertEquals(await (await noStripe.call(removeCard, "manager")).json(), { removed: true });
+  assertEquals(noStripe.stripeCalls().length, 0);
+});
+
+Deno.test("remove_saved_card: manager+ only, the customer must be in the shop", async () => {
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    paymentMethods: { pm_1Default: { customer: "cus_1Saved" } },
+  });
+  for (const who of ["tech", "outsider"] as const) {
+    assertEquals((await errorOf(await f.call(removeCard, who)))[1], "forbidden");
+  }
+  assertEquals((await errorOf(await f.call(removeCard, "none")))[1], "unauthorized");
+  assertEquals(
+    (await errorOf(await f.call({ ...removeCard, customer_id: OTHER_CUSTOMER }, "manager")))
+      .slice(0, 2),
+    [404, "not_found"],
+  );
+  // Another customer's card id is not this customer's card.
+  assertEquals(
+    await (await f.call({ ...removeCard, payment_method_id: "pm_1Foreign" }, "manager")).json(),
+    { removed: false },
+  );
+  assertEquals(f.stripeCalls().length, 0);
+  assertEquals(f.db.table("customer_payment_methods").length, 3);
+});

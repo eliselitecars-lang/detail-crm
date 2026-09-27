@@ -20,7 +20,7 @@ import {
   TEST_ENV,
 } from "../_shared/testing/mod.ts";
 import { adminClient } from "../_shared/supabase.ts";
-import { disputeNoteLine, refundStatus, withDisputeLine } from "./handlers.ts";
+import { disputeNoteLine, withDisputeLine } from "./handlers.ts";
 import { makeHandler, type WebhookResponse } from "./index.ts";
 
 const SHOP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -75,6 +75,25 @@ function installMoneyRpcs(db: FakeSupabase): void {
     return mutate(db, "payments", (rows) => {
       let row = rows.find((r) => r.stripe_payment_intent_id === a.p_payment_intent_id);
       if (!row) {
+        // 0013: links to records that no longer exist in the shop are
+        // dropped (a membership charge without its membership becomes a
+        // plain payment); nothing left at all is P0002.
+        const exists = (table: string, id: unknown) =>
+          id !== null && id !== undefined &&
+          db.table(table).some((r) => r.id === id && r.shop_id === a.p_shop_id);
+        if (!exists("invoices", a.p_invoice_id)) a.p_invoice_id = null;
+        if (!exists("jobs", a.p_job_id)) a.p_job_id = null;
+        if (!exists("memberships", a.p_membership_id)) {
+          a.p_membership_id = null;
+          if (a.p_kind === "membership") a.p_kind = "payment";
+        }
+        if (!exists("customers", a.p_customer_id)) a.p_customer_id = null;
+        if (!a.p_invoice_id && !a.p_job_id && !a.p_membership_id && !a.p_customer_id) {
+          throw new FakeRpcError(
+            "P0002",
+            "none of the payment's invoice, job, membership or customer exists in this shop",
+          );
+        }
         // payments_before_write (0012) runs BEFORE the foreign keys are
         // checked: linkage is derived from the parents that exist, and a
         // supplied value contradicting one is 23514.
@@ -155,6 +174,7 @@ function installMoneyRpcs(db: FakeSupabase): void {
           amount_cents: amount,
           tip_cents: tip,
           refunded_cents: 0,
+          disputed_cents: 0,
           stripe_payment_intent_id: a.p_payment_intent_id,
           stripe_charge_id: a.p_charge_id ?? null,
           stripe_checkout_session_id: a.p_checkout_session_id ?? null,
@@ -215,6 +235,13 @@ function installMoneyRpcs(db: FakeSupabase): void {
       c.id === a.p_customer_id && c.shop_id === a.p_shop_id
     );
     if (!customer) throw new FakeRpcError("P0002", "customer not found");
+    // 0011: the card's Stripe customer must be this customer's
+    if (
+      a.p_stripe_customer_id !== undefined && a.p_stripe_customer_id !== null &&
+      a.p_stripe_customer_id !== customer.stripe_customer_id
+    ) {
+      throw new FakeRpcError("22023", "payment method belongs to another Stripe customer");
+    }
     return mutate(db, "customer_payment_methods", (rows) => {
       const existing = rows.find((r) =>
         r.shop_id === a.p_shop_id && r.stripe_payment_method_id === a.p_stripe_payment_method_id
@@ -273,10 +300,65 @@ function installMoneyRpcs(db: FakeSupabase): void {
 
   db.onRpc("notify_shop_staff", (a, { role }) => {
     assertEquals(role, "service_role");
-    if (a.p_job_id && !db.table("jobs").some((j) => j.id === a.p_job_id)) {
-      throw new FakeRpcError("P0002", "job not found in this shop");
+    // 0031: every deep-link id must belong to the shop
+    for (
+      const [id, table] of [
+        [a.p_job_id, "jobs"],
+        [a.p_customer_id, "customers"],
+        [a.p_quote_id, "quotes"],
+        [a.p_invoice_id, "invoices"],
+      ] as const
+    ) {
+      if (id && !db.table(table).some((r) => r.id === id && r.shop_id === a.p_shop_id)) {
+        throw new FakeRpcError("P0002", `${table} row not found in this shop`);
+      }
     }
     return 1;
+  });
+
+  // set_stripe_refund_total (0093): compare-and-set on refunded_cents.
+  db.onRpc("set_stripe_refund_total", (a, { role }) => {
+    assertEquals(role, "service_role");
+    return mutate(db, "payments", (rows) => {
+      const row = rows.find((r) =>
+        r.stripe_payment_intent_id === a.p_payment_intent_id && r.shop_id === a.p_shop_id
+      );
+      if (!row) throw new FakeRpcError("P0002", "payment not found");
+      if (!RECEIVED.includes(row.status as string)) {
+        throw new FakeRpcError("22023", "a payment that was not received has no refunds");
+      }
+      const total = a.p_refunded_cents_total as number;
+      if (total < 0 || total > (row.amount_cents as number) + (row.tip_cents as number)) {
+        throw new FakeRpcError("22023", "refunded total out of range");
+      }
+      if (row.refunded_cents !== a.p_expected_refunded_cents) {
+        throw new FakeRpcError("40001", "refund total changed concurrently");
+      }
+      row.refunded_cents = total;
+      row.status = sqlRefundStatus(row.amount_cents as number, row.tip_cents as number, total);
+      return { ...row };
+    });
+  });
+
+  // apply_stripe_dispute (0093): lost -> what it took back; won-ish -> 0.
+  db.onRpc("apply_stripe_dispute", (a, { role }) => {
+    assertEquals(role, "service_role");
+    return mutate(db, "payments", (rows) => {
+      const row = rows.find((r) =>
+        r.stripe_payment_intent_id === a.p_payment_intent_id && r.shop_id === a.p_shop_id
+      );
+      if (!row) throw new FakeRpcError("P0002", "payment not found");
+      const status = String(a.p_dispute_status ?? "").trim().toLowerCase();
+      if (!status) throw new FakeRpcError("22023", "dispute status is required");
+      if (status === "lost") {
+        const open = (row.amount_cents as number) + (row.tip_cents as number) -
+          (row.refunded_cents as number);
+        row.disputed_cents = Math.max(Math.min(a.p_amount_cents as number, open), 0);
+      } else if (["won", "warning_closed", "funds_reinstated"].includes(status)) {
+        row.disputed_cents = 0;
+      }
+      return { ...row };
+    });
   });
 
   db.onRpc("sync_stripe_subscription", (a) =>
@@ -1380,16 +1462,6 @@ Deno.test("refund reversal is a compare-and-set: a concurrent change fails the d
   // nothing overwritten; the ledger keeps the event unprocessed so Stripe retries
   assertEquals(payment(db).refunded_cents, 9_000);
   assertEquals(ledger(db, "evt_1RaceRefund")?.processed_at, null);
-});
-
-Deno.test("refundStatus mirrors payment_refund_status", () => {
-  for (const refunded of [0, 1, 10_999, 11_000]) {
-    assertEquals(refundStatus(10_000, 1_000, refunded), sqlRefundStatus(10_000, 1_000, refunded));
-  }
-  assertEquals(refundStatus(10_000, 1_000, 0), "succeeded");
-  assertEquals(refundStatus(10_000, 1_000, 1), "partially_refunded");
-  assertEquals(refundStatus(10_000, 1_000, 10_999), "partially_refunded");
-  assertEquals(refundStatus(10_000, 1_000, 11_000), "refunded");
 });
 
 Deno.test("out of order: an updated snapshot delivered after deletion never revives a membership", async () => {
@@ -2545,7 +2617,12 @@ Deno.test("charge.dispute.created flags the payment and notifies owners/admins",
     p_title: "A card payment was disputed",
     p_body: row.note,
     p_job_id: JOB,
+    p_customer_id: CUSTOMER,
+    p_invoice_id: INVOICE,
   }]);
+  // an open dispute records no outcome yet
+  assertEquals(rpcCalls(db, "apply_stripe_dispute")[0]?.p_dispute_status, "needs_response");
+  assertEquals(payment(db).disputed_cents, 0);
   assertEquals(logs.events("stripe_dispute")[0]?.dispute_status, "needs_response");
   // the dispute was read on the shop's connected account
   assertEquals(
@@ -2579,9 +2656,60 @@ Deno.test("charge.dispute.closed (lost) replaces the flag, logs an error and not
   assertEquals(note.split("\n").length, 1); // one dispute line, replaced in place
   assertEquals(rpcCalls(db, "notify_shop_staff").at(-1)?.p_title, "Dispute lost: money taken back");
   assertEquals(logs.events("stripe_dispute_lost").length, 1);
+  // the outcome is recorded (what it took back, bounded by the charge);
+  // the balance-relevant fields are untouched
+  assertEquals(rpcCalls(db, "apply_stripe_dispute").at(-1), {
+    p_shop_id: SHOP,
+    p_payment_intent_id: "pi_1Invoice",
+    p_dispute_status: "lost",
+    p_amount_cents: 11_000,
+  });
+  assertEquals(
+    [payment(db).disputed_cents, payment(db).status, payment(db).refunded_cents],
+    [11_000, "succeeded", 0],
+  );
   // funds_withdrawn for the same lost dispute changes nothing more
   await ok(await deliver(handler, event("charge.dispute.funds_withdrawn", dispute())));
   assertEquals(rpcCalls(db, "notify_shop_staff").length, 2);
+  assertEquals(payment(db).disputed_cents, 11_000);
+});
+
+Deno.test("charge.dispute.funds_reinstated / won clears a lost dispute's amount (current state wins)", async () => {
+  const ctx = setup();
+  const { db, stripe, handler } = ctx;
+  await paidInvoice(ctx);
+  stripe.put(dispute({ status: "lost" }));
+  await ok(await deliver(handler, event("charge.dispute.closed", dispute())));
+  assertEquals(payment(db).disputed_cents, 11_000);
+  // A late funds_withdrawn (withdrawn when the dispute opened) after the
+  // issuer reversed its decision: Stripe's current state decides.
+  stripe.put(dispute({ status: "won" }));
+  await ok(await deliver(handler, event("charge.dispute.funds_withdrawn", dispute())));
+  assertEquals(payment(db).disputed_cents, 0);
+  await ok(await deliver(handler, event("charge.dispute.funds_reinstated", dispute())));
+  assertEquals(payment(db).disputed_cents, 0);
+  assertEquals(rpcCalls(db, "apply_stripe_dispute").map((c) => c.p_dispute_status), [
+    "lost",
+    "won",
+    "won",
+  ]);
+});
+
+Deno.test("charge.dispute.*: a refunded part is never counted as lost again", async () => {
+  const ctx = setup();
+  const { db, stripe, handler } = ctx;
+  await paidInvoice(ctx);
+  db.seed(
+    "payments",
+    db.table("payments").map((r) => ({
+      ...r,
+      refunded_cents: 4_000,
+      status: "partially_refunded",
+    })),
+  );
+  stripe.put(dispute({ status: "lost" }));
+  await ok(await deliver(handler, event("charge.dispute.closed", dispute())));
+  assertEquals(payment(db).disputed_cents, 7_000);
 });
 
 Deno.test("charge.dispute.*: out of order, a late 'created' after the close applies the current state", async () => {
@@ -2647,4 +2775,180 @@ Deno.test("disputeNoteLine / withDisputeLine: bounded, replace in place, no pers
   const long = withDisputeLine("n".repeat(2_000), line);
   assertEquals(long.length, 1_000);
   assert(long.endsWith(line));
+});
+
+// ---------------------------------------------------------------------------
+// Saved cards: the SQL helper checks the Stripe customer too (0011)
+// ---------------------------------------------------------------------------
+
+Deno.test("saved cards are stored with the Stripe customer they are attached to", async () => {
+  const { db, stripe, handler } = setup();
+  stripe.put(paymentMethod());
+  await ok(
+    await deliver(
+      handler,
+      event("setup_intent.succeeded", {
+        id: "seti_1Card",
+        object: "setup_intent",
+        status: "succeeded",
+        customer: "cus_1Customer",
+        payment_method: "pm_1Card",
+        metadata: { shop_id: SHOP, customer_id: CUSTOMER },
+      }),
+    ),
+  );
+  assertEquals(
+    rpcCalls(db, "upsert_customer_payment_method")[0]?.p_stripe_customer_id,
+    "cus_1Customer",
+  );
+  assertEquals(db.table("customer_payment_methods").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Sibling PaymentSheets once the invoice is paid
+// ---------------------------------------------------------------------------
+
+function openSheet(id: string, status: string, source = "payment_sheet"): Row {
+  return {
+    id,
+    object: "payment_intent",
+    amount: 11_000,
+    status,
+    metadata: { shop_id: SHOP, invoice_id: INVOICE, source },
+  };
+}
+
+function seedSheetRows(db: FakeSupabase, ids: string[]): void {
+  db.seed(
+    "payments",
+    ids.map((pi, i) => ({
+      id: `p-sheet-${i}`,
+      shop_id: SHOP,
+      customer_id: CUSTOMER,
+      invoice_id: INVOICE,
+      job_id: JOB,
+      membership_id: null,
+      status: "pending",
+      kind: "payment",
+      method: "card",
+      amount_cents: 11_000,
+      tip_cents: 0,
+      refunded_cents: 0,
+      disputed_cents: 0,
+      stripe_payment_intent_id: pi,
+    })),
+  );
+}
+
+function sheetSetup(balanceCents: number) {
+  const ctx = setup();
+  ctx.db.seed("invoices", [{
+    id: INVOICE,
+    shop_id: SHOP,
+    job_id: JOB,
+    customer_id: CUSTOMER,
+    status: balanceCents > 0 ? "partially_paid" : "paid",
+    balance_cents: balanceCents,
+  }]);
+  seedSheetRows(ctx.db, ["pi_1SheetA", "pi_1SheetB", "pi_1SheetBusy", "pi_1Checkout"]);
+  ctx.stripe
+    .put(openSheet("pi_1SheetA", "requires_payment_method"))
+    .put(openSheet("pi_1SheetB", "requires_confirmation"))
+    .put(openSheet("pi_1SheetBusy", "requires_action"))
+    .put(openSheet("pi_1Checkout", "requires_payment_method", "invoice_checkout"))
+    .put(intent())
+    .put(charge());
+  const cancels: Array<{ id: string; key: string | null; account: string | null }> = [];
+  ctx.db.http.on("POST", `${STRIPE}/payment_intents/:id/cancel`, (req, { params }) => {
+    const found = ctx.stripe.objects.get(params.id ?? "");
+    cancels.push({
+      id: params.id ?? "",
+      key: req.headers.get("idempotency-key"),
+      account: req.headers.get("stripe-account"),
+    });
+    if (found) found.status = "canceled";
+    return jsonResponse({ ...found, status: "canceled" });
+  });
+  return { ...ctx, cancels };
+}
+
+Deno.test("a payment that settles the invoice cancels its other waiting PaymentSheets", async () => {
+  const { db, handler, cancels, logs } = sheetSetup(0);
+  const res = await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
+  assertEquals(res.result, "applied");
+  // Only the sheets still waiting for a card; 3DS in progress and other
+  // flows' intents are left to the payments sweep.
+  assertEquals(cancels.map((c) => c.id), ["pi_1SheetA", "pi_1SheetB"]);
+  for (const c of cancels) {
+    assertEquals(c.account, ACCT);
+    assert(c.key?.startsWith("dcrm:sheet_cancel:"), String(c.key));
+  }
+  const status = (pi: string) => payment(db, pi).status;
+  assertEquals(
+    ["pi_1SheetA", "pi_1SheetB", "pi_1SheetBusy", "pi_1Checkout"].map(status),
+    ["cancelled", "cancelled", "pending", "pending"],
+  );
+  assertEquals(logs.events("sibling_sheet_cancelled").length, 2);
+});
+
+Deno.test("sheets stay open while the invoice still has a balance", async () => {
+  const { db, handler, cancels } = sheetSetup(2_500);
+  await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
+  assertEquals(cancels, []);
+  assertEquals(payment(db, "pi_1SheetA").status, "pending");
+});
+
+Deno.test("a sheet that cannot be cancelled never fails the delivery (the money is recorded)", async () => {
+  const { db, handler, logs } = sheetSetup(0);
+  db.http.on(
+    "POST",
+    `${STRIPE}/payment_intents/:id/cancel`,
+    () => jsonResponse(stripeErrorBody("api_error", "Stripe is down"), 500),
+  );
+  const res = await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
+  assertEquals(res.result, "applied");
+  assertEquals(payment(db).status, "succeeded");
+  assertEquals(payment(db, "pi_1SheetA").status, "pending");
+  assertEquals(logs.events("sibling_sheet_cancel_failed").length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Unlinkable money (upsert_stripe_payment P0002)
+// ---------------------------------------------------------------------------
+
+Deno.test("P0002 with every named record gone and no known payer is acknowledged, not retried", async () => {
+  const { db, stripe, logs, handler } = setup();
+  db.seed("invoices", []);
+  db.seed("jobs", []);
+  const pi = intent({
+    customer: "cus_1Unknown",
+    metadata: {
+      shop_id: SHOP,
+      invoice_id: INVOICE,
+      job_id: JOB,
+      customer_id: "44444444-4444-4444-8444-444444444444",
+      kind: "payment",
+      tip_cents: "0",
+    },
+  });
+  stripe.put(pi).put(charge());
+  const res = await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  assertEquals([res.result, res.handled], ["ignored", true]);
+  assertEquals(db.table("payments"), []);
+  assertEquals(logs.events("stripe_payment_unlinkable")[0]?.deleted, [
+    "invoice",
+    "job",
+    "customer",
+  ]);
+});
+
+Deno.test("P0002 while the named records exist is a real failure: retried (500)", async () => {
+  const { db, stripe, handler } = setup();
+  stripe.put(intent()).put(charge());
+  db.onRpc("upsert_stripe_payment", () => {
+    throw new FakeRpcError("P0002", "shop not found");
+  });
+  const res = await deliver(handler, event("payment_intent.succeeded", intent()));
+  assertEquals(res.status, 500);
+  await res.body?.cancel();
 });

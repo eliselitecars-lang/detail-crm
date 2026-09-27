@@ -117,9 +117,16 @@ export default function NewJobPage() {
   const team = useTeam();
   const create = useCreateJob();
 
+  // A shop without vehicle sizes prices every service at its base price.
+  const noSizes = categories.isSuccess && categories.data.length === 0;
   const pricing = usePricing(
-    customer && categoryId && selected.length > 0
-      ? { customerId: customer.id, vehicleCategoryId: categoryId, vehicleId, serviceIds: selected }
+    customer && (categoryId || noSizes) && selected.length > 0
+      ? {
+          customerId: customer.id,
+          vehicleCategoryId: categoryId || null,
+          vehicleId,
+          serviceIds: selected,
+        }
       : null,
   );
 
@@ -154,7 +161,7 @@ export default function NewJobPage() {
     if (!customer) return 'Choose a customer.';
     const lines = pricing.data?.lines ?? [];
     if (selected.length > 0) {
-      if (!categoryId) return 'Choose the vehicle size to price the services.';
+      if (!categoryId && !noSizes) return 'Choose the vehicle size to price the services.';
       if (!pricing.data || pricing.isFetching)
         return 'Prices are still loading. Try again in a moment.';
       if (lines.some((l) => l.unit_price_cents === null)) {
@@ -276,7 +283,7 @@ export default function NewJobPage() {
               setSelected((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
             }
             pricing={pricing}
-            canPrice={customer !== null && categoryId !== ''}
+            canPrice={customer !== null && (categoryId !== '' || noSizes)}
             applyMemberDiscount={applyMemberDiscount}
             onApplyMemberDiscount={setApplyMemberDiscount}
           />

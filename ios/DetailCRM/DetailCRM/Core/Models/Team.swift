@@ -158,12 +158,6 @@ struct TeamInviteReply: Decodable, Sendable {
     var reissued: Bool?
 }
 
-/// `{ "error": "...", "code": "..." }` returned by every edge function on failure.
-struct TeamEdgeErrorPayload: Decodable, Sendable {
-    var error: String
-    var code: String?
-}
-
 /// Result of sending or re-sending an invite.
 enum TeamInviteOutcome: Equatable, Sendable {
     /// The link was emailed. `newLink` is true when a new invite link was

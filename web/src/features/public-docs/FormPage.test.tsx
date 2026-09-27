@@ -4,10 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SignaturePadHandle } from '@/components/ui';
 import { renderRoute } from '@/test/render';
 import FormPage from './FormPage';
-import { mockRpc, pgError, resetPublicMocks, storageBucket } from './shared/testing';
+import { mockRpc, pgError, resetSupabaseMock, supabase } from '@/test/supabaseMock';
 import { DOC_TOKEN, formFixture } from './testFixtures';
 
-vi.mock('@/lib/supabase', () => import('@/features/public-docs/shared/testSupabase'));
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
 // jsdom has no canvas: a stand-in pad whose "Draw" button signs.
 vi.mock('@/components/ui/SignaturePad', () => ({
@@ -46,7 +46,7 @@ function render() {
 }
 
 beforeEach(() => {
-  resetPublicMocks();
+  resetSupabaseMock();
 });
 
 describe('FormPage', () => {
@@ -75,19 +75,25 @@ describe('FormPage', () => {
       public_get_form: { data: formFixture() },
       public_sign_form: { data: { ...signed, signature_upload_prefix: null } },
     });
-    storageBucket.upload.mockResolvedValue({ data: { path: 'x' }, error: null });
+    supabase.storage
+      .from('signatures')
+      .upload.mockResolvedValue({ data: { path: 'x' }, error: null });
     const { user } = render();
     await user.click(await screen.findByRole('button', { name: 'Sign form' }));
     expect(screen.getByText('Type your full name.')).toBeInTheDocument();
     expect(screen.getByText('Draw your signature in the box.')).toBeInTheDocument();
-    expect(storageBucket.upload).not.toHaveBeenCalled();
+    expect(supabase.storage.from('signatures').upload).not.toHaveBeenCalled();
 
     await user.type(screen.getByLabelText(/^Your full name/), 'Ana Diaz');
     await user.click(screen.getByRole('button', { name: 'Draw Your signature' }));
     await user.click(screen.getByRole('button', { name: 'Sign form' }));
 
     expect(await screen.findByText('Signed — thank you!')).toBeInTheDocument();
-    const [path, blob, options] = storageBucket.upload.mock.calls[0] as [string, Blob, object];
+    const [path, blob, options] = supabase.storage.from('signatures').upload.mock.calls[0] as [
+      string,
+      Blob,
+      object,
+    ];
     expect(path).toMatch(new RegExp(`^shop-1/forms/${DOC_TOKEN}/signature-[0-9a-f-]{36}\\.png$`));
     expect(path.split('/')).toHaveLength(4);
     expect(blob).toBeInstanceOf(Blob);
@@ -111,7 +117,7 @@ describe('FormPage', () => {
     await user.type(await screen.findByLabelText(/^Your full name/), 'Ana');
     await user.click(screen.getByRole('button', { name: 'I agree' }));
     expect(await screen.findByText('Signed — thank you!')).toBeInTheDocument();
-    expect(storageBucket.upload).not.toHaveBeenCalled();
+    expect(supabase.storage.from('signatures').upload).not.toHaveBeenCalled();
     expect(calls.find((c) => c.fn === 'public_sign_form')?.args).toEqual({
       p_token: DOC_TOKEN,
       p_signer_name: 'Ana',
@@ -120,7 +126,9 @@ describe('FormPage', () => {
 
   it('reports a failed upload without signing', async () => {
     const calls = mockRpc({ public_get_form: { data: formFixture() } });
-    storageBucket.upload.mockResolvedValue({ data: null, error: { message: 'denied' } });
+    supabase.storage
+      .from('signatures')
+      .upload.mockResolvedValue({ data: null, error: { message: 'denied' } });
     const { user } = render();
     await user.type(await screen.findByLabelText(/^Your full name/), 'Ana');
     await user.click(screen.getByRole('button', { name: 'Draw Your signature' }));
@@ -141,7 +149,7 @@ describe('FormPage', () => {
   });
 
   it('shows not found for an unknown form', async () => {
-    mockRpc({ public_get_form: pgError('P0002', 'form not found') });
+    mockRpc({ public_get_form: pgError('PT404', 'form not found') });
     render();
     expect(await screen.findByText('We couldn’t find this form')).toBeInTheDocument();
   });

@@ -1,6 +1,6 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, SHOP, type MockUser, type Role } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, type Json } from './support/mockSupabase';
 
 const MANAGER: MockUser = {
   id: '00000000-0000-4000-8000-000000000003',
@@ -65,7 +65,19 @@ interface Recorded {
   membershipLoads: number;
 }
 
-async function setup(page: Page, user: MockUser, role: Role): Promise<Recorded> {
+interface SetupOptions {
+  /** Answers of the stripe-connect function (refresh_status → this status). */
+  stripeStatus?: Record<string, Json>;
+  /** Bodies the stripe-connect function received. */
+  connectCalls?: Record<string, unknown>[];
+}
+
+async function setup(
+  page: Page,
+  user: MockUser,
+  role: Role,
+  { stripeStatus, connectCalls = [] }: SetupOptions = {},
+): Promise<Recorded> {
   const recorded: Recorded = { shopPatches: [], membershipLoads: 0 };
   let shop = { ...SHOP_ROW };
   await mockSupabase(page, {
@@ -86,38 +98,19 @@ async function setup(page: Page, user: MockUser, role: Role): Promise<Recorded> 
       booking_settings: [BOOKING_SETTINGS],
       message_templates: TEMPLATES,
     },
+    functions: stripeStatus
+      ? {
+          'stripe-connect': ({ body }) => {
+            const call = (body ?? {}) as Record<string, unknown>;
+            connectCalls.push(call);
+            return call.action === 'refresh_status'
+              ? stripeStatus
+              : { url: 'https://connect.stripe.com/onboarding/acct_1', expires_at: 0 };
+          },
+        }
+      : {},
   });
   return recorded;
-}
-
-async function stripeConnect(
-  page: Page,
-  status: Record<string, unknown>,
-  calls: Record<string, unknown>[] = [],
-) {
-  await page.route(`${SUPABASE_URL}/functions/v1/stripe-connect`, async (route: Route) => {
-    const headers = {
-      'access-control-allow-origin': '*',
-      'access-control-allow-headers': '*',
-      'access-control-allow-methods': 'POST, OPTIONS',
-    };
-    if (route.request().method() === 'OPTIONS') {
-      await route.fulfill({ status: 204, headers });
-      return;
-    }
-    const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
-    calls.push(body);
-    const response =
-      body.action === 'refresh_status'
-        ? status
-        : { url: 'https://connect.stripe.com/onboarding/acct_1', expires_at: 0 };
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      headers,
-      body: JSON.stringify(response),
-    });
-  });
 }
 
 test.describe('settings', () => {
@@ -167,19 +160,17 @@ test.describe('settings', () => {
   });
 
   test('Stripe Connect onboarding redirect and return', async ({ page }) => {
-    await setup(page, OWNER, 'owner');
     const calls: Record<string, unknown>[] = [];
-    await stripeConnect(
-      page,
-      {
+    await setup(page, OWNER, 'owner', {
+      stripeStatus: {
         connected: false,
         stripe_account_id: null,
         charges_enabled: false,
         payouts_enabled: false,
         details_submitted: false,
       },
-      calls,
-    );
+      connectCalls: calls,
+    });
     await page.route('https://connect.stripe.com/**', (route) =>
       route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>Stripe onboarding</h1>' }),
     );
@@ -193,13 +184,14 @@ test.describe('settings', () => {
   });
 
   test('returning from Stripe refreshes the status and clears the query', async ({ page }) => {
-    await setup(page, OWNER, 'owner');
-    await stripeConnect(page, {
-      connected: true,
-      stripe_account_id: 'acct_1',
-      charges_enabled: false,
-      payouts_enabled: false,
-      details_submitted: true,
+    await setup(page, OWNER, 'owner', {
+      stripeStatus: {
+        connected: true,
+        stripe_account_id: 'acct_1',
+        charges_enabled: false,
+        payouts_enabled: false,
+        details_submitted: true,
+      },
     });
     await page.goto('/app/settings/payments?stripe=return');
     await expect(page.getByText('Details submitted — waiting on Stripe')).toBeVisible();

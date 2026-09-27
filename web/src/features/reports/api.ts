@@ -16,12 +16,14 @@ import {
   outstandingReportSchema,
   paymentsRowSchema,
   revenueRowSchema,
+  revenueTotalsSchema,
   salesRowSchema,
   teamRowSchema,
   type CustomersReport,
   type OutstandingReport,
   type PaymentsRow,
   type RevenueRow,
+  type RevenueTotals,
   type SalesRow,
   type TeamRow,
 } from './model';
@@ -31,6 +33,8 @@ export const reportKeys = {
   all: (shopId: string) => shopKey(shopId, 'reports'),
   revenue: (shopId: string, range: DateRange, bucket: Bucket) =>
     [...reportKeys.all(shopId), 'revenue', range.from, range.to, bucket] as const,
+  revenueTotals: (shopId: string, range: DateRange) =>
+    [...reportKeys.all(shopId), 'revenue-totals', range.from, range.to] as const,
   payments: (shopId: string, range: DateRange) =>
     [...reportKeys.all(shopId), 'payments', range.from, range.to] as const,
   sales: (shopId: string, range: DateRange) =>
@@ -95,6 +99,37 @@ export function useRevenueReport(
       );
       assertCompleteRevenue(rows, range, bucket);
       return rows;
+    },
+  });
+}
+
+/**
+ * The period's revenue totals in one row (report_revenue_totals): the
+ * summary cards never depend on how many buckets the chart has.
+ */
+export function useRevenueTotals(range: DateRange, { enabled = true }: Options = {}) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: reportKeys.revenueTotals(shopId, range),
+    enabled,
+    queryFn: async (): Promise<RevenueTotals> => {
+      const rows = parse(
+        z.array(revenueTotalsSchema),
+        unwrap(
+          await supabase.rpc('report_revenue_totals', {
+            p_shop_id: shopId,
+            p_from: range.from,
+            p_to: range.to,
+          }),
+        ) ?? [],
+      );
+      const row = rows[0];
+      if (!row) {
+        throw new AppError('The report came back in an unexpected format. Please try again.', {
+          kind: 'server',
+        });
+      }
+      return row;
     },
   });
 }

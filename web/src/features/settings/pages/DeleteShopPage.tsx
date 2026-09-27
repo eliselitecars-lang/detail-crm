@@ -1,17 +1,16 @@
-import { AlertTriangle, Trash2 } from 'lucide-react';
+import { Info, Trash2 } from 'lucide-react';
 import { useId, useRef, useState, type FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { useNavigate } from 'react-router';
 import { Button, Dialog, FormField, Input, SectionCard, useToast } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
-import { errorMessage } from '@/lib/errors';
-import { useBillingMembershipCount, useDeleteShop } from '../api';
+import { deleteShopErrorMessage, useBillingMembershipCount, useDeleteShop } from '../api';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
 import { confirmationMatches } from '../deleteShop';
 
 /**
- * Owner only (route guard + nav: shop.delete; RLS shops_delete). Deleting
- * cascades every tenant row; it is blocked while Stripe subscriptions could
- * keep billing customers of the deleted shop.
+ * Owner only (route guard + nav: shop.delete; the payments function checks
+ * the owner again). The server cancels billing in Stripe, expires open pay
+ * links and then deletes the shop; every tenant row cascades.
  */
 export default function DeleteShopPage() {
   const query = useBillingMembershipCount(true);
@@ -27,7 +26,6 @@ export default function DeleteShopPage() {
 function DeleteShopCard({ billingMemberships }: { billingMemberships: number }) {
   const { shop } = useShop();
   const [open, setOpen] = useState(false);
-  const blocked = billingMemberships > 0;
   return (
     <SectionCard
       title="Delete this shop"
@@ -47,26 +45,22 @@ function DeleteShopCard({ billingMemberships }: { billingMemberships: number }) 
             manage or close the account at stripe.com.
           </li>
         </ul>
-        {blocked && (
+        {billingMemberships > 0 && (
           <p
-            role="alert"
-            className="rounded-card border-warning bg-warning-soft text-warning-ink flex gap-2 border px-3 py-2"
+            role="status"
+            className="rounded-card border-primary/25 bg-primary-soft text-primary-ink flex gap-2 border px-3 py-2"
           >
-            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
             <span>
               {billingMemberships === 1
-                ? '1 membership still bills a customer'
-                : `${billingMemberships} memberships still bill customers`}{' '}
-              through Stripe. Deleting the shop would not stop those charges — cancel them on the{' '}
-              <Link to="/app/memberships" className="text-primary font-medium underline">
-                Memberships page
-              </Link>{' '}
-              first.
+                ? '1 active membership will be cancelled in Stripe'
+                : `${billingMemberships} active memberships will be cancelled in Stripe`}
+              , so those customers are not charged again. Open pay and deposit links stop working.
             </span>
           </p>
         )}
         <div>
-          <Button variant="danger" disabled={blocked} onClick={() => setOpen(true)}>
+          <Button variant="danger" onClick={() => setOpen(true)}>
             <Trash2 className="size-4" aria-hidden="true" />
             Delete shop…
           </Button>
@@ -105,7 +99,7 @@ function DeleteShopDialog({
     event.preventDefault();
     if (!matches || remove.isPending) return;
     try {
-      await remove.mutateAsync();
+      await remove.mutateAsync(typed.trim());
       toast.success(`${shopName} was deleted`);
       await navigate('/app', { replace: true });
     } catch {
@@ -163,7 +157,7 @@ function DeleteShopDialog({
             role="alert"
             className="bg-danger-soft text-danger-ink rounded-control px-3 py-2 text-sm"
           >
-            {errorMessage(remove.error)}
+            {deleteShopErrorMessage(remove.error)}
           </p>
         )}
       </form>

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, SHOP, TECH } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, reply, type MockReply } from './support/mockSupabase';
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type Row = { [key: string]: Json };
@@ -90,6 +90,8 @@ interface Setup {
   resources?: Row[];
   patches?: Row[];
   rangeCalls?: Json[];
+  /** Answer every reschedule (PATCH) with this PostgREST error. */
+  rejectPatch?: MockReply;
 }
 
 async function setup(page: Page, options: Setup = {}) {
@@ -107,6 +109,10 @@ async function setup(page: Page, options: Setup = {}) {
       })),
       resources: options.resources ?? [],
       jobs: ({ method, body }) => {
+        if (method === 'PATCH' && options.rejectPatch) {
+          options.patches?.push(body as Row);
+          return options.rejectPatch;
+        }
         if (method === 'PATCH') {
           options.patches?.push(body as Row);
           // the server now holds the moved job
@@ -203,21 +209,14 @@ test.describe('calendar', () => {
     page,
   }) => {
     const patches: Row[] = [];
-    await setup(page, { patches });
-    await page.route(`${SUPABASE_URL}/rest/v1/jobs**`, async (route) => {
-      if (route.request().method() !== 'PATCH') return route.fallback();
-      patches.push(route.request().postDataJSON() as Row);
-      return route.fulfill({
-        status: 400,
-        headers: { 'access-control-allow-origin': '*' },
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: '23514',
-          message: 'the new time overlaps a blocked time',
-          details: null,
-          hint: null,
-        }),
-      });
+    await setup(page, {
+      patches,
+      rejectPatch: reply(400, {
+        code: '23514',
+        message: 'the new time overlaps a blocked time',
+        details: null,
+        hint: null,
+      }),
     });
     await page.goto('/app/calendar');
     const event = page.locator('.fc-timegrid-event', { hasText: '#1001' });

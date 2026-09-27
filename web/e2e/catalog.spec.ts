@@ -60,7 +60,12 @@ interface Captured {
   search: string;
 }
 
-async function setup(page: Page, user: MockUser, role: 'manager' | 'technician' | 'owner') {
+async function setup(
+  page: Page,
+  user: MockUser,
+  role: 'manager' | 'technician' | 'owner',
+  counts: Record<string, number> = {},
+) {
   const writes: Captured[] = [];
   const addons: Row[] = [];
   const services: Row[] = [
@@ -144,7 +149,7 @@ async function setup(page: Page, user: MockUser, role: 'manager' | 'technician' 
         },
       ]),
     },
-    counts: {},
+    counts,
   });
   return writes;
 }
@@ -203,17 +208,8 @@ test.describe('catalog', () => {
   });
 
   test('deleting an item in use offers archiving instead', async ({ page }) => {
-    const writes = await setup(page, MANAGER, 'manager');
-    await page.route('**/rest/v1/job_line_items**', (route) =>
-      route.fulfill({
-        status: 200,
-        headers: {
-          'content-range': '0-2/3',
-          'access-control-expose-headers': 'content-range',
-          'access-control-allow-origin': '*',
-        },
-      }),
-    );
+    // Three job lines still use the service (HEAD count).
+    const writes = await setup(page, MANAGER, 'manager', { job_line_items: 3 });
     await page.goto(`/app/catalog/services/${SVC}`);
     await expect(page.getByRole('heading', { name: 'Interior Detail' })).toBeVisible();
     await page.getByRole('button', { name: 'More actions' }).click();

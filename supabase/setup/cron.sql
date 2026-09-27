@@ -23,9 +23,16 @@
 --                                              the next process_queue run sends them)
 --   detail-crm-expire-quotes    daily 06:05    public.expire_quotes()
 --                               UTC            (quotes also expire lazily on public access)
+--   detail-crm-sweep-payment-sheets  every 10 min  POST payments {"action":"sweep_payment_sheets"}
+--                                              (releases PaymentSheets left unconfirmed 30+ min
+--                                              so an abandoned sheet never locks an invoice)
 --   detail-crm-storage-purge    every 15 min   POST storage-purge {"action":"purge"}
 --                                              (removes the stored files of deleted shops,
 --                                              jobs, inspections and forms; migration 0025)
+--
+-- Re-run this file after every release that adds or changes a job above:
+-- it is idempotent (each job is unscheduled, then scheduled again), so a
+-- re-run with the same values only brings the schedule up to date.
 --
 -- HOW TO RUN
 --   1. Deploy the functions and set the function secrets (see
@@ -45,6 +52,13 @@
 -- To rotate CRON_SECRET: set the new function secret, then re-run this file
 -- with the new value (both sides must match; the function compares in
 -- constant time and answers 401 otherwise).
+--
+-- LOCAL DEVELOPMENT: this script is for hosted projects and is https-only
+-- on purpose (the app URL and the functions URL must be https://, the
+-- checks below refuse anything else), so it cannot be run against a local
+-- stack. Local stacks set the app URL and the extensions with
+-- scripts/stack/sql/setup_local.sql, and scheduled jobs are exercised by
+-- scripts/stack/verify_stack.mjs (it calls each job's action itself).
 --
 -- Twilio webhooks are configured per shop number in the Twilio Console, not
 -- here (see supabase/setup/twilio.md):

@@ -15,7 +15,8 @@ ios/
       Core/Components/        LoadState, state views, AsyncButton, toasts, confirmations,
                               money/status/avatar views, form rows, signature pad,
                               photo/camera pickers, map/phone/email links, brand mark
-      Core/Networking/        Supa.swift (the one SupabaseClient, error text, AnyJSON helpers)
+      Core/Networking/        Supa.swift (the one SupabaseClient, error text, AnyJSON helpers),
+                              EdgeErrorDecoder.swift (edge-function errors + EdgeFunctions.invoke)
       Core/Models/            Codable structs mirroring tables / RPC results
       Core/Services/          one static enum per domain (AuthService, ShopService, …)
       Features/<Feature>/     screens, one folder per feature
@@ -76,7 +77,9 @@ ios/
 5. **Navigation.** Each tab owns one `NavigationStack` (`TabRoot`); feature
    root views never create their own. Link across features with
    `NavigationLink(value: AppRoute.job(id))` (also `.customer`, `.quote`,
-   `.invoice`); the destinations are registered once per tab.
+   `.invoice`, `.conversation(customerID)`); the destinations are
+   registered once per tab. Notifications open `AppNotification.route`
+   (same precedence as the web app).
 6. **Feature entry points** (keep these names/initializers): `TodayView`,
    `CalendarHomeView`, `CustomersView`, `CustomerDetailView(customerID:)`,
    `InboxView`, `JobDetailView(jobID:)`, `QuotesView`,
@@ -95,6 +98,19 @@ ios/
    no `try!`; build URLs with `URLComponents`, never `URL(string:)!`.
 8. **Swift 5 language mode** (`SWIFT_VERSION = 5.0`) to avoid strict
    concurrency errors; keep UI types on the main actor.
+9. **Edge functions.** Call them through `EdgeFunctions.invoke("name", body:)`
+   (or `MoneyEdge.invoke` in the money services) with a string literal name
+   (`swift_sanity.py` checks it names a real function). Every failure is an
+   `EdgeFunctionError` (`EdgeErrorDecoder`): our `{error, code, details}`
+   envelope keeps the server's wording and `details.reason`; a gateway /
+   non-envelope body is worded from the HTTP status (401 "Your session has
+   expired. Sign in again.", 403, 404, 429, 5xx).
+10. **Idempotent sends.** Every message compose carries a `request_nonce`
+   (`MoneyEdge.newNonce()`, reused when the same content is sent again after
+   a failure — `InboxComposeAttempt`), so a retry never queues a second copy.
+   Quote / invoice messages are rendered and queued by the server
+   (`messaging` send with `quote_id` / `invoice_id`; preview from
+   `preview_document_message`) — the app never renders document wording.
 
 ## Running locally (macOS with Xcode 16+)
 
@@ -122,7 +138,10 @@ iOS changes):
    additionally fails while any stub remains).
 2. `swift test` in `ios/DetailCore`.
 3. `xcodebuild -resolvePackageDependencies` (SPM checkouts cached by
-   Package.resolved/pbxproj hash) and `xcodebuild build` for
+   Package.resolved/pbxproj hash; the pins are committed in
+   `DetailCRM.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
+   and each run uploads what it resolved as the `package-resolved`
+   artifact) and `xcodebuild build` for
    `generic/platform=iOS Simulator` with `CODE_SIGNING_ALLOWED=NO`.
 4. On failure the first 200 unique `error:` lines of each log are printed and
    the logs are uploaded as an artifact.

@@ -29,7 +29,7 @@ supabase/functions/
     fetch_timeout.ts   withTimeout: per-request time cap (body included) for Twilio/Resend calls
     testing/           FakeFetch, FakeSupabase, request builders, test env, Stripe signer
   <function>/index.ts  one directory per deployed function (stripe-connect, payments,
-                       stripe-webhook, messaging, invites, storage-purge)
+                       stripe-webhook, messaging, invites, storage-purge, account)
 ```
 
 ## Writing a function
@@ -212,7 +212,7 @@ implements it; when you change an action, update it here in the same commit.
   that owns the row. Missing/invalid session: `401 unauthorized`. Auth
   outage or throttling: `503 service_unavailable`, not 401. Non-member or
   wrong role: `403 forbidden` (the same answer for both). On
-  `stripe-connect` and `invites` (`verify_jwt = true`) the Supabase gateway
+  `stripe-connect`, `invites` and `account` (`verify_jwt = true`) the Supabase gateway
   rejects a missing/invalid JWT first with its own 401, which is **not** our
   error envelope; treat any 401 as "sign in again".
 - **Public auth:** the link token in the body (a UUID; a malformed one is
@@ -294,6 +294,14 @@ the staff JWT themselves. Payment rows are written server-side;
 checkout/sheet completes, re-read the invoice/booking rather than trusting
 the client.
 
+Every PaymentIntent, SetupIntent and Checkout Session is **card-only**
+(`payment_method_types: ["card"]`; Apple Pay / Google Pay are cards): the
+CRM records brand and last4 and its money guards assume a card settles at
+once, so bank debits that clear days later are never offered.
+
+A public RPC's "not found" (`PT404`, migration 0042) and a staff RPC's
+(`P0002`) both answer `404 not_found`.
+
 #### `invoice_checkout` (PUBLIC, invoice token)
 
 Body `{token, tip_cents?, request_nonce?}` (`token` = `invoices.public_token`,
@@ -372,17 +380,30 @@ Errors: `403 forbidden` (technician not allowed or not assigned),
 
 #### `cancel_open_payments` (same callers as `payment_sheet`)
 
-Body `{shop_id, invoice_id}`. Releases the invoice: cancels its unconfirmed
-PaymentSheet intents, records any that already succeeded, and expires its
-open Checkout pay links and its job's deposit links. Call it when a sheet is
-dismissed and **before voiding or editing** an invoice. It never cancels a
+Body `{shop_id, invoice_id}` **or** `{shop_id, job_id}` (exactly one of the
+two ids; both or neither is `400 validation_failed`). It never cancels a
 payment that is already processing.
 
-200: `{invoice_id, cancelled, succeeded, in_progress, sessions_expired}`
-(counts; all 0 when the shop has no Stripe account). `in_progress > 0` means
-money is still moving: do not void yet.
+- `invoice_id` releases the invoice: cancels its unconfirmed PaymentSheet
+  intents, records any that already succeeded, and expires its open Checkout
+  pay links and its job's deposit links. Call it when a sheet is dismissed
+  and **before voiding or editing** an invoice.
+- `job_id` releases the job: every unsettled card attempt of the job (its
+  deposits and its invoice's payments), the deposit links opened for the
+  job's **current** customer and, when the job has a non-void invoice, that
+  invoice's pay links. Call it **before cancelling a job / marking it
+  no-show and before changing a job's customer**. Technicians may call it
+  only for a job assigned to them, when the shop lets them collect.
 
-Errors: `403 forbidden`, `404 not_found`.
+200: `{invoice_id, job_id, cancelled, succeeded, in_progress, sessions_expired}`.
+`invoice_id` / `job_id` name what was released (the invoice path answers
+the invoice's job or `null`; the job path the job's non-void invoice or
+`null`). The counts are all 0 when the shop has no Stripe account.
+`in_progress > 0` means money is still moving: do not void / cancel / move
+the job yet ("A card payment is in progress — wait for it to finish.").
+`succeeded > 0` means money was just recorded: refresh the balance.
+
+Errors: `403 forbidden`, `404 not_found` (invoice or job not in this shop).
 
 #### `sweep_payment_sheets` (pg_cron, `x-cron-secret`)
 
@@ -409,9 +430,25 @@ Errors: `402 payment_failed` with `details {reason, stripe_code, decline_code}`.
 (the bank wants the customer present: send a pay link instead). Also:
 `404 not_found` (invoice, or that card is not saved for this customer),
 invoice-state errors, `409 conflict` reason `payment_in_progress`, and
-`422 unprocessable` reasons `no_saved_card`, `amount_exceeds_balance`
-(`details.balance_cents`), `amount_out_of_range`, `stripe_not_connected`,
-`charges_disabled`.
+`422 unprocessable` reasons `no_saved_card`, `saved_card_removed` (Stripe no
+longer has the card, or it is no longer attached to the customer: it was
+removed from the customer's saved cards; show `error` and reload the
+cards), `amount_exceeds_balance` (`details.balance_cents`),
+`amount_out_of_range`, `stripe_not_connected`, `charges_disabled`.
+
+#### `remove_saved_card` (manager+)
+
+Body `{shop_id, customer_id, payment_method_id}`. Detaches the card from the
+customer's Stripe customer on the shop's account (so no PaymentSheet or
+charge can use it again), then removes it from `customer_payment_methods`
+(the customer's newest remaining card becomes the default when the default
+is removed). A card Stripe no longer has, or that is attached to another
+Stripe customer, is only removed from the CRM. Works without Stripe too.
+
+200: `{removed}`: `false` when the card is not (or no longer) saved for this
+customer, e.g. a retry after success; nothing is changed then.
+
+Errors: `403 forbidden`, `404 not_found` (customer not in this shop).
 
 #### `setup_card` (manager+)
 
@@ -494,6 +531,35 @@ Errors: `404 not_found`, `409 conflict` reasons `already_cancelled`,
 `membership_changed` (refresh), `422 unprocessable` reason
 `stripe_not_connected`.
 
+#### `delete_shop` (owner only)
+
+Body `{shop_id, confirm_name}`. `confirm_name` is the shop's name as the
+owner typed it (compared trimmed and case-insensitively). In order:
+
+1. every unsettled card attempt of the shop is settled (unconfirmed
+   PaymentSheets cancelled, money that already landed recorded); a payment
+   still processing refuses the deletion before anything else changes;
+2. every open Checkout link the CRM created on the account (pay, deposit,
+   card-saving and membership links) is expired;
+3. every membership that is not cancelled is cancelled **now**: its Stripe
+   subscription is cancelled on the connected account (and any subscription
+   a completed link started), then it is recorded `cancelled`;
+4. the shop is deleted. The database cascades to every tenant row, queues
+   the shop's stored files for `storage-purge` and logs its SMS number in
+   `sms_number_releases` (the operator releases it in Twilio).
+
+The Stripe Connect account is left intact: the owner keeps the Express
+dashboard, the balance and the payouts. A shop without Stripe skips steps
+1-3's Stripe calls.
+
+200: `{deleted: true, memberships_cancelled, sessions_expired}`. Afterwards
+drop every cached query of that shop and leave its screens.
+
+Errors: `403 forbidden` (not the owner), `404 not_found`,
+`409 conflict` reason `payment_in_progress` (a card payment is still
+processing or a pay link was just paid: nothing was deleted; try again in a
+moment), `422 unprocessable` reason `name_mismatch`.
+
 ### `stripe-webhook` (Stripe only)
 
 `POST /functions/v1/stripe-webhook`, raw body (at most 1 MiB), header
@@ -510,6 +576,21 @@ Errors: `404 not_found`, `409 conflict` reasons `already_cancelled`,
   retries).
 
 The events handled are listed in [Stripe Connect webhook](#stripe-connect-webhook).
+Besides recording money, refunds (a failed refund lowers the refunded total
+again, `set_stripe_refund_total`), subscriptions and saved cards, it:
+
+- records a dispute's outcome in `payments.disputed_cents`
+  (`apply_stripe_dispute`: `lost` = what the dispute took back; `won` /
+  `warning_closed` = 0), writes one line about it in the payment's note and
+  notifies owners/admins (deep links: the payment's job, customer and
+  invoice). Balances are not changed by a dispute;
+- cancels, once a card payment settles an invoice in full, that invoice's
+  other PaymentSheets still waiting for a card (recorded `cancelled`), so a
+  sheet left open on another device cannot overpay it;
+- keeps money whose job / invoice / membership was deleted as the payer's
+  unapplied payment with a note (upsert_stripe_payment drops the stale
+  links); money that nothing in the shop can take is logged
+  (`stripe_payment_unlinkable`) and acknowledged.
 
 ### `messaging`
 
@@ -518,7 +599,7 @@ The events handled are listed in [Stripe Connect webhook](#stripe-connect-webhoo
 
 #### `send` (staff)
 
-Body `{shop_id?, customer_id?, job_id?, channel, template_key?, subject?, body?}`:
+Body `{shop_id?, customer_id?, job_id?, quote_id?, invoice_id?, channel, template_key?, subject?, body?, request_nonce?}`:
 
 - `channel`: `"sms"` | `"email"`.
 - Give exactly one of `template_key` or `body` (non-blank).
@@ -537,17 +618,35 @@ Body `{shop_id?, customer_id?, job_id?, channel, template_key?, subject?, body?}
 - `subject`: email free-form only (templates bring their own; SMS has none),
   at most 500 characters. `body`: at most 1600 characters for SMS, 50,000
   for email.
+- **Quotes and invoices:** `quote_id` with `template_key: "quote_sent"`, or
+  `invoice_id` with `template_key: "invoice_sent"` (owner/admin/manager
+  only). The database renders the shop's template with the document's own
+  link, amount and balance and queues it (`enqueue_document_message`);
+  clients never render or send the wording themselves (use the
+  `preview_document_message` RPC to show it first). The customer and job
+  come from the document, so `customer_id`, `job_id`, `body` and `subject`
+  are not allowed with a document id, nor are both ids at once
+  (`400 validation_failed`). A draft quote (mark it sent first) or a draft /
+  void invoice has no link yet: `422 missing_link` with `error` "Mark the
+  quote as sent first." / "Issue the invoice first." / "This invoice is void;
+  it can no longer be sent.". Without a `shop_id`, the shop comes from the
+  document.
+- `request_nonce` (8-64 of `[A-Za-z0-9_-]`, a UUID string is fine): one per
+  compose, reused when that compose is retried, a fresh one after a
+  success. The database queues a nonce once per sender and shop
+  (`messages.request_nonce`); a retry returns the same message.
 - Roles: owner/admin/manager can send anything. Technicians can send only
   `template_key` `on_the_way` / `job_started` / `job_completed`, with a
-  `job_id` they are assigned to.
+  `job_id` they are assigned to (never quotes or invoices: `403 forbidden`).
 
 200: `{message_id, channel, status, error}`, where `status` is the state
 after the immediate delivery attempt: `sent`, `failed` (`error` holds a
 short reason), `queued` (retry scheduled), `sending` or `cancelled`. A
-repeat of an identical send by the same staff member within 5 minutes
-returns the **original** message (its id and current status, which may be
-`delivered`) and sends nothing new. A delivery failure is still 200: show
-`error`.
+retry with the same `request_nonce` returns the **same** message with its
+current status (which may be `delivered`) and never delivers it twice.
+Without a nonce, a repeat of an identical send by the same staff member
+within 5 minutes returns the **original** message and sends nothing new. A
+delivery failure is still 200: show `error`.
 
 Errors: `403 forbidden` (role, technician rules, not assigned),
 `404 not_found` (job or customer not found / not visible), and
@@ -560,7 +659,8 @@ Errors: `403 forbidden` (role, technician rules, not assigned),
 - `no_marketing_consent` (`follow_up`)
 - `appointment_closed` (the job is cancelled / no-show)
 - `missing_link` (a link placeholder would be blank; `details.variables`;
-  `error` says what to set up)
+  `error` says what to set up; also when the platform has no customer app
+  URL configured yet)
 - `empty_message`
 - `job_customer_mismatch`
 - `job_required` (optionally `details.variables`)
@@ -645,6 +745,28 @@ invited with another role) and `422 unprocessable` (the invite cannot be
 created). `resend_invite` can return `404 not_found` (invite), `409 conflict`
 (already accepted) and `410 gone` (revoked). Both can return `403 forbidden`.
 
+### `account` (any signed-in user, own account only; `verify_jwt = true`)
+
+#### `delete_account`
+
+Body `{}` (just `{"action":"delete_account"}`). Deletes the caller's own
+account (App Store guideline 5.1.1(v)); every role can, portal clients
+included. The caller must not own a shop: ownership is checked as the
+caller (`account_deletion_blockers`), because a shop cannot be left without
+an owner. The auth user is then deleted with the Auth admin API; the
+database cascades remove their memberships and profile, clear customers'
+portal links and null audit references. Shop records (customers, jobs,
+payments) are never deleted with a person's account.
+
+200: `{deleted: true}`: sign out locally and go to the sign-in page.
+
+Errors: `401 unauthorized` (gateway or function), `409 conflict` reason
+`owns_shops` with `details.shops: [{shop_id, name}]` (ordered by name) and
+`error` "Transfer ownership or delete these shops first." (link each shop to
+its delete-shop page and to the team page for an ownership transfer),
+`503 service_unavailable` (Auth could not delete the user right now: try
+again).
+
 ## Testing
 
 ```sh
@@ -715,14 +837,43 @@ supabase functions deploy stripe-webhook
 supabase functions deploy messaging
 supabase functions deploy invites
 supabase functions deploy storage-purge
+supabase functions deploy account
 # or all at once (every [functions.*] entry must exist as a directory):
 supabase functions deploy
 ```
 
-`verify_jwt` comes from `config.toml`: `stripe-connect` and `invites` require
-a Supabase JWT at the gateway; `payments`, `stripe-webhook`, `messaging` and
-`storage-purge` have public/webhook/cron entry points and authenticate every
-request themselves.
+`verify_jwt` comes from `config.toml`: `stripe-connect`, `invites` and
+`account` require a Supabase JWT at the gateway; `payments`,
+`stripe-webhook`, `messaging` and `storage-purge` have public/webhook/cron
+entry points and authenticate every request themselves.
+
+### Launch / upgrade checklist
+
+Run through it at launch and after every release (`scripts/deploy/`
+automates steps 1-3 for a hosted project):
+
+1. **Deploy the functions and set the secrets** ([Secrets](#secrets)):
+   every `[functions.*]` entry of `config.toml` is deployed with its
+   `verify_jwt`. Migrations first, so the functions find the RPCs they call.
+2. **Re-run `supabase/setup/cron.sql`** (with the private values) after any
+   release that adds or changes a scheduled job. It is idempotent: every job
+   is unscheduled and scheduled again, and the app URL and Vault secrets are
+   upserted. Jobs today: `process_queue` (every minute), automations (every
+   5 min), quote expiry (daily), `sweep_payment_sheets` (every 10 min) and
+   `storage-purge` (every 15 min). cron.sql is https-only on purpose: local
+   stacks use `scripts/stack/sql/setup_local.sql` instead, and
+   `scripts/stack/verify_stack.mjs` exercises the scheduled actions there.
+3. **Stripe:** the Connect endpoint (`stripe-webhook`, "Events on Connected
+   accounts") must be subscribed to **every** event in
+   [Stripe Connect webhook](#stripe-connect-webhook), including the refund
+   (`charge.refund.updated`, `refund.updated`, `refund.failed`), dispute
+   (`charge.dispute.*`) and `payment_method.detached` events; add any event
+   a release adds to `HANDLED_EVENT_TYPES`.
+4. **Twilio:** each shop number's "A message comes in" webhook points at
+   `messaging?action=twilio_inbound&shop_id=<SHOP UUID>#rc=3&rp=all`
+   ([Twilio webhooks](#twilio-webhooks), `supabase/setup/twilio.md`); the
+   status callback is sent with every SMS. After a shop is deleted, release
+   the numbers listed in `public.sms_number_releases` (service role).
 
 Local: `supabase start`, then
 `supabase functions serve --env-file supabase/functions/.env.local`.
@@ -745,7 +896,8 @@ account, so payment events are emitted **on the connected account**.
    Stripe are removed from the CRM),
    `charge.dispute.created`, `charge.dispute.updated`,
    `charge.dispute.closed`, `charge.dispute.funds_withdrawn`,
-   `charge.dispute.funds_reinstated` (flagged on the payment + owner/admin
+   `charge.dispute.funds_reinstated` (outcome recorded in
+   `payments.disputed_cents`, flagged in the payment's note + owner/admin
    notification),
    `customer.subscription.created`, `customer.subscription.updated`,
    `customer.subscription.deleted`, `invoice.paid`,
@@ -775,5 +927,8 @@ and service per shop, never shared: Twilio scopes STOP per service), set to
 The signature covers the exact URL including `?action=...`, so the URL in
 Twilio must match `FUNCTIONS_PUBLIC_URL`/`SUPABASE_URL` exactly. When
 tunnelling local dev, set `FUNCTIONS_PUBLIC_URL` to the tunnel's
-`.../functions/v1`. Inbound STOP/START/HELP keywords are classified by
-`classifyOptKeyword`; reply to Twilio with `emptyTwiml()`.
+`.../functions/v1`. Inbound keywords are applied by `record_inbound_sms`
+(0033): STOP and its synonyms opt out; START, UNSTOP and YES (Twilio's
+opt-in keywords; "yes please..." is an ordinary reply) opt back in.
+`classifyOptKeyword` mirrors the same lists. Reply to Twilio with
+`emptyTwiml()`.

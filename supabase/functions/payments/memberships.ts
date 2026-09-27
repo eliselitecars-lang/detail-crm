@@ -49,9 +49,9 @@ export const membershipCancelInput = z.object({
   at_period_end: z.boolean().optional(),
 }).strict();
 
-type MembershipStatus = "incomplete" | "active" | "past_due" | "cancelled";
+export type MembershipStatus = "incomplete" | "active" | "past_due" | "cancelled";
 
-interface MembershipRow {
+export interface MembershipRow {
   id: string;
   shop_id: string;
   plan_id: string;
@@ -103,6 +103,9 @@ export function periodEndOf(subscription: Stripe.Subscription): string | null {
   return ends.length ? new Date(Math.max(...ends) * 1000).toISOString() : null;
 }
 
+export const MEMBERSHIP_COLUMNS =
+  "id, shop_id, plan_id, customer_id, vehicle_id, status, stripe_subscription_id, cancel_at_period_end, current_period_end";
+
 async function loadMembership(
   s: Services,
   shopId: string,
@@ -110,9 +113,7 @@ async function loadMembership(
 ): Promise<MembershipRow> {
   const { data, error } = await s.admin
     .from("memberships")
-    .select(
-      "id, shop_id, plan_id, customer_id, vehicle_id, status, stripe_subscription_id, cancel_at_period_end, current_period_end",
-    )
+    .select(MEMBERSHIP_COLUMNS)
     .eq("shop_id", shopId)
     .eq("id", membershipId)
     .maybeSingle();
@@ -300,7 +301,10 @@ async function cancelIfLive(
  * any subscription a completed one started (the webhook may not have linked
  * it yet). Returns how many live subscriptions were stopped.
  */
-async function closeMembershipCheckout(s: Services, membership: MembershipRow): Promise<number> {
+export async function closeMembershipCheckout(
+  s: Services,
+  membership: MembershipRow,
+): Promise<number> {
   const account = await findAccount(s.admin, membership.shop_id);
   if (!account) return 0;
   const customer = await loadCustomer(s.admin, membership.shop_id, membership.customer_id);
@@ -384,6 +388,7 @@ export async function membershipCheckout(
     {
       mode: "subscription",
       customer: stripeCustomer,
+      payment_method_types: ["card"],
       client_reference_id: membership.id,
       line_items: [{ price: priceId, quantity: 1 }],
       subscription_data: {

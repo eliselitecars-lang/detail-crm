@@ -173,23 +173,100 @@ enum MessageThreadKey: Hashable, Sendable {
     }
 }
 
-/// One conversation in the inbox list (computed client-side from recent
-/// messages; not a table).
+/// One row of `inbox_threads`: a conversation's newest message and its
+/// unread count, grouped by the server (customer threads `c:<uuid>`,
+/// unknown senders `a:<address>`).
+// rpc: inbox_threads
+struct InboxThreadRow: Codable, Hashable, Sendable {
+    var threadKey: String
+    var customerID: UUID?
+    /// Counterpart address of the newest message (inbound sender /
+    /// outbound recipient).
+    var fromAddress: String?
+    var customerFirstName: String?
+    var customerLastName: String?
+    var customerCompany: String?
+    var lastMessageID: UUID
+    var lastDirection: Message.Direction
+    var lastChannel: Message.Channel
+    var lastStatus: Message.Status
+    /// The first 280 characters of the newest message.
+    var lastBody: String
+    var lastCreatedAt: Date
+    var unreadCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case threadKey = "thread_key"
+        case customerID = "customer_id"
+        case fromAddress = "from_address"
+        case customerFirstName = "customer_first_name"
+        case customerLastName = "customer_last_name"
+        case customerCompany = "customer_company"
+        case lastMessageID = "last_message_id"
+        case lastDirection = "last_direction"
+        case lastChannel = "last_channel"
+        case lastStatus = "last_status"
+        case lastBody = "last_body"
+        case lastCreatedAt = "last_created_at"
+        case unreadCount = "unread_count"
+    }
+}
+
+/// One conversation in the inbox list (a row of `inbox_threads`).
 struct MessageThread: Identifiable, Hashable, Sendable {
     var key: MessageThreadKey
-    /// nil for unknown senders or customers the caller cannot read.
-    var customer: Customer?
-    var latest: Message
+    /// The customer's name as the server read it (nil for unknown senders).
+    var customerName: String?
+    /// Counterpart address of the newest message.
+    var address: String?
+    var lastMessageID: UUID
+    var lastDirection: Message.Direction
+    var lastChannel: Message.Channel
+    var lastStatus: Message.Status
+    var lastBody: String
+    var lastCreatedAt: Date
     var unreadCount: Int
 
     var id: String { key.stableID }
 
     var customerID: UUID? { key.customerID }
 
+    var isLastInbound: Bool { lastDirection == .inbound }
+
+    /// nil when the row's thread key is not one this app understands.
+    init?(row: InboxThreadRow) {
+        let raw = row.threadKey
+        if raw.hasPrefix("c:") {
+            guard let id = row.customerID ?? UUID(uuidString: String(raw.dropFirst(2))) else { return nil }
+            key = .customer(id)
+        } else if raw.hasPrefix("a:") {
+            // The conversation screen matches inbound rows by their stored
+            // sender address; the key's address is the normalized form.
+            let keyAddress = String(raw.dropFirst(2))
+            let stored = row.lastDirection == .inbound ? row.fromAddress?.trimmedNonEmpty : nil
+            guard let address = stored ?? keyAddress.trimmedNonEmpty else { return nil }
+            key = .unknownSender(address)
+        } else {
+            return nil
+        }
+        let person = [row.customerFirstName, row.customerLastName]
+            .compactMap { $0?.trimmedNonEmpty }
+            .joined(separator: " ")
+        customerName = person.isEmpty ? row.customerCompany?.trimmedNonEmpty : person
+        address = row.fromAddress?.trimmedNonEmpty
+        lastMessageID = row.lastMessageID
+        lastDirection = row.lastDirection
+        lastChannel = row.lastChannel
+        lastStatus = row.lastStatus
+        lastBody = row.lastBody
+        lastCreatedAt = row.lastCreatedAt
+        unreadCount = max(0, row.unreadCount)
+    }
+
     var title: String {
         switch key {
         case .customer:
-            return customer?.displayName ?? "Customer"
+            return customerName ?? "Customer"
         case .unknownSender(let address):
             return PhoneNumber.format(address)
         }
@@ -198,10 +275,18 @@ struct MessageThread: Identifiable, Hashable, Sendable {
     var subtitle: String? {
         switch key {
         case .customer:
-            return customer?.formattedPhone ?? customer?.email
+            guard let address else { return nil }
+            return lastChannel == .sms ? PhoneNumber.format(address) : address
         case .unknownSender:
             return "Not a saved customer"
         }
+    }
+
+    /// Short preview for the list row.
+    var preview: String {
+        let text = lastBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { return text.replacingOccurrences(of: "\n", with: " ") }
+        return isLastInbound ? "(empty message)" : ""
     }
 }
 

@@ -1,6 +1,6 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { membershipRow, OWNER, TECH, type MockUser } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, type Handler } from './support/mockSupabase';
 
 const MANAGER: MockUser = {
   id: '00000000-0000-4000-8000-000000000003',
@@ -31,40 +31,29 @@ const team = [
   },
 ];
 
-async function mockInvites(page: Page) {
-  const calls: unknown[] = [];
-  await page.route(`${SUPABASE_URL}/functions/v1/invites`, async (route) => {
-    const headers = {
-      'access-control-allow-origin': '*',
-      'access-control-allow-headers': '*',
-      'access-control-allow-methods': 'POST, OPTIONS',
+/** The invites function: records the JSON bodies it received. */
+function invites(calls: unknown[]): Handler {
+  return ({ body }) => {
+    calls.push(body);
+    const email = (body as { email?: string } | null)?.email;
+    return {
+      invite: {
+        id: '70000000-0000-4000-8000-000000000001',
+        shop_id: '10000000-0000-4000-8000-000000000001',
+        email: email ?? 'x@example.com',
+        role: 'manager',
+        expires_at: '2099-01-01T00:00:00Z',
+      },
+      invite_url: 'http://localhost:5173/invite/70000000-0000-4000-8000-000000000009',
+      email_sent: true,
     };
-    if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers });
-    calls.push(route.request().postDataJSON());
-    const body = route.request().postDataJSON() as { email?: string };
-    return route.fulfill({
-      status: 200,
-      headers,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        invite: {
-          id: '70000000-0000-4000-8000-000000000001',
-          shop_id: '10000000-0000-4000-8000-000000000001',
-          email: body.email ?? 'x@example.com',
-          role: 'manager',
-          expires_at: '2099-01-01T00:00:00Z',
-        },
-        invite_url: 'http://localhost:5173/invite/70000000-0000-4000-8000-000000000009',
-        email_sent: true,
-      }),
-    });
-  });
-  return calls;
+  };
 }
 
 test.describe('team', () => {
   test('owner invites a member and edits pay', async ({ page }) => {
     const upserts: unknown[] = [];
+    const calls: unknown[] = [];
     await mockSupabase(page, {
       user: OWNER,
       tables: {
@@ -77,8 +66,8 @@ test.describe('team', () => {
         },
       },
       rpc: { shop_team: team },
+      functions: { invites: invites(calls) },
     });
-    const calls = await mockInvites(page);
 
     await page.goto('/app/team');
     const members = page.getByRole('table', { name: 'Team members' });

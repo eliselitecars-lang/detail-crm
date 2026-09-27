@@ -60,6 +60,9 @@ export default function LoginPage() {
       }
     >
       <form noValidate onSubmit={(event) => void onSubmit(event)} className="flex flex-col gap-4">
+        {params.get('account') === 'deleted' && !submitError && (
+          <FormAlert tone="success">Your account was deleted.</FormAlert>
+        )}
         {submitError && <FormAlert>{submitError}</FormAlert>}
         <FormField label="Email" error={errors.email?.message} required>
           <Input type="email" autoComplete="email" {...register('email')} />

@@ -9,10 +9,17 @@ import { z } from 'zod';
 import { useToast } from '@/components/ui';
 import type { Json } from '@/lib/database.types';
 import { unwrap, unwrapRequired } from '@/lib/db';
+import { isNonRetryable } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
-import type { CampaignChannel, CampaignStatus, RecipientStats } from './model';
+import {
+  campaignPreviewSchema,
+  type CampaignChannel,
+  type CampaignPreview,
+  type CampaignStatus,
+  type RecipientStats,
+} from './model';
 
 export const campaignKeys = {
   all: (shopId: string) => shopKey(shopId, 'campaigns'),
@@ -229,6 +236,43 @@ export function useCampaignStats(id: string, status: CampaignStatus, recipients:
 }
 
 // ---------------------------------------------------------------------------
+// Message preview (server-rendered, as launch_campaign sends it)
+// ---------------------------------------------------------------------------
+
+export interface CampaignPreviewInput {
+  channel: CampaignChannel;
+  body: string;
+  subject: string | null;
+}
+
+/**
+ * preview_campaign_message (0090, manager+): the campaign text rendered like
+ * launch_campaign (shop values filled in, customer placeholders shown as
+ * “[first name]”), with the opt-out line / unsubscribe footer, its length and
+ * the limit that applies. Disabled while the body is blank.
+ */
+export function useCampaignPreview(input: CampaignPreviewInput) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: [...campaignKeys.all(shopId), 'preview', input] as const,
+    enabled: input.body.trim() !== '',
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    queryFn: async (): Promise<CampaignPreview> =>
+      campaignPreviewSchema.parse(
+        unwrap(
+          await supabase.rpc('preview_campaign_message', {
+            p_shop_id: shopId,
+            p_channel: input.channel,
+            p_body: input.body,
+            ...(input.channel === 'email' && input.subject ? { p_subject: input.subject } : {}),
+          }),
+        ),
+      ),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Public unsubscribe page (/u/:token) — anonymous visitors
 // ---------------------------------------------------------------------------
 
@@ -238,11 +282,42 @@ export function useCampaignStats(id: string, status: CampaignStatus, recipients:
  * unsubscribe token, never its message id). Resolves true when done
  * (idempotent), false for an unknown link.
  */
+export const unsubscribeInfoSchema = z.object({
+  shop_name: z.string(),
+  shop_logo_path: z.string().nullable(),
+  /** The address is already opted out of this shop's email. */
+  unsubscribed: z.boolean(),
+});
+export type UnsubscribeInfo = z.infer<typeof unsubscribeInfoSchema>;
+
+/**
+ * What the unsubscribe link is for (public_unsubscribe_info, anon): the
+ * shop's name and logo and whether the address is already unsubscribed.
+ * Never the address itself. An unknown link is PT404 (kind not_found).
+ */
+export function useUnsubscribeInfo(token: string) {
+  return useQuery({
+    queryKey: ['public', 'unsubscribe', token] as const,
+    queryFn: async (): Promise<UnsubscribeInfo> =>
+      unsubscribeInfoSchema.parse(
+        unwrap(await supabase.rpc('public_unsubscribe_info', { p_token: token })),
+      ),
+    retry: (failureCount, error) => !isNonRetryable(error) && failureCount < 2,
+  });
+}
+
 export function useUnsubscribe() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (token: string) => {
       const result = await supabase.rpc('public_unsubscribe', { p_token: token });
       return z.boolean().parse(unwrap(result));
+    },
+    onSuccess: (done, token) => {
+      if (!done) return;
+      queryClient.setQueryData<UnsubscribeInfo>(['public', 'unsubscribe', token], (info) =>
+        info ? { ...info, unsubscribed: true } : info,
+      );
     },
   });
 }

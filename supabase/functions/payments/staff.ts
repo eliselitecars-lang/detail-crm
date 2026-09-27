@@ -4,13 +4,19 @@
  *   payment_sheet      manager+, or an assigned technician when the shop lets
  *                      technicians collect (iOS PaymentSheet). Only manager+
  *                      get the Stripe customer + ephemeral key (saved cards).
- *   cancel_open_payments  same callers: release an invoice (cancel unconfirmed
- *                      sheets, expire open Checkout sessions)
+ *   cancel_open_payments  same callers: release an invoice or a job (cancel
+ *                      unconfirmed sheets, expire open Checkout sessions)
  *   sweep_payment_sheets  pg_cron (x-cron-secret): abandon stale sheets
  *   charge_saved_card  manager+ (off-session charge of a saved card)
  *   setup_card         manager+ (SetupIntent for PaymentSheet setup mode)
  *   setup_card_link    manager+ (Checkout setup-mode link to text/email)
+ *   remove_saved_card  manager+ (detach in Stripe, then drop from the CRM)
  *   refund             owner/admin (card payments; cash etc. use refund_manual_payment)
+ *
+ * Every PaymentIntent, SetupIntent and Checkout Session is card-only
+ * (payment_method_types ['card']): the CRM records card payments (brand /
+ * last4) and its money guards assume a card settles at once, so a bank
+ * debit that clears days later is never offered.
  */
 import { z } from "zod";
 import {
@@ -38,7 +44,9 @@ import {
   expireOpenSessions,
   findAccount,
   IDEMPOTENCY_WINDOW_MS,
+  INVOICE_COLUMNS,
   type InvoiceRow,
+  isInvalidRequest,
   loadAccount,
   loadCustomer,
   loadInvoice,
@@ -52,7 +60,7 @@ import {
   type Services,
   sessionFor,
 } from "./lib.ts";
-import { settleInvoice, settlePending, sweepStale } from "./settle.ts";
+import { settleInvoice, settleJob, settlePending, sweepStale } from "./settle.ts";
 
 /** Stripe API version for the ephemeral key (must match the mobile SDK's when it asks). */
 const apiVersion = z.string().regex(
@@ -71,7 +79,17 @@ export const paymentSheetInput = z.object({
 
 export const cancelOpenPaymentsInput = z.object({
   shop_id: uuid,
-  invoice_id: uuid,
+  invoice_id: uuid.optional(),
+  job_id: uuid.optional(),
+}).strict().refine((input) => (input.invoice_id === undefined) !== (input.job_id === undefined), {
+  message: "give exactly one of invoice_id or job_id",
+  path: ["invoice_id"],
+});
+
+export const removeSavedCardInput = z.object({
+  shop_id: uuid,
+  customer_id: uuid,
+  payment_method_id: z.string().regex(/^(pm|card|src)_[A-Za-z0-9]+$/, "must be a saved card id"),
 }).strict();
 
 export const sweepPaymentSheetsInput = z.object({}).strict();
@@ -120,10 +138,7 @@ async function requireCollector(
   if (hasRole(membership, ROLES.managerPlus)) {
     return { membership, invoice: await loadInvoice(s.admin, shopId, invoiceId) };
   }
-  const shop = await loadShop(s.admin, shopId);
-  if (!shop.techs_can_collect_payments) {
-    throw errors.forbidden("Your role does not allow collecting payments.");
-  }
+  await requireTechCollection(s, shopId);
   const invoice = await loadInvoice(s.admin, shopId, invoiceId);
   if (
     !invoice.job_id || !(await isAssignedToJob(s.admin, shopId, invoice.job_id, membership.id))
@@ -131,6 +146,48 @@ async function requireCollector(
     throw errors.forbidden("You can only collect payments for jobs assigned to you.");
   }
   return { membership, invoice };
+}
+
+/** A technician collects only while the shop allows it (shops.techs_can_collect_payments). */
+async function requireTechCollection(s: Services, shopId: string): Promise<void> {
+  const shop = await loadShop(s.admin, shopId);
+  if (!shop.techs_can_collect_payments) {
+    throw errors.forbidden("Your role does not allow collecting payments.");
+  }
+}
+
+interface JobRow {
+  id: string;
+  shop_id: string;
+  customer_id: string;
+}
+
+/** The same callers for a job: manager+, or its assigned technician when allowed. */
+async function requireJobCollector(
+  s: Services,
+  req: Request,
+  shopId: string,
+  jobId: string,
+): Promise<JobRow> {
+  const caller = await requireUser(req, { admin: s.admin });
+  const membership = await requireShopRole(s.admin, caller, shopId, ROLES.anyStaff);
+  if (!hasRole(membership, ROLES.managerPlus)) await requireTechCollection(s, shopId);
+  const { data, error } = await s.admin
+    .from("jobs")
+    .select("id, shop_id, customer_id")
+    .eq("shop_id", shopId)
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error) throw dbFailure("jobs lookup", error);
+  if (!data) throw errors.notFound("Job not found.");
+  const job = data as JobRow;
+  if (
+    !hasRole(membership, ROLES.managerPlus) &&
+    !(await isAssignedToJob(s.admin, shopId, job.id, membership.id))
+  ) {
+    throw errors.forbidden("You can only collect payments for jobs assigned to you.");
+  }
+  return job;
 }
 
 async function recordStripePayment(
@@ -253,7 +310,7 @@ export async function paymentSheet(
     amount: total,
     currency: shop.currency,
     ...(stripeCustomer ? { customer: stripeCustomer } : {}),
-    automatic_payment_methods: { enabled: true },
+    payment_method_types: ["card"],
     description: `${shop.name} invoice #${invoice.number}`,
     metadata: metadata({
       shop_id: shop.id,
@@ -357,25 +414,29 @@ async function freshIntent(
  * pending rows block void / pricing / line-item edits) and expires its open
  * Checkout sessions and its job's open deposit sessions (so an old pay or
  * deposit link cannot be paid after a void or edit; the public pages open a
- * fresh one for what is still due). Call it when a sheet is dismissed and before voiding or editing.
- * Payments already processing are reported, never cancelled.
+ * fresh one for what is still due). Call it when a sheet is dismissed and
+ * before voiding or editing.
+ *
+ * With `job_id` instead, releases a job before it is cancelled / marked
+ * no-show or moved to another customer: every unsettled card attempt of the
+ * job (its deposits and its invoice's payments), the deposit links opened for
+ * the job's CURRENT customer and, when the job has a non-void invoice, that
+ * invoice's pay links.
+ *
+ * Payments already processing are reported (`in_progress`), never cancelled.
  */
 export async function cancelOpenPayments(
   s: Services,
   req: Request,
   input: z.output<typeof cancelOpenPaymentsInput>,
 ): Promise<Record<string, unknown>> {
-  const { invoice } = await requireCollector(s, req, input.shop_id, input.invoice_id);
-  const account = await findAccount(s.admin, invoice.shop_id);
-  if (!account) {
-    return {
-      invoice_id: invoice.id,
-      cancelled: 0,
-      succeeded: 0,
-      in_progress: 0,
-      sessions_expired: 0,
-    };
+  if (input.job_id !== undefined) {
+    return await cancelOpenJobPayments(s, req, input.shop_id, input.job_id);
   }
+  const { invoice } = await requireCollector(s, req, input.shop_id, input.invoice_id ?? "");
+  const released = { invoice_id: invoice.id, job_id: invoice.job_id ?? null };
+  const account = await findAccount(s.admin, invoice.shop_id);
+  if (!account) return { ...released, ...NOTHING_RELEASED };
   const settled = await settleInvoice(s, account, invoice.shop_id, invoice.id);
   const customer = await loadCustomer(s.admin, invoice.shop_id, invoice.customer_id);
   const expired = customer.stripe_customer_id
@@ -387,7 +448,48 @@ export async function cancelOpenPayments(
     )
     : [];
   return {
-    invoice_id: invoice.id,
+    ...released,
+    cancelled: settled.cancelled,
+    succeeded: settled.succeeded,
+    in_progress: settled.in_progress,
+    sessions_expired: expired.length,
+  };
+}
+
+const NOTHING_RELEASED = { cancelled: 0, succeeded: 0, in_progress: 0, sessions_expired: 0 };
+
+async function cancelOpenJobPayments(
+  s: Services,
+  req: Request,
+  shopId: string,
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  const job = await requireJobCollector(s, req, shopId, jobId);
+  const { data, error } = await s.admin
+    .from("invoices")
+    .select(INVOICE_COLUMNS)
+    .eq("shop_id", job.shop_id)
+    .eq("job_id", job.id)
+    .neq("status", "void")
+    .maybeSingle();
+  if (error) throw dbFailure("job invoice lookup", error);
+  const invoice = data as InvoiceRow | null;
+  const released = { invoice_id: invoice?.id ?? null, job_id: job.id };
+  const account = await findAccount(s.admin, job.shop_id);
+  if (!account) return { ...released, ...NOTHING_RELEASED };
+
+  // Every card row that carries the job: its deposits and the payments of
+  // its invoice (payments_before_write stamps the invoice's job on them).
+  const settled = await settleJob(s, account, job.shop_id, job.id);
+  const customer = await loadCustomer(s.admin, job.shop_id, job.customer_id);
+  const match = invoice
+    ? sessionFor.invoiceOrDeposit(job.shop_id, { id: invoice.id, job_id: job.id })
+    : sessionFor.deposit(job.shop_id, job.id);
+  const expired = customer.stripe_customer_id
+    ? await expireOpenSessions(s, account, customer.stripe_customer_id, match)
+    : [];
+  return {
+    ...released,
     cancelled: settled.cancelled,
     succeeded: settled.succeeded,
     in_progress: settled.in_progress,
@@ -528,7 +630,7 @@ export async function chargeSavedCard(
         payment_method: card.stripe_payment_method_id,
         off_session: true,
         confirm: true,
-        automatic_payment_methods: { enabled: true, allow_redirects: "never" },
+        payment_method_types: ["card"],
         description: `${shop.name} invoice #${invoice.number}`,
         metadata: metadata({
           shop_id: shop.id,
@@ -558,6 +660,19 @@ export async function chargeSavedCard(
       }
       throw cardDeclined(err);
     }
+    if (isGoneCard(err)) {
+      // Deleted in Stripe, or no longer attached to this customer (removed
+      // in the dashboard / another sheet): it can never be charged again.
+      await removeCardRow(s, shop.id, card.stripe_payment_method_id);
+      throw new HttpError(
+        "unprocessable",
+        "That saved card is no longer available; it was removed.",
+        {
+          details: { reason: "saved_card_removed" },
+          cause: err,
+        },
+      );
+    }
     throw err;
   }
 
@@ -585,6 +700,123 @@ export async function chargeSavedCard(
     card_brand: card.brand,
     card_last4: card.last4,
   };
+}
+
+/**
+ * Stripe refused the saved card itself: the payment method is missing
+ * (resource_missing) or not attached to this customer any more (an invalid
+ * request about the payment_method parameter).
+ */
+function isGoneCard(err: unknown): boolean {
+  if (!isInvalidRequest(err)) return false;
+  const e = err as { code?: unknown; param?: unknown };
+  return e.param === "payment_method" ||
+    (e.code === "resource_missing" && (e.param === undefined || e.param === "payment_method"));
+}
+
+/** remove_customer_payment_method (0011, service role): also promotes the next default. */
+async function removeCardRow(
+  s: Services,
+  shopId: string,
+  paymentMethodId: string,
+): Promise<boolean> {
+  const { data, error } = await s.admin.rpc("remove_customer_payment_method", {
+    p_shop_id: shopId,
+    p_stripe_payment_method_id: paymentMethodId,
+  });
+  if (error) throw rpcError("remove_customer_payment_method", error);
+  return data === true;
+}
+
+// ---------------------------------------------------------------------------
+// remove_saved_card
+// ---------------------------------------------------------------------------
+
+/**
+ * Staff remove a customer's saved card (manager+, like charging it). The card
+ * is detached from the customer's Stripe customer on the connected account
+ * (so no PaymentSheet or charge can use it again), then removed from the CRM.
+ * A card Stripe no longer has, or that is attached to another Stripe
+ * customer, is only removed from the CRM. `removed: false` when the CRM no
+ * longer lists that card for the customer (a retry after success).
+ */
+export async function removeSavedCard(
+  s: Services,
+  req: Request,
+  input: z.output<typeof removeSavedCardInput>,
+): Promise<{ removed: boolean }> {
+  const caller = await requireUser(req, { admin: s.admin });
+  await requireShopRole(s.admin, caller, input.shop_id, ROLES.managerPlus);
+  const customer = await loadCustomer(s.admin, input.shop_id, input.customer_id);
+  const { data, error } = await s.admin
+    .from("customer_payment_methods")
+    .select("stripe_payment_method_id")
+    .eq("shop_id", customer.shop_id)
+    .eq("customer_id", customer.id)
+    .eq("stripe_payment_method_id", input.payment_method_id)
+    .maybeSingle();
+  if (error) throw dbFailure("customer_payment_methods lookup", error);
+  if (!data) return { removed: false };
+
+  const account = await findAccount(s.admin, customer.shop_id);
+  if (account) await detachCard(s, account, customer.stripe_customer_id, input.payment_method_id);
+  const removed = await removeCardRow(s, customer.shop_id, input.payment_method_id);
+  s.log.info("saved_card_removed", {
+    shop_id: customer.shop_id,
+    customer_id: customer.id,
+    payment_method: input.payment_method_id,
+  });
+  return { removed };
+}
+
+/** Detaches the card from the customer's Stripe customer; never from another customer. */
+async function detachCard(
+  s: Services,
+  account: AccountRow,
+  stripeCustomer: string | null,
+  paymentMethodId: string,
+): Promise<void> {
+  let pm: Stripe.PaymentMethod;
+  try {
+    pm = await s.stripe.paymentMethods.retrieve(
+      paymentMethodId,
+      {},
+      onAccount(account.stripe_account_id),
+    );
+  } catch (err) {
+    if (isInvalidRequest(err) && isMissingStripeObject(err)) return;
+    throw err;
+  }
+  const owner = typeof pm.customer === "string" ? pm.customer : pm.customer?.id ?? null;
+  if (!owner) return; // already detached
+  if (owner !== stripeCustomer) {
+    s.log.warn("saved_card_owner_mismatch", {
+      shop_id: account.shop_id,
+      payment_method: paymentMethodId,
+    });
+    return;
+  }
+  try {
+    await s.stripe.paymentMethods.detach(
+      paymentMethodId,
+      {},
+      onAccount(account.stripe_account_id, {
+        idempotencyKey: await idempotencyKey("pm_detach", paymentMethodId),
+      }),
+    );
+  } catch (err) {
+    // Detached or deleted meanwhile: the outcome we wanted.
+    if (!isInvalidRequest(err)) throw err;
+    s.log.warn("saved_card_detach_skipped", {
+      shop_id: account.shop_id,
+      payment_method: paymentMethodId,
+    });
+  }
+}
+
+function isMissingStripeObject(err: unknown): boolean {
+  const e = err as { code?: unknown; statusCode?: unknown };
+  return e.code === "resource_missing" || e.statusCode === 404;
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +859,7 @@ export async function setupCard(
     {
       customer: stripeCustomer,
       usage: "off_session",
-      automatic_payment_methods: { enabled: true },
+      payment_method_types: ["card"],
       metadata: { ...meta, source: "setup_card" },
     },
     onAccount(account.stripe_account_id, {
@@ -668,6 +900,7 @@ export async function setupCardLink(
     {
       mode: "setup",
       currency: shop.currency,
+      payment_method_types: ["card"],
       customer: stripeCustomer,
       client_reference_id: customer.id,
       setup_intent_data: {

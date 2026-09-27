@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { membershipRow, OWNER } from './support/fixtures';
-import { mockSupabase } from './support/mockSupabase';
+import { mockSupabase, reply } from './support/mockSupabase';
 
 const JOB_ID = '40000000-0000-4000-8000-000000000001';
 
@@ -83,7 +83,10 @@ test.describe('notifications page', () => {
       tables: {
         shop_members: [membershipRow(OWNER, 'owner')],
         notifications: ({ url, method }) => {
-          if (method === 'PATCH') return [];
+          // Writes fail (e.g. the connection dropped).
+          if (method === 'PATCH') {
+            return reply(503, { code: '08006', message: 'connection failure' });
+          }
           if (url.searchParams.get('read_at') !== 'is.null') return [];
           const offset = Number(url.searchParams.get('offset') ?? '0');
           const limit = Number(url.searchParams.get('limit') ?? '1000');
@@ -92,17 +95,6 @@ test.describe('notifications page', () => {
       },
       counts: { notifications: 55 },
     });
-    // Writes fail (e.g. the connection dropped).
-    await page.route('https://e2e-mock.supabase.co/rest/v1/notifications?*', (route) =>
-      route.request().method() === 'PATCH'
-        ? route.fulfill({
-            status: 503,
-            contentType: 'application/json',
-            headers: { 'access-control-allow-origin': '*' },
-            body: JSON.stringify({ code: '08006', message: 'connection failure' }),
-          })
-        : route.fallback(),
-    );
 
     await page.goto('/app/notifications');
     const list = page.getByRole('list', { name: 'Unread notifications' });

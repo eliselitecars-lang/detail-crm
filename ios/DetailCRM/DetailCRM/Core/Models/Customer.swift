@@ -651,3 +651,40 @@ struct CustomerMembershipItem: Identifiable, Hashable, Sendable {
 
     var id: UUID { membership.id }
 }
+
+// MARK: - Overview (customer_summary)
+
+/// Server-computed overview of one customer (manager+). Money is derived
+/// by the server: lifetime paid is net of refunds and excludes tips.
+// rpc: customer_summary
+struct CustomerSummary: Codable, Hashable, Sendable {
+    var customerID: UUID
+    var lifetimePaidCents: Int
+    var tipsCents: Int
+    var refundedCents: Int
+    var openBalanceCents: Int
+    var overdueBalanceCents: Int
+    var completedJobs: Int
+    var upcomingJobs: Int
+    var firstVisitAt: Date?
+    var lastVisitAt: Date?
+    var nextJobAt: Date?
+    var openQuotes: Int
+    var activeMemberships: Int
+
+    enum CodingKeys: String, CodingKey {
+        case customerID = "customer_id"
+        case lifetimePaidCents = "lifetime_paid_cents"
+        case tipsCents = "tips_cents"
+        case refundedCents = "refunded_cents"
+        case openBalanceCents = "open_balance_cents"
+        case overdueBalanceCents = "overdue_balance_cents"
+        case completedJobs = "completed_jobs"
+        case upcomingJobs = "upcoming_jobs"
+        case firstVisitAt = "first_visit_at"
+        case lastVisitAt = "last_visit_at"
+        case nextJobAt = "next_job_at"
+        case openQuotes = "open_quotes"
+        case activeMemberships = "active_memberships"
+    }
+}

@@ -29,7 +29,8 @@ export function ReviewStep({
   profile: ShopProfile;
   catalog: BookingCatalog;
   state: WizardState;
-  categoryId: string;
+  /** null when the shop has no vehicle categories. */
+  categoryId: string | null;
   /** Booking failure that no earlier step can fix (shown here). */
   error: ReactNode;
   submitting: boolean;

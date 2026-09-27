@@ -27,7 +27,7 @@
 import { HttpError } from "../_shared/errors.ts";
 import { readForm } from "../_shared/http.ts";
 import { publicRequestUrl } from "../_shared/links.ts";
-import { classifyOptKeyword, emptyTwiml, validateTwilioSignature } from "../_shared/twilio.ts";
+import { emptyTwiml, validateTwilioSignature } from "../_shared/twilio.ts";
 import { DbError, errorText, type Services } from "./lib.ts";
 import { recordSmsOptOut, TWILIO_UNSUBSCRIBED } from "./optout.ts";
 import { shopIdFromWebhookUrl, withConnectionOverrides } from "./sender.ts";
@@ -62,8 +62,8 @@ interface InboundRow {
 
 /**
  * Inbound SMS -> record_inbound_sms (routes by To to the shop, by From to the
- * customer, applies STOP/START opt-out keywords, notifies staff; YES is
- * applied here, see applyMissedOptIn). Always
+ * customer, applies the STOP / START, UNSTOP, YES opt-out and opt-in
+ * keywords — the same set Twilio acts on — and notifies staff). Always
  * answers with empty TwiML: carrier-level opt-out replies come from Twilio
  * (Advanced Opt-Out), so we never auto-reply.
  */
@@ -125,68 +125,14 @@ export async function twilioInbound(svc: Services, req: Request): Promise<Respon
       webhook_shop_id: boundShop,
     });
   } else {
-    const optAction = row.opt_action ??
-      (await applyMissedOptIn(svc, shopId, from, body, row.message_id));
     svc.log.info("inbound_sms_recorded", {
       message_id: row.message_id,
       shop_id: row.shop_id,
       matched_customer: row.customer_id !== null,
-      opt_action: optAction,
+      opt_action: row.opt_action,
     });
   }
   return emptyTwiml();
-}
-
-/**
- * The keyword as record_inbound_sms reads it (0033): trimmed, trailing
- * whitespace/punctuation dropped, upper-cased.
- */
-export function smsKeyword(body: string): string {
-  return body.trim().replace(/[\s\p{P}\p{S}]+$/u, "").toUpperCase();
-}
-
-/**
- * Twilio's default opt-in keywords are START, YES and UNSTOP; on any of them
- * Twilio lifts its own block on the number. record_inbound_sms (0033) only
- * honours START and UNSTOP, so a customer who replied YES would be texting-
- * enabled at Twilio but stay opted out here for good (staff cannot clear an
- * SMS opt-out). When the database did not act on an opt-in keyword, apply
- * the same opt-in it applies for START: comms_unsuppress(shop, 'sms', from)
- * (drops the suppression and clears sms_opted_out_at for the shop's
- * customers with that number; marketing consent sms_opt_in is NOT restored,
- * exactly like START).
- *
- * Only for the newest inbound text from that number to the shop, so a late
- * Twilio retry of an old YES never undoes a STOP sent after it. A database
- * error answers 500 and Twilio redelivers (the replay is idempotent).
- */
-async function applyMissedOptIn(
-  svc: Services,
-  shopId: string,
-  from: string,
-  body: string,
-  messageId: string,
-): Promise<string | null> {
-  if (classifyOptKeyword(smsKeyword(body)) !== "opt_in") return null;
-  const { data: latest, error } = await svc.admin.from("messages")
-    .select("id")
-    .eq("shop_id", shopId).eq("direction", "inbound").eq("channel", "sms")
-    .eq("from_address", from)
-    .order("created_at", { ascending: false }).order("id", { ascending: false })
-    .limit(1);
-  if (error) throw new DbError("messages lookup", error);
-  const newest = Array.isArray(latest) ? (latest[0] as { id?: unknown } | undefined) : undefined;
-  if (newest?.id !== messageId) {
-    svc.log.info("sms_opt_in_skipped", { message_id: messageId, reason: "newer_inbound_text" });
-    return null;
-  }
-  const { error: unsuppressError } = await svc.admin.rpc("comms_unsuppress", {
-    p_shop_id: shopId,
-    p_channel: "sms",
-    p_address: from,
-  });
-  if (unsuppressError) throw new DbError("comms_unsuppress", unsuppressError);
-  return "opt_in";
 }
 
 /** Twilio MessageStatus -> our status (others are intermediate and ignored). */

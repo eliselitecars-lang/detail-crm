@@ -1,4 +1,10 @@
+import type { Constants } from '@/lib/database.types';
 import { Badge, type BadgeTone } from './Badge';
+
+type Enums = (typeof Constants)['public']['Enums'];
+type Entry = { label: string; tone: BadgeTone };
+/** One entry per value of a Postgres enum: tsc fails when the enum gains a value. */
+type Exhaustive<E extends keyof Enums> = Record<Enums[E][number], Entry>;
 
 /**
  * Every workflow status in the product (SPEC §4) → label + tone, in one map
@@ -14,7 +20,7 @@ export const STATUS_MAP = {
     completed: { label: 'Completed', tone: 'success' },
     cancelled: { label: 'Cancelled', tone: 'neutral' },
     no_show: { label: 'No-show', tone: 'danger' },
-  },
+  } satisfies Exhaustive<'job_status'>,
   quote: {
     draft: { label: 'Draft', tone: 'neutral' },
     sent: { label: 'Sent', tone: 'info' },
@@ -23,14 +29,14 @@ export const STATUS_MAP = {
     declined: { label: 'Declined', tone: 'danger' },
     expired: { label: 'Expired', tone: 'neutral' },
     converted: { label: 'Converted', tone: 'success' },
-  },
+  } satisfies Exhaustive<'quote_status'>,
   invoice: {
     draft: { label: 'Draft', tone: 'neutral' },
     open: { label: 'Open', tone: 'money' },
     partially_paid: { label: 'Partially paid', tone: 'money' },
     paid: { label: 'Paid', tone: 'success' },
     void: { label: 'Void', tone: 'neutral' },
-  },
+  } satisfies Exhaustive<'invoice_status'>,
   payment: {
     pending: { label: 'Pending', tone: 'warning' },
     succeeded: { label: 'Succeeded', tone: 'success' },
@@ -38,13 +44,13 @@ export const STATUS_MAP = {
     cancelled: { label: 'Cancelled', tone: 'neutral' },
     refunded: { label: 'Refunded', tone: 'neutral' },
     partially_refunded: { label: 'Partially refunded', tone: 'warning' },
-  },
+  } satisfies Exhaustive<'payment_status'>,
   membership: {
     incomplete: { label: 'Incomplete', tone: 'warning' },
     active: { label: 'Active', tone: 'success' },
     past_due: { label: 'Past due', tone: 'danger' },
     cancelled: { label: 'Cancelled', tone: 'neutral' },
-  },
+  } satisfies Exhaustive<'membership_status'>,
   message: {
     queued: { label: 'Queued', tone: 'neutral' },
     sending: { label: 'Sending', tone: 'info' },
@@ -52,19 +58,20 @@ export const STATUS_MAP = {
     delivered: { label: 'Delivered', tone: 'success' },
     failed: { label: 'Failed', tone: 'danger' },
     received: { label: 'Received', tone: 'info' },
-  },
-} as const satisfies Record<string, Record<string, { label: string; tone: BadgeTone }>>;
+    cancelled: { label: 'Cancelled', tone: 'neutral' },
+  } satisfies Exhaustive<'message_status'>,
+} as const satisfies Record<string, Record<string, Entry>>;
 
 export type StatusKind = keyof typeof STATUS_MAP;
 export type StatusOf<K extends StatusKind> = keyof (typeof STATUS_MAP)[K] & string;
 
 export function statusLabel(kind: StatusKind, status: string): string {
-  const entry = (STATUS_MAP[kind] as Record<string, { label: string; tone: BadgeTone }>)[status];
+  const entry = (STATUS_MAP[kind] as Record<string, Entry>)[status];
   return entry?.label ?? humanize(status);
 }
 
 export function statusTone(kind: StatusKind, status: string): BadgeTone {
-  const entry = (STATUS_MAP[kind] as Record<string, { label: string; tone: BadgeTone }>)[status];
+  const entry = (STATUS_MAP[kind] as Record<string, Entry>)[status];
   return entry?.tone ?? 'neutral';
 }
 

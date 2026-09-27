@@ -53,6 +53,9 @@ export class AppError extends Error {
 }
 
 export const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.';
+export const SESSION_EXPIRED_MESSAGE = 'Your session has expired. Sign in again.';
+export const PERMISSION_MESSAGE = "You don't have permission to do that.";
+const RATE_LIMITED_MESSAGE = 'Too many attempts. Please wait a minute and try again.';
 
 interface ErrorLike {
   message?: unknown;
@@ -162,7 +165,8 @@ export function sentenceCase(message: string): string {
 
 function kindForCode(code: string): AppErrorKind {
   if (code === '42501' || code.startsWith('28')) return 'permission';
-  if (code === 'P0002' || code === 'PGRST116') return 'not_found';
+  // PT404: our public RPCs' "not found" (HTTP 404 through PostgREST).
+  if (code === 'P0002' || code === 'PT404' || code === 'PGRST116') return 'not_found';
   if (
     code === '23505' ||
     code === '23503' ||
@@ -210,7 +214,7 @@ function fromPostgres(code: string, message: string, details?: string): AppError
 
   switch (code) {
     case '42501':
-      return new AppError("You don't have permission to do that.", { ...base, kind: 'permission' });
+      return new AppError(PERMISSION_MESSAGE, { ...base, kind: 'permission' });
     case '23505':
       return new AppError('That already exists. Use a different value.', {
         ...base,
@@ -362,49 +366,64 @@ export function isNonRetryable(error: unknown): boolean {
   );
 }
 
+function kindForStatus(status: number): AppErrorKind {
+  if (status === 401) return 'session_expired';
+  if (status === 403) return 'permission';
+  if (status === 404) return 'not_found';
+  if (status === 409) return 'conflict';
+  if (status === 429) return 'rate_limited';
+  if (status >= 500) return 'server';
+  return 'validation';
+}
+
+/**
+ * An HTTP failure whose body is NOT our envelope (the Supabase gateway's
+ * `{ code: 401, message: 'Invalid JWT' }`, a proxy's HTML page, an empty
+ * body…): the status decides, never the gateway's wording.
+ */
+function fromHttpStatus(status: number, message: string | undefined, cause: unknown): AppError {
+  const base = { status, cause };
+  if (status === 401)
+    return new AppError(SESSION_EXPIRED_MESSAGE, { ...base, kind: 'session_expired' });
+  if (status === 403) return new AppError(PERMISSION_MESSAGE, { ...base, kind: 'permission' });
+  if (status === 404) return new AppError('Not found.', { ...base, kind: 'not_found' });
+  if (status === 429) return new AppError(RATE_LIMITED_MESSAGE, { ...base, kind: 'rate_limited' });
+  if (status >= 500 || !message) {
+    return new AppError(GENERIC_ERROR_MESSAGE, {
+      ...base,
+      kind: status >= 500 ? 'server' : 'unknown',
+    });
+  }
+  return new AppError(sentenceCase(message), { ...base, kind: kindForStatus(status) });
+}
+
 /**
  * Edge functions (supabase.functions.invoke) return `FunctionsHttpError`
- * whose JSON body is `{ error: string }` (see supabase/functions/_shared).
- * Reads that body and returns an AppError with the server's message.
+ * whose JSON body is our envelope `{ error, code, details? }` (see
+ * supabase/functions/_shared/errors.ts): its `error` text is written for end
+ * users and shown as-is, with the kind taken from the HTTP status. Any other
+ * body (`{ message }` / `{ msg }` from the gateway or auth, non-JSON) falls
+ * back to the HTTP status (401 → session expired, 403 → permission, 404 →
+ * not found, 429 → rate limited, 5xx → generic).
  */
 export async function edgeFunctionError(error: unknown): Promise<AppError> {
   if (typeof error === 'object' && error !== null) {
     const e = error as { name?: unknown; context?: unknown };
     if (e.name === 'FunctionsHttpError' && e.context instanceof Response) {
       const status = e.context.status;
+      let body: unknown = null;
       try {
-        const body: unknown = await e.context.clone().json();
-        const message =
-          typeof body === 'object' && body !== null && 'error' in body
-            ? str(body.error)
-            : undefined;
-        if (message) {
-          const kind: AppErrorKind =
-            status === 401
-              ? 'session_expired'
-              : status === 403
-                ? 'permission'
-                : status === 404
-                  ? 'not_found'
-                  : status === 409
-                    ? 'conflict'
-                    : status === 429
-                      ? 'rate_limited'
-                      : status >= 500
-                        ? 'server'
-                        : 'validation';
-          return new AppError(message, { kind, status, cause: error });
-        }
+        body = await e.context.clone().json();
       } catch {
-        // body was not JSON — fall through
+        // not JSON: the status decides
       }
-      if (status === 403)
-        return new AppError("You don't have permission to do that.", {
-          kind: 'permission',
-          status,
-          cause: error,
-        });
-      return new AppError(GENERIC_ERROR_MESSAGE, { kind: 'server', status, cause: error });
+      const fields =
+        typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
+      const envelopeMessage = str(fields.error);
+      if (envelopeMessage) {
+        return new AppError(envelopeMessage, { kind: kindForStatus(status), status, cause: error });
+      }
+      return fromHttpStatus(status, str(fields.message) ?? str(fields.msg), error);
     }
   }
   return toAppError(error);

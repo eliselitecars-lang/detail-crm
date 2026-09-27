@@ -290,6 +290,7 @@ function QuoteView({ quote, lines }: { quote: QuoteRow; lines: DocLine[] }) {
           open={pending === 'send'}
           onClose={() => setPending(null)}
           kind="quote"
+          documentId={quote.id}
           documentLabel={label}
           customer={customer.data}
           link={link}

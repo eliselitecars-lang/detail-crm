@@ -1,6 +1,6 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { membershipRow, OWNER, TECH } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase, type Json } from './support/mockSupabase';
 
 const casey = {
   id: '30000000-0000-4000-8000-000000000001',
@@ -38,35 +38,43 @@ const inbound = {
   customer: casey,
 };
 
-/** Intercepts the messaging edge function; returns the JSON bodies it received. */
-async function mockMessaging(page: Page) {
-  const calls: unknown[] = [];
-  await page.route(`${SUPABASE_URL}/functions/v1/messaging`, async (route) => {
-    const headers = {
-      'access-control-allow-origin': '*',
-      'access-control-allow-headers': '*',
-      'access-control-allow-methods': 'POST, OPTIONS',
+/** One inbox_threads row (the newest message of a conversation + unread count). */
+function threadRow(over: Record<string, Json> = {}): Record<string, Json> {
+  return {
+    thread_key: `c:${casey.id}`,
+    customer_id: casey.id,
+    from_address: casey.phone,
+    customer_first_name: casey.first_name,
+    customer_last_name: casey.last_name,
+    customer_company: null,
+    last_message_id: inbound.id,
+    last_direction: 'inbound',
+    last_channel: 'sms',
+    last_status: 'received',
+    last_body: inbound.body,
+    last_created_at: inbound.created_at,
+    unread_count: 1,
+    ...over,
+  };
+}
+
+/** The messaging function: records the JSON bodies it received. */
+function messaging(calls: unknown[]) {
+  return ({ body }: { body: unknown }) => {
+    calls.push(body);
+    return {
+      message_id: '40000000-0000-4000-8000-000000000002',
+      channel: 'sms',
+      status: 'sent',
+      error: null,
     };
-    if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers });
-    calls.push(route.request().postDataJSON());
-    return route.fulfill({
-      status: 200,
-      headers,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        message_id: '40000000-0000-4000-8000-000000000002',
-        channel: 'sms',
-        status: 'sent',
-        error: null,
-      }),
-    });
-  });
-  return calls;
+  };
 }
 
 test.describe('messages inbox', () => {
   test('owner reads a thread and replies by text', async ({ page }) => {
     const patches: string[] = [];
+    const calls: unknown[] = [];
     await mockSupabase(page, {
       user: OWNER,
       tables: {
@@ -79,8 +87,9 @@ test.describe('messages inbox', () => {
         customers: [casey],
         message_templates: [],
       },
+      rpc: { inbox_threads: [threadRow()], inbox_unread_count: 1 },
+      functions: { messaging: messaging(calls) },
     });
-    const calls = await mockMessaging(page);
 
     await page.goto('/app/messages');
     const conversations = page.getByRole('navigation', { name: 'Conversations' });
@@ -105,6 +114,7 @@ test.describe('messages inbox', () => {
         customer_id: casey.id,
         channel: 'sms',
         body: 'Saturday at 9 works!',
+        request_nonce: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/),
       },
     ]);
   });
@@ -120,6 +130,7 @@ test.describe('messages inbox', () => {
         customers: [casey],
         message_templates: [],
       },
+      rpc: { inbox_threads: [threadRow({ unread_count: 0 })], inbox_unread_count: 0 },
     });
     await page.goto('/app/messages');
     await page.getByRole('link', { name: /Casey Jones/ }).click();
@@ -134,53 +145,54 @@ test.describe('messages inbox', () => {
     await expect(page.getByRole('navigation', { name: 'Conversations' })).toBeVisible();
   });
 
-  test('an unread reply stays listed after a campaign blast fills the newest page', async ({
+  test('pages older conversations with inbox_threads and counts every unread message', async ({
     page,
   }) => {
-    // 300 campaign sends (one INBOX_PAGE) newer than Casey's unread reply.
-    const blast = Array.from({ length: 300 }, (_, i) => {
+    // A campaign blast: 50 newer conversations fill the first page.
+    const blast = Array.from({ length: 50 }, (_, i) => {
       const id = `50000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
-      return {
-        ...inbound,
-        id,
+      return threadRow({
+        thread_key: `c:${id}`,
         customer_id: id,
-        customer: { ...casey, id, first_name: 'Recipient', last_name: String(i) },
-        campaign_id: '60000000-0000-4000-8000-000000000001',
-        direction: 'outbound',
-        status: 'queued',
-        body: 'Spring special: 20% off',
-        created_at: '2026-03-12T10:00:00Z',
-      };
+        customer_first_name: 'Recipient',
+        customer_last_name: String(i),
+        last_direction: 'outbound',
+        last_status: 'queued',
+        last_body: 'Spring special: 20% off',
+        last_created_at: `2026-03-12T10:${String(59 - i).padStart(2, '0')}:00Z`,
+        unread_count: 0,
+      });
     });
-    const unreadRow = {
-      id: inbound.id,
-      customer_id: casey.id,
-      from_address: casey.phone,
-      created_at: inbound.created_at,
-    };
+    const pages: unknown[] = [];
     await mockSupabase(page, {
       user: OWNER,
       tables: {
         shop_members: [membershipRow(OWNER, 'owner')],
         notifications: [],
-        messages: ({ url }) => {
-          const q = decodeURIComponent(url.search);
-          if (q.includes('read_at=is.null')) return [unreadRow];
-          if (q.includes('id=in.')) return q.includes(inbound.id) ? [inbound] : [];
-          return blast;
-        },
-        customers: [casey],
         message_templates: [],
+      },
+      rpc: {
+        inbox_threads: ({ body }) => {
+          pages.push(body);
+          return (body as { p_before?: string }).p_before ? [threadRow()] : blast;
+        },
+        inbox_unread_count: 1,
       },
     });
     await page.goto('/app/messages');
     await expect(page.getByText('1 unread message', { exact: true })).toBeVisible();
     const conversations = page.getByRole('navigation', { name: 'Conversations' });
+    await expect(conversations.getByRole('link')).toHaveCount(50);
+    await conversations.getByRole('button', { name: 'Load older conversations' }).click();
+    await expect(conversations.getByRole('link', { name: /Casey Jones/ })).toContainText(
+      '1 unread',
+    );
+    expect(pages).toEqual([
+      { p_shop_id: expect.any(String), p_limit: 50 },
+      { p_shop_id: expect.any(String), p_limit: 50, p_before: '2026-03-12T10:10:00Z' },
+    ]);
     await conversations.getByRole('tab', { name: /Unread/ }).click();
-    const links = conversations.getByRole('link');
-    await expect(links).toHaveCount(1);
-    await expect(links.first()).toContainText('Casey Jones');
-    await expect(links.first()).toContainText('1 unread');
+    await expect(conversations.getByRole('link')).toHaveCount(1);
   });
 
   test('technicians have no inbox', async ({ page }) => {

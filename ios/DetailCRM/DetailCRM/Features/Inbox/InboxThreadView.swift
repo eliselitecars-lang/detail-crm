@@ -28,6 +28,10 @@ struct InboxThreadView: View {
     /// A background refresh already reported a failure; stay quiet until a
     /// refresh succeeds again (no toast every 15 s while offline).
     @State private var pollFailureReported = false
+    /// The last send attempt that did not go through: tapping Send again
+    /// with the same text reuses its nonce, so the server never queues the
+    /// message twice.
+    @State private var lastAttempt: InboxComposeAttempt?
 
     init(key: MessageThreadKey, customer: Customer? = nil) {
         _key = State(initialValue: key)
@@ -187,14 +191,22 @@ struct InboxThreadView: View {
             toasts.show(problem, style: .error)
             return
         }
+        let subject = channel == .email ? draftSubject : nil
+        let attempt = InboxComposeAttempt.next(
+            after: lastAttempt,
+            fingerprint: [customerID.uuidString, channel.rawValue, subject ?? "", draftBody]
+        )
+        lastAttempt = attempt
         do {
             let result = try await MessageService.send(
                 shopID: shopID,
                 customerID: customerID,
                 channel: channel,
-                subject: channel == .email ? draftSubject : nil,
-                body: draftBody
+                subject: subject,
+                body: draftBody,
+                nonce: attempt.nonce
             )
+            lastAttempt = nil
             draftBody = ""
             draftSubject = ""
             report(result)

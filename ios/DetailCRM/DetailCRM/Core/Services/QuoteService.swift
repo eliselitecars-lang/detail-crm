@@ -213,13 +213,16 @@ enum QuoteService {
         guard !serviceIDs.isEmpty else {
             throw AppError.invalidInput("Choose at least one service.")
         }
-        let params: [String: AnyJSON] = [
+        // The category comes from the vehicle server-side; unknown
+        // arguments are omitted (SQL defaults: null).
+        var params: [String: AnyJSON] = [
             "p_shop": .string(shopID.uuidString),
             "p_customer_id": .string(customerID.uuidString),
-            "p_vehicle_category_id": .null,
             "p_service_ids": .array(serviceIDs.map { AnyJSON.string($0.uuidString) }),
-            "p_vehicle_id": vehicleID.map { AnyJSON.string($0.uuidString) } ?? .null,
         ]
+        if let vehicleID {
+            params["p_vehicle_id"] = .string(vehicleID.uuidString)
+        }
         return try await Supa.client
             .rpc("price_services", params: params)
             .execute()
@@ -325,68 +328,68 @@ enum QuoteService {
     }
 
     /// Sends the shop's `quote_sent` wording with this quote's client link
-    /// (`/q/<token>`) through the messaging edge function (consent and
-    /// opt-outs enforced server-side). Rendered in the app: the server's
-    /// template variables only carry a quote link for a job's quote.
+    /// (`/q/<token>`) and total, rendered and queued by the server
+    /// (`messaging` send with `quote_id`; consent and opt-outs enforced
+    /// server-side). The quote must be sent (not a draft) first. `nonce`
+    /// is one per compose, reused on a retry.
     static func sendQuoteMessage(
         shopID: UUID,
         quote: Quote,
-        channel: MoneyMessageChannel
+        channel: MoneyMessageChannel,
+        nonce: String
     ) async throws -> MoneyMessageResult {
-        guard let link = MoneyLinks.quote(token: quote.publicToken) else {
-            throw AppError.message("Quote links need WEB_APP_URL in the app configuration, so the message can't include the link.")
-        }
-        return try await MoneyDocumentMessage.send(
+        try await MoneyDocumentMessage.send(
             shopID: shopID,
-            request: MoneyDocumentMessage.Request(
-                template: .quoteSent,
-                customerID: quote.customerID,
-                jobID: nil,
-                channel: channel,
-                link: link,
-                amountCents: nil,
-                balanceCents: nil
-            )
+            request: MoneyDocumentMessage.Request(kind: .quoteSent, id: quote.id, channel: channel),
+            nonce: nonce
         )
     }
 
-    /// Records the customer's answer given in person / by phone.
-    static func recordApproval(shopID: UUID, quoteID: UUID, approvedByName: String) async throws {
-        struct Payload: Encodable {
-            let status = "approved"
-            let approved_by_name: String
-        }
+    /// Records the customer's approval given in person / by phone
+    /// (`staff_record_quote_response`, manager+): in one transaction the
+    /// optional items the customer chose become exactly
+    /// `selectedOptionalIDs` (nil keeps the current choices) and the quote
+    /// is approved. Only a sent / viewed, unexpired quote can be answered.
+    @discardableResult
+    static func recordApproval(
+        shopID: UUID,
+        quoteID: UUID,
+        approvedByName: String,
+        selectedOptionalIDs: [UUID]?
+    ) async throws -> Quote {
         let name = approvedByName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw AppError.invalidInput("Enter who approved the quote.") }
-        try await Supa.client
-            .from("quotes")
-            .update(Payload(approved_by_name: name), returning: .minimal)
-            .eq("shop_id", value: shopID.uuidString)
-            .eq("id", value: quoteID.uuidString)
+        guard name.count <= 200 else { throw AppError.invalidInput("Keep the name under 200 characters.") }
+        return try await Supa.client
+            .rpc("staff_record_quote_response", params: QuoteResponseParams(
+                p_quote_id: quoteID,
+                p_action: "approve",
+                p_selected_optional_line_ids: selectedOptionalIDs,
+                p_approved_by_name: name,
+                p_declined_reason: nil
+            ))
             .execute()
+            .value
     }
 
-    static func recordDecline(shopID: UUID, quoteID: UUID, reason: String?) async throws {
-        struct Payload: Encodable {
-            let status = "declined"
-            let declined_reason: String?
-
-            func encode(to encoder: Encoder) throws {
-                var c = encoder.container(keyedBy: PayloadKeys.self)
-                try c.encode(status, forKey: .status)
-                try c.encode(declined_reason, forKey: .declined_reason)
-            }
-
-            enum PayloadKeys: String, CodingKey {
-                case status, declined_reason
-            }
+    /// Records the customer's decline given in person / by phone
+    /// (`staff_record_quote_response`, manager+).
+    @discardableResult
+    static func recordDecline(shopID: UUID, quoteID: UUID, reason: String?) async throws -> Quote {
+        let trimmed = reason?.trimmedNonEmpty
+        if let trimmed, trimmed.count > 1000 {
+            throw AppError.invalidInput("Keep the reason under 1,000 characters.")
         }
-        try await Supa.client
-            .from("quotes")
-            .update(Payload(declined_reason: reason?.trimmedNonEmpty), returning: .minimal)
-            .eq("shop_id", value: shopID.uuidString)
-            .eq("id", value: quoteID.uuidString)
+        return try await Supa.client
+            .rpc("staff_record_quote_response", params: QuoteResponseParams(
+                p_quote_id: quoteID,
+                p_action: "decline",
+                p_selected_optional_line_ids: nil,
+                p_approved_by_name: nil,
+                p_declined_reason: trimmed
+            ))
             .execute()
+            .value
     }
 
     /// sent / viewed / approved / declined / expired → draft (clears stamps).
@@ -579,4 +582,14 @@ private struct QuoteLineInsertPayload: Encodable {
         try c.encode(quoteID, forKey: .quoteID)
         try line.encode(to: encoder)
     }
+}
+
+/// `staff_record_quote_response` arguments; nil ones are omitted (their
+/// SQL defaults apply: null keeps the current optional-line choices).
+private struct QuoteResponseParams: Encodable {
+    let p_quote_id: UUID
+    let p_action: String
+    let p_selected_optional_line_ids: [UUID]?
+    let p_approved_by_name: String?
+    let p_declined_reason: String?
 }

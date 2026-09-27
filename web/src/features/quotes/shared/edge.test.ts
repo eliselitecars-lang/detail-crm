@@ -1,23 +1,13 @@
-import { FunctionsHttpError } from '@supabase/supabase-js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { supabase } from '@/lib/supabase';
+import { edgeHttpError, resetSupabaseMock, supabase } from '@/test/supabaseMock';
 import { EdgeFunctionError, invokeEdge, toEdgeError } from './edge';
 
-vi.mock('@/lib/supabase', async () => {
-  const mod = await import('@/test/supabaseMock');
-  return { ...mod, supabase: Object.assign(mod.supabase, { functions: { invoke: vi.fn() } }) };
-});
+vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
-const invoke = vi.mocked(supabase.functions.invoke);
+const invoke = supabase.functions.invoke;
 
-function httpError(status: number, body: unknown) {
-  return new FunctionsHttpError(
-    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }),
-  );
-}
-
-beforeEach(() => invoke.mockReset());
+beforeEach(() => resetSupabaseMock());
 
 describe('invokeEdge', () => {
   it('sends { action, ...params } and validates the result', async () => {
@@ -37,7 +27,7 @@ describe('invokeEdge', () => {
   it('maps error bodies to code, reason and the server message', async () => {
     invoke.mockResolvedValueOnce({
       data: null,
-      error: httpError(402, {
+      error: edgeHttpError(402, {
         error: 'The card’s bank requires the customer to confirm this payment.',
         code: 'payment_failed',
         details: { reason: 'authentication_required' },

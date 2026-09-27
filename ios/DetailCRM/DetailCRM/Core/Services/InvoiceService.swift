@@ -200,13 +200,15 @@ enum InvoiceService {
     }
 
     /// Sends the shop's `invoice_sent` wording with this invoice's pay link
-    /// (`/i/<token>`) and the server's total and balance through the
-    /// messaging edge function. Rendered in the app so invoices without a
-    /// job (and jobs with several invoices) get their own link and balance.
+    /// (`/i/<token>`), total and balance, rendered and queued by the server
+    /// (`messaging` send with `invoice_id`), so invoices without a job (and
+    /// jobs with several invoices) get their own link and balance. `nonce`
+    /// is one per compose, reused on a retry.
     static func sendInvoiceMessage(
         shopID: UUID,
         invoice: Invoice,
-        channel: MoneyMessageChannel
+        channel: MoneyMessageChannel,
+        nonce: String
     ) async throws -> MoneyMessageResult {
         switch invoice.status {
         case .draft:
@@ -216,21 +218,10 @@ enum InvoiceService {
         case .open, .partiallyPaid, .paid:
             break
         }
-        let token = try await linkToken(invoiceID: invoice.id)
-        guard let link = MoneyLinks.invoice(token: token) else {
-            throw AppError.message("Pay links need WEB_APP_URL in the app configuration, so the message can't include the link.")
-        }
         return try await MoneyDocumentMessage.send(
             shopID: shopID,
-            request: MoneyDocumentMessage.Request(
-                template: .invoiceSent,
-                customerID: invoice.customerID,
-                jobID: invoice.jobID,
-                channel: channel,
-                link: link,
-                amountCents: invoice.totalCents,
-                balanceCents: invoice.balanceCents
-            )
+            request: MoneyDocumentMessage.Request(kind: .invoiceSent, id: invoice.id, channel: channel),
+            nonce: nonce
         )
     }
 

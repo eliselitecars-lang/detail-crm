@@ -8,7 +8,6 @@ import {
   supabase,
   type Builder,
 } from '@/test/supabaseMock';
-import { notificationLink } from './links';
 import { UNREAD_PAGE_SIZE } from './api';
 import NotificationsPage from './NotificationsPage';
 
@@ -103,21 +102,6 @@ function setup() {
     routes: [{ path: '/app/jobs/:id', element: <p>Job page</p> }],
   });
 }
-
-describe('notificationLink', () => {
-  it('deep-links by kind and job', () => {
-    expect(notificationLink({ kind: 'new_booking', job_id: 'j1' })).toEqual({
-      href: '/app/jobs/j1',
-      label: 'Open job',
-    });
-    expect(notificationLink({ kind: 'inbound_message', job_id: null })?.href).toBe('/app/messages');
-    expect(notificationLink({ kind: 'quote_approved', job_id: null })?.href).toBe('/app/quotes');
-    expect(notificationLink({ kind: 'payment_received', job_id: null })?.href).toBe(
-      '/app/payments',
-    );
-    expect(notificationLink({ kind: 'general', job_id: null })).toBeNull();
-  });
-});
 
 describe('NotificationsPage', () => {
   it('lists unread first, then earlier ones', async () => {

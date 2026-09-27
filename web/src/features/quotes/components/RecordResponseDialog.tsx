@@ -80,9 +80,9 @@ function ResponseForm({
           ? {
               status: 'approved',
               approvedByName: text.trim() || null,
-              optionalChoices: optionalLines
-                .filter((line) => (chosen[line.id] ?? line.selected) !== line.selected)
-                .map((line) => ({ id: line.id, selected: chosen[line.id] ?? line.selected })),
+              selectedOptionalLineIds: optionalLines
+                .filter((line) => chosen[line.id] ?? line.selected)
+                .map((line) => line.id),
             }
           : { status: 'declined', declinedReason: text.trim() || null },
       );

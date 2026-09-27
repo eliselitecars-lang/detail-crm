@@ -77,16 +77,13 @@ enum TeamService {
             )
             return TeamInviteOutcome.from(reply, isResend: false)
         } catch let error as FunctionsError {
-            if case .httpError(let code, let data) = error {
-                if let payload = try? JSONDecoder().decode(TeamEdgeErrorPayload.self, from: data) {
-                    throw AppError.message(ErrorText.sentence(payload.error))
-                }
-                if code == 404 {
-                    let invite = try await createInviteDirectly(shopID: shopID, email: address, role: role)
-                    return .createdWithoutEmail(link: invite?.link, newLink: true)
-                }
+            let edge = EdgeErrorDecoder.error(from: error)
+            // A 404 without our envelope: the invites function isn't deployed.
+            if edge.status == 404 && !edge.isEnvelope {
+                let invite = try await createInviteDirectly(shopID: shopID, email: address, role: role)
+                return .createdWithoutEmail(link: invite?.link, newLink: true)
             }
-            throw AppError.message("The invite couldn't be sent. Try again.")
+            throw edge
         } catch is DecodingError {
             // 2xx but an unreadable reply: the invite exists; don't claim an email went out.
             throw AppError.message("The invite was saved, but we couldn't confirm the email. Check Pending invites and share the link if needed.")
@@ -123,19 +120,16 @@ enum TeamService {
             )
             return TeamInviteOutcome.from(reply, isResend: true)
         } catch let error as FunctionsError {
-            if case .httpError(let code, let data) = error {
-                if let payload = try? JSONDecoder().decode(TeamEdgeErrorPayload.self, from: data) {
-                    throw AppError.message(ErrorText.sentence(payload.error))
+            let edge = EdgeErrorDecoder.error(from: error)
+            // A 404 without our envelope: the invites function isn't deployed.
+            if edge.status == 404 && !edge.isEnvelope {
+                if !invite.isExpired() {
+                    return .createdWithoutEmail(link: invite.link, newLink: false)
                 }
-                if code == 404 {
-                    if !invite.isExpired() {
-                        return .createdWithoutEmail(link: invite.link, newLink: false)
-                    }
-                    let fresh = try await createInviteDirectly(shopID: invite.shopID, email: invite.email, role: invite.role)
-                    return .createdWithoutEmail(link: fresh?.link, newLink: true)
-                }
+                let fresh = try await createInviteDirectly(shopID: invite.shopID, email: invite.email, role: invite.role)
+                return .createdWithoutEmail(link: fresh?.link, newLink: true)
             }
-            throw AppError.message("The invite couldn't be resent. Try again.")
+            throw edge
         } catch is DecodingError {
             // 2xx but an unreadable reply: the invite exists; don't claim an email went out.
             throw AppError.message("The invite was saved, but we couldn't confirm the email. Check Pending invites and share the link if needed.")

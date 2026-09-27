@@ -154,6 +154,11 @@ struct InvoiceChargeSavedCardSheet: View {
     @State private var errorText: String?
     @State private var needsCustomer = false
     @State private var nonce = MoneyEdge.newNonce()
+    /// One pay-link text per sheet (a retry never texts twice).
+    @State private var textNonce = MoneyEdge.newNonce()
+    /// Cards Stripe no longer has (removed by the server while charging);
+    /// hidden until the invoice screen reloads its list.
+    @State private var removedCardIDs: Set<UUID> = []
 
     var body: some View {
         NavigationStack {
@@ -162,10 +167,15 @@ struct InvoiceChargeSavedCardSheet: View {
                     Text("Card on file")
                         .font(Theme.Typography.footnote.weight(.semibold))
                         .foregroundStyle(Theme.textSecondary)
-                    ForEach(cards) { card in
+                    ForEach(availableCards) { card in
                         InvoiceSavedCardRow(card: card, isSelected: card.id == selectedCardID) {
                             selectedCardID = card.id
                         }
+                    }
+                    if availableCards.isEmpty {
+                        Text("No saved cards left for this customer.")
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.textSecondary)
                     }
                 }
                 ThemedTextField(
@@ -210,6 +220,10 @@ struct InvoiceChargeSavedCardSheet: View {
 
     private var currencyCode: String { appState.currencyCode }
 
+    private var availableCards: [SavedCard] {
+        cards.filter { !removedCardIDs.contains($0.id) }
+    }
+
     private var chargeTitle: String {
         if let amount = Money.parseCents(amountText, currencyCode: currencyCode), amount > 0 {
             return "Charge \(Money.format(cents: amount, currencyCode: currencyCode))"
@@ -234,7 +248,7 @@ struct InvoiceChargeSavedCardSheet: View {
 
     private func charge() async {
         errorText = nil
-        guard let card = cards.first(where: { $0.id == selectedCardID }) else {
+        guard let card = availableCards.first(where: { $0.id == selectedCardID }) else {
             errorText = "Choose a card."
             return
         }
@@ -262,9 +276,17 @@ struct InvoiceChargeSavedCardSheet: View {
                 toasts.show("Charge is processing — it shows once Stripe confirms it.", style: .info)
             }
             dismiss()
-        } catch let edgeError as MoneyEdgeError where edgeError.needsCustomerAuthentication {
+        } catch let edgeError as EdgeFunctionError where edgeError.needsCustomerAuthentication {
             needsCustomer = true
             errorText = edgeError.message
+        } catch let edgeError as EdgeFunctionError where edgeError.reason == "saved_card_removed" {
+            // Stripe no longer has that card; the server removed it. Show
+            // why, drop it here and reload the invoice's cards.
+            errorText = edgeError.message
+            removedCardIDs.insert(card.id)
+            selectedCardID = availableCards.first(where: { $0.isDefault })?.id ?? availableCards.first?.id
+            nonce = MoneyEdge.newNonce()
+            await onFinished()
         } catch {
             errorText = ErrorText.message(for: error)
             // A declined card is final for this attempt; a new tap is a new charge.
@@ -275,7 +297,12 @@ struct InvoiceChargeSavedCardSheet: View {
     private func textPayLink() async {
         do {
             let shopID = try appState.requireShopID()
-            let result = try await InvoiceService.sendInvoiceMessage(shopID: shopID, invoice: invoice, channel: .sms)
+            let result = try await InvoiceService.sendInvoiceMessage(
+                shopID: shopID,
+                invoice: invoice,
+                channel: .sms,
+                nonce: textNonce
+            )
             if result.failed {
                 errorText = result.error?.trimmedNonEmpty ?? "The text could not be delivered."
                 return
@@ -337,6 +364,9 @@ struct InvoiceSendSheet: View {
     @State private var notifyCustomer = true
     @State private var channel: MoneyMessageChannel = .sms
     @State private var errorText: String?
+    /// One per compose (reused when Send is tapped again after a failure,
+    /// so the server never queues the message twice); new per channel.
+    @State private var nonce = MoneyEdge.newNonce()
 
     var body: some View {
         NavigationStack {
@@ -362,12 +392,21 @@ struct InvoiceSendSheet: View {
                     .pickerStyle(.segmented)
                     .disabled(!notifyCustomer)
                     .opacity(notifyCustomer ? 1 : 0.45)
-                    Text(destinationText)
-                        .font(Theme.Typography.footnote)
-                        .foregroundStyle(Theme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if notifyCustomer {
+                        MoneyDocumentMessagePreviewView(
+                            request: MoneyDocumentMessage.Request(kind: .invoiceSent, id: invoice.id, channel: channel)
+                        )
+                    } else {
+                        Text("No message is sent. Share the pay link yourself from the invoice.")
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .cardStyle()
+                .onChange(of: channel) {
+                    nonce = MoneyEdge.newNonce()
+                }
                 if let errorText {
                     InlineMessage(text: errorText)
                 }
@@ -391,24 +430,6 @@ struct InvoiceSendSheet: View {
             : "The customer gets the invoice again with the current balance and pay link."
     }
 
-    private var destinationText: String {
-        guard notifyCustomer else {
-            return "No message is sent. Share the pay link yourself from the invoice."
-        }
-        switch channel {
-        case .sms:
-            if let phone = customer?.phone?.trimmedNonEmpty {
-                return "Your shop's \"invoice sent\" text goes to \(phone)."
-            }
-            return "This customer has no mobile number on file."
-        case .email:
-            if let email = customer?.email?.trimmedNonEmpty {
-                return "Your shop's \"invoice sent\" email goes to \(email)."
-            }
-            return "This customer has no email address on file."
-        }
-    }
-
     private func send() async {
         errorText = nil
         let issued: Invoice
@@ -422,7 +443,12 @@ struct InvoiceSendSheet: View {
         if notifyCustomer {
             do {
                 let shopID = try appState.requireShopID()
-                let result = try await InvoiceService.sendInvoiceMessage(shopID: shopID, invoice: issued, channel: channel)
+                let result = try await InvoiceService.sendInvoiceMessage(
+                    shopID: shopID,
+                    invoice: issued,
+                    channel: channel,
+                    nonce: nonce
+                )
                 if result.failed {
                     messageProblem = result.error?.trimmedNonEmpty ?? "The message could not be delivered."
                 }

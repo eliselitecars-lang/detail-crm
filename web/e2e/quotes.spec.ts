@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, SHOP } from './support/fixtures';
-import { mockSupabase, SUPABASE_URL } from './support/mockSupabase';
+import { mockSupabase } from './support/mockSupabase';
 
 const CUSTOMER = {
   id: '30000000-0000-4000-8000-000000000001',
@@ -104,42 +104,29 @@ async function setup(page: Page, current: ReturnType<typeof quote>) {
           phone: null,
         },
       ],
-      message_templates: [
-        {
-          subject: null,
-          body: 'Hi {{customer_first_name}}, review your quote: {{quote_link}}',
-          enabled: true,
-        },
-      ],
     },
     rpc: {
-      render_template: rpc(
-        'render_template',
-        'Hi Jane, review your quote: https://app.test/q/token',
-      ),
+      // Rendered by the server exactly as it will be sent (no client rendering).
+      preview_document_message: rpc('preview_document_message', [
+        {
+          enabled: true,
+          to_address: CUSTOMER.phone,
+          subject: null,
+          body: 'Hi Jane, review your quote: https://app.test/q/token',
+        },
+      ]),
       mark_quote_sent: rpc('mark_quote_sent', { ...current, status: 'sent' }),
       convert_quote_to_job: rpc('convert_quote_to_job', {
         id: '80000000-0000-4000-8000-000000000009',
         number: 77,
       }),
     },
-  });
-  await page.route(`${SUPABASE_URL}/functions/v1/**`, async (route) => {
-    const request = route.request();
-    if (request.method() === 'OPTIONS') {
-      return route.fulfill({
-        status: 204,
-        headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
-      });
-    }
-    const name = new URL(request.url()).pathname.split('/').pop() ?? '';
-    captured.functions.push({ name, body: request.postDataJSON() as unknown });
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      headers: { 'access-control-allow-origin': '*' },
-      body: JSON.stringify({ message_id: 'm-1', channel: 'sms', status: 'sent', error: null }),
-    });
+    functions: {
+      messaging: ({ body }) => {
+        captured.functions.push({ name: 'messaging', body });
+        return { message_id: 'm-1', channel: 'sms', status: 'sent', error: null };
+      },
+    },
   });
   return captured;
 }
@@ -159,22 +146,29 @@ test.describe('quotes', () => {
 
     await page.getByRole('button', { name: 'Send quote' }).click();
     const dialog = page.getByRole('dialog', { name: /Send quote #1001/ });
-    await expect(dialog.getByRole('textbox', { name: 'Message' })).toHaveValue(
+    await expect(dialog.getByRole('region', { name: 'Message preview' })).toContainText(
       'Hi Jane, review your quote: https://app.test/q/token',
     );
     await dialog.getByRole('button', { name: 'Send text' }).click();
     await expect(page.getByText('Quote #1001 sent by text')).toBeVisible();
 
-    expect(captured.rpc.map((c) => c.name)).toContain('mark_quote_sent');
+    const names = captured.rpc.map((c) => c.name);
+    expect(names).toContain('mark_quote_sent');
+    expect(names).not.toContain('render_template');
+    expect(captured.rpc.find((c) => c.name === 'preview_document_message')?.body).toEqual({
+      p_quote_id: quote().id,
+      p_channel: 'sms',
+    });
     expect(captured.functions).toEqual([
       {
         name: 'messaging',
         body: {
           action: 'send',
           shop_id: SHOP.id,
-          customer_id: CUSTOMER.id,
           channel: 'sms',
-          body: 'Hi Jane, review your quote: https://app.test/q/token',
+          template_key: 'quote_sent',
+          quote_id: quote().id,
+          request_nonce: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/),
         },
       },
     ]);

@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { jsonResponse, stripeErrorBody } from "../_shared/testing/mod.ts";
+import { FakeRpcError, jsonResponse, stripeErrorBody } from "../_shared/testing/mod.ts";
+import { rpcError } from "./lib.ts";
 import {
   ACCT,
   CUSTOMER,
@@ -277,6 +278,25 @@ Deno.test("booking_deposit_checkout: nothing due, closed bookings, unknown token
   assertEquals((await errorOf(await off.call(deposit)))[2], { reason: "charges_disabled" });
 });
 
+Deno.test("public not-found (PT404, 0042) is a 404, like P0002", async () => {
+  // The booking disappears between the token lookup and public_get_booking.
+  const f = fixture();
+  f.db.onRpc("public_get_booking", () => {
+    throw new FakeRpcError("PT404", "booking not found", { status: 404 });
+  });
+  assertEquals((await errorOf(await f.call(deposit))).slice(0, 2), [404, "not_found"]);
+  assertEquals(f.stripe("POST", "/checkout/sessions").length, 0);
+  for (const code of ["PT404", "P0002"]) {
+    const mapped = rpcError("public_get_invoice", { code, message: "invoice not found" }, {
+      notFound: "Invoice not found.",
+    });
+    assertEquals([(mapped as { code?: string }).code, mapped.message], [
+      "not_found",
+      "Invoice not found.",
+    ]);
+  }
+});
+
 Deno.test("booking_deposit_checkout: never charges more than the job's invoice still owes", async () => {
   // Job $120 with a $100 deposit; the invoice created from it was then
   // discounted to $90 (allowed while nothing is paid). The deposit lands on
@@ -457,4 +477,16 @@ Deno.test("invoice_checkout: a replayed session that was already paid is 409, ne
     { reason: "payment_in_progress" },
   ]);
   assertEquals(f.stripe("POST", "/checkout/sessions").length, 1);
+});
+
+Deno.test("public checkouts are card-only", async () => {
+  const f = fixture();
+  await (await f.call(checkout)).body?.cancel();
+  await (await f.call(deposit)).body?.cancel();
+  const creates = f.stripe("POST", "/checkout/sessions");
+  assertEquals(creates.length, 2);
+  for (const call of creates) {
+    assertEquals(call.form.get("payment_method_types[0]"), "card");
+    assertEquals(call.form.get("payment_method_types[1]"), null);
+  }
 });
