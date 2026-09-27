@@ -95,6 +95,39 @@ export function defaultBucket(range: DateRange): Bucket {
 /** Longest range the server accepts (report_check_range: to − from ≤ 3660). */
 export const MAX_RANGE_DAYS = 3660;
 
+/**
+ * Most periods a revenue report may be grouped into. report_revenue returns
+ * one row per bucket (empty ones included) and PostgREST caps responses at
+ * max_rows = 1000, so a finer grouping would silently drop the latest
+ * periods. 400 keeps a leap year of days readable in the chart and table.
+ */
+export const MAX_BUCKETS = 400;
+
+/** Natural start of the bucket containing `date` (Monday / 1st of the month). */
+export function bucketStart(date: LocalDate, bucket: Bucket): LocalDate {
+  if (bucket === 'month') return startOfMonth(date);
+  if (bucket === 'week') return addLocalDays(date, -isoWeekdayIndex(date));
+  return date;
+}
+
+/**
+ * Number of rows report_revenue returns for a range: every bucket from the
+ * one containing `from` through the one containing `to`.
+ */
+export function bucketCount(range: DateRange, bucket: Bucket): number {
+  if (bucket === 'day') return localDaysBetween(range.from, range.to) + 1;
+  if (bucket === 'week')
+    return Math.floor(localDaysBetween(bucketStart(range.from, 'week'), range.to) / 7) + 1;
+  const [fy, fm] = parts(range.from);
+  const [ty, tm] = parts(range.to);
+  return (ty - fy) * 12 + (tm - fm) + 1;
+}
+
+/** Whether `bucket` keeps a (valid) range within MAX_BUCKETS periods. */
+export function bucketAllowed(range: DateRange, bucket: Bucket): boolean {
+  return bucketCount(range, bucket) <= MAX_BUCKETS;
+}
+
 /** Validation message for a custom range, or null when it's usable. */
 export function rangeError(range: Partial<DateRange>): string | null {
   const { from, to } = range;
@@ -142,7 +175,13 @@ export function readParams(
     range = presetRange(preset, today);
   }
   const rawBucket = params.get('bucket');
-  const bucket: Bucket = isBucket(rawBucket) ? rawBucket : error ? 'day' : defaultBucket(range);
+  let bucket: Bucket;
+  if (error) bucket = isBucket(rawBucket) ? rawBucket : 'day';
+  // A grouping too fine for the range (e.g. ?bucket=day over three years)
+  // falls back to the automatic one, which always fits in MAX_BUCKETS.
+  else
+    bucket =
+      isBucket(rawBucket) && bucketAllowed(range, rawBucket) ? rawBucket : defaultBucket(range);
   return { preset, range, bucket, valid: error === null, error };
 }
 

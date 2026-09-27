@@ -110,7 +110,7 @@ async function stripeConnect(
     const response =
       body.action === 'refresh_status'
         ? status
-        : { url: 'https://connect.stripe.test/onboarding/acct_1', expires_at: 0 };
+        : { url: 'https://connect.stripe.com/onboarding/acct_1', expires_at: 0 };
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -180,14 +180,14 @@ test.describe('settings', () => {
       },
       calls,
     );
-    await page.route('https://connect.stripe.test/**', (route) =>
+    await page.route('https://connect.stripe.com/**', (route) =>
       route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>Stripe onboarding</h1>' }),
     );
 
     await page.goto('/app/settings/payments');
     await expect(page.getByText('Not connected')).toBeVisible();
     await page.getByRole('button', { name: 'Connect Stripe' }).click();
-    await expect(page).toHaveURL('https://connect.stripe.test/onboarding/acct_1');
+    await expect(page).toHaveURL('https://connect.stripe.com/onboarding/acct_1');
     expect(calls.map((c) => c.action)).toEqual(['refresh_status', 'create_account_link']);
     expect(calls[1]).toMatchObject({ shop_id: SHOP.id });
   });

@@ -9,6 +9,10 @@ import {
   EMPTY_AUDIENCE_FORM,
   normalizeTags,
   smsNeedsStopFooter,
+  campaignBodyMax,
+  EMAIL_FOOTER_RESERVE,
+  hasPlaceholders,
+  hasUnsubscribeLink,
 } from './model';
 
 describe('audience', () => {
@@ -104,5 +108,31 @@ describe('campaignFormSchema', () => {
   it('knows when the STOP footer is appended', () => {
     expect(smsNeedsStopFooter('Deal inside')).toBe(true);
     expect(smsNeedsStopFooter('Reply STOP to quit')).toBe(false);
+    expect(smsNeedsStopFooter('Deals! text "stop" to end')).toBe(false);
+    expect(smsNeedsStopFooter('Stop by this Saturday for our spring special!')).toBe(true);
+  });
+
+  it('reserves room for the footer the server appends', () => {
+    expect(campaignBodyMax('sms', 'Deal inside')).toBe(1577);
+    expect(campaignBodyMax('sms', 'Reply STOP to quit')).toBe(1600);
+    expect(campaignBodyMax('email', 'Hi')).toBe(50000 - EMAIL_FOOTER_RESERVE);
+    expect(campaignBodyMax('email', 'Bye: {{ unsubscribe_link }}')).toBe(50000);
+
+    const fits = campaignFormSchema.safeParse({ ...base, body: 'x'.repeat(1577) });
+    expect(fits.success).toBe(true);
+    const cut = campaignFormSchema.safeParse({ ...base, body: 'x'.repeat(1578) });
+    expect(cut.error?.issues[0]?.message).toMatch(/1,577 characters.*Reply STOP/);
+    const withStop = campaignFormSchema.safeParse({
+      ...base,
+      body: `${'x'.repeat(1580)} Reply STOP to quit`,
+    });
+    expect(withStop.success).toBe(true);
+  });
+
+  it('spots placeholders and unsubscribe links', () => {
+    expect(hasPlaceholders('Hi {{customer_name}}!')).toBe(true);
+    expect(hasPlaceholders('Hi there {not one}')).toBe(false);
+    expect(hasUnsubscribeLink('{{unsubscribe_link}}')).toBe(true);
+    expect(hasUnsubscribeLink('{{review_link}}')).toBe(false);
   });
 });

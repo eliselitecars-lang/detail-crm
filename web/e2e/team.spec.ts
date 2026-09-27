@@ -117,6 +117,46 @@ test.describe('team', () => {
     ]);
   });
 
+  test('pending invite rows stay readable at 360px', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 780 });
+    const email = 'someone.with.long.email@example.com';
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: [],
+        shop_invites: [
+          {
+            id: '70000000-0000-4000-8000-000000000002',
+            email,
+            role: 'manager',
+            token: '70000000-0000-4000-8000-000000000003',
+            expires_at: '2019-12-31T18:00:00Z',
+            created_at: '2019-12-24T18:00:00Z',
+          },
+        ],
+      },
+      rpc: { shop_team: team },
+    });
+    await page.goto('/app/team');
+    const emailText = page.getByText(email, { exact: true });
+    await expect(emailText).toBeVisible();
+    const box = await emailText.boundingBox();
+    expect(box?.width ?? 0).toBeGreaterThan(180);
+    // The details line wraps as a sentence, not one word per line.
+    const details = page.getByText(/Manager · sent/);
+    const detailsBox = await details.boundingBox();
+    expect(detailsBox?.height ?? 999).toBeLessThan(40);
+    // The actions sit below the text, not beside it.
+    const resend = page.getByRole('button', { name: `Resend invite to ${email}` });
+    const resendBox = await resend.boundingBox();
+    expect(resendBox?.y ?? 0).toBeGreaterThan((box?.y ?? 0) + (box?.height ?? 0));
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+
   test('manager sees a read-only team', async ({ page }) => {
     await mockSupabase(page, {
       user: MANAGER,

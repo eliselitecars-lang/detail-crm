@@ -284,6 +284,12 @@ export interface SetQuoteStatusInput {
   status: StaffQuoteStatus;
   approvedByName?: string | null;
   declinedReason?: string | null;
+  /**
+   * approved only: the customer's choice on optional lines (just the ones
+   * that change). Written before the status move — lines lock once approved,
+   * and convert_quote_to_job copies only required + selected optional lines.
+   */
+  optionalChoices?: ReadonlyArray<{ id: string; selected: boolean }>;
 }
 
 /** Staff status moves allowed by quotes_status_machine (revise / record response). */
@@ -291,8 +297,21 @@ export function useSetQuoteStatus(quoteId: string) {
   const { shopId } = useShop();
   const invalidate = useInvalidateQuotes();
   return useMutation({
-    mutationFn: async (input: SetQuoteStatusInput) =>
-      unwrapRequired(
+    mutationFn: async (input: SetQuoteStatusInput) => {
+      if (input.status === 'approved' && input.optionalChoices?.length) {
+        for (const choice of input.optionalChoices) {
+          unwrap(
+            await supabase
+              .from('quote_line_items')
+              .update({ selected: choice.selected })
+              .eq('shop_id', shopId)
+              .eq('quote_id', quoteId)
+              .eq('id', choice.id)
+              .eq('optional', true),
+          );
+        }
+      }
+      return unwrapRequired(
         await supabase
           .from('quotes')
           .update({
@@ -309,7 +328,8 @@ export function useSetQuoteStatus(quoteId: string) {
           .select('*')
           .maybeSingle(),
         'quote',
-      ),
+      );
+    },
     onSettled: invalidate,
   });
 }
@@ -377,19 +397,45 @@ function lineInsert(shopId: string, quoteId: string, draft: LineDraft, sort: num
   };
 }
 
-/** Duplicates a quote as a new draft with the same content and lines. */
+/**
+ * Duplicates a quote as a new draft with the same content and lines, priced
+ * with the shop's CURRENT tax rate (like a new quote), not the old quote's.
+ * Line vehicles that no longer belong to the customer are dropped (the
+ * validate trigger would reject them), and if the lines still fail to copy
+ * the half-made draft is deleted so no empty quote is left behind.
+ */
 export function useDuplicateQuote() {
   const { shopId } = useShop();
   const invalidate = useInvalidateQuotes();
   return useMutation({
     mutationFn: async ({ quote, lines }: { quote: QuoteRow; lines: readonly DocLine[] }) => {
+      const shopRow = unwrapRequired<Pick<Row<'shops'>, 'tax_rate_bps'>>(
+        await supabase.from('shops').select('tax_rate_bps').eq('id', shopId).maybeSingle(),
+        'shop',
+      );
+      const lineVehicles = new Set(
+        lines.map((line) => line.vehicle_id).filter((id): id is string => id !== null),
+      );
+      const customerVehicles =
+        lineVehicles.size === 0
+          ? new Set<string>()
+          : new Set(
+              unwrapList(
+                await supabase
+                  .from('vehicles')
+                  .select('id')
+                  .eq('shop_id', shopId)
+                  .eq('customer_id', quote.customer_id)
+                  .in('id', [...lineVehicles]),
+              ).map((v) => v.id),
+            );
       const copy = unwrapRequired<QuoteRow>(
         await supabase
           .from('quotes')
           .insert({
             shop_id: shopId,
             number: 0, // assigned by the server
-            tax_rate_bps: quote.tax_rate_bps,
+            tax_rate_bps: shopRow.tax_rate_bps,
             customer_id: quote.customer_id,
             vehicle_id: quote.vehicle_id,
             notes: quote.notes,
@@ -403,14 +449,20 @@ export function useDuplicateQuote() {
         'quote',
       );
       if (lines.length > 0) {
-        unwrap(
-          await supabase.from('quote_line_items').insert(
-            lines.map((line, index) => ({
-              ...lineInsert(shopId, copy.id, line, index + 1),
-              vehicle_id: line.vehicle_id,
-            })),
-          ),
+        const inserted = await supabase.from('quote_line_items').insert(
+          lines.map((line, index) => ({
+            ...lineInsert(shopId, copy.id, line, index + 1),
+            vehicle_id:
+              line.vehicle_id !== null && customerVehicles.has(line.vehicle_id)
+                ? line.vehicle_id
+                : null,
+          })),
         );
+        if (inserted.error) {
+          // Don't leave an empty draft behind; the original error is what matters.
+          await supabase.from('quotes').delete().eq('shop_id', shopId).eq('id', copy.id);
+          unwrap(inserted);
+        }
       }
       return copy;
     },

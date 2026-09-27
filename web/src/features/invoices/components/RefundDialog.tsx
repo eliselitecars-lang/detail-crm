@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Button, Dialog, FormField, MoneyInput, useToast } from '@/components/ui';
 import { formatCents } from '@/lib/money';
+import { EdgeFunctionError } from '@/features/quotes/shared/edge';
+import { newRequestNonce } from '@/features/quotes/shared/format';
 import {
   isCardMethod,
   paymentMethodLabel,
@@ -48,6 +50,9 @@ function RefundForm({
   const refund = useRefundPayment();
   const max = refundableCents(payment);
   const [amount, setAmount] = useState<number | null>(max);
+  // One nonce per refund attempt: kept across network/5xx retries (so a lost
+  // response never refunds twice), replaced after a definitive answer.
+  const [nonce, setNonce] = useState(newRequestNonce);
   const error =
     amount === null || amount <= 0
       ? 'Enter an amount greater than zero.'
@@ -58,10 +63,14 @@ function RefundForm({
   const submit = async () => {
     if (error || amount === null) return;
     try {
-      await refund.mutateAsync({ payment, amountCents: amount });
+      await refund.mutateAsync({ payment, amountCents: amount, nonce });
       toast.success(`${formatCents(amount, { currency })} refunded`);
       onClose();
     } catch (err) {
+      if (err instanceof EdgeFunctionError && err.status !== undefined && err.status < 500) {
+        // A definitive answer (not refundable, amount too high…): a new try is a new attempt.
+        setNonce(newRequestNonce());
+      }
       toast.error(err);
     }
   };

@@ -1,5 +1,5 @@
 import { ScanLine } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type KeyboardEvent } from 'react';
 import {
   Button,
   ErrorState,
@@ -88,7 +88,9 @@ export function VehicleSection({
         <FormField
           label="Vehicle size"
           required
-          help={categories.length === 0 ? 'Add vehicle sizes in Settings to price services.' : undefined}
+          help={
+            categories.length === 0 ? 'Add vehicle sizes in Settings to price services.' : undefined
+          }
         >
           <Select
             value={categoryId}
@@ -178,17 +180,20 @@ function NewVehicleForm({
     }
   };
 
+  // Enter in a field saves this record instead of submitting the job form.
+  const submitOnEnter = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void submit();
+    }
+  };
+
   return (
-    <form
-      aria-label="New vehicle"
-      className="grid grid-cols-2 gap-3 sm:grid-cols-4"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void submit();
-      }}
-    >
+    // Not a <form>: this sits inside the New job form (forms can't nest).
+    <div role="group" aria-label="New vehicle" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       <FormField label="VIN" error={errors.vin} className="col-span-2 sm:col-span-3">
         <Input
+          onKeyDown={submitOnEnter}
           value={form.vin}
           maxLength={20}
           autoCapitalize="characters"
@@ -209,22 +214,53 @@ function NewVehicleForm({
         </Button>
       </div>
       <FormField label="Year" error={errors.year}>
-        <Input inputMode="numeric" maxLength={4} value={form.year} onChange={(e) => set({ year: e.target.value })} />
+        <Input
+          onKeyDown={submitOnEnter}
+          inputMode="numeric"
+          maxLength={4}
+          value={form.year}
+          onChange={(e) => set({ year: e.target.value })}
+        />
       </FormField>
       <FormField label="Make" error={errors.make}>
-        <Input value={form.make} maxLength={60} onChange={(e) => set({ make: e.target.value })} />
+        <Input
+          onKeyDown={submitOnEnter}
+          value={form.make}
+          maxLength={60}
+          onChange={(e) => set({ make: e.target.value })}
+        />
       </FormField>
       <FormField label="Model">
-        <Input value={form.model} maxLength={60} onChange={(e) => set({ model: e.target.value })} />
+        <Input
+          onKeyDown={submitOnEnter}
+          value={form.model}
+          maxLength={60}
+          onChange={(e) => set({ model: e.target.value })}
+        />
       </FormField>
       <FormField label="Trim">
-        <Input value={form.trim} maxLength={60} onChange={(e) => set({ trim: e.target.value })} />
+        <Input
+          onKeyDown={submitOnEnter}
+          value={form.trim}
+          maxLength={60}
+          onChange={(e) => set({ trim: e.target.value })}
+        />
       </FormField>
       <FormField label="Color">
-        <Input value={form.color} maxLength={40} onChange={(e) => set({ color: e.target.value })} />
+        <Input
+          onKeyDown={submitOnEnter}
+          value={form.color}
+          maxLength={40}
+          onChange={(e) => set({ color: e.target.value })}
+        />
       </FormField>
       <FormField label="Plate">
-        <Input value={form.plate} maxLength={15} onChange={(e) => set({ plate: e.target.value })} />
+        <Input
+          onKeyDown={submitOnEnter}
+          value={form.plate}
+          maxLength={15}
+          onChange={(e) => set({ plate: e.target.value })}
+        />
       </FormField>
       <FormField label="Size" className="col-span-2">
         <Select
@@ -235,13 +271,13 @@ function NewVehicleForm({
         />
       </FormField>
       <div className="col-span-2 flex gap-2 sm:col-span-4">
-        <Button type="submit" loading={create.isPending}>
+        <Button loading={create.isPending} onClick={() => void submit()}>
           Save vehicle
         </Button>
         <Button type="button" variant="ghost" onClick={onCancel} disabled={create.isPending}>
           Cancel
         </Button>
       </div>
-    </form>
+    </div>
   );
 }

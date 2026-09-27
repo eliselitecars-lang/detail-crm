@@ -13,7 +13,13 @@ import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
 import { SHOP_ROLES } from '@/features/shop/permissions';
-import { TIME_ENTRY_COLUMNS, timeEntrySchema, type EntryWrite, type TimeEntryKind } from './model';
+import {
+  TIME_ENTRY_COLUMNS,
+  timeEntrySchema,
+  type EntryPatch,
+  type EntryWrite,
+  type TimeEntryKind,
+} from './model';
 
 export interface EntryFilters {
   /** UTC ISO bounds [from, to) */
@@ -118,26 +124,27 @@ export function useClock() {
   return { clockIn, clockOut };
 }
 
+/** A new manual entry, or the changed columns of an existing one. */
+export type SaveEntryInput = { values: EntryWrite } | { id: string; patch: EntryPatch };
+
 export function useSaveEntry() {
   const { shopId } = useShop();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, values }: { id?: string; values: EntryWrite }) => {
-      if (id) {
+    mutationFn: async (input: SaveEntryInput) => {
+      if ('id' in input) {
+        // Only the changed columns (see entryEditPatch); nothing changed → no write.
+        if (Object.keys(input.patch).length === 0) return input.id;
         const result = await supabase
           .from('time_entries')
-          .update({
-            job_id: values.job_id,
-            clock_in: values.clock_in,
-            clock_out: values.clock_out,
-            notes: values.notes,
-          })
+          .update(input.patch)
           .eq('shop_id', shopId)
-          .eq('id', id)
+          .eq('id', input.id)
           .select('id')
           .maybeSingle();
         return unwrapRequired(result, 'time entry').id;
       }
+      const { values } = input;
       const result = await supabase
         .from('time_entries')
         .insert({ ...values, shop_id: shopId, source: 'manual' })

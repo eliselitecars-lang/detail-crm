@@ -32,15 +32,17 @@ let results: Record<string, MockResult> = {};
 /** Like the shared mock, but `.maybeSingle()` resolves to the first row. */
 function mockTables(next: Record<string, MockResult>) {
   results = next;
-  supabase.from.mockImplementation(((table: string) => {
+  supabase.from.mockImplementation((table: string) => {
     const result = results[table] ?? { data: [] };
     const builder = createBuilder(result);
     builder.maybeSingle.mockImplementation(() =>
       createBuilder({ data: Array.isArray(result.data) ? (result.data[0] ?? null) : null }),
     );
+    // The shared mock has no .contains() (membership_plans usage count).
+    Object.assign(builder, { contains: vi.fn(() => builder) });
     (builders[table] ??= []).push(builder);
     return builder;
-  }));
+  });
 }
 
 function renderAs(role: 'owner' | 'manager' | 'technician') {
@@ -166,5 +168,54 @@ describe('ServiceDetailPage', () => {
     mockTables({ ...results, services: { data: [] } });
     renderAs('manager');
     expect(await screen.findByText('That service could not be found.')).toBeInTheDocument();
+  });
+
+  it('warns before deleting an add-on that is the only one a service offers', async () => {
+    mockTables({
+      ...results,
+      services: {
+        data: [
+          { ...base, id: 'add-1', name: 'Pet Hair', kind: 'addon' },
+          { ...base, id: 'svc-2', name: 'Interior Detail', kind: 'service' },
+          { ...base, id: 'pkg-1', name: 'Showroom Package', kind: 'package' },
+        ],
+      },
+      service_addons: { data: [{ id: 'l1', service_id: 'svc-2', addon_id: 'add-1' }] },
+    });
+    const { user } = renderAs('manager');
+    expect(await screen.findByRole('heading', { name: 'Pet Hair' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete…' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Pet Hair?' });
+    expect(
+      await within(dialog).findByText('Interior Detail only offers this add-on.'),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(/will offer every add-on/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Delete anyway' })).toBeInTheDocument();
+    const lookups = (builders.service_addons ?? []).flatMap((b) => b.eq.mock.calls);
+    expect(lookups).toContainEqual(['addon_id', 'add-1']);
+  });
+
+  it('keeps add-on links manageable on products', async () => {
+    mockTables({
+      ...results,
+      services: {
+        data: [
+          { ...base, id: 'prd-1', name: 'Ceramic Spray', kind: 'product' },
+          { ...base, id: 'add-1', name: 'Pet Hair', kind: 'addon' },
+        ],
+      },
+      service_addons: { data: [{ id: 'l1', addon_id: 'add-1' }] },
+    });
+    const { user } = renderAs('manager');
+    expect(await screen.findByRole('heading', { name: 'Ceramic Spray' })).toBeInTheDocument();
+    const box = await screen.findByRole('checkbox', { name: 'Pet Hair' });
+    expect(box).toBeChecked();
+    await user.click(box);
+    await waitFor(() =>
+      expect((builders.service_addons ?? []).some((b) => b.delete.mock.calls.length > 0)).toBe(
+        true,
+      ),
+    );
   });
 });

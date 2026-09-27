@@ -7,3 +7,17 @@ export function moveItem<T>(list: readonly T[], from: number, to: number): T[] {
   if (item !== undefined) next.splice(target, 0, item);
   return next;
 }
+
+/**
+ * Sort position for a newly added row: one past the largest stored `sort`.
+ * Defensive against rows without a finite sort (a NaN here would be sent as
+ * `sort: null` and violate the NOT NULL column).
+ */
+export function nextSortPosition(rows: readonly { sort?: number | null }[]): number {
+  let max = 0;
+  for (const row of rows) {
+    const sort = row.sort;
+    if (typeof sort === 'number' && Number.isFinite(sort) && sort > max) max = sort;
+  }
+  return max + 1;
+}

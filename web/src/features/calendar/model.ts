@@ -7,6 +7,13 @@
  */
 import type { BusinessHoursInput, EventInput } from '@fullcalendar/core';
 import { statusLabel } from '@/components/ui';
+import {
+  formatInTz,
+  localTimeToMinutes,
+  shopDayRangeUtc,
+  shopWeekday,
+  type LocalDate,
+} from '@/lib/dates';
 import type { JobStatus } from '@/features/jobs/model';
 
 export interface CalendarRow {
@@ -183,15 +190,139 @@ export function scrollTimeFor(rows: readonly BusinessHoursRow[]): string {
   return `${String(hour).padStart(2, '0')}:00:00`;
 }
 
-export type CalendarView = 'timeGridDay' | 'timeGridWeek' | 'dayGridMonth' | 'listWeek';
+/** Views rendered by the main FullCalendar instance. */
+export type GridView = 'timeGridDay' | 'timeGridWeek' | 'dayGridMonth' | 'listWeek';
+/** All calendar views, including the hand-rolled per-bay/van day view. */
+export type CalendarView = GridView | 'resourceDay';
 
 export const CALENDAR_VIEWS: readonly { value: CalendarView; label: string }[] = [
   { value: 'timeGridDay', label: 'Day' },
   { value: 'timeGridWeek', label: 'Week' },
   { value: 'dayGridMonth', label: 'Month' },
   { value: 'listWeek', label: 'List' },
+  { value: 'resourceDay', label: 'Bays' },
 ];
 
 export function isCalendarView(value: string | null): value is CalendarView {
   return CALENDAR_VIEWS.some((v) => v.value === value);
+}
+
+export function isGridView(value: CalendarView): value is GridView {
+  return value !== 'resourceDay';
+}
+
+// ---------------------------------------------------------------------------
+// Resource (bay / van) view — FullCalendar's resource views are premium, so
+// the page renders one MIT timeGridDay column per resource side by side and
+// moves jobs between them with FullCalendar's cross-calendar drag.
+// ---------------------------------------------------------------------------
+
+export interface ResourceOption {
+  id: string;
+  name: string;
+  active: boolean;
+  archived_at: string | null;
+}
+
+export interface ResourceColumn {
+  /** null = jobs with no bay / van. */
+  id: string | null;
+  name: string;
+  /** Archived / inactive resource still holding jobs in range. */
+  inactive: boolean;
+}
+
+export const UNASSIGNED_COLUMN_NAME = 'No bay / van';
+
+/**
+ * Columns for the resource view: every active resource (in the shop's order),
+ * any inactive/unknown resource that still has jobs in range, then the
+ * "No bay / van" column. A resource filter narrows it to that one column.
+ */
+export function resourceColumns(
+  resources: readonly ResourceOption[],
+  rows: readonly CalendarRow[],
+  filterResourceId: string | null,
+): ResourceColumn[] {
+  const columns: ResourceColumn[] = resources
+    .filter((r) => r.active && !r.archived_at)
+    .map((r) => ({ id: r.id, name: r.name, inactive: false }));
+  const known = new Set(columns.map((c) => c.id));
+  for (const row of rows) {
+    if (row.event_type === 'blocked_time' || !row.resource_id || known.has(row.resource_id)) {
+      continue;
+    }
+    known.add(row.resource_id);
+    const resource = resources.find((r) => r.id === row.resource_id);
+    columns.push({
+      id: row.resource_id,
+      name: resource ? resource.name : 'Unavailable bay / van',
+      inactive: true,
+    });
+  }
+  columns.push({ id: null, name: UNASSIGNED_COLUMN_NAME, inactive: false });
+  if (filterResourceId === null) return columns;
+  return columns.filter((c) => c.id === filterResourceId);
+}
+
+/** Event inputs for one resource column (blocked times show in every column). */
+export function columnEventInputs(
+  rows: readonly CalendarRow[],
+  filters: CalendarFilters,
+  columnId: string | null,
+  canReschedule: boolean,
+): EventInput[] {
+  return toEventInputs(
+    rows.filter((r) => r.event_type === 'blocked_time' || (r.resource_id ?? null) === columnId),
+    { memberId: filters.memberId, resourceId: null },
+    canReschedule,
+  );
+}
+
+function minutesOfDay(iso: string, timeZone: string): number {
+  const [h = '0', m = '0'] = formatInTz(iso, timeZone, 'HH:mm').split(':');
+  return Number(h) * 60 + Number(m);
+}
+
+function slotTime(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:00:00`;
+}
+
+/**
+ * Visible hours for the resource day view: the day's business hours ± 1 h,
+ * widened so no job of that day is ever cut off. Shop wall clock.
+ */
+export function resourceDayBounds(
+  hours: readonly BusinessHoursRow[],
+  rows: readonly CalendarRow[],
+  date: LocalDate,
+  timeZone: string,
+): { slotMinTime: string; slotMaxTime: string } {
+  const { from, to } = shopDayRangeUtc(date, timeZone);
+  const weekday = shopWeekday(from, timeZone);
+  const today = hours.filter((h) => h.weekday === weekday);
+  let min = 7 * 60;
+  let max = 19 * 60;
+  if (today.length > 0) {
+    min = Math.min(...today.map((h) => localTimeToMinutes(h.opens_at.slice(0, 5)))) - 60;
+    max =
+      Math.max(
+        ...today.map((h) =>
+          h.closes_at.startsWith('24:00') ? 1440 : localTimeToMinutes(h.closes_at.slice(0, 5)),
+        ),
+      ) + 60;
+  }
+  const fromMs = Date.parse(from);
+  const toMs = Date.parse(to);
+  for (const row of rows) {
+    if (row.event_type === 'blocked_time') continue;
+    const s = Date.parse(row.starts_at);
+    const e = Date.parse(row.ends_at);
+    if (e <= fromMs || s >= toMs) continue;
+    min = Math.min(min, s <= fromMs ? 0 : minutesOfDay(row.starts_at, timeZone));
+    max = Math.max(max, e >= toMs ? 1440 : minutesOfDay(row.ends_at, timeZone) || 1440);
+  }
+  const lo = Math.max(0, Math.floor(min / 60) * 60);
+  const hi = Math.min(1440, Math.max(lo + 60, Math.ceil(max / 60) * 60));
+  return { slotMinTime: slotTime(lo), slotMaxTime: slotTime(hi) };
 }

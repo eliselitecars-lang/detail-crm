@@ -25,7 +25,7 @@ import {
   type VehicleCategory,
 } from '../api';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
-import { moveItem } from '../reorder';
+import { moveItem, nextSortPosition } from '../reorder';
 import { categorySchema } from '../schemas';
 import { useSettingsAccess } from '../useSettingsAccess';
 
@@ -139,7 +139,7 @@ export default function VehicleCategoriesPage() {
       {editing && (
         <CategoryDialog
           category={editing.category}
-          nextSort={(query.data?.reduce((max, c) => Math.max(max, c.sort), 0) ?? 0) + 1}
+          nextSort={nextSortPosition(query.data ?? [])}
           onClose={() => setEditing(null)}
         />
       )}

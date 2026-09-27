@@ -14,10 +14,22 @@ import type { CatalogData, Pricing } from '../../api';
 import { formatDuration } from '../../model';
 
 export interface ServicesSectionProps {
-  catalog: { data: CatalogData | undefined; isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown };
+  catalog: {
+    data: CatalogData | undefined;
+    isPending: boolean;
+    isError: boolean;
+    error: unknown;
+    refetch: () => unknown;
+  };
   selected: string[];
   onToggle: (serviceId: string) => void;
-  pricing: { data: Pricing | undefined; isFetching: boolean; isError: boolean; error: unknown; refetch: () => unknown };
+  pricing: {
+    data: Pricing | undefined;
+    isFetching: boolean;
+    isError: boolean;
+    error: unknown;
+    refetch: () => unknown;
+  };
   canPrice: boolean;
   applyMemberDiscount: boolean;
   onApplyMemberDiscount: (value: boolean) => void;
@@ -93,7 +105,9 @@ export function ServicesSection({
           <div className="border-line flex flex-col gap-2 border-t pt-4" aria-live="polite">
             <h3 className="text-ink text-sm font-semibold">Selected</h3>
             {!canPrice ? (
-              <p className="text-muted text-sm">Choose a customer and vehicle size to see prices.</p>
+              <p className="text-muted text-sm">
+                Choose a customer and vehicle size to see prices.
+              </p>
             ) : pricing.isError ? (
               <ErrorState compact error={pricing.error} onRetry={() => void pricing.refetch()} />
             ) : !pricing.data ? (

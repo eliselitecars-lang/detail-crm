@@ -33,10 +33,11 @@ import {
   audienceToForm,
   audienceToJson,
   CAMPAIGN_PLACEHOLDERS,
+  campaignBodyMax,
   campaignFormSchema,
-  EMAIL_BODY_MAX,
   EMPTY_AUDIENCE_FORM,
-  SMS_BODY_MAX,
+  hasPlaceholders,
+  hasUnsubscribeLink,
   smsNeedsStopFooter,
   type AudienceForm,
   type CampaignChannel,
@@ -184,7 +185,21 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
     });
   };
 
-  const max = channel === 'sms' ? SMS_BODY_MAX : EMAIL_BODY_MAX;
+  // The limit leaves room for the compliance footer the server appends.
+  const max = campaignBodyMax(channel, body.trim());
+  const footerNote =
+    channel === 'sms'
+      ? smsNeedsStopFooter(body)
+        ? ' · “Reply STOP to opt out.” is added automatically.'
+        : ''
+      : hasUnsubscribeLink(body)
+        ? ''
+        : ' · An unsubscribe link is added automatically.';
+  const placeholderNote = hasPlaceholders(body)
+    ? ` Placeholders are filled in for each customer and make the ${
+        channel === 'sms' ? 'text' : 'email'
+      } longer; anything past the limit is cut off.`
+    : '';
   const busy = isSubmitting || save.isPending || launch.isPending;
   const { ref: bodyRef, ...bodyField } = register('body');
 
@@ -228,13 +243,7 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
             label="Message"
             required
             error={errors.body?.message}
-            help={`${body.length.toLocaleString()}/${max.toLocaleString()} characters${
-              channel === 'sms' && smsNeedsStopFooter(body)
-                ? ' · “Reply STOP to opt out.” is added automatically.'
-                : channel === 'email'
-                  ? ' · An unsubscribe link is added automatically.'
-                  : ''
-            }`}
+            help={`${body.trim().length.toLocaleString()}/${max.toLocaleString()} characters${footerNote}${placeholderNote}`}
           >
             <Textarea
               rows={channel === 'sms' ? 5 : 10}

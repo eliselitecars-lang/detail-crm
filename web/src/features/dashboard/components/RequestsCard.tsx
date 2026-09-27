@@ -145,8 +145,13 @@ function DeclineDialog({
       await decline.mutateAsync({ jobId: request.id, reason });
       toast.success('Booking declined', `Job #${request.number} was cancelled.`);
       onClose();
-    } catch {
-      // shown below
+    } catch (error) {
+      // Already approved/cancelled elsewhere: nothing to decline any more.
+      if (toAppError(error).kind === 'conflict') {
+        toast.error(toAppError(error).message);
+        onClose();
+      }
+      // Other errors are shown in the dialog below.
     }
   };
 

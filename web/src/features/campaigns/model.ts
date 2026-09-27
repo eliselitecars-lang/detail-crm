@@ -17,8 +17,17 @@ export type CampaignChannel = (typeof Constants.public.Enums.message_channel)[nu
 export type Lifecycle = (typeof Constants.public.Enums.customer_lifecycle)[number];
 
 export const MAX_TAGS = 50;
+/** launch_campaign cuts every rendered SMS to this many characters (footer included). */
 export const SMS_BODY_MAX = 1600;
 export const EMAIL_BODY_MAX = 50000;
+/** The opt-out line the server appends when the rendered text has no opt-out instruction (see smsNeedsStopFooter). */
+export const SMS_STOP_FOOTER = '\nReply STOP to opt out.';
+/**
+ * Room kept for the unsubscribe footer launch_campaign appends to emails
+ * without {{unsubscribe_link}} (≈60 characters of text plus the link); the
+ * server cuts the rendered email to EMAIL_BODY_MAX after appending it.
+ */
+export const EMAIL_FOOTER_RESERVE = 300;
 
 const localDate = z.string().refine(isLocalDate, 'Use a valid date.');
 
@@ -153,12 +162,15 @@ export const campaignFormSchema = z
         path: ['subject'],
         message: 'Email campaigns need a subject.',
       });
-    const max = v.channel === 'sms' ? SMS_BODY_MAX : EMAIL_BODY_MAX;
+    const max = campaignBodyMax(v.channel, v.body);
     if (v.body.length > max)
       ctx.addIssue({
         code: 'custom',
         path: ['body'],
-        message: `Keep it under ${max.toLocaleString()} characters.`,
+        message:
+          v.channel === 'sms' && smsNeedsStopFooter(v.body)
+            ? `Keep it under ${max.toLocaleString()} characters — the automatic “Reply STOP to opt out.” line needs the rest.`
+            : `Keep it under ${max.toLocaleString()} characters.`,
       });
     if ((v.sendDate === '') !== (v.sendTime === ''))
       ctx.addIssue({
@@ -171,9 +183,38 @@ export const campaignFormSchema = z
   });
 export type CampaignFormValues = z.input<typeof campaignFormSchema>;
 
-/** SMS campaigns get "Reply STOP to opt out." appended by the server unless the text mentions STOP. */
+/**
+ * SMS campaigns get "Reply STOP to opt out." appended by the server
+ * (comms_sms_with_optout) unless the text already has an opt-out
+ * instruction — "Reply STOP", "Text STOP", "Txt STOP", "Send STOP"; merely
+ * using the word ("Stop by Saturday") does not count.
+ */
 export function smsNeedsStopFooter(body: string): boolean {
-  return !/\bstop\b/i.test(body);
+  return !/\b(reply|text|txt|send)\s+["'“‘]?stop\b/i.test(body);
+}
+
+/** Whether the email body already carries {{unsubscribe_link}} (else the server appends a footer). */
+export function hasUnsubscribeLink(body: string): boolean {
+  return /\{\{[ \t]*unsubscribe_link[ \t]*\}\}/.test(body);
+}
+
+/** Whether the text has {{placeholders}}, which are filled in per customer at launch. */
+export function hasPlaceholders(body: string): boolean {
+  return /\{\{[ \t]*[a-z_]+[ \t]*\}\}/i.test(body);
+}
+
+/**
+ * Longest body the author may write. launch_campaign renders the
+ * placeholders, appends the compliance footer when needed and then cuts the
+ * text to the channel limit, so a body that fills the whole limit would be
+ * cut mid-sentence (or lose its footer). The footer's room is reserved here;
+ * placeholder growth cannot be known before launch (the editor warns).
+ */
+export function campaignBodyMax(channel: CampaignChannel, body: string): number {
+  if (channel === 'sms') {
+    return smsNeedsStopFooter(body) ? SMS_BODY_MAX - SMS_STOP_FOOTER.length : SMS_BODY_MAX;
+  }
+  return hasUnsubscribeLink(body) ? EMAIL_BODY_MAX : EMAIL_BODY_MAX - EMAIL_FOOTER_RESERVE;
 }
 
 export interface RecipientStats {
@@ -183,4 +224,11 @@ export interface RecipientStats {
   delivered: number;
   failed: number;
   cancelled: number;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** An unsubscribe link token is the campaign email's message id (a uuid). */
+export function isUnsubscribeToken(value: string | undefined): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
 }

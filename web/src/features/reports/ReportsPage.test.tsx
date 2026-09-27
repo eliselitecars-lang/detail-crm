@@ -128,7 +128,16 @@ describe('ReportsPage', () => {
   });
 
   it('shows an empty state when nothing was paid', async () => {
-    rpcResults({ report_revenue: [{ ...revenue[1] }] });
+    rpcResults({
+      report_revenue: revenue.map((r) => ({
+        ...r,
+        gross_cents: 0,
+        refunds_cents: 0,
+        net_cents: 0,
+        tips_cents: 0,
+        payments_count: 0,
+      })),
+    });
     renderAs('owner');
     expect(await screen.findByText('No payments in this period')).toBeInTheDocument();
   });
@@ -211,5 +220,28 @@ describe('ReportsPage', () => {
     expect(router.state.location.search).toContain('range=ytd');
     await user.selectOptions(screen.getByRole('combobox', { name: 'Group by' }), 'month');
     expect(router.state.location.search).toContain('bucket=month');
+  });
+
+  it('disables daily grouping for long ranges and coerces ?bucket=day', async () => {
+    rpcResults({ report_revenue: [{ ...revenue[0], bucket_start: '2026-09-01' }] });
+    renderAs('manager', 'range=custom&from=2023-01-01&to=2026-09-27&bucket=day');
+    await screen.findByLabelText('Revenue totals');
+    expect(supabase.rpc).toHaveBeenCalledWith('report_revenue', {
+      p_shop_id: 'shop-1',
+      p_from: '2023-01-01',
+      p_to: '2026-09-27',
+      p_bucket: 'month',
+    });
+    const groupBy = screen.getByRole('combobox', { name: 'Group by' });
+    expect(within(groupBy).getByRole('option', { name: 'Daily (range too long)' })).toBeDisabled();
+    expect(within(groupBy).getByRole('option', { name: 'Weekly' })).toBeEnabled();
+  });
+
+  it('shows an error instead of understated totals when rows are cut off', async () => {
+    // Server returned only the first day of a three-day range.
+    rpcResults({ report_revenue: [revenue[0]] });
+    renderAs('manager');
+    expect(await screen.findByText(/too many periods to show/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Revenue totals')).not.toBeInTheDocument();
   });
 });

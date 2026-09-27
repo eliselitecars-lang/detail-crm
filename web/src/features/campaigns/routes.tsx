@@ -20,4 +20,9 @@ export const routes: FeatureRoutes = {
       ],
     },
   ],
+  public: [
+    // Every campaign email's unsubscribe link (launch_campaign renders
+    // {{unsubscribe_link}} as app_url('/u/<message id>')); no sign-in.
+    { path: '/u/:token', lazy: lazyPage(() => import('./UnsubscribePage')) },
+  ],
 };

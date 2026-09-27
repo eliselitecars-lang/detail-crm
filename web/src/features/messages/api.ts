@@ -23,6 +23,8 @@ import {
   threadCustomerSchema,
   threadKey,
   unreadRowSchema,
+  unreadThreadsOutside,
+  type InboxMessage,
   type MessageChannel,
   type ThreadRef,
 } from './model';
@@ -47,30 +49,60 @@ export const messageKeys = {
 // Inbox (thread list)
 // ---------------------------------------------------------------------------
 
+/** Unread rows read for counts and for unread threads outside the page. */
+const UNREAD_LIMIT = 2000;
+/** At most this many unread conversations are added beyond the newest page. */
+const MAX_UNREAD_EXTRA_THREADS = 500;
+/** Ids per `in.(…)` filter (keeps the request URL short). */
+const ID_CHUNK = 100;
+
+const INBOX_COLUMNS = `${MESSAGE_COLUMNS}, customer:customers!messages_customer_fk(${THREAD_CUSTOMER_COLUMNS})`;
+
 async function fetchInbox(shopId: string, limit: number) {
   const [recent, unread] = await Promise.all([
     supabase
       .from('messages')
-      .select(
-        `${MESSAGE_COLUMNS}, customer:customers!messages_customer_fk(${THREAD_CUSTOMER_COLUMNS})`,
-      )
+      .select(INBOX_COLUMNS)
       .eq('shop_id', shopId)
       .order('created_at', { ascending: false })
       .limit(limit),
     supabase
       .from('messages')
-      .select('customer_id, from_address')
+      .select('id, customer_id, from_address, created_at', { count: 'exact' })
       .eq('shop_id', shopId)
       .eq('direction', 'inbound')
       .is('read_at', null)
-      .limit(2000),
+      .order('created_at', { ascending: false })
+      .limit(UNREAD_LIMIT),
   ]);
   const messages = z.array(inboxMessageSchema).parse(unwrap(recent) ?? []);
   const unreadRows = z.array(unreadRowSchema).parse(unwrap(unread) ?? []);
+
+  // Threads with unread messages always appear, even when the newest page is
+  // all campaign sends: add each missing one via its newest unread message.
+  const presentKeys = new Set(buildThreads(messages, []).map((t) => t.key));
+  const extraIds = unreadThreadsOutside(presentKeys, unreadRows, MAX_UNREAD_EXTRA_THREADS);
+  const chunks: string[][] = [];
+  for (let i = 0; i < extraIds.length; i += ID_CHUNK) chunks.push(extraIds.slice(i, i + ID_CHUNK));
+  const extra: InboxMessage[] = (
+    await Promise.all(
+      chunks.map(async (ids) => {
+        const result = await supabase
+          .from('messages')
+          .select(INBOX_COLUMNS)
+          .eq('shop_id', shopId)
+          .in('id', ids);
+        return z.array(inboxMessageSchema).parse(unwrap(result) ?? []);
+      }),
+    )
+  ).flat();
+
   return {
-    threads: buildThreads(messages, unreadRows),
+    threads: buildThreads([...messages, ...extra], unreadRows),
     /** More history exists beyond `limit` (offer "Load older conversations"). */
     truncated: messages.length >= limit,
+    /** Every unread inbound message of the shop, not just the listed threads'. */
+    unreadTotal: unread.count ?? unreadRows.length,
   };
 }
 
@@ -161,9 +193,11 @@ export function useMarkThreadRead() {
       const key = threadKey(ref);
       for (const [queryKey, data] of snapshot) {
         if (!data) continue;
+        const cleared = data.threads.find((t) => t.key === key)?.unread ?? 0;
         queryClient.setQueryData(queryKey, {
           ...data,
           threads: data.threads.map((t) => (t.key === key ? { ...t, unread: 0 } : t)),
+          unreadTotal: Math.max(0, data.unreadTotal - cleared),
         });
       }
       return { snapshot };

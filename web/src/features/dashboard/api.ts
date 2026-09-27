@@ -156,18 +156,36 @@ function useInvalidateJobs(shopId: string) {
     ]);
 }
 
+export const REQUEST_ALREADY_HANDLED =
+  'This request was already handled — it’s no longer waiting for approval.';
+
+/**
+ * The status guard (`status = 'requested'`) turns a stale approve/decline into
+ * a zero-row update, which PostgREST reports as success. Treat "nothing
+ * changed" as a conflict so the UI never claims an action that didn't happen
+ * (another manager, the customer's manage link or the jobs page got there first).
+ */
+function requireChanged(rows: { id: string }[] | null): void {
+  if (!rows || rows.length === 0) {
+    throw new AppError(REQUEST_ALREADY_HANDLED, { kind: 'conflict' });
+  }
+}
+
 /** requested → scheduled (the status trigger validates the transition). */
 export function useApproveRequest(shopId: string) {
   const invalidate = useInvalidateJobs(shopId);
   return useMutation({
     mutationFn: async (jobId: string) => {
-      unwrap(
-        await supabase
-          .from('jobs')
-          .update({ status: 'scheduled' })
-          .eq('shop_id', shopId)
-          .eq('id', jobId)
-          .eq('status', 'requested'),
+      requireChanged(
+        unwrap(
+          await supabase
+            .from('jobs')
+            .update({ status: 'scheduled' })
+            .eq('shop_id', shopId)
+            .eq('id', jobId)
+            .eq('status', 'requested')
+            .select('id'),
+        ),
       );
     },
     onSettled: invalidate,
@@ -179,13 +197,16 @@ export function useDeclineRequest(shopId: string) {
   const invalidate = useInvalidateJobs(shopId);
   return useMutation({
     mutationFn: async ({ jobId, reason }: { jobId: string; reason: string }) => {
-      unwrap(
-        await supabase
-          .from('jobs')
-          .update({ status: 'cancelled', cancel_reason: reason.trim() || null })
-          .eq('shop_id', shopId)
-          .eq('id', jobId)
-          .eq('status', 'requested'),
+      requireChanged(
+        unwrap(
+          await supabase
+            .from('jobs')
+            .update({ status: 'cancelled', cancel_reason: reason.trim() || null })
+            .eq('shop_id', shopId)
+            .eq('id', jobId)
+            .eq('status', 'requested')
+            .select('id'),
+        ),
       );
     },
     onSettled: invalidate,

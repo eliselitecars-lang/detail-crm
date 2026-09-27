@@ -2,7 +2,13 @@ import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { supabase as appSupabase } from '@/lib/supabase';
 import { renderRoute } from '@/test/render';
-import { createBuilder, resetSupabaseMock, setTableResult, supabase } from '@/test/supabaseMock';
+import {
+  builders,
+  createBuilder,
+  resetSupabaseMock,
+  setTableResult,
+  supabase,
+} from '@/test/supabaseMock';
 import QuoteDetailPage from './QuoteDetailPage';
 import { customerRow, quoteLineRow, quoteRow } from './testFixtures';
 
@@ -137,6 +143,92 @@ describe('QuoteDetailPage', () => {
       p_start: '2026-10-05T14:00:00.000Z',
       p_end: '2026-10-05T17:00:00.000Z',
     });
+  });
+
+  it('records which optional items the customer chose when staff mark it approved', async () => {
+    const { user } = setup(quoteRow({ status: 'sent', sent_at: '2026-09-21T10:00:00Z' }), [
+      quoteLineRow(),
+      quoteLineRow({
+        id: 'qli-2',
+        name: 'Ceramic top-up',
+        optional: true,
+        selected: false,
+        unit_price_cents: 5000,
+        total_cents: 5000,
+        sort: 2,
+      }),
+      quoteLineRow({
+        id: 'qli-3',
+        name: 'Headlight restore',
+        optional: true,
+        selected: false,
+        unit_price_cents: 3000,
+        total_cents: 3000,
+        sort: 3,
+      }),
+    ]);
+    await user.click(await screen.findByRole('button', { name: 'More quote actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /Mark approved/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Mark quote as approved' });
+    const topUp = within(dialog).getByRole('checkbox', { name: 'Ceramic top-up' });
+    expect(topUp).not.toBeChecked();
+    expect(within(dialog).getByRole('checkbox', { name: 'Headlight restore' })).not.toBeChecked();
+    await user.click(topUp);
+    await user.click(within(dialog).getByRole('button', { name: 'Mark approved' }));
+
+    await waitFor(() =>
+      expect(builders.quotes?.some((b) => b.update.mock.calls.length > 0)).toBe(true),
+    );
+    const lineUpdates = (builders.quote_line_items ?? []).filter(
+      (b) => b.update.mock.calls.length > 0,
+    );
+    expect(lineUpdates).toHaveLength(1); // only the line whose choice changed
+    expect(lineUpdates[0]?.update).toHaveBeenCalledWith({ selected: true });
+    expect(lineUpdates[0]?.eq).toHaveBeenCalledWith('id', 'qli-2');
+    expect(lineUpdates[0]?.eq).toHaveBeenCalledWith('optional', true);
+    const statusUpdate = builders.quotes?.find((b) => b.update.mock.calls.length > 0);
+    expect(statusUpdate?.update).toHaveBeenCalledWith({
+      status: 'approved',
+      approved_by_name: null,
+    });
+    // the choice is written before the quote locks on approval
+    const lineOrder = lineUpdates[0]?.update.mock.invocationCallOrder[0] ?? Infinity;
+    const statusOrder = statusUpdate?.update.mock.invocationCallOrder[0] ?? -Infinity;
+    expect(lineOrder).toBeLessThan(statusOrder);
+  });
+
+  it('duplicates with the shop’s current tax rate', async () => {
+    const { user } = setup(quoteRow({ tax_rate_bps: 500 }));
+    setTableResult('shops', { data: { tax_rate_bps: 925 } });
+    await user.click(await screen.findByRole('button', { name: 'More quote actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Duplicate' }));
+    await waitFor(() =>
+      expect(
+        builders.quotes?.find((b) => b.insert.mock.calls.length > 0)?.insert,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ tax_rate_bps: 925, customer_id: quoteRow().customer_id }),
+      ),
+    );
+    expect(await screen.findByText('Duplicated as quote #1001')).toBeInTheDocument();
+  });
+
+  it('removes the new draft when its lines fail to copy', async () => {
+    const { user } = setup();
+    await screen.findByRole('list', { name: 'Line items' });
+    setTableResult('quote_line_items', {
+      data: null,
+      error: { message: "the vehicle does not belong to this quote's customer", code: '23514' },
+    });
+    await user.click(await screen.findByRole('button', { name: 'More quote actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Duplicate' }));
+    await waitFor(() =>
+      expect(builders.quotes?.some((b) => b.delete.mock.calls.length > 0)).toBe(true),
+    );
+    const cleanup = builders.quotes?.find((b) => b.delete.mock.calls.length > 0);
+    expect(cleanup?.eq).toHaveBeenCalledWith('id', 'quote-1');
+    expect(
+      (await screen.findAllByText("The vehicle does not belong to this quote's customer.")).length,
+    ).toBeGreaterThan(0);
   });
 
   it('shows an error state with retry', async () => {

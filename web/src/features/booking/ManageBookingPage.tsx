@@ -50,6 +50,7 @@ import {
   usePublicBooking,
   type BookingDocument,
 } from './api';
+import { showsBalance } from './model';
 
 export default function ManageBookingPage() {
   const { token } = useParams();
@@ -122,14 +123,14 @@ function BookingDocumentView({
     ...(totals.paid_cents > 0
       ? [{ key: 'paid', label: 'Paid', cents: totals.paid_cents, negative: true }]
       : []),
-    ...(!closed || totals.balance_cents > 0
+    ...(showsBalance(booking.status, totals.balance_cents)
       ? [
           {
             key: 'balance',
             label: 'Balance',
             cents: totals.balance_cents,
             emphasis: true,
-            money: totals.balance_cents > 0 && booking.status !== 'cancelled',
+            money: totals.balance_cents > 0,
           },
         ]
       : []),

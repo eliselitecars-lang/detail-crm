@@ -134,6 +134,55 @@ test.describe('messages inbox', () => {
     await expect(page.getByRole('navigation', { name: 'Conversations' })).toBeVisible();
   });
 
+  test('an unread reply stays listed after a campaign blast fills the newest page', async ({
+    page,
+  }) => {
+    // 300 campaign sends (one INBOX_PAGE) newer than Casey's unread reply.
+    const blast = Array.from({ length: 300 }, (_, i) => {
+      const id = `50000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+      return {
+        ...inbound,
+        id,
+        customer_id: id,
+        customer: { ...casey, id, first_name: 'Recipient', last_name: String(i) },
+        campaign_id: '60000000-0000-4000-8000-000000000001',
+        direction: 'outbound',
+        status: 'queued',
+        body: 'Spring special: 20% off',
+        created_at: '2026-03-12T10:00:00Z',
+      };
+    });
+    const unreadRow = {
+      id: inbound.id,
+      customer_id: casey.id,
+      from_address: casey.phone,
+      created_at: inbound.created_at,
+    };
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: [],
+        messages: ({ url }) => {
+          const q = decodeURIComponent(url.search);
+          if (q.includes('read_at=is.null')) return [unreadRow];
+          if (q.includes('id=in.')) return q.includes(inbound.id) ? [inbound] : [];
+          return blast;
+        },
+        customers: [casey],
+        message_templates: [],
+      },
+    });
+    await page.goto('/app/messages');
+    await expect(page.getByText('1 unread message', { exact: true })).toBeVisible();
+    const conversations = page.getByRole('navigation', { name: 'Conversations' });
+    await conversations.getByRole('tab', { name: /Unread/ }).click();
+    const links = conversations.getByRole('link');
+    await expect(links).toHaveCount(1);
+    await expect(links.first()).toContainText('Casey Jones');
+    await expect(links.first()).toContainText('1 unread');
+  });
+
   test('technicians have no inbox', async ({ page }) => {
     await mockSupabase(page, {
       user: TECH,

@@ -17,9 +17,11 @@ import {
 import { errorMessage } from '@/lib/errors';
 import { useCan } from '@/features/shop/useCan';
 import {
+  useAddonSoleLinks,
   useCategories,
   useDeleteService,
   useService,
+  useServices,
   useServiceUsage,
   useUpdateService,
 } from './api';
@@ -185,9 +187,10 @@ function ServiceDetail({ service }: { service: ServiceRow }) {
         </div>
         <div className="flex min-w-0 flex-col gap-5">
           <ServiceImageCard service={service} canManage={canManage} />
-          {(service.kind === 'service' || service.kind === 'package') && (
-            <AddonsCard service={service} canManage={canManage} />
-          )}
+          {/* Any non-add-on can carry add-on links (services, packages and
+              products — the server and online booking honour them for all
+              three), so the card must stay reachable after a kind change. */}
+          {service.kind !== 'addon' && <AddonsCard service={service} canManage={canManage} />}
         </div>
       </div>
 
@@ -232,11 +235,17 @@ function DeleteServiceDialog({
   const navigate = useNavigate();
   const toast = useToast();
   const usage = useServiceUsage(service.id, true);
+  const isAddon = service.kind === 'addon';
+  const soleLinks = useAddonSoleLinks(service.id, isAddon);
+  const services = useServices();
   const remove = useDeleteService();
   const inUse = usage.data ? usageTotal(usage.data) > 0 : false;
   const archived = service.archived_at !== null;
+  // Only add-ons need the "which services would switch to all add-ons" check.
+  const linksPending = isAddon && (soleLinks.isPending || services.isPending);
+  const linksError = isAddon ? (soleLinks.error ?? services.error) : null;
 
-  if (usage.isPending || usage.error || inUse) {
+  if (usage.isPending || usage.error || inUse || linksPending || linksError) {
     return (
       <ConfirmDialog
         open
@@ -249,14 +258,28 @@ function DeleteServiceDialog({
           else onClose();
         }}
       >
-        {usage.isPending ? (
+        {usage.isPending || (!inUse && linksPending) ? (
           <p className="text-muted flex items-center gap-2 text-sm" role="status">
             <Spinner className="size-4" /> Checking where it’s used…
           </p>
-        ) : usage.error ? (
-          <p role="alert" className="text-danger-ink text-sm">
-            {errorMessage(usage.error)}
-          </p>
+        ) : usage.error || (!inUse && linksError) ? (
+          <div className="flex flex-col items-start gap-2">
+            <p role="alert" className="text-danger-ink text-sm">
+              {errorMessage(usage.error ?? linksError)}
+            </p>
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={usage.isRefetching || soleLinks.isRefetching || services.isRefetching}
+              onClick={() => {
+                if (usage.error) void usage.refetch();
+                if (soleLinks.error) void soleLinks.refetch();
+                if (services.error) void services.refetch();
+              }}
+            >
+              Try again
+            </Button>
+          </div>
         ) : (
           <p className="text-muted text-sm">
             It’s used by {describeUsage(usage.data)}, so it can’t be deleted.
@@ -267,6 +290,9 @@ function DeleteServiceDialog({
     );
   }
 
+  const nameOf = new Map((services.data ?? []).map((s) => [s.id, s.name]));
+  const widened = isAddon ? (soleLinks.data ?? []).map((id) => nameOf.get(id) ?? 'An item') : [];
+
   return (
     <ConfirmDialog
       open
@@ -274,8 +300,8 @@ function DeleteServiceDialog({
       tone="danger"
       loading={remove.isPending}
       title={`Delete ${service.name}?`}
-      description="It isn’t used on any job, quote, invoice, package or plan. Its prices, add-on links and image are removed too. This can’t be undone."
-      confirmLabel="Delete"
+      description="It isn’t used on any job, quote, invoice, package or plan. Its prices, add-on links and image are removed too, and checklists linked to it are no longer added automatically. This can’t be undone."
+      confirmLabel={widened.length > 0 ? 'Delete anyway' : 'Delete'}
       onConfirm={async () => {
         try {
           await remove.mutateAsync(service);
@@ -286,6 +312,28 @@ function DeleteServiceDialog({
           onClose();
         }
       }}
-    />
+    >
+      {widened.length > 0 && (
+        <div className="bg-warning-soft text-warning-ink rounded-control px-3 py-2 text-sm">
+          <p className="font-medium">
+            {widened.length === 1
+              ? `${widened[0] ?? ''} only offers this add-on.`
+              : 'These items only offer this add-on:'}
+          </p>
+          {widened.length > 1 && (
+            <ul className="mt-1 list-disc pl-5">
+              {widened.map((name, i) => (
+                <li key={`${name}-${i}`}>{name}</li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-1">
+            After deleting, {widened.length === 1 ? 'it' : 'they'} will offer every add-on —
+            including on online booking. Archive this add-on instead, or pick other add-ons for{' '}
+            {widened.length === 1 ? 'it' : 'them'} first.
+          </p>
+        </div>
+      )}
+    </ConfirmDialog>
   );
 }

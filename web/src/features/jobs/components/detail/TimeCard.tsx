@@ -43,8 +43,7 @@ export function TimeCard({ job }: { job: JobDetail }) {
           {open.length > 0 ? (
             <p className="flex flex-wrap items-center gap-2 text-sm">
               <Clock className="text-success size-4" aria-hidden="true" />
-              On the clock:{' '}
-              {open.map((e) => names.get(e.member_id) ?? 'Team member').join(', ')}
+              On the clock: {open.map((e) => names.get(e.member_id) ?? 'Team member').join(', ')}
             </p>
           ) : (
             <p className="text-muted text-sm">Nobody is clocked in on this job.</p>

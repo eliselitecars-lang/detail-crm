@@ -79,8 +79,16 @@ export function NotesCard({ job }: { job: JobDetail }) {
     <SectionCard title="Notes" level={3}>
       <div className="flex flex-col gap-3">
         {canManage ? (
-          <FormField label="Notes for the customer" help="Shown on the customer’s booking and documents.">
-            <Textarea rows={3} maxLength={20000} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          <FormField
+            label="Notes for the customer"
+            help="Shown on the customer’s booking and documents."
+          >
+            <Textarea
+              rows={3}
+              maxLength={20000}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+            />
           </FormField>
         ) : (
           job.notes && (
@@ -99,7 +107,12 @@ export function NotesCard({ job }: { job: JobDetail }) {
           />
         </FormField>
         <div>
-          <Button size="sm" loading={update.isPending} disabled={!dirty} onClick={() => void save()}>
+          <Button
+            size="sm"
+            loading={update.isPending}
+            disabled={!dirty}
+            onClick={() => void save()}
+          >
             Save notes
           </Button>
         </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type KeyboardEvent } from 'react';
 import {
   Button,
   Combobox,
@@ -150,38 +150,68 @@ function NewCustomerForm({
     }
   };
 
+  // Enter in a field saves this record instead of submitting the job form.
+  const submitOnEnter = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void submit();
+    }
+  };
+
   return (
-    <form
-      className="grid grid-cols-1 gap-3 sm:grid-cols-2"
-      aria-label="New customer"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void submit();
-      }}
-    >
+    // Not a <form>: this sits inside the New job form (forms can't nest).
+    <div role="group" className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-label="New customer">
       <FormField label="First name" error={errors.first}>
-        <Input value={first} maxLength={100} autoComplete="off" onChange={(e) => setFirst(e.target.value)} />
+        <Input
+          onKeyDown={submitOnEnter}
+          value={first}
+          maxLength={100}
+          autoComplete="off"
+          onChange={(e) => setFirst(e.target.value)}
+        />
       </FormField>
       <FormField label="Last name">
-        <Input value={last} maxLength={100} autoComplete="off" onChange={(e) => setLast(e.target.value)} />
+        <Input
+          onKeyDown={submitOnEnter}
+          value={last}
+          maxLength={100}
+          autoComplete="off"
+          onChange={(e) => setLast(e.target.value)}
+        />
       </FormField>
       <FormField label="Company" className="sm:col-span-2">
-        <Input value={company} maxLength={200} onChange={(e) => setCompany(e.target.value)} />
+        <Input
+          onKeyDown={submitOnEnter}
+          value={company}
+          maxLength={200}
+          onChange={(e) => setCompany(e.target.value)}
+        />
       </FormField>
       <FormField label="Mobile phone" error={errors.phone}>
-        <PhoneInput value={phone} onChange={setPhone} autoComplete="off" />
+        <PhoneInput
+          onKeyDown={submitOnEnter}
+          value={phone}
+          onChange={setPhone}
+          autoComplete="off"
+        />
       </FormField>
       <FormField label="Email" error={errors.email}>
-        <Input type="email" value={email} autoComplete="off" onChange={(e) => setEmail(e.target.value)} />
+        <Input
+          onKeyDown={submitOnEnter}
+          type="email"
+          value={email}
+          autoComplete="off"
+          onChange={(e) => setEmail(e.target.value)}
+        />
       </FormField>
       <div className="flex gap-2 sm:col-span-2">
-        <Button type="submit" loading={create.isPending}>
+        <Button loading={create.isPending} onClick={() => void submit()}>
           Create customer
         </Button>
         <Button type="button" variant="ghost" onClick={onCancel} disabled={create.isPending}>
           Cancel
         </Button>
       </div>
-    </form>
+    </div>
   );
 }

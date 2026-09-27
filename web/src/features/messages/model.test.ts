@@ -8,6 +8,7 @@ import {
   messagePreview,
   smsSegments,
   threadKey,
+  unreadThreadsOutside,
   type InboxMessage,
   type ThreadCustomer,
 } from './model';
@@ -100,6 +101,36 @@ describe('buildThreads', () => {
 
   it('skips outbound rows without a customer', () => {
     expect(buildThreads([msg({ customer_id: null, customer: null })], [])).toEqual([]);
+  });
+});
+
+describe('unreadThreadsOutside', () => {
+  const row = (
+    id: string,
+    customer_id: string | null,
+    created_at: string,
+    from: string | null = '+1205',
+  ) => ({
+    id,
+    customer_id,
+    from_address: from,
+    created_at,
+  });
+
+  it('returns the newest unread message of each thread missing from the page', () => {
+    const unread = [
+      row('u1', 'c1', '2026-03-01T09:00:00Z'),
+      row('u2', 'c1', '2026-03-02T09:00:00Z'),
+      row('u3', 'c2', '2026-03-03T09:00:00Z'),
+      row('u4', null, '2026-03-04T09:00:00Z', '+12055550199'),
+      row('u5', 'c3', '2026-03-05T09:00:00Z'),
+      row('u6', null, '2026-03-06T09:00:00Z', null),
+    ];
+    expect(unreadThreadsOutside(new Set(['c:c3']), unread, 10)).toEqual(['u4', 'u3', 'u2']);
+    expect(unreadThreadsOutside(new Set(['c:c3']), unread, 2)).toEqual(['u4', 'u3']);
+    expect(
+      unreadThreadsOutside(new Set(['c:c1', 'c:c2', 'c:c3', 'u:+12055550199']), unread, 10),
+    ).toEqual([]);
   });
 });
 

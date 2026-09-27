@@ -73,7 +73,7 @@ function useVehicleLabels(customerId: string) {
 }
 
 export function JobsTab({ customerId }: { customerId: string }) {
-  const { shopId, timezone } = useShop();
+  const { shopId, timezone, currency } = useShop();
   const showMoney = useCan('invoices.view');
   const canCreate = useCan('jobs.manage');
   const jobs = useCustomerJobs(shopId, customerId);
@@ -96,7 +96,9 @@ export function JobsTab({ customerId }: { customerId: string }) {
             key: 'total',
             header: 'Total',
             align: 'right' as const,
-            cell: (j: JobRow) => <span className="tabular">{formatCents(j.total_cents)}</span>,
+            cell: (j: JobRow) => (
+              <span className="tabular">{formatCents(j.total_cents, { currency })}</span>
+            ),
           },
         ]
       : []),
@@ -138,7 +140,7 @@ export function JobsTab({ customerId }: { customerId: string }) {
 }
 
 export function QuotesTab({ customerId }: { customerId: string }) {
-  const { shopId, timezone } = useShop();
+  const { shopId, timezone, currency } = useShop();
   const canView = useCan('quotes.view');
   const quotes = useCustomerQuotes(shopId, customerId, canView);
   const vehicle = useVehicleLabels(customerId);
@@ -167,7 +169,7 @@ export function QuotesTab({ customerId }: { customerId: string }) {
       key: 'total',
       header: 'Total',
       align: 'right',
-      cell: (q) => <span className="tabular">{formatCents(q.total_cents)}</span>,
+      cell: (q) => <span className="tabular">{formatCents(q.total_cents, { currency })}</span>,
     },
   ];
 
@@ -205,7 +207,7 @@ export function QuotesTab({ customerId }: { customerId: string }) {
 }
 
 export function InvoicesTab({ customerId }: { customerId: string }) {
-  const { shopId, timezone } = useShop();
+  const { shopId, timezone, currency } = useShop();
   const canView = useCan('invoices.view');
   const invoices = useCustomerInvoices(shopId, customerId, canView);
   type InvoiceRow = NonNullable<typeof invoices.data>[number];
@@ -232,7 +234,7 @@ export function InvoicesTab({ customerId }: { customerId: string }) {
       key: 'total',
       header: 'Total',
       align: 'right',
-      cell: (i) => <span className="tabular">{formatCents(i.total_cents)}</span>,
+      cell: (i) => <span className="tabular">{formatCents(i.total_cents, { currency })}</span>,
     },
     {
       key: 'balance',
@@ -246,7 +248,7 @@ export function InvoicesTab({ customerId }: { customerId: string }) {
               : 'tabular'
           }
         >
-          {formatCents(i.balance_cents)}
+          {formatCents(i.balance_cents, { currency })}
         </span>
       ),
     },
@@ -272,7 +274,7 @@ export function InvoicesTab({ customerId }: { customerId: string }) {
 }
 
 export function MembershipsTab({ customerId }: { customerId: string }) {
-  const { shopId, timezone } = useShop();
+  const { shopId, timezone, currency } = useShop();
   const canView = useCan('memberships.view');
   const memberships = useCustomerMemberships(shopId, customerId, canView);
   const vehicle = useVehicleLabels(customerId);
@@ -301,7 +303,8 @@ export function MembershipsTab({ customerId }: { customerId: string }) {
       key: 'price',
       header: 'Price',
       hideOnMobile: true,
-      cell: (m) => (m.plan ? `${formatCents(m.plan.price_cents)}${interval(m)}` : '—'),
+      cell: (m) =>
+        m.plan ? `${formatCents(m.plan.price_cents, { currency })}${interval(m)}` : '—',
     },
     {
       key: 'renews',

@@ -35,10 +35,15 @@ export function parseListParams(params: URLSearchParams): CustomerListFilters {
   };
 }
 
-/** Only non-default values are written, keeping URLs short. */
+/**
+ * Only non-default values are written, keeping URLs short. The search text is
+ * written as typed (not trimmed): the search box re-syncs from this value, so
+ * trimming here would eat the space after a word when the user pauses
+ * ("jane " → "jane" → "janedoe"). Terms are trimmed when patterns are built.
+ */
 export function toListParams(f: CustomerListFilters): URLSearchParams {
   const params = new URLSearchParams();
-  if (f.search.trim()) params.set('q', f.search.trim());
+  if (f.search.trim()) params.set('q', f.search);
   if (f.tag) params.set('tag', f.tag);
   if (f.lifecycle) params.set('lifecycle', f.lifecycle);
   if (f.archived !== 'active') params.set('archived', f.archived);

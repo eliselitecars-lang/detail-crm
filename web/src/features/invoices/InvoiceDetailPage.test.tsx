@@ -23,12 +23,14 @@ function setup(
   options: {
     role?: 'owner' | 'manager' | 'technician';
     invoice?: ReturnType<typeof invoiceRow>;
+    lines?: ReturnType<typeof invoiceLineRow>[];
+    payments?: ReturnType<typeof paymentRow>[];
   } = {},
 ) {
   const invoice = options.invoice ?? invoiceRow();
   setTableResult('invoices', { data: invoice });
-  setTableResult('invoice_line_items', { data: [invoiceLineRow()] });
-  setTableResult('payments', { data: [paymentRow()] });
+  setTableResult('invoice_line_items', { data: options.lines ?? [invoiceLineRow()] });
+  setTableResult('payments', { data: options.payments ?? [paymentRow()] });
   setTableResult('customers', { data: customerRow() });
   setTableResult('vehicles', { data: [] });
   setTableResult('customer_payment_methods', {
@@ -54,6 +56,10 @@ function setup(
     routePath: '/app/invoices/:invoiceId',
     shop: shopValue({ membership: current }),
   });
+}
+
+function edgeHttpError(status: number, body: Record<string, unknown>) {
+  return new FunctionsHttpError(new Response(JSON.stringify(body), { status }));
 }
 
 beforeEach(() => {
@@ -161,9 +167,187 @@ describe('InvoiceDetailPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Refund $115.00' }));
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith('payments', {
-        body: { action: 'refund', shop_id: 'shop-1', payment_id: 'pay-1', amount_cents: 11500 },
+        body: {
+          action: 'refund',
+          shop_id: 'shop-1',
+          payment_id: 'pay-1',
+          amount_cents: 11500,
+          request_nonce: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/) as unknown,
+        },
       }),
     );
+  });
+
+  it('keeps the refund nonce for a retry after a server error and renews it after a definitive answer', async () => {
+    invoke
+      .mockResolvedValueOnce({
+        data: null,
+        error: edgeHttpError(503, { error: 'Stripe is unavailable.', code: 'upstream_error' }),
+        response: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: null,
+        error: edgeHttpError(422, {
+          error: 'The refund is more than the refundable amount.',
+          code: 'unprocessable',
+          details: { reason: 'amount_exceeds_refundable' },
+        }),
+        response: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: {
+          payment_id: 'pay-1',
+          refund_id: 're_2',
+          refund_status: 'succeeded',
+          amount_cents: 1000,
+          refunded_cents_total: 2000,
+          payment_status: 'partially_refunded',
+        },
+        error: null,
+        response: undefined,
+      });
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: /Refund Visa •••• 4242 payment/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Refund payment' });
+    const amount = within(dialog).getByLabelText(/Refund amount/);
+    await user.clear(amount);
+    await user.type(amount, '10');
+    const refundButton = within(dialog).getByRole('button', { name: 'Refund $10.00' });
+    await user.click(refundButton);
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(refundButton).toBeEnabled());
+    await user.click(refundButton);
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(refundButton).toBeEnabled());
+    await user.click(refundButton);
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+    const nonces = invoke.mock.calls.map(([, options]) => {
+      const body: unknown = options?.body;
+      return (body as { request_nonce?: string }).request_nonce;
+    });
+    expect(nonces[0]).toBeTruthy();
+    expect(nonces[1]).toBe(nonces[0]); // same attempt retried: Stripe replays, never refunds twice
+    expect(nonces[2]).not.toBe(nonces[1]); // a new attempt after a definitive refusal
+    expect(await screen.findByText('$10.00 refunded')).toBeInTheDocument();
+  });
+
+  it('shows the in-flight payment hold and releases it with cancel_open_payments', async () => {
+    invoke.mockResolvedValueOnce({
+      data: {
+        invoice_id: 'inv-1',
+        cancelled: 1,
+        succeeded: 0,
+        in_progress: 0,
+        sessions_expired: 1,
+      },
+      error: null,
+      response: undefined,
+    });
+    const { user } = setup({
+      payments: [
+        paymentRow({
+          id: 'pay-2',
+          status: 'pending',
+          paid_at: null,
+          created_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+        }),
+      ],
+    });
+    const hold = await screen.findByText('A card payment is in progress on this invoice.');
+    const banner = hold.closest('[role="status"]');
+    expect(banner).not.toBeNull();
+    await user.click(
+      within(banner as HTMLElement).getByRole('button', { name: 'Cancel open payments' }),
+    );
+    const dialog = await screen.findByRole('alertdialog', { name: 'Cancel open card payments?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel open payments' }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('payments', {
+        body: { action: 'cancel_open_payments', shop_id: 'shop-1', invoice_id: 'inv-1' },
+      }),
+    );
+    expect(await screen.findByText('1 open payment cancelled')).toBeInTheDocument();
+    expect(screen.getByText('1 open pay link was expired.')).toBeInTheDocument();
+  });
+
+  it('does not show the hold for an abandoned pending payment older than an hour', async () => {
+    setup({
+      payments: [
+        paymentRow({
+          id: 'pay-2',
+          status: 'pending',
+          paid_at: null,
+          created_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+        }),
+      ],
+    });
+    await screen.findByRole('heading', { name: 'Invoice #2001', level: 1 });
+    await screen.findByRole('list', { name: 'Payments' });
+    expect(
+      screen.queryByText('A card payment is in progress on this invoice.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('offers to cancel open payments when a void is refused for an in-flight payment', async () => {
+    supabase.rpc.mockReturnValue(
+      createBuilder({
+        data: null,
+        error: {
+          message: 'a payment is in progress on this invoice; wait for it to finish',
+          code: '22023',
+        },
+      }),
+    );
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: 'More invoice actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /Void invoice/ }));
+    const dialog = await screen.findByRole('alertdialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Void invoice' }));
+    const toastTitle = await screen.findByText('A card payment is in progress on this invoice', {
+      selector: '[role="status"] *, [role="alert"] *',
+    });
+    expect(toastTitle).toBeInTheDocument();
+    // the hold banner is shown too
+    expect(
+      await screen.findByText('A card payment is in progress on this invoice.'),
+    ).toBeInTheDocument();
+    const toastAction = screen.getAllByRole('button', { name: 'Cancel open payments' });
+    expect(toastAction.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('managers get a Cancel open payments action on an open invoice', async () => {
+    const { user } = setup({ role: 'manager' });
+    await user.click(await screen.findByRole('button', { name: 'More invoice actions' }));
+    expect(screen.getByRole('menuitem', { name: /Cancel open payments/ })).toBeInTheDocument();
+  });
+
+  it('a draft shows "Not issued yet" instead of a paid-in-full balance', async () => {
+    setup({
+      role: 'manager',
+      lines: [],
+      invoice: invoiceRow({
+        status: 'draft',
+        subtotal_cents: 0,
+        total_cents: 0,
+        amount_paid_cents: 0,
+        balance_cents: 0,
+        issued_at: null,
+        sent_at: null,
+        due_at: null,
+      }),
+      payments: [],
+    });
+    expect(await screen.findByText('Not issued yet')).toBeInTheDocument();
+    expect(screen.queryByText('Paid in full')).not.toBeInTheDocument();
+    expect(screen.queryByText('Paid')).not.toBeInTheDocument();
+  });
+
+  it('won’t clear the due date of an issued invoice', async () => {
+    const { user } = setup({ role: 'manager' });
+    const due = await screen.findByLabelText(/Due date/);
+    await user.clear(due);
+    expect(await screen.findByText('An issued invoice needs a due date.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save details' })).toBeDisabled();
   });
 
   it('technicians (when allowed) can collect but not charge cards, refund, void or send', async () => {

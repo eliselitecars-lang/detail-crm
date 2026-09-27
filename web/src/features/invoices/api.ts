@@ -4,18 +4,19 @@
  * payments; this module writes content (due date, notes, discount, lines),
  * calls the RPCs (create_invoice, mark_invoice_sent, record_manual_payment,
  * refund_manual_payment, void_invoice) and the `payments` edge function for
- * card money (charge_saved_card, refund). Nothing money-related is computed
+ * card money (charge_saved_card, refund, cancel_open_payments). Nothing money-related is computed
  * here.
  */
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { pageRange } from '@/components/ui';
 import { unwrap, unwrapRequired, type Row, type UpdateRow } from '@/lib/db';
+import { errorMessage } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
 import { unwrapList } from '@/features/quotes/shared/db';
-import { invokeEdge } from '@/features/quotes/shared/edge';
+import { EdgeFunctionError, invokeEdge } from '@/features/quotes/shared/edge';
 import { escapeLike, newRequestNonce, parseDocNumber } from '@/features/quotes/shared/format';
 import {
   nextSorts,
@@ -455,6 +456,93 @@ export function useChargeSavedCard(invoiceId: string) {
   });
 }
 
+export const cancelOpenPaymentsResultSchema = z.object({
+  invoice_id: z.string(),
+  cancelled: z.number().int(),
+  succeeded: z.number().int(),
+  in_progress: z.number().int(),
+  sessions_expired: z.number().int(),
+});
+
+export type CancelOpenPaymentsResult = z.infer<typeof cancelOpenPaymentsResultSchema>;
+
+/**
+ * payments.cancel_open_payments (manager+ in the UI): cancels the invoice's
+ * unconfirmed card sheets and expires its open Checkout links, releasing the
+ * hold that blocks void / line / discount edits and saved-card charges.
+ * Payments already processing are reported (in_progress), never cancelled;
+ * ones that already took the money are recorded (succeeded).
+ */
+export function useCancelOpenPayments(invoiceId: string) {
+  const { shopId } = useShop();
+  const invalidate = useInvalidateMoney();
+  return useMutation({
+    mutationFn: () =>
+      invokeEdge(
+        'payments',
+        'cancel_open_payments',
+        { shop_id: shopId, invoice_id: invoiceId },
+        cancelOpenPaymentsResultSchema,
+      ),
+    onSettled: invalidate,
+  });
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** Toast text for a cancel_open_payments result. */
+export function cancelOpenPaymentsSummary(result: CancelOpenPaymentsResult): {
+  title: string;
+  description?: string;
+} {
+  const notes: string[] = [];
+  if (result.succeeded > 0) {
+    notes.push(
+      `${plural(result.succeeded, 'payment had already gone through and was', 'payments had already gone through and were')} recorded.`,
+    );
+  }
+  if (result.in_progress > 0) {
+    notes.push(
+      `${plural(result.in_progress, 'payment is', 'payments are')} still being processed by the bank and can’t be cancelled; the invoice updates when it finishes.`,
+    );
+  }
+  if (result.sessions_expired > 0) {
+    notes.push(
+      `${plural(result.sessions_expired, 'open pay link was', 'open pay links were')} expired.`,
+    );
+  }
+  const title =
+    result.cancelled > 0
+      ? `${plural(result.cancelled, 'open payment', 'open payments')} cancelled`
+      : result.in_progress > 0
+        ? 'A payment is still processing'
+        : 'No open payments to cancel';
+  return notes.length > 0 ? { title, description: notes.join(' ') } : { title };
+}
+
+/** Mirrors public.payment_in_flight: a pending payment started within the last hour. */
+export const PAYMENT_IN_FLIGHT_MS = 60 * 60 * 1000;
+
+export function isPaymentInFlight(
+  payment: Pick<InvoicePayment, 'status' | 'created_at'>,
+  now: Date = new Date(),
+): boolean {
+  return (
+    payment.status === 'pending' &&
+    now.getTime() - new Date(payment.created_at).getTime() < PAYMENT_IN_FLIGHT_MS
+  );
+}
+
+/**
+ * Whether a failure was the server refusing because a card payment is in
+ * flight on the invoice (line/discount guards, void_invoice, the payments
+ * function's payment_in_progress conflict).
+ */
+export function isPaymentInProgressError(error: unknown): boolean {
+  if (error instanceof EdgeFunctionError && error.reason === 'payment_in_progress') return true;
+  return /payment is in progress on this invoice/i.test(errorMessage(error));
+}
+
 export const refundResultSchema = z.object({
   payment_id: z.string(),
   refund_id: z.string(),
@@ -467,6 +555,13 @@ export const refundResultSchema = z.object({
 export interface RefundInput {
   payment: Pick<InvoicePayment, 'id' | 'method'>;
   amountCents: number;
+  /**
+   * Idempotency nonce of this refund attempt (card refunds). Reuse it only to
+   * retry the same attempt after a network/server failure; a new refund gets
+   * a new one, so a second partial refund of the same amount is never taken
+   * for a replay of the first.
+   */
+  nonce: string;
 }
 
 /**
@@ -477,12 +572,17 @@ export function useRefundPayment() {
   const { shopId } = useShop();
   const invalidate = useInvalidateMoney();
   return useMutation({
-    mutationFn: async ({ payment, amountCents }: RefundInput) => {
+    mutationFn: async ({ payment, amountCents, nonce }: RefundInput) => {
       if (payment.method === 'card' || payment.method === 'card_present') {
         await invokeEdge(
           'payments',
           'refund',
-          { shop_id: shopId, payment_id: payment.id, amount_cents: amountCents },
+          {
+            shop_id: shopId,
+            payment_id: payment.id,
+            amount_cents: amountCents,
+            request_nonce: nonce,
+          },
           refundResultSchema,
         );
         return;

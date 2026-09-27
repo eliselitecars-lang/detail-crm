@@ -66,9 +66,17 @@ export function InvoiceDetailsCard({
   const original = draftOf(invoice, timezone);
   const dirty = JSON.stringify(original) !== JSON.stringify(draft);
   const dueChanged = draft.dueDate !== original.dueDate;
-  const dueError =
-    !dueChanged || draft.dueDate === ''
-      ? undefined
+  // Once issued, an empty due date is not "no due date": invoices_compute
+  // puts it back to issue time + the shop's default terms (often 0 days),
+  // which is already past and flips the invoice to Overdue. Only drafts may
+  // leave it empty (the default is applied when the invoice is sent).
+  const issued = invoice.status !== 'draft';
+  const dueError = !dueChanged
+    ? undefined
+    : draft.dueDate === ''
+      ? issued
+        ? 'An issued invoice needs a due date.'
+        : undefined
       : !isLocalDate(draft.dueDate)
         ? 'Enter a valid date.'
         : draft.dueDate < today
@@ -214,8 +222,9 @@ export function InvoiceDetailsCard({
         <FormField
           label="Due date"
           error={dueError}
+          required={issued}
           help={
-            invoice.status === 'draft' && !draft.dueDate
+            !issued && !draft.dueDate
               ? 'Leave empty to use your shop’s default payment terms when it’s sent.'
               : 'Due through the end of this day (shop time).'
           }

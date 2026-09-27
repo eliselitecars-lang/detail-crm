@@ -65,4 +65,57 @@ test.describe('notifications page', () => {
     await earlier.getByRole('link', { name: 'Open job' }).click();
     await expect(page).toHaveURL(new RegExp(`/app/jobs/${JOB_ID}$`));
   });
+
+  test('unread past the first page can be loaded, and a failed mark-read is announced', async ({
+    page,
+  }) => {
+    const unread = Array.from({ length: 55 }, (_, i) => ({
+      id: `u-${i}`,
+      kind: 'general',
+      title: `Unread number ${i + 1}`,
+      body: null,
+      job_id: null,
+      read_at: null,
+      created_at: new Date(Date.UTC(2026, 8, 27, 14, 0) - i * 60_000).toISOString(),
+    }));
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: ({ url, method }) => {
+          if (method === 'PATCH') return [];
+          if (url.searchParams.get('read_at') !== 'is.null') return [];
+          const offset = Number(url.searchParams.get('offset') ?? '0');
+          const limit = Number(url.searchParams.get('limit') ?? '1000');
+          return unread.slice(offset, offset + limit);
+        },
+      },
+      counts: { notifications: 55 },
+    });
+    // Writes fail (e.g. the connection dropped).
+    await page.route('https://e2e-mock.supabase.co/rest/v1/notifications?*', (route) =>
+      route.request().method() === 'PATCH'
+        ? route.fulfill({
+            status: 503,
+            contentType: 'application/json',
+            headers: { 'access-control-allow-origin': '*' },
+            body: JSON.stringify({ code: '08006', message: 'connection failure' }),
+          })
+        : route.fallback(),
+    );
+
+    await page.goto('/app/notifications');
+    const list = page.getByRole('list', { name: 'Unread notifications' });
+    await expect(list.getByRole('listitem')).toHaveCount(50);
+    await expect(page.getByText('55 new')).toBeVisible();
+    await page.getByRole('button', { name: 'Show more unread (5 more)' }).click();
+    await expect(list.getByText('Unread number 55')).toBeVisible();
+    await expect(list.getByRole('listitem')).toHaveCount(55);
+
+    await list.getByRole('listitem').first().getByRole('button', { name: 'Mark read' }).click();
+    await expect(page.getByText('Couldn’t mark the notification read')).toBeVisible();
+    await expect(
+      list.getByRole('listitem').first().getByRole('button', { name: 'Mark read' }),
+    ).toBeVisible();
+  });
 });

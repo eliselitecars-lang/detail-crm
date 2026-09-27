@@ -77,7 +77,12 @@ export function ServicesTab({ canManage, onNew }: ServicesTabProps) {
     {
       key: 'category',
       header: 'Category',
-      cell: (s) => (s.category_id ? (categoryName.get(s.category_id) ?? '—') : '—'),
+      cell: (s) => {
+        if (!s.category_id) return '—';
+        if (categories.isPending) return <span aria-label="Loading">…</span>;
+        if (categories.error) return <span className="text-subtle">Unavailable</span>;
+        return categoryName.get(s.category_id) ?? '—';
+      },
     },
     {
       key: 'duration',
@@ -90,7 +95,9 @@ export function ServicesTab({ canManage, onNew }: ServicesTabProps) {
       header: 'Base price',
       align: 'right',
       cell: (s) => {
-        if (prices.isPending) return '…';
+        if (prices.isPending) return <span aria-label="Loading">…</span>;
+        // Never claim "Not set" when the prices simply failed to load.
+        if (prices.error) return <span className="text-subtle">Unavailable</span>;
         const cents = prices.data?.get(s.id);
         return cents === undefined ? (
           <span className="text-subtle">Not set</span>
@@ -159,16 +166,34 @@ export function ServicesTab({ canManage, onNew }: ServicesTabProps) {
         description="Try another search, type or show archived items."
       />
     );
-  else
+  else {
+    const detailsError = prices.error ?? categories.error;
     body = (
-      <Table
-        caption="Catalog items"
-        columns={columns}
-        rows={rows}
-        getRowId={(s) => s.id}
-        rowHref={(s) => `/app/catalog/services/${s.id}`}
-      />
+      <>
+        {detailsError && (
+          <div className="border-line border-b">
+            <ErrorState
+              compact
+              error={detailsError}
+              title={prices.error ? 'Couldn’t load base prices' : 'Couldn’t load category names'}
+              onRetry={() => {
+                if (prices.error) void prices.refetch();
+                if (categories.error) void categories.refetch();
+              }}
+              retrying={prices.isRefetching || categories.isRefetching}
+            />
+          </div>
+        )}
+        <Table
+          caption="Catalog items"
+          columns={columns}
+          rows={rows}
+          getRowId={(s) => s.id}
+          rowHref={(s) => `/app/catalog/services/${s.id}`}
+        />
+      </>
     );
+  }
 
   return (
     <SectionCard

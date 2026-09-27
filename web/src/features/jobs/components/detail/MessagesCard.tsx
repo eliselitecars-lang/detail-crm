@@ -25,7 +25,7 @@ export function MessagesCard({ job }: { job: JobDetail }) {
   const canSend = useCan('messages.sendJobUpdates');
   const canReadInbox = useCan('messages.inbox');
   const toast = useToast();
-  const messages = useJobMessages(job.id, canReadInbox);
+  const messages = useJobMessages(job.id, job.customer_id, canReadInbox);
   const send = useSendJobTemplate(job.id);
   const [channel, setChannel] = useState<'sms' | 'email'>(job.customer?.phone ? 'sms' : 'email');
 
@@ -90,7 +90,7 @@ export function MessagesCard({ job }: { job: JobDetail }) {
           ) : messages.isError ? (
             <ErrorState compact error={messages.error} onRetry={() => void messages.refetch()} />
           ) : messages.data.length === 0 ? (
-            <p className="text-muted text-sm">No messages for this job yet.</p>
+            <p className="text-muted text-sm">No messages with this customer yet.</p>
           ) : (
             <ul className="flex flex-col gap-3">
               {messages.data.map((m) => (
@@ -98,7 +98,9 @@ export function MessagesCard({ job }: { job: JobDetail }) {
                   <div className="text-muted mb-1 flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span>
                       {m.direction === 'inbound' ? 'From customer' : 'To customer'} ·{' '}
-                      {m.channel === 'sms' ? 'Text' : 'Email'} · {formatDateTime(m.created_at, timezone)}
+                      {m.channel === 'sms' ? 'Text' : 'Email'} ·{' '}
+                      {formatDateTime(m.created_at, timezone)}
+                      {m.job_id === null ? ' · not linked to a job' : ''}
                     </span>
                     <StatusBadge kind="message" status={m.status} />
                   </div>

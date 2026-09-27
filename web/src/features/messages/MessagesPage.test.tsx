@@ -1,7 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { renderRoute } from '@/test/render';
-import { builders, resetSupabaseMock, setTableResult, supabase } from '@/test/supabaseMock';
+import {
+  builders,
+  createBuilder,
+  resetSupabaseMock,
+  setTableResult,
+  supabase,
+  type MockResult,
+} from '@/test/supabaseMock';
 import MessagesPage from './MessagesPage';
 
 vi.mock('@/lib/supabase', async () => {
@@ -68,6 +75,61 @@ describe('MessagesPage', () => {
     expect(link).toHaveTextContent('1 unread');
     expect(link).toHaveAttribute('href', '/app/messages?customer=c1');
     expect(screen.getByRole('heading', { name: 'Messages', level: 1 })).toBeInTheDocument();
+  });
+
+  it('keeps unread conversations listed and counted after a campaign blast', async () => {
+    // The newest page is all campaign sends; Casey's unread reply is older.
+    const blast = Array.from({ length: 3 }, (_, i) =>
+      message({
+        id: `camp-${i}`,
+        customer_id: `x${i}`,
+        customer: { ...casey, id: `x${i}`, first_name: `Recipient ${i}` },
+        campaign_id: 'camp',
+        direction: 'outbound',
+        status: 'queued',
+        body: 'Spring special',
+        created_at: '2026-03-12T10:00:00Z',
+      }),
+    );
+    const reply = message({ id: 'reply', created_at: '2026-03-10T14:00:00Z' });
+    const unread = [
+      { id: 'reply', customer_id: 'c1', from_address: casey.phone, created_at: reply.created_at },
+    ];
+    const original = supabase.from.getMockImplementation();
+    supabase.from.mockImplementation((table: string) => {
+      if (table !== 'messages' || !original) return original ? original(table) : createBuilder();
+      const builder = createBuilder();
+      (builders.messages ??= []).push(builder);
+      const result = (): MockResult =>
+        builder.in.mock.calls.length > 0
+          ? { data: [reply] }
+          : builder.is.mock.calls.length > 0
+            ? { data: unread, count: 7 }
+            : { data: blast };
+      (builder as { then: PromiseLike<MockResult>['then'] }).then = (ok, fail) =>
+        Promise.resolve({ error: null, count: null, ...result() }).then(ok, fail);
+      return builder;
+    });
+    try {
+      const { user } = renderRoute(<MessagesPage />, {
+        path: '/app/messages',
+        routePath: '/app/messages',
+      });
+      const nav = await screen.findByRole('navigation', { name: 'Conversations' });
+      const link = await within(nav).findByRole('link', { name: /Casey Jones/ });
+      expect(link).toHaveTextContent('1 unread');
+      expect(within(nav).getAllByRole('link')).toHaveLength(4);
+      // The header counts every unread message, not just the listed threads'.
+      expect(screen.getByText('7 unread messages')).toBeInTheDocument();
+      const extra = builders.messages?.find((b) => b.in.mock.calls.length > 0);
+      expect(extra?.in).toHaveBeenCalledWith('id', ['reply']);
+
+      await user.click(within(nav).getByRole('tab', { name: /Unread/ }));
+      expect(within(nav).getAllByRole('link')).toHaveLength(1);
+      expect(within(nav).getByRole('link')).toHaveTextContent('Casey Jones');
+    } finally {
+      if (original) supabase.from.mockImplementation(original);
+    }
   });
 
   it('shows the empty state with a way to start a conversation', async () => {

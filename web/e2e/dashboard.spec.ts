@@ -70,8 +70,10 @@ test.describe('dashboard', () => {
         jobs: ({ method, body }) => {
           if (method === 'PATCH') {
             updates.push(body);
-            return [];
+            // `.select('id')`: the guarded update returns the changed row.
+            return [{ id: 'job-9' }];
           }
+          if (updates.length > 0) return [];
           return [
             {
               id: 'job-9',
@@ -106,6 +108,54 @@ test.describe('dashboard', () => {
     await requests.getByRole('button', { name: 'Approve booking from Sam Lee' }).click();
     await expect(page.getByText('Booking approved')).toBeVisible();
     expect(updates).toContainEqual({ status: 'scheduled' });
+  });
+
+  test('company-only customers show by name, and a stale approval is not reported as done', async ({
+    page,
+  }) => {
+    let handledElsewhere = false;
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: [],
+        time_entries: [],
+        customers: [{ id: 'c-9', first_name: 'Sam', last_name: 'Lee', company: null }],
+        jobs: ({ method }) => {
+          if (method === 'PATCH') {
+            // Another manager approved it first: the status guard matches nothing.
+            handledElsewhere = true;
+            return [];
+          }
+          if (handledElsewhere) return [];
+          return [
+            {
+              id: 'job-9',
+              number: 1050,
+              scheduled_start: '2026-09-29T14:00:00Z',
+              scheduled_end: '2026-09-29T16:00:00Z',
+              location_type: 'shop',
+              created_at: '2026-09-26T10:00:00Z',
+              customer_id: 'c-9',
+            },
+          ];
+        },
+      },
+      rpc: {
+        dashboard_summary: summary('shop'),
+        calendar_events: [{ ...JOB, customer_name: null, title: 'Acme Fleet — Exterior Wash' }],
+        report_team: [],
+      },
+    });
+    await page.goto('/app');
+    const schedule = page.getByRole('region', { name: 'Today’s schedule' });
+    await expect(schedule.getByRole('link', { name: /Acme Fleet · #1001/ })).toBeVisible();
+
+    const requests = page.getByRole('region', { name: 'Booking requests' });
+    await requests.getByRole('button', { name: 'Approve booking from Sam Lee' }).click();
+    await expect(page.getByText(/This request was already handled/)).toBeVisible();
+    await expect(page.getByText('Booking approved')).toHaveCount(0);
+    await expect(requests.getByText('No requests waiting')).toBeVisible();
   });
 
   test('technician sees their jobs and clocks in', async ({ page }) => {

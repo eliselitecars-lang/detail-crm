@@ -128,7 +128,9 @@ export function DiscountDialog({ job, onClose }: { job: JobDetail; onClose: () =
           ) : (
             <FormField
               label="Coupon"
-              help={coupons.data.length === 0 ? 'No active coupons. Add one in Settings.' : undefined}
+              help={
+                coupons.data.length === 0 ? 'No active coupons. Add one in Settings.' : undefined
+              }
             >
               <Select
                 value={couponId}

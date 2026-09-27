@@ -1,5 +1,5 @@
 import { Plus, Users } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import {
   Badge,
@@ -64,6 +64,20 @@ export default function CustomersPage() {
   const update = (patch: Partial<CustomerListFilters>) => {
     setParams(toListParams({ ...filters, page: 1, ...patch }), { replace: true });
   };
+
+  // A page past the end (stale link, or back after archiving shrank the
+  // list) is not "no customers": step back to the last page that has rows.
+  const lastPage = list.data ? Math.max(1, Math.ceil(list.data.total / filters.pageSize)) : 1;
+  const pastEnd =
+    list.isSuccess &&
+    !list.isPlaceholderData &&
+    list.data.rows.length === 0 &&
+    filters.page > 1 &&
+    filters.page > lastPage;
+  const clampTo = pastEnd ? toListParams({ ...filters, page: lastPage }).toString() : null;
+  useEffect(() => {
+    if (clampTo !== null) setParams(new URLSearchParams(clampTo), { replace: true });
+  }, [clampTo, setParams]);
 
   const filtered =
     filters.search.trim() !== '' ||
@@ -199,7 +213,7 @@ export default function CustomersPage() {
           </div>
         </div>
 
-        {list.isPending ? (
+        {list.isPending || pastEnd ? (
           <LoadingState variant="rows" rows={6} label="Loading customers…" />
         ) : list.isError ? (
           <ErrorState

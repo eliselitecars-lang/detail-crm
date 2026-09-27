@@ -12,7 +12,14 @@ import {
 } from '@/test/supabaseMock';
 import DashboardPage from './DashboardPage';
 import { scheduleRow, shopSummary, techSummary } from './fixtures.test-data';
-import { dashboardSummarySchema, formatDuration, servicesFromTitle } from './summary';
+import { REQUEST_ALREADY_HANDLED } from './api';
+import {
+  customerFromTitle,
+  dashboardSummarySchema,
+  formatDuration,
+  scheduleCustomerLabel,
+  servicesFromTitle,
+} from './summary';
 
 vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
@@ -50,6 +57,19 @@ describe('dashboard summary helpers', () => {
     expect(servicesFromTitle('Jane — Full Detail')).toBe('Full Detail');
     expect(servicesFromTitle('Jane')).toBeNull();
     expect(servicesFromTitle(null)).toBeNull();
+  });
+
+  it('labels company-only (fleet) customers from the calendar title', () => {
+    expect(customerFromTitle('Acme Fleet — Full Detail')).toBe('Acme Fleet');
+    expect(customerFromTitle('Acme Fleet')).toBe('Acme Fleet');
+    expect(customerFromTitle(null)).toBeNull();
+    expect(scheduleCustomerLabel({ customer_name: 'Jane Doe', title: 'Jane Doe — X' })).toBe(
+      'Jane Doe',
+    );
+    expect(scheduleCustomerLabel({ customer_name: null, title: 'Acme Fleet — Wash' })).toBe(
+      'Acme Fleet',
+    );
+    expect(scheduleCustomerLabel({ customer_name: null, title: null })).toBe('Customer');
   });
 });
 
@@ -154,6 +174,90 @@ describe('DashboardPage (manager+)', () => {
       status: 'cancelled',
       cancel_reason: 'Fully booked that day',
     });
+  });
+
+  it('shows fleet jobs on today’s schedule by company name', async () => {
+    rpcResults.dashboard_summary = { data: shopSummary };
+    rpcResults.calendar_events = {
+      data: [scheduleRow({ customer_name: null, title: 'Acme Fleet — Exterior Wash' })],
+    };
+    setTableResult('jobs', { data: [] });
+    setTableResult('time_entries', { data: [] });
+    setup();
+    const schedule = await screen.findByRole('region', { name: 'Today’s schedule' });
+    const job = await within(schedule).findByRole('link', { name: /Acme Fleet/ });
+    expect(job).toHaveAttribute('href', '/app/jobs/job-1');
+    expect(within(schedule).queryByText(/^Customer/)).not.toBeInTheDocument();
+  });
+
+  it('says so when a request was already handled elsewhere (no false success)', async () => {
+    rpcResults.dashboard_summary = { data: shopSummary };
+    rpcResults.calendar_events = { data: [] };
+    setTableResult('time_entries', { data: [] });
+    setTableResult('customers', {
+      data: [{ id: 'c-9', first_name: 'Sam', last_name: 'Lee', company: null }],
+    });
+    const request = {
+      id: 'job-9',
+      number: 1050,
+      scheduled_start: '2026-09-29T14:00:00Z',
+      scheduled_end: '2026-09-29T16:00:00Z',
+      location_type: 'shop',
+      created_at: '2026-09-26T10:00:00Z',
+      customer_id: 'c-9',
+    };
+    setTableResult('jobs', { data: [request] });
+    const { user } = setup();
+    const requests = await screen.findByRole('region', { name: 'Booking requests' });
+    await within(requests).findByText(/Sam Lee/);
+
+    // Someone else approved it: the guarded update matches zero rows.
+    setTableResult('jobs', { data: [] });
+    await user.click(
+      within(requests).getByRole('button', { name: 'Approve booking from Sam Lee' }),
+    );
+    expect(await screen.findByText(REQUEST_ALREADY_HANDLED)).toBeInTheDocument();
+    expect(screen.queryByText('Booking approved')).not.toBeInTheDocument();
+    const approve = builders.jobs?.find((b) => b.update.mock.calls.length > 0);
+    expect(approve?.select).toHaveBeenCalledWith('id');
+    expect(await within(requests).findByText('No requests waiting')).toBeInTheDocument();
+  });
+
+  it('closes the decline dialog with a notice when the request was already handled', async () => {
+    rpcResults.dashboard_summary = { data: shopSummary };
+    rpcResults.calendar_events = { data: [] };
+    setTableResult('time_entries', { data: [] });
+    setTableResult('customers', {
+      data: [{ id: 'c-9', first_name: 'Sam', last_name: 'Lee', company: null }],
+    });
+    setTableResult('jobs', {
+      data: [
+        {
+          id: 'job-9',
+          number: 1050,
+          scheduled_start: '2026-09-29T14:00:00Z',
+          scheduled_end: '2026-09-29T16:00:00Z',
+          location_type: 'shop',
+          created_at: '2026-09-26T10:00:00Z',
+          customer_id: 'c-9',
+        },
+      ],
+    });
+    const { user } = setup();
+    const requests = await screen.findByRole('region', { name: 'Booking requests' });
+    await within(requests).findByText(/Sam Lee/);
+    await user.click(
+      within(requests).getByRole('button', { name: 'Decline booking from Sam Lee' }),
+    );
+    const dialog = await screen.findByRole('alertdialog', { name: 'Decline this booking?' });
+    await user.type(within(dialog).getByLabelText(/Reason/), 'Fully booked');
+    setTableResult('jobs', { data: [] });
+    await user.click(within(dialog).getByRole('button', { name: 'Decline booking' }));
+    expect(await screen.findByText(REQUEST_ALREADY_HANDLED)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog', { name: 'Decline this booking?' })).toBeNull(),
+    );
+    expect(screen.queryByText('Booking declined')).not.toBeInTheDocument();
   });
 
   it('shows an error with retry when the summary fails', async () => {

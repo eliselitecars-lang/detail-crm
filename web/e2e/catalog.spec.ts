@@ -97,9 +97,9 @@ async function setup(page: Page, user: MockUser, role: 'manager' | 'technician' 
       shop_members: [membershipRow(user, role)],
       notifications: [],
       services: record('services', () => services),
-      service_categories: [
+      service_categories: record('service_categories', () => [
         { id: CAT, shop_id: SHOP.id, name: 'Exterior', sort: 10, created_at: '', updated_at: '' },
-      ],
+      ]),
       service_prices: ({ url, method, body }) => {
         if (method !== 'GET') {
           writes.push({ method, table: 'service_prices', body, search: url.search });
@@ -129,7 +129,7 @@ async function setup(page: Page, user: MockUser, role: 'manager' | 'technician' 
         }
         return filterEq(addons, url);
       },
-      checklist_templates: [
+      checklist_templates: record('checklist_templates', () => [
         {
           id: '35000000-0000-4000-8000-000000000001',
           shop_id: SHOP.id,
@@ -142,7 +142,7 @@ async function setup(page: Page, user: MockUser, role: 'manager' | 'technician' 
           created_at: '',
           updated_at: '',
         },
-      ],
+      ]),
     },
     counts: {},
   });
@@ -224,6 +224,43 @@ test.describe('catalog', () => {
     await dialog.getByRole('button', { name: 'Archive instead' }).click();
     await expect(page.getByText('Archived', { exact: true }).first()).toBeVisible();
     expect(writes.some((w) => w.table === 'services' && w.method === 'DELETE')).toBe(false);
+  });
+
+  test('manager adds a category and a checklist template', async ({ page }) => {
+    const writes = await setup(page, MANAGER, 'manager');
+    await page.goto('/app/catalog?tab=categories');
+    const categories = page.getByRole('list', { name: 'Service categories' });
+    await expect(categories).toContainText('Exterior');
+    await page.getByRole('button', { name: 'New category' }).click();
+    const categoryDialog = page.getByRole('dialog', { name: 'New category' });
+    await categoryDialog.getByRole('textbox', { name: 'Name' }).fill('Coatings');
+    await categoryDialog.getByRole('button', { name: 'Add category' }).click();
+    await expect(page.getByText('Category added')).toBeVisible();
+    expect(writes.find((w) => w.table === 'service_categories')?.body).toEqual({
+      shop_id: SHOP.id,
+      name: 'Coatings',
+      sort: 20,
+    });
+
+    await page.getByRole('tab', { name: 'Checklists' }).click();
+    await page.getByRole('button', { name: 'New checklist' }).click();
+    const dialog = page.getByRole('dialog', { name: 'New checklist' });
+    await dialog.getByRole('textbox', { name: 'Name' }).fill('Interior QC');
+    await dialog.getByRole('combobox', { name: 'Linked service' }).selectOption(SVC);
+    const newItem = dialog.getByRole('textbox', { name: 'New item' });
+    await newItem.fill('Vacuum carpets');
+    await newItem.press('Enter');
+    await expect(dialog.getByRole('textbox', { name: 'Item 1' })).toHaveValue('Vacuum carpets');
+    // Typed but not added with Enter: still saved.
+    await newItem.fill('Wipe dash');
+    await dialog.getByRole('button', { name: 'Create checklist' }).click();
+    await expect(page.getByText('Checklist created')).toBeVisible();
+    expect(writes.find((w) => w.table === 'checklist_templates')?.body).toEqual({
+      name: 'Interior QC',
+      service_id: SVC,
+      items: [{ label: 'Vacuum carpets' }, { label: 'Wipe dash' }],
+      shop_id: SHOP.id,
+    });
   });
 
   test('technician reads the catalog without edit controls', async ({ page }) => {

@@ -57,6 +57,7 @@ beforeAll(async () => {
     import('./pages/SmsPage'),
     import('./pages/TemplatesPage'),
     import('./pages/VehicleCategoriesPage'),
+    import('./pages/DeleteShopPage'),
   ]);
 }, 60_000);
 
@@ -297,14 +298,14 @@ describe('PaymentsPage (Stripe Connect)', () => {
               },
               error: null,
             }
-          : { data: { url: 'https://connect.stripe.test/setup/abc' }, error: null },
+          : { data: { url: 'https://connect.stripe.com/setup/abc' }, error: null },
       ),
     );
     const { user } = renderSettings('/app/settings/payments');
     expect(await screen.findByText('Not connected')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Connect Stripe' }));
     await waitFor(() =>
-      expect(vi.mocked(redirectTo)).toHaveBeenCalledWith('https://connect.stripe.test/setup/abc'),
+      expect(vi.mocked(redirectTo)).toHaveBeenCalledWith('https://connect.stripe.com/setup/abc'),
     );
     expect(invoke).toHaveBeenCalledWith('stripe-connect', {
       body: expect.objectContaining({
@@ -337,6 +338,32 @@ describe('PaymentsPage (Stripe Connect)', () => {
       body: { action: 'refresh_status', shop_id: 'shop-1' },
     });
     await waitFor(() => expect(router.state.location.search).toBe(''));
+  });
+
+  it('refuses to redirect to a link that is not an https stripe.com URL', async () => {
+    invoke.mockImplementation((_name, { body }) =>
+      Promise.resolve(
+        body.action === 'refresh_status'
+          ? {
+              data: {
+                connected: false,
+                stripe_account_id: null,
+                charges_enabled: false,
+                payouts_enabled: false,
+                details_submitted: false,
+              },
+              error: null,
+            }
+          : { data: { url: 'javascript:alert(document.cookie)' }, error: null },
+      ),
+    );
+    const { user } = renderSettings('/app/settings/payments');
+    expect(await screen.findByText('Not connected')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Connect Stripe' }));
+    expect(
+      await screen.findByText('Stripe returned an unexpected link. Please try again.'),
+    ).toBeVisible();
+    expect(vi.mocked(redirectTo)).not.toHaveBeenCalled();
   });
 
   it('shows the edge function error with a retry', async () => {
@@ -482,5 +509,76 @@ describe('SmsPage', () => {
     );
     await user.click(screen.getByRole('button', { name: 'Save changes' }));
     expect(await screen.findByText('Another shop already uses this number.')).toBeVisible();
+  });
+});
+
+describe('DeleteShopPage', () => {
+  it('is listed and reachable only for the owner', async () => {
+    renderSettings('/app/settings/delete-shop', { role: 'admin' });
+    expect(await screen.findByText('You don’t have access to this page')).toBeVisible();
+    const nav = screen.getByRole('navigation', { name: 'Settings' });
+    expect(within(nav).queryByRole('link', { name: 'Delete shop' })).not.toBeInTheDocument();
+    expect(builders.memberships).toBeUndefined();
+  });
+
+  it('blocks deletion while memberships still bill through Stripe', async () => {
+    setTableResult('memberships', { data: null, count: 2 });
+    renderSettings('/app/settings/delete-shop');
+    expect(await screen.findByText(/2 memberships still bill customers/)).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Memberships page' })).toHaveAttribute(
+      'href',
+      '/app/memberships',
+    );
+    expect(screen.getByRole('button', { name: /Delete shop/ })).toBeDisabled();
+    const query = builders.memberships?.[0];
+    expect(query?.neq).toHaveBeenCalledWith('status', 'cancelled');
+    expect(query?.not).toHaveBeenCalledWith('stripe_subscription_id', 'is', null);
+  });
+
+  it('deletes the shop after the owner types its name, then leaves settings', async () => {
+    setTableResult('memberships', { data: null, count: 0 });
+    const { user, router, refetch } = renderSettings('/app/settings/delete-shop');
+    const nav = await screen.findByRole('navigation', { name: 'Settings' });
+    expect(within(nav).getByRole('link', { name: 'Delete shop' })).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /Delete shop/ }));
+
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Glacier Detailing?' });
+    const confirm = within(dialog).getByRole('button', { name: 'Delete shop permanently' });
+    expect(confirm).toBeDisabled();
+    const input = within(dialog).getByLabelText(/Type the shop name/);
+    expect(input).toHaveFocus();
+    await user.type(input, 'Glacier');
+    expect(confirm).toBeDisabled();
+
+    setTableResult('shops', { data: [{ id: 'shop-1' }] });
+    await user.type(input, ' Detailing');
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+
+    await waitFor(() => expect(router.state.location.pathname).toBe('/app'));
+    const del = builders.shops?.find((b) => b.delete.mock.calls.length > 0);
+    expect(del?.eq).toHaveBeenCalledWith('id', 'shop-1');
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it('keeps the dialog open with the error when the delete is refused', async () => {
+    setTableResult('memberships', { data: null, count: 0 });
+    const { user, router } = renderSettings('/app/settings/delete-shop');
+    await user.click(await screen.findByRole('button', { name: /Delete shop/ }));
+    const dialog = await screen.findByRole('alertdialog');
+    setTableResult('shops', { data: [] });
+    await user.type(within(dialog).getByLabelText(/Type the shop name/), 'Glacier Detailing');
+    await user.keyboard('{Enter}');
+    expect(
+      await within(dialog).findByText('Only the shop owner can delete this shop.'),
+    ).toBeVisible();
+    expect(router.state.location.pathname).toBe('/app/settings/delete-shop');
+  });
+
+  it('shows a retryable error when the membership check fails', async () => {
+    setTableResult('memberships', { data: null, error: { message: 'boom', code: '500' } });
+    renderSettings('/app/settings/delete-shop');
+    expect(await screen.findByText('Couldn’t load shop details')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
   });
 });

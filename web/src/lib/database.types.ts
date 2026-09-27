@@ -1188,6 +1188,7 @@ export type Database = {
           message_ids: string[]
           outcome: string
           processed_at: string
+          scheduled_for: string | null
           shop_id: string
         }
         Insert: {
@@ -1199,6 +1200,7 @@ export type Database = {
           message_ids?: string[]
           outcome: string
           processed_at: string
+          scheduled_for?: string | null
           shop_id: string
         }
         Update: {
@@ -1210,6 +1212,7 @@ export type Database = {
           message_ids?: string[]
           outcome?: string
           processed_at?: string
+          scheduled_for?: string | null
           shop_id?: string
         }
         Relationships: [
@@ -1745,10 +1748,14 @@ export type Database = {
           current_period_end: string | null
           customer_id: string
           id: string
+          interval: Database["public"]["Enums"]["membership_interval"]
+          interval_count: number
           plan_id: string
+          price_cents: number
           shop_id: string
           started_at: string | null
           status: Database["public"]["Enums"]["membership_status"]
+          stripe_price_id: string | null
           stripe_subscription_id: string | null
           updated_at: string
           vehicle_id: string | null
@@ -1761,10 +1768,14 @@ export type Database = {
           current_period_end?: string | null
           customer_id: string
           id?: string
+          interval: Database["public"]["Enums"]["membership_interval"]
+          interval_count: number
           plan_id: string
+          price_cents: number
           shop_id: string
           started_at?: string | null
           status?: Database["public"]["Enums"]["membership_status"]
+          stripe_price_id?: string | null
           stripe_subscription_id?: string | null
           updated_at?: string
           vehicle_id?: string | null
@@ -1777,10 +1788,14 @@ export type Database = {
           current_period_end?: string | null
           customer_id?: string
           id?: string
+          interval?: Database["public"]["Enums"]["membership_interval"]
+          interval_count?: number
           plan_id?: string
+          price_cents?: number
           shop_id?: string
           started_at?: string | null
           status?: Database["public"]["Enums"]["membership_status"]
+          stripe_price_id?: string | null
           stripe_subscription_id?: string | null
           updated_at?: string
           vehicle_id?: string | null
@@ -3231,6 +3246,39 @@ export type Database = {
           isSetofReturn: true
         }
       }
+      apply_payment_to_invoice: {
+        Args: { p_invoice_id: string; p_now?: string; p_payment_id: string }
+        Returns: {
+          amount_cents: number
+          card_brand: string | null
+          card_last4: string | null
+          created_at: string
+          customer_id: string
+          id: string
+          invoice_id: string | null
+          job_id: string | null
+          kind: Database["public"]["Enums"]["payment_kind"]
+          membership_id: string | null
+          method: Database["public"]["Enums"]["payment_method"]
+          note: string | null
+          paid_at: string | null
+          recorded_by: string | null
+          refunded_cents: number
+          shop_id: string
+          status: Database["public"]["Enums"]["payment_status"]
+          stripe_charge_id: string | null
+          stripe_checkout_session_id: string | null
+          stripe_payment_intent_id: string | null
+          tip_cents: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "payments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       apply_stripe_refund: {
         Args: { p_payment_intent_id: string; p_refunded_cents_total: number }
         Returns: {
@@ -3327,6 +3375,13 @@ export type Database = {
       }
       can_collect_for_job: {
         Args: { p_job_id: string; p_shop_id: string }
+        Returns: boolean
+      }
+      can_read_notification: {
+        Args: {
+          p_kind: Database["public"]["Enums"]["notification_kind"]
+          p_shop_id: string
+        }
         Returns: boolean
       }
       can_read_signature_object: { Args: { p_name: string }; Returns: boolean }
@@ -3476,6 +3531,10 @@ export type Database = {
         Args: { p_key: Database["public"]["Enums"]["message_template_key"] }
         Returns: boolean
       }
+      comms_is_marketing_key: {
+        Args: { p_key: Database["public"]["Enums"]["message_template_key"] }
+        Returns: boolean
+      }
       comms_is_suppressed: {
         Args: {
           p_address: string
@@ -3495,6 +3554,7 @@ export type Database = {
         }
         Returns: Record<string, unknown>
       }
+      comms_sms_with_optout: { Args: { p_body: string }; Returns: string }
       comms_suppress: {
         Args: {
           p_address: string
@@ -3722,10 +3782,14 @@ export type Database = {
           current_period_end: string | null
           customer_id: string
           id: string
+          interval: Database["public"]["Enums"]["membership_interval"]
+          interval_count: number
           plan_id: string
+          price_cents: number
           shop_id: string
           started_at: string | null
           status: Database["public"]["Enums"]["membership_status"]
+          stripe_price_id: string | null
           stripe_subscription_id: string | null
           updated_at: string
           vehicle_id: string | null
@@ -3975,6 +4039,7 @@ export type Database = {
         Args: { p_vehicle_id: string }
         Returns: boolean
       }
+      job_booking_token: { Args: { p_job_id: string }; Returns: string }
       job_payment_summary: {
         Args: { p_job_id: string }
         Returns: {
@@ -4192,6 +4257,10 @@ export type Database = {
       normalize_phone_e164: {
         Args: { p_country?: string; p_phone: string }
         Returns: string
+      }
+      notification_kind_for_managers: {
+        Args: { p_kind: Database["public"]["Enums"]["notification_kind"] }
+        Returns: boolean
       }
       notify_shop_staff: {
         Args: {
@@ -4742,8 +4811,12 @@ export type Database = {
         Args: {
           p_cancel_at_period_end?: boolean
           p_current_period_end?: string
+          p_interval?: Database["public"]["Enums"]["membership_interval"]
+          p_interval_count?: number
           p_membership_id?: string
           p_now?: string
+          p_price_cents?: number
+          p_price_id?: string
           p_shop_id: string
           p_status: Database["public"]["Enums"]["membership_status"]
           p_subscription_id: string
@@ -4756,10 +4829,14 @@ export type Database = {
           current_period_end: string | null
           customer_id: string
           id: string
+          interval: Database["public"]["Enums"]["membership_interval"]
+          interval_count: number
           plan_id: string
+          price_cents: number
           shop_id: string
           started_at: string | null
           status: Database["public"]["Enums"]["membership_status"]
+          stripe_price_id: string | null
           stripe_subscription_id: string | null
           updated_at: string
           vehicle_id: string | null

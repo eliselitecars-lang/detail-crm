@@ -1,6 +1,7 @@
 import { Inbox, Mail, MessageSquare } from 'lucide-react';
+import { useState } from 'react';
 import { Link } from 'react-router';
-import { Avatar, Button, EmptyState, ErrorState, LoadingState } from '@/components/ui';
+import { Avatar, Button, EmptyState, ErrorState, LoadingState, Tabs } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { formatListTime } from '../format';
 import { messagePreview, type ThreadSummary } from '../model';
@@ -33,6 +34,7 @@ export function ThreadList({
   loadingMore,
   onNewConversation,
 }: ThreadListProps) {
+  const [filter, setFilter] = useState<'all' | 'unread'>('all');
   if (isPending) return <LoadingState label="Loading conversations…" variant="rows" rows={6} />;
   if (error && !threads)
     return (
@@ -55,10 +57,31 @@ export function ThreadList({
       />
     );
 
+  const unreadThreads = threads.filter((t) => t.unread > 0);
+  const shown = filter === 'unread' ? unreadThreads : threads;
+
   return (
     <nav aria-label="Conversations" className="flex min-h-0 flex-1 flex-col">
+      <Tabs
+        label="Show conversations"
+        value={filter}
+        onChange={setFilter}
+        className="px-3 pt-2"
+        items={[
+          { value: 'all', label: 'All' },
+          { value: 'unread', label: 'Unread', count: unreadThreads.length },
+        ]}
+      />
+      {shown.length === 0 && (
+        <EmptyState
+          icon={<Inbox aria-hidden="true" />}
+          title="No unread conversations"
+          description="Replies you haven’t opened yet show up here."
+          compact
+        />
+      )}
       <ul className="divide-line min-h-0 flex-1 divide-y overflow-y-auto">
-        {threads.map((thread) => {
+        {shown.map((thread) => {
           const selected = thread.key === selectedKey;
           const title = threadTitle(thread);
           const outbound = thread.last.direction === 'outbound';
@@ -125,7 +148,7 @@ export function ThreadList({
           );
         })}
       </ul>
-      {truncated && (
+      {truncated && filter === 'all' && (
         <div className="border-line border-t p-2">
           <Button variant="ghost" size="sm" fullWidth loading={loadingMore} onClick={onLoadMore}>
             Load older conversations

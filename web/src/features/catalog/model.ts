@@ -343,3 +343,13 @@ export function describeUsage(u: ServiceUsage): string {
   add(u.plans, 'membership plan', 'membership plans');
   return parts.join(', ');
 }
+
+/** Of `serviceIds`, those whose links name no add-on other than `addonId`. */
+export function soleAddonServices(
+  addonId: string,
+  serviceIds: readonly string[],
+  links: readonly { service_id: string; addon_id: string }[],
+): string[] {
+  const hasOther = new Set(links.filter((l) => l.addon_id !== addonId).map((l) => l.service_id));
+  return serviceIds.filter((id) => !hasOther.has(id));
+}

@@ -130,10 +130,15 @@ export function PhotosCard({ jobId }: { jobId: string }) {
                     return (
                       <li
                         key={photo.id}
-                        className="border-line bg-surface-2 relative aspect-square overflow-hidden rounded-control border"
+                        className="border-line bg-surface-2 rounded-control relative aspect-square overflow-hidden border"
                       >
                         {photo.url ? (
-                          <a href={photo.url} target="_blank" rel="noreferrer" className="block size-full">
+                          <a
+                            href={photo.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block size-full"
+                          >
                             <img
                               src={photo.url}
                               alt={alt}

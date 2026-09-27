@@ -2,11 +2,19 @@
 
 export type CsvValue = string | number | null | undefined;
 
-/** Quotes a cell when needed; neutralises spreadsheet formulas (=, +, -, @). */
+/** A plain decimal number ("-0.05", "12", "123.45") — never a formula. */
+const PLAIN_NUMBER = /^-?\d+(\.\d+)?$/;
+
+/**
+ * Quotes a cell when needed; neutralises spreadsheet formulas (=, +, -, @).
+ * Plain numeric strings (e.g. centsCell output) stay numbers, so negative
+ * amounts export as -0.05 rather than the text '-0.05.
+ */
 export function csvCell(value: CsvValue): string {
   if (value === null || value === undefined) return '';
   let text = String(value);
-  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  if (typeof value === 'string' && !PLAIN_NUMBER.test(text) && /^[=+\-@\t\r]/.test(text))
+    text = `'${text}`;
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 

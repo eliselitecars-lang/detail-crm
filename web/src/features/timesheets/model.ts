@@ -12,6 +12,7 @@ import {
   isLocalTime,
   localDaysBetween,
   shopLocalToUtcIso,
+  utcToShopLocal,
 } from '@/lib/dates';
 
 export const TIME_ENTRY_KINDS = Constants.public.Enums.time_entry_kind;
@@ -197,12 +198,9 @@ export const entryFormSchema = z
       ctx.addIssue({ code: 'custom', path: ['outTime'], message: 'Choose a valid clock-out.' });
       return;
     }
-    if (hasOutDate && `${v.outDate}T${v.outTime}` < `${v.inDate}T${v.inTime}`)
-      ctx.addIssue({
-        code: 'custom',
-        path: ['outTime'],
-        message: 'Clock-out must be after clock-in.',
-      });
+    // Clock-out ≥ clock-in is checked on the resolved UTC instants
+    // (clockOrderError), not on wall-clock strings: on the fall-back DST day
+    // 01:10 (standard time) comes after 01:50 (daylight time).
   });
 export type EntryFormValues = z.input<typeof entryFormSchema>;
 
@@ -215,7 +213,15 @@ export interface EntryWrite {
   notes: string | null;
 }
 
-/** Form (shop-local wall clock) → row values (UTC instants). */
+export const CLOCK_ORDER_MESSAGE = 'Clock-out must be after clock-in.';
+
+/** Null when the instants are in order (or the entry is open). */
+export function clockOrderError(clockIn: string, clockOut: string | null): string | null {
+  if (clockOut === null) return null;
+  return new Date(clockOut).getTime() < new Date(clockIn).getTime() ? CLOCK_ORDER_MESSAGE : null;
+}
+
+/** Form (shop-local wall clock) → row values (UTC instants), for new entries. */
 export function entryFormToWrite(
   v: z.output<typeof entryFormSchema>,
   timeZone: string,
@@ -228,4 +234,51 @@ export function entryFormToWrite(
     clock_out: v.outDate ? shopLocalToUtcIso(v.outDate, v.outTime, timeZone) : null,
     notes: v.notes === '' ? null : v.notes,
   };
+}
+
+/** The edit form's initial clock fields for an entry (shop-local, minute precision). */
+export function entryFormTimes(
+  entry: Pick<TimeEntry, 'clock_in' | 'clock_out'>,
+  timeZone: string,
+): Pick<EntryFormValues, 'inDate' | 'inTime' | 'outDate' | 'outTime'> {
+  const inLocal = utcToShopLocal(entry.clock_in, timeZone);
+  const outLocal = entry.clock_out ? utcToShopLocal(entry.clock_out, timeZone) : null;
+  return {
+    inDate: inLocal.date,
+    inTime: inLocal.time,
+    outDate: outLocal?.date ?? '',
+    outTime: outLocal?.time ?? '',
+  };
+}
+
+/** Only the columns an edit changes (the member and kind never change). */
+export type EntryPatch = Partial<Pick<EntryWrite, 'job_id' | 'clock_in' | 'clock_out' | 'notes'>>;
+
+/**
+ * Edit form → the columns the user actually changed. The form shows times
+ * to the minute, so rebuilding untouched clock_in/clock_out from it would
+ * drop their seconds (changing payroll and tripping time_entries_no_overlap
+ * against a neighbour that started within the same minute) and would move
+ * an entry in the repeated fall-back hour to the first occurrence. Untouched
+ * clock fields therefore keep the stored instants — and are left out of the
+ * update, so a concurrent clock-out is not undone either.
+ */
+export function entryEditPatch(
+  v: z.output<typeof entryFormSchema>,
+  timeZone: string,
+  entry: Pick<TimeEntry, 'job_id' | 'clock_in' | 'clock_out' | 'notes'>,
+): EntryPatch {
+  const initial = entryFormTimes(entry, timeZone);
+  const patch: EntryPatch = {};
+  const jobId = v.kind === 'job' ? v.jobId : null;
+  if (jobId !== entry.job_id) patch.job_id = jobId;
+  if (v.inDate !== initial.inDate || v.inTime !== initial.inTime) {
+    patch.clock_in = shopLocalToUtcIso(v.inDate, v.inTime, timeZone);
+  }
+  if (v.outDate !== initial.outDate || v.outTime !== initial.outTime) {
+    patch.clock_out = v.outDate ? shopLocalToUtcIso(v.outDate, v.outTime, timeZone) : null;
+  }
+  const notes = v.notes === '' ? null : v.notes;
+  if (notes !== entry.notes) patch.notes = notes;
+  return patch;
 }

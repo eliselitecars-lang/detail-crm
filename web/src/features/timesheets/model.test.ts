@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  clockOrderError,
+  entryEditPatch,
   entryFormSchema,
+  entryFormTimes,
   entryFormToWrite,
   formatClock,
   formatDuration,
@@ -141,12 +144,79 @@ describe('entry form', () => {
     expect(job.error?.issues[0]?.path).toEqual(['jobId']);
   });
 
-  it('rejects clock-out before clock-in and half-filled clock-outs', () => {
-    expect(
-      entryFormSchema.safeParse({ ...base, outTime: '07:00' }).error?.issues[0]?.message,
-    ).toMatch(/after clock-in/);
+  it('rejects half-filled clock-outs; clock order is checked on instants', () => {
     expect(entryFormSchema.safeParse({ ...base, outTime: '' }).error?.issues[0]?.path).toEqual([
       'outTime',
     ]);
+    const write = entryFormToWrite(entryFormSchema.parse({ ...base, outTime: '07:00' }), TZ);
+    expect(clockOrderError(write.clock_in, write.clock_out)).toMatch(/after clock-in/);
+    expect(clockOrderError('2026-03-10T13:00:00Z', '2026-03-10T13:00:00Z')).toBeNull();
+    expect(clockOrderError('2026-03-10T13:00:00Z', null)).toBeNull();
+    // Fall-back day in Chicago: 01:50 CDT (06:50Z) → 01:10 CST (07:10Z) is in order
+    // although the wall-clock strings are not.
+    expect(clockOrderError('2026-11-01T06:50:00Z', '2026-11-01T07:10:00Z')).toBeNull();
+  });
+});
+
+describe('entry edit patch', () => {
+  const stored = {
+    job_id: 'j1',
+    clock_in: '2026-03-10T15:15:52.123+00:00', // 10:15:52 Chicago (CDT)
+    clock_out: '2026-03-10T17:40:31+00:00',
+    notes: 'old',
+  };
+  const form = (over: Partial<Parameters<typeof entryFormSchema.parse>[0]> = {}) =>
+    entryFormSchema.parse({
+      memberId: 'm1',
+      kind: 'job',
+      jobId: 'j1',
+      ...entryFormTimes(stored, TZ),
+      notes: 'old',
+      ...over,
+    });
+
+  it('shows minute-precision local times', () => {
+    expect(entryFormTimes(stored, TZ)).toEqual({
+      inDate: '2026-03-10',
+      inTime: '10:15',
+      outDate: '2026-03-10',
+      outTime: '12:40',
+    });
+    expect(entryFormTimes({ ...stored, clock_out: null }, TZ)).toMatchObject({
+      outDate: '',
+      outTime: '',
+    });
+  });
+
+  it('a notes-only edit leaves clock_in/clock_out (and their seconds) alone', () => {
+    expect(entryEditPatch(form({ notes: 'new' }), TZ, stored)).toEqual({ notes: 'new' });
+    expect(entryEditPatch(form(), TZ, stored)).toEqual({});
+    expect(entryEditPatch(form({ jobId: 'j2' }), TZ, stored)).toEqual({ job_id: 'j2' });
+    expect(entryEditPatch(form({ notes: '' }), TZ, stored)).toEqual({ notes: null });
+  });
+
+  it('sends only the clock field the user changed', () => {
+    expect(entryEditPatch(form({ outTime: '13:00' }), TZ, stored)).toEqual({
+      clock_out: '2026-03-10T18:00:00.000Z',
+    });
+    expect(entryEditPatch(form({ inTime: '10:00' }), TZ, stored)).toEqual({
+      clock_in: '2026-03-10T15:00:00.000Z',
+    });
+    expect(entryEditPatch(form({ outDate: '', outTime: '' }), TZ, stored)).toEqual({
+      clock_out: null,
+    });
+  });
+
+  it('keeps an entry in the repeated fall-back hour where it is', () => {
+    // 01:30 CST on 2026-11-01 (the SECOND 01:30 in Chicago).
+    const dst = { job_id: null, clock_in: '2026-11-01T07:30:00Z', clock_out: null, notes: null };
+    const v = entryFormSchema.parse({
+      memberId: 'm1',
+      kind: 'shift',
+      jobId: '',
+      ...entryFormTimes(dst, TZ),
+      notes: 'fixed',
+    });
+    expect(entryEditPatch(v, TZ, dst)).toEqual({ notes: 'fixed' });
   });
 });

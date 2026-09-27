@@ -10,7 +10,9 @@ import {
   describeWindow,
 } from './coupons';
 import { bookingUrl } from './links';
-import { moveItem } from './reorder';
+import { confirmationMatches } from './deleteShop';
+import { planHoursReplace } from './hoursPlan';
+import { moveItem, nextSortPosition } from './reorder';
 import {
   blockedTimeSchema,
   bookingSchema,
@@ -332,5 +334,57 @@ describe('coupons', () => {
     expect(couponState({ ...coupon, active: false }, now)).toBe('inactive');
     expect(couponState(coupon, new Date('2026-05-01T00:00:00Z'))).toBe('expired');
     expect(couponState(coupon, new Date('2026-02-01T00:00:00Z'))).toBe('scheduled');
+  });
+});
+
+describe('nextSortPosition', () => {
+  it('is one past the largest sort', () => {
+    expect(nextSortPosition([])).toBe(1);
+    expect(nextSortPosition([{ sort: 3 }, { sort: 7 }, { sort: 1 }])).toBe(8);
+  });
+
+  it("never yields NaN for rows without a sort (e.g. another feature's cache shape)", () => {
+    expect(nextSortPosition([{}, { sort: null }, { sort: 2 }])).toBe(3);
+    expect(Number.isNaN(nextSortPosition([{}, {}]))).toBe(false);
+  });
+});
+
+describe('planHoursReplace', () => {
+  const stored = [
+    { id: 'a', weekday: 1, opens_at: '08:00:00', closes_at: '12:00:00' },
+    { id: 'b', weekday: 1, opens_at: '13:00:00', closes_at: '17:00:00' },
+    { id: 'c', weekday: 6, opens_at: '10:00:00', closes_at: '24:00:00' },
+  ];
+
+  it('keeps unchanged intervals (seconds and 24:00 normalised)', () => {
+    const plan = planHoursReplace(stored, [
+      { weekday: 1, opens_at: '08:00', closes_at: '12:00' },
+      { weekday: 1, opens_at: '13:00', closes_at: '17:00' },
+      { weekday: 6, opens_at: '10:00', closes_at: '24:00' },
+    ]);
+    expect(plan).toEqual({ remove: [], insert: [] });
+  });
+
+  it('removes changed/closed intervals and inserts new ones only', () => {
+    const plan = planHoursReplace(stored, [
+      { weekday: 1, opens_at: '08:00', closes_at: '12:00' },
+      { weekday: 1, opens_at: '12:30', closes_at: '17:00' },
+      { weekday: 3, opens_at: '09:00', closes_at: '17:00' },
+    ]);
+    expect(plan.remove.map((r) => r.id)).toEqual(['b', 'c']);
+    expect(plan.insert).toEqual([
+      { weekday: 1, opens_at: '12:30', closes_at: '17:00' },
+      { weekday: 3, opens_at: '09:00', closes_at: '17:00' },
+    ]);
+  });
+});
+
+describe('confirmationMatches', () => {
+  it('requires the exact shop name, ignoring surrounding spaces', () => {
+    expect(confirmationMatches('Glacier Detailing', 'Glacier Detailing')).toBe(true);
+    expect(confirmationMatches('  Glacier Detailing ', 'Glacier Detailing')).toBe(true);
+    expect(confirmationMatches('glacier detailing', 'Glacier Detailing')).toBe(false);
+    expect(confirmationMatches('Glacier', 'Glacier Detailing')).toBe(false);
+    expect(confirmationMatches('', '   ')).toBe(false);
   });
 });

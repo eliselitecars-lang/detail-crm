@@ -86,6 +86,28 @@ export function formatDuration(seconds: number): string {
   return `${h}h ${String(m).padStart(2, '0')}m`;
 }
 
+/**
+ * calendar_events titles are "<customer> — <service, service>" where
+ * <customer> is the person's name or, failing that, the company. Returns the
+ * customer part (the whole title when the job has no line items yet).
+ */
+export function customerFromTitle(title: string | null): string | null {
+  if (!title) return null;
+  const at = title.indexOf(' — ');
+  return (at >= 0 ? title.slice(0, at) : title).trim() || null;
+}
+
+/**
+ * Display name for a schedule row: calendar_events' customer_name is the
+ * person's name only, so company-only (fleet) customers fall back to the title.
+ */
+export function scheduleCustomerLabel(row: {
+  customer_name: string | null;
+  title: string | null;
+}): string {
+  return row.customer_name ?? customerFromTitle(row.title) ?? 'Customer';
+}
+
 /** calendar_events titles are "<customer> — <service, service>"; returns the services part. */
 export function servicesFromTitle(title: string | null): string | null {
   if (!title) return null;

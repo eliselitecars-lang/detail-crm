@@ -26,6 +26,7 @@ import {
 } from '../api';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
 import { RESOURCE_KINDS, resourceSchema, type ResourceValues } from '../schemas';
+import { nextSortPosition } from '../reorder';
 import { useSettingsAccess } from '../useSettingsAccess';
 
 const RESOURCE_KIND_LABELS: Record<ResourceKind, string> = {
@@ -147,7 +148,7 @@ export default function ResourcesPage() {
       {editing && (
         <ResourceDialog
           resource={editing.resource}
-          nextSort={(query.data?.reduce((max, r) => Math.max(max, r.sort), 0) ?? 0) + 1}
+          nextSort={nextSortPosition(query.data ?? [])}
           onClose={() => setEditing(null)}
         />
       )}

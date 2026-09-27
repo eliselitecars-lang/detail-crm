@@ -15,6 +15,7 @@ import {
   serviceFormDefaults,
   serviceFormSchema,
   serviceImagePath,
+  soleAddonServices,
   usageTotal,
   type PriceRow,
 } from './model';
@@ -199,5 +200,18 @@ describe('images and usage', () => {
     const usage = { jobLines: 2, quoteLines: 0, invoiceLines: 1, packages: 1, plans: 0 };
     expect(usageTotal(usage)).toBe(4);
     expect(describeUsage(usage)).toBe('2 job lines, 1 invoice line, 1 package');
+  });
+});
+
+describe('soleAddonServices', () => {
+  it('finds services that would switch to "all add-ons" if the add-on went away', () => {
+    const links = [
+      { service_id: 's1', addon_id: 'a1' },
+      { service_id: 's2', addon_id: 'a1' },
+      { service_id: 's2', addon_id: 'a2' },
+      { service_id: 's3', addon_id: 'a1' },
+    ];
+    expect(soleAddonServices('a1', ['s1', 's2', 's3'], links)).toEqual(['s1', 's3']);
+    expect(soleAddonServices('a1', [], links)).toEqual([]);
   });
 });

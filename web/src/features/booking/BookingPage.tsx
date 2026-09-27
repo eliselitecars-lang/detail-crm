@@ -131,8 +131,13 @@ function BookingWizardLoader({ slug, profile }: { slug: string; profile: ShopPro
     );
   }
   if (catalog.data.vehicle_categories.length === 0) {
-    // Availability and pricing are sized per vehicle category; without any
-    // categories the shop has not finished setting up online booking.
+    // The server would price and schedule a "no category" booking, but the
+    // typed contract can't express it: get_available_slots and
+    // public_validate_coupon declare p_vehicle_category_id as a required uuid
+    // (no default), so the generated Args type has no null and PostgREST
+    // can't match a call that omits it. Until those parameters get
+    // `default null`, a shop needs at least one vehicle category to take
+    // online bookings.
     return (
       <BookingClosed
         profile={profile}

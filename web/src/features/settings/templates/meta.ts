@@ -191,6 +191,8 @@ export const CUSTOMER_PLACEHOLDERS: readonly PlaceholderMeta[] = [
 
 export const INVITE_PLACEHOLDERS: readonly PlaceholderMeta[] = [
   { name: 'shop_name', label: 'Shop name' },
+  // invites/index.ts buildInviteEmail supplies shop_phone too.
+  { name: 'shop_phone', label: 'Shop phone' },
   { name: 'invite_link', label: 'Invitation link' },
 ];
 

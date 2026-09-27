@@ -1,4 +1,5 @@
 import { ClipboardList, Plus } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import {
   buttonClasses,
@@ -40,10 +41,20 @@ export default function JobsPage() {
   const canViewAll = useCan('jobs.view');
   const canSeeMoney = useCan('invoices.viewAssigned');
   const [params, setParams] = useSearchParams();
+  const search = params.toString();
   const filters = parseJobFilters(params);
 
+  // Navigations are transitions: a second filter change made before the
+  // first one commits must build on it, not on the stale URL. Merge from
+  // the latest requested filters; resync whenever the URL itself changes.
+  const latest = useRef(filters);
+  useEffect(() => {
+    latest.current = parseJobFilters(new URLSearchParams(search));
+  }, [search]);
+
   const update = (next: Partial<JobFilters>) => {
-    const merged: JobFilters = { ...filters, page: 1, ...next };
+    const merged: JobFilters = { ...latest.current, page: 1, ...next };
+    latest.current = merged;
     setParams(jobFiltersToParams(merged), { replace: true });
   };
 
@@ -132,7 +143,10 @@ export default function JobsPage() {
         <JobFiltersBar
           filters={filters}
           onChange={update}
-          onClear={() => setParams(jobFiltersToParams(DEFAULT_JOB_FILTERS), { replace: true })}
+          onClear={() => {
+            latest.current = DEFAULT_JOB_FILTERS;
+            setParams(jobFiltersToParams(DEFAULT_JOB_FILTERS), { replace: true });
+          }}
           team={canViewAll ? (team.data ?? []) : null}
         />
         {jobs.isPending ? (

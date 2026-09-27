@@ -87,6 +87,16 @@ describe('model helpers', () => {
   });
 });
 
+describe('list params: search text', () => {
+  it('writes the search as typed (trailing space kept) and drops blank searches', () => {
+    const base = parseListParams(new URLSearchParams());
+    expect(toListParams({ ...base, search: 'jane ' }).get('q')).toBe('jane ');
+    expect(parseListParams(toListParams({ ...base, search: 'jane ' })).search).toBe('jane ');
+    expect(toListParams({ ...base, search: '   ' }).has('q')).toBe(false);
+    expect(searchPatterns('jane ')).toEqual(['%jane%']);
+  });
+});
+
 describe('list params', () => {
   it('round-trips non-default filters and ignores junk', () => {
     const f = parseListParams(

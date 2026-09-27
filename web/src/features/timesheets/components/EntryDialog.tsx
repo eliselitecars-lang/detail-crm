@@ -14,11 +14,19 @@ import {
   TimeInput,
   useToast,
 } from '@/components/ui';
-import { shopToday, utcToShopLocal } from '@/lib/dates';
+import { shopToday } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
 import { useShop } from '@/features/shop/shopContext';
-import { useJobSearch, useSaveEntry, type JobHit } from '../api';
-import { entryFormSchema, entryFormToWrite, type TimeEntry, type TimeEntryKind } from '../model';
+import { useJobSearch, useSaveEntry, type JobHit, type SaveEntryInput } from '../api';
+import {
+  clockOrderError,
+  entryEditPatch,
+  entryFormSchema,
+  entryFormTimes,
+  entryFormToWrite,
+  type TimeEntry,
+  type TimeEntryKind,
+} from '../model';
 
 type FormInput = z.input<typeof entryFormSchema>;
 type FormOutput = z.output<typeof entryFormSchema>;
@@ -45,14 +53,14 @@ export function EntryDialog({ entry, members, defaultMemberId, onClose }: EntryD
       : null,
   );
 
-  const inLocal = entry ? utcToShopLocal(entry.clock_in, timezone) : null;
-  const outLocal = entry?.clock_out ? utcToShopLocal(entry.clock_out, timezone) : null;
+  const initialTimes = entry ? entryFormTimes(entry, timezone) : null;
   const today = shopToday(timezone);
   const {
     register,
     control,
     handleSubmit,
     setValue,
+    setError,
     formState: { errors },
   } = useForm<FormInput, unknown, FormOutput>({
     resolver: zodResolver(entryFormSchema),
@@ -60,21 +68,39 @@ export function EntryDialog({ entry, members, defaultMemberId, onClose }: EntryD
       memberId: entry?.member_id ?? defaultMemberId ?? '',
       kind: entry?.kind ?? 'shift',
       jobId: entry?.job_id ?? '',
-      inDate: inLocal?.date ?? today,
-      inTime: inLocal?.time ?? '',
-      outDate: outLocal?.date ?? (entry ? '' : today),
-      outTime: outLocal?.time ?? '',
+      inDate: initialTimes?.inDate ?? today,
+      inTime: initialTimes?.inTime ?? '',
+      outDate: initialTimes ? initialTimes.outDate : today,
+      outTime: initialTimes?.outTime ?? '',
       notes: entry?.notes ?? '',
     },
   });
   const kind = useWatch({ control, name: 'kind' });
 
   const onSubmit = handleSubmit(async (values) => {
+    // Edits send only the changed columns: untouched clock times keep their
+    // stored instants (seconds, DST occurrence) — see entryEditPatch.
+    let input: SaveEntryInput;
+    let clockIn: string;
+    let clockOut: string | null;
+    if (entry) {
+      const patch = entryEditPatch(values, timezone, entry);
+      input = { id: entry.id, patch };
+      clockIn = patch.clock_in ?? entry.clock_in;
+      clockOut = patch.clock_out !== undefined ? patch.clock_out : entry.clock_out;
+    } else {
+      const write = entryFormToWrite(values, timezone);
+      input = { values: write };
+      clockIn = write.clock_in;
+      clockOut = write.clock_out;
+    }
+    const orderError = clockOrderError(clockIn, clockOut);
+    if (orderError) {
+      setError('outTime', { type: 'custom', message: orderError }, { shouldFocus: true });
+      return;
+    }
     try {
-      await save.mutateAsync({
-        ...(entry ? { id: entry.id } : {}),
-        values: entryFormToWrite(values, timezone),
-      });
+      await save.mutateAsync(input);
       toast.success(entry ? 'Entry updated' : 'Entry added');
       onClose();
     } catch {

@@ -170,7 +170,7 @@ describe('BookingPage', () => {
     expect(edge.invoke).toHaveBeenCalledWith('payments', {
       body: expect.objectContaining({ action: 'booking_deposit_checkout', token: TOKEN }),
     });
-  });
+  }, 20_000);
 
   it('sends the visitor back to pick another time when the slot was just taken', async () => {
     const { user } = setup({

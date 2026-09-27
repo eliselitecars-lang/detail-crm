@@ -13,6 +13,7 @@ import {
   previousWeekStart,
   priceFor,
   pruneSelection,
+  showsBalance,
   validateDetails,
   validateVehicle,
   weekWindow,
@@ -141,6 +142,33 @@ describe('validation', () => {
     expect(validateDetails({ ...filled, smsOptIn: true }, 'fixed')).toEqual({
       phone: 'Add a mobile number to get text updates.',
     });
+  });
+
+  it('asks non-NANP shops’ customers for the international format', () => {
+    const details = initialWizardState(profileFixture()).details;
+    const filled = { ...details, firstName: 'Ana', email: 'ana@example.com' };
+    // The server (normalize_phone_e164 with a GB shop) rejects local numbers too.
+    expect(validateDetails({ ...filled, phone: '07700 900123' }, 'fixed', 'GB')).toEqual({
+      phone: 'Enter your number with the country code, starting with + (e.g. +44 7700 900123).',
+    });
+    expect(validateDetails({ ...filled, phone: '+44 7700 900123' }, 'fixed', 'GB')).toEqual({});
+    expect(validateDetails({ ...filled, phone: '12' }, 'fixed', 'ca')).toEqual({
+      phone: 'Enter a valid phone number.',
+    });
+  });
+});
+
+describe('showsBalance', () => {
+  it('never shows the job total as owed on a cancelled or no-show booking', () => {
+    expect(showsBalance('cancelled', 15000)).toBe(false);
+    expect(showsBalance('no_show', 15000)).toBe(false);
+  });
+
+  it('shows open bookings’ balance and only a real balance once completed', () => {
+    expect(showsBalance('scheduled', 15000)).toBe(true);
+    expect(showsBalance('in_progress', 0)).toBe(true);
+    expect(showsBalance('completed', 0)).toBe(false);
+    expect(showsBalance('completed', 2500)).toBe(true);
   });
 });
 

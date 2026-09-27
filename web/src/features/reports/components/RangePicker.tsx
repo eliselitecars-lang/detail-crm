@@ -2,6 +2,7 @@ import { DateInput, FormField, Select } from '@/components/ui';
 import { formatLocalDate } from '@/lib/dates';
 import {
   BUCKET_LABELS,
+  bucketAllowed,
   BUCKETS,
   isBucket,
   isPreset,
@@ -19,7 +20,8 @@ export interface RangePickerProps {
   error: string | null;
   showBucket: boolean;
   onPresetChange: (preset: Preset) => void;
-  onCustomChange: (range: DateRange) => void;
+  /** Only the edited end is passed, so quick successive edits compose. */
+  onCustomChange: (patch: Partial<DateRange>) => void;
   onBucketChange: (bucket: Bucket) => void;
 }
 
@@ -58,14 +60,14 @@ export function RangePicker({
               <DateInput
                 value={range.from}
                 max={range.to || undefined}
-                onChange={(e) => onCustomChange({ ...range, from: e.target.value })}
+                onChange={(e) => onCustomChange({ from: e.target.value })}
               />
             </FormField>
             <FormField label="To">
               <DateInput
                 value={range.to}
                 min={range.from || undefined}
-                onChange={(e) => onCustomChange({ ...range, to: e.target.value })}
+                onChange={(e) => onCustomChange({ to: e.target.value })}
               />
             </FormField>
           </div>
@@ -77,7 +79,14 @@ export function RangePicker({
               onChange={(e) => {
                 if (isBucket(e.target.value)) onBucketChange(e.target.value);
               }}
-              options={BUCKETS.map((b) => ({ value: b, label: BUCKET_LABELS[b] }))}
+              options={BUCKETS.map((b) => {
+                const disabled = error === null && !bucketAllowed(range, b);
+                return {
+                  value: b,
+                  label: disabled ? `${BUCKET_LABELS[b]} (range too long)` : BUCKET_LABELS[b],
+                  disabled,
+                };
+              })}
             />
           </FormField>
         )}

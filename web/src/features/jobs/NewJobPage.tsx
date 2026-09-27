@@ -92,13 +92,23 @@ export default function NewJobPage() {
   const [location, setLocation] = useState<LocationType>(
     shop.business_type === 'mobile' ? 'mobile' : 'shop',
   );
-  const [address, setAddress] = useState({ line1: '', line2: '', city: '', region: '', postal: '' });
-  const [resourceId, setResourceId] = useState('');
+  const [address, setAddress] = useState({
+    line1: '',
+    line2: '',
+    city: '',
+    region: '',
+    postal: '',
+  });
+  // ?resourceId= comes from a slot picked in the calendar's bay / van view.
+  const [resourceId, setResourceId] = useState(params.get('resourceId') ?? '');
   const [assignees, setAssignees] = useState<string[]>([]);
   const [notes, setNotes] = useState('');
   const [internalNotes, setInternalNotes] = useState('');
   const [deposit, setDeposit] = useState<number | null>(null);
   const [progress, setProgress] = useState<CreateJobProgress>(EMPTY_PROGRESS);
+  // Once the job row exists, retries replay exactly the input it was created
+  // from (the form is locked): later stages can't drift from the saved job.
+  const [committed, setCommitted] = useState<CreateJobInput | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
   const catalog = useCatalog();
@@ -114,7 +124,9 @@ export default function NewJobPage() {
   );
 
   const catalogMinutes = sumDurations(
-    (catalog.data?.services ?? []).filter((s) => selected.includes(s.id)).map((s) => s.duration_minutes),
+    (catalog.data?.services ?? [])
+      .filter((s) => selected.includes(s.id))
+      .map((s) => s.duration_minutes),
   );
   const minutes = pricing.data?.duration_minutes ?? catalogMinutes;
   const autoEnd = addMinutesLocal(start, minutes > 0 ? minutes : 60, timezone);
@@ -134,12 +146,17 @@ export default function NewJobPage() {
     }
   };
 
+  const activeTeam = (team.data ?? []).filter((m) => m.active);
+  const activeResources = (resources.data ?? []).filter((r) => r.active && !r.archived_at);
+  const resourceValue = activeResources.some((r) => r.id === resourceId) ? resourceId : '';
+
   const buildInput = (): CreateJobInput | string => {
     if (!customer) return 'Choose a customer.';
     const lines = pricing.data?.lines ?? [];
     if (selected.length > 0) {
       if (!categoryId) return 'Choose the vehicle size to price the services.';
-      if (!pricing.data || pricing.isFetching) return 'Prices are still loading. Try again in a moment.';
+      if (!pricing.data || pricing.isFetching)
+        return 'Prices are still loading. Try again in a moment.';
       if (lines.some((l) => l.unit_price_cents === null)) {
         return 'Some services have no price for this vehicle size. Remove them or set a price in the catalog.';
       }
@@ -178,7 +195,7 @@ export default function NewJobPage() {
         service_city: text(address.city),
         service_region: text(address.region),
         service_postal_code: text(address.postal),
-        resource_id: resourceId || null,
+        resource_id: resourceValue || null,
         notes: notes.trim() || null,
         internal_notes: internalNotes.trim() || null,
         discount_kind: useDiscount ? 'percent' : 'none',
@@ -192,7 +209,7 @@ export default function NewJobPage() {
 
   const submit = async () => {
     setFormError(null);
-    const input = buildInput();
+    const input = committed ?? buildInput();
     if (typeof input === 'string') {
       setFormError(input);
       return;
@@ -203,14 +220,15 @@ export default function NewJobPage() {
       toast.success('Job created');
       if (done.jobId) await navigate(`/app/jobs/${done.jobId}`);
     } catch (error) {
-      if (error instanceof CreateJobError) setProgress(error.progress);
+      if (error instanceof CreateJobError) {
+        setProgress(error.progress);
+        if (error.progress.jobId) setCommitted(input);
+      }
       setFormError(errorMessage(error));
     }
   };
 
   const partial = progress.jobId !== null;
-  const activeTeam = (team.data ?? []).filter((m) => m.active);
-  const activeResources = (resources.data ?? []).filter((r) => r.active && !r.archived_at);
 
   return (
     <>
@@ -227,7 +245,12 @@ export default function NewJobPage() {
           void submit();
         }}
       >
-        <div className="flex min-w-0 flex-col gap-4 lg:col-span-2">
+        <fieldset
+          disabled={partial}
+          aria-describedby={partial ? 'new-job-locked' : undefined}
+          className="flex min-w-0 flex-col gap-4 lg:col-span-2"
+        >
+          <legend className="sr-only">Job details</legend>
           <CustomerSection
             customer={customer}
             loading={paramCustomer.isFetching}
@@ -387,64 +410,76 @@ export default function NewJobPage() {
               )}
             </div>
           </SectionCard>
-        </div>
+        </fieldset>
 
         <div className="flex min-w-0 flex-col gap-4">
-          <SectionCard title="Team" level={3}>
-            <div className="flex flex-col gap-3">
-              <FormField label="Bay / van">
-                <Select
-                  value={resourceId}
-                  onChange={(e) => setResourceId(e.target.value)}
-                  options={[
-                    { value: '', label: 'None' },
-                    ...activeResources.map((r) => ({ value: r.id, label: r.name })),
-                  ]}
-                />
-              </FormField>
-              <fieldset className="flex flex-col gap-2">
-                <legend className="text-ink mb-1 text-sm font-medium">Assign to</legend>
-                {activeTeam.length === 0 ? (
-                  <p className="text-muted text-sm">
-                    {team.isPending ? 'Loading team…' : 'No team members yet.'}
-                  </p>
-                ) : (
-                  activeTeam.map((m) => (
-                    <Checkbox
-                      key={m.memberId}
-                      label={m.name}
-                      checked={assignees.includes(m.memberId)}
-                      onChange={(e) =>
-                        setAssignees((ids) =>
-                          e.target.checked
-                            ? [...ids, m.memberId]
-                            : ids.filter((x) => x !== m.memberId),
-                        )
-                      }
-                    />
-                  ))
-                )}
-              </fieldset>
-            </div>
-          </SectionCard>
-          <SectionCard title="Notes & deposit" level={3}>
-            <div className="flex flex-col gap-3">
-              <FormField label="Notes for the customer">
-                <Textarea rows={3} maxLength={20000} value={notes} onChange={(e) => setNotes(e.target.value)} />
-              </FormField>
-              <FormField label="Internal notes" help="Only your team sees these.">
-                <Textarea
-                  rows={3}
-                  maxLength={20000}
-                  value={internalNotes}
-                  onChange={(e) => setInternalNotes(e.target.value)}
-                />
-              </FormField>
-              <FormField label="Deposit required" help="Optional.">
-                <MoneyInput value={deposit} onChange={setDeposit} />
-              </FormField>
-            </div>
-          </SectionCard>
+          <fieldset
+            disabled={partial}
+            aria-describedby={partial ? 'new-job-locked' : undefined}
+            className="flex min-w-0 flex-col gap-4"
+          >
+            <legend className="sr-only">Team, notes and deposit</legend>
+            <SectionCard title="Team" level={3}>
+              <div className="flex flex-col gap-3">
+                <FormField label="Bay / van">
+                  <Select
+                    value={resourceValue}
+                    onChange={(e) => setResourceId(e.target.value)}
+                    options={[
+                      { value: '', label: 'None' },
+                      ...activeResources.map((r) => ({ value: r.id, label: r.name })),
+                    ]}
+                  />
+                </FormField>
+                <fieldset className="flex flex-col gap-2">
+                  <legend className="text-ink mb-1 text-sm font-medium">Assign to</legend>
+                  {activeTeam.length === 0 ? (
+                    <p className="text-muted text-sm">
+                      {team.isPending ? 'Loading team…' : 'No team members yet.'}
+                    </p>
+                  ) : (
+                    activeTeam.map((m) => (
+                      <Checkbox
+                        key={m.memberId}
+                        label={m.name}
+                        checked={assignees.includes(m.memberId)}
+                        onChange={(e) =>
+                          setAssignees((ids) =>
+                            e.target.checked
+                              ? [...ids, m.memberId]
+                              : ids.filter((x) => x !== m.memberId),
+                          )
+                        }
+                      />
+                    ))
+                  )}
+                </fieldset>
+              </div>
+            </SectionCard>
+            <SectionCard title="Notes & deposit" level={3}>
+              <div className="flex flex-col gap-3">
+                <FormField label="Notes for the customer">
+                  <Textarea
+                    rows={3}
+                    maxLength={20000}
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                  />
+                </FormField>
+                <FormField label="Internal notes" help="Only your team sees these.">
+                  <Textarea
+                    rows={3}
+                    maxLength={20000}
+                    value={internalNotes}
+                    onChange={(e) => setInternalNotes(e.target.value)}
+                  />
+                </FormField>
+                <FormField label="Deposit required" help="Optional.">
+                  <MoneyInput value={deposit} onChange={setDeposit} />
+                </FormField>
+              </div>
+            </SectionCard>
+          </fieldset>
           <div className="flex flex-col gap-3">
             {formError && (
               <div
@@ -455,11 +490,14 @@ export default function NewJobPage() {
                 <div className="flex flex-col gap-1">
                   <p>{formError}</p>
                   {partial && (
-                    <p>
-                      Retrying saves only what’s missing — the job won’t be created twice.{' '}
+                    <p id="new-job-locked">
+                      The job is saved, so this form is locked. Retrying saves only the remaining
+                      services and team assignments exactly as entered — the job won’t be created
+                      twice. To change anything else,{' '}
                       <Link to={`/app/jobs/${progress.jobId}`} className="font-medium underline">
-                        Open the job
+                        open the job
                       </Link>
+                      .
                     </p>
                   )}
                 </div>

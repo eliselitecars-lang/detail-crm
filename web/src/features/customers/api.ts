@@ -12,7 +12,7 @@ import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { normalizeTags, type CustomerLifecycle, type CustomerRow } from './model';
 import type { CustomerWrite, VehicleWrite } from './schemas';
-import { searchPatterns } from './search';
+import { searchPatterns, searchTerms } from './search';
 
 // ---------------------------------------------------------------- keys
 
@@ -60,24 +60,63 @@ export const historyKeys = {
 export const CUSTOMER_LIST_COLUMNS =
   'id, first_name, last_name, company, email, phone, tags, lifecycle, source, archived_at, portal_user_id, created_at, updated_at';
 
+/** PostgREST: "Requested range not satisfiable" (offset beyond the total). */
+const RANGE_NOT_SATISFIABLE = 'PGRST103';
+
+/** The PostgREST filter methods the list uses (shared by rows + count queries). */
+interface FilterableQuery<Q> {
+  ilike(column: 'search_text', pattern: string): Q;
+  contains(column: 'tags', value: string[]): Q;
+  eq(column: 'lifecycle', value: CustomerLifecycle): Q;
+  is(column: 'archived_at', value: null): Q;
+  not(column: 'archived_at', operator: 'is', value: null): Q;
+}
+
+function applyListFilters<Q extends FilterableQuery<Q>>(
+  initial: Q,
+  filters: CustomerListFilters,
+): Q {
+  let query = initial;
+  for (const pattern of searchPatterns(filters.search)) {
+    query = query.ilike('search_text', pattern);
+  }
+  if (filters.tag) query = query.contains('tags', [filters.tag]);
+  if (filters.lifecycle) query = query.eq('lifecycle', filters.lifecycle);
+  if (filters.archived === 'active') query = query.is('archived_at', null);
+  else if (filters.archived === 'archived') query = query.not('archived_at', 'is', null);
+  return query;
+}
+
+async function countOnly(
+  filters: CustomerListFilters,
+  shopId: string,
+  signal: AbortSignal,
+): Promise<number> {
+  const result = await applyListFilters(
+    supabase.from('customers').select('id', { count: 'exact', head: true }).eq('shop_id', shopId),
+    filters,
+  ).abortSignal(signal);
+  unwrap(result);
+  return result.count ?? 0;
+}
+
 export function useCustomerList(shopId: string, filters: CustomerListFilters) {
+  // The search box keeps the raw text (trailing spaces included); key the
+  // cache by the normalised terms so "jane" and "jane " share one request.
+  const keyFilters = { ...filters, search: searchTerms(filters.search).join(' ') };
   return useQuery({
-    queryKey: customerKeys.list(shopId, filters),
+    queryKey: customerKeys.list(shopId, keyFilters),
     placeholderData: keepPreviousData,
     queryFn: async ({ signal }) => {
       const { from, to } = pageRange(filters.page, filters.pageSize);
       const ascending = filters.sort.direction === 'asc';
-      let query = supabase
-        .from('customers')
-        .select(CUSTOMER_LIST_COLUMNS, { count: 'exact' })
-        .eq('shop_id', shopId);
-      for (const pattern of searchPatterns(filters.search)) {
-        query = query.ilike('search_text', pattern);
-      }
-      if (filters.tag) query = query.contains('tags', [filters.tag]);
-      if (filters.lifecycle) query = query.eq('lifecycle', filters.lifecycle);
-      if (filters.archived === 'active') query = query.is('archived_at', null);
-      else if (filters.archived === 'archived') query = query.not('archived_at', 'is', null);
+      let query = applyListFilters(
+        supabase
+          .from('customers')
+          .select(CUSTOMER_LIST_COLUMNS, { count: 'exact' })
+          .eq('shop_id', shopId),
+        filters,
+      );
 
       if (filters.sort.key === 'name') {
         query = query
@@ -88,6 +127,12 @@ export function useCustomerList(shopId: string, filters: CustomerListFilters) {
         query = query.order(filters.sort.key, { ascending });
       }
       const result = await query.order('id').range(from, to).abortSignal(signal);
+      if (result.error?.code === RANGE_NOT_SATISFIABLE) {
+        // The page is past the end (stale link, or the list shrank after an
+        // archive). PostgREST answers 416 with count=exact; report the real
+        // total with no rows so the page can step back to the last page.
+        return { rows: [], total: await countOnly(filters, shopId, signal) };
+      }
       const rows = unwrap(result) ?? [];
       return { rows, total: result.count ?? from + rows.length };
     },

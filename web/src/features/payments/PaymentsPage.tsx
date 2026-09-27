@@ -277,17 +277,33 @@ export default function PaymentsPage() {
                       : 'text-ink mt-1 text-lg font-semibold tabular-nums'
                   }
                 >
-                  {tile.value === undefined ? <Skeleton className="h-6 w-24" /> : money(tile.value)}
+                  {rangeError ? (
+                    // The totals query is off until the range is fixed: nothing is loading.
+                    <>
+                      <span aria-hidden="true">—</span>
+                      <span className="sr-only">Not available</span>
+                    </>
+                  ) : tile.value === undefined ? (
+                    <Skeleton className="h-6 w-24" />
+                  ) : (
+                    money(tile.value)
+                  )}
                 </dd>
               </Card>
             ))}
           </dl>
         )}
         <p className="text-muted mt-2 text-xs">
-          Totals cover money received from {formatLocalDate(from)} to {formatLocalDate(to)}
-          {method !== 'all' ? ` by ${METHOD_LABELS[method].toLowerCase()}` : ''} (shop time); the
-          status and kind filters apply to the list only.
-          {totals ? ` ${totals.count} received payment${totals.count === 1 ? '' : 's'}.` : ''}
+          {rangeError ? (
+            'Fix the date range to see totals.'
+          ) : (
+            <>
+              Totals cover money received from {formatLocalDate(from)} to {formatLocalDate(to)}
+              {method !== 'all' ? ` by ${METHOD_LABELS[method].toLowerCase()}` : ''} (shop time);
+              the status and kind filters apply to the list only.
+              {totals ? ` ${totals.count} received payment${totals.count === 1 ? '' : 's'}.` : ''}
+            </>
+          )}
         </p>
       </section>
 

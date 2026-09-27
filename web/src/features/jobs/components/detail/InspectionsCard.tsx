@@ -31,11 +31,14 @@ import {
   useSignInspection,
   useUpdateInspection,
   type Inspection,
+  type InspectionDetails,
 } from '../../fieldApi';
 import {
   customerName,
   DAMAGE_KINDS,
   DAMAGE_LABELS,
+  inspectionDetailsDraft,
+  parseInspectionDetails,
   PHOTO_MIME_TYPES,
   photoProblem,
   VEHICLE_VIEWS,
@@ -114,7 +117,6 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
   const toast = useToast();
   const [view, setView] = useState<VehicleView>('front');
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
-  const [signing, setSigning] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const addMark = useAddMark(job.id);
   const deleteMark = useDeleteMark(job.id);
@@ -126,32 +128,54 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
   const numbered = inspection.marks.map((m, i) => ({ ...m, number: i + 1 }));
   const inView = numbered.filter((m) => m.view === view);
 
-  const [mileage, setMileage] = useState(inspection.mileage?.toString() ?? '');
-  const [fuel, setFuel] = useState(inspection.fuel_level?.toString() ?? '');
-  const [notes, setNotes] = useState(inspection.notes ?? '');
+  // Local drafts of the details, resynced whenever the server row changes
+  // (after a save, a signature, or someone else's edit) — never stale.
+  const serverDetails = inspectionDetailsDraft(inspection);
+  const [syncedFrom, setSyncedFrom] = useState(serverDetails);
+  const [draft, setDraft] = useState(serverDetails);
+  if (
+    syncedFrom.mileage !== serverDetails.mileage ||
+    syncedFrom.fuel !== serverDetails.fuel ||
+    syncedFrom.notes !== serverDetails.notes
+  ) {
+    setSyncedFrom(serverDetails);
+    setDraft(serverDetails);
+  }
+  // A signed inspection shows exactly what the database holds.
+  const shown = locked ? serverDetails : draft;
+  const dirty =
+    !locked &&
+    (draft.mileage.trim() !== serverDetails.mileage.trim() ||
+      draft.fuel.trim() !== serverDetails.fuel.trim() ||
+      draft.notes.trim() !== serverDetails.notes.trim());
   const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [signingDetails, setSigningDetails] = useState<InspectionDetails | null>(null);
+
+  const validDetails = (): InspectionDetails | null => {
+    setDetailsError(null);
+    const parsed = parseInspectionDetails(draft);
+    if (!parsed.ok) {
+      setDetailsError(parsed.error);
+      return null;
+    }
+    return parsed.details;
+  };
 
   const saveDetails = async () => {
-    setDetailsError(null);
-    const m = mileage.trim() === '' ? null : Number(mileage);
-    const f = fuel.trim() === '' ? null : Number(fuel);
-    if (m !== null && (!Number.isInteger(m) || m < 0 || m > 9_999_999)) {
-      setDetailsError('Mileage must be a whole number.');
-      return;
-    }
-    if (f !== null && (!Number.isInteger(f) || f < 0 || f > 100)) {
-      setDetailsError('Fuel level is a percentage from 0 to 100.');
-      return;
-    }
+    const details = validDetails();
+    if (!details) return;
     try {
-      await update.mutateAsync({
-        id: inspection.id,
-        patch: { mileage: m, fuel_level: f, notes: notes.trim() || null },
-      });
+      await update.mutateAsync({ id: inspection.id, patch: details });
       toast.success('Inspection saved');
     } catch (error) {
       toast.error(error);
     }
+  };
+
+  // The signature saves the details the customer is shown in the same update.
+  const startSigning = () => {
+    const details = validDetails();
+    if (details) setSigningDetails(details);
   };
 
   return (
@@ -232,26 +256,26 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
         <FormField label="Mileage">
           <Input
             inputMode="numeric"
-            value={mileage}
+            value={shown.mileage}
             disabled={locked}
-            onChange={(e) => setMileage(e.target.value)}
+            onChange={(e) => setDraft((d) => ({ ...d, mileage: e.target.value }))}
           />
         </FormField>
         <FormField label="Fuel level (%)">
           <Input
             inputMode="numeric"
-            value={fuel}
+            value={shown.fuel}
             disabled={locked}
-            onChange={(e) => setFuel(e.target.value)}
+            onChange={(e) => setDraft((d) => ({ ...d, fuel: e.target.value }))}
           />
         </FormField>
         <FormField label="Notes" className="sm:col-span-2">
           <Textarea
             rows={2}
             maxLength={20000}
-            value={notes}
+            value={shown.notes}
             disabled={locked}
-            onChange={(e) => setNotes(e.target.value)}
+            onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
           />
         </FormField>
       </div>
@@ -268,13 +292,19 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
               size="sm"
               variant="secondary"
               loading={update.isPending}
+              disabled={!dirty}
               onClick={() => void saveDetails()}
             >
               Save details
             </Button>
-            <Button size="sm" onClick={() => setSigning(true)}>
+            <Button size="sm" disabled={update.isPending} onClick={startSigning}>
               Collect customer signature
             </Button>
+            {dirty && (
+              <span className="text-muted text-xs">
+                Unsaved details are saved with the signature.
+              </span>
+            )}
           </>
         )}
         {locked && (
@@ -283,7 +313,7 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
               <img
                 src={inspection.signatureUrl}
                 alt={`Signature of ${inspection.signed_by_name ?? 'the customer'}`}
-                className="border-line bg-surface h-16 rounded-control border"
+                className="border-line bg-surface rounded-control h-16 border"
               />
             )}
             <p className="text-muted text-sm">
@@ -332,30 +362,53 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
           }}
         />
       )}
-      {signing && (
+      {signingDetails && (
         <SignatureDialog
           title={`Sign the ${KIND_LABEL[inspection.kind].toLowerCase()}`}
           description="The customer confirms the recorded vehicle condition. The inspection locks once signed."
           requireDrawing
           defaultName={job.customer ? customerName(job.customer) : ''}
           pending={sign.isPending}
-          onClose={() => setSigning(false)}
+          onClose={() => setSigningDetails(null)}
           onSign={async (signerName, signature) => {
             if (!signature) return;
             try {
-              await sign.mutateAsync({ inspectionId: inspection.id, signerName, signature });
+              await sign.mutateAsync({
+                inspectionId: inspection.id,
+                signerName,
+                signature,
+                details: signingDetails,
+              });
               toast.success('Inspection signed');
-              setSigning(false);
+              setSigningDetails(null);
             } catch (error) {
               toast.error(error);
             }
           }}
         >
-          <p className="text-muted text-sm">
-            {inspection.marks.length === 0
-              ? 'No damage was recorded.'
-              : `${inspection.marks.length} damage mark${inspection.marks.length === 1 ? '' : 's'} recorded.`}
-          </p>
+          <ul
+            className="text-muted flex flex-col gap-1 text-sm"
+            aria-label="What the customer signs"
+          >
+            <li>
+              {inspection.marks.length === 0
+                ? 'No damage was recorded.'
+                : `${inspection.marks.length} damage mark${inspection.marks.length === 1 ? '' : 's'} recorded.`}
+            </li>
+            <li>
+              Mileage:{' '}
+              {signingDetails.mileage === null
+                ? 'not recorded'
+                : `${signingDetails.mileage.toLocaleString('en-US')} mi`}
+            </li>
+            <li>
+              Fuel level:{' '}
+              {signingDetails.fuel_level === null
+                ? 'not recorded'
+                : `${signingDetails.fuel_level}%`}
+            </li>
+            {signingDetails.notes && <li>Notes: {signingDetails.notes}</li>}
+          </ul>
         </SignatureDialog>
       )}
       <ConfirmDialog
@@ -423,7 +476,12 @@ function MarkDialog({ view, pending, onClose, onSave }: MarkDialogProps) {
           />
         </FormField>
         <FormField label="Note" help="Describe the exact spot if you used the keyboard.">
-          <Textarea rows={2} maxLength={2000} value={note} onChange={(e) => setNote(e.target.value)} />
+          <Textarea
+            rows={2}
+            maxLength={2000}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
         </FormField>
         <FormField label="Photo" help="Optional." error={error}>
           <Input

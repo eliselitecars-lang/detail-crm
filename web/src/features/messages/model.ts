@@ -61,8 +61,10 @@ export const inboxMessageSchema = messageSchema.extend({
 export type InboxMessage = z.infer<typeof inboxMessageSchema>;
 
 export const unreadRowSchema = z.object({
+  id: z.string(),
   customer_id: z.string().nullable(),
   from_address: z.string().nullable(),
+  created_at: z.string(),
 });
 export type UnreadRow = z.infer<typeof unreadRowSchema>;
 
@@ -103,7 +105,7 @@ export interface ThreadSummary {
  */
 export function buildThreads(
   messages: readonly InboxMessage[],
-  unread: readonly UnreadRow[],
+  unread: readonly Pick<UnreadRow, 'customer_id' | 'from_address'>[],
 ): ThreadSummary[] {
   const unreadByKey = new Map<string, number>();
   for (const row of unread) {
@@ -133,6 +135,35 @@ export function buildThreads(
     });
   }
   return [...threads.values()];
+}
+
+/**
+ * Ids of the newest unread message of every thread that has unread messages
+ * but is not among `presentKeys` (the threads built from the newest page of
+ * the whole inbox). A campaign launch inserts one outbound row per recipient
+ * at once, which can push every older conversation — including ones with
+ * unread replies — out of that page; fetching these rows keeps unread
+ * conversations in the list whatever the page holds. Newest threads first,
+ * at most `max`.
+ */
+export function unreadThreadsOutside(
+  presentKeys: ReadonlySet<string>,
+  unread: readonly UnreadRow[],
+  max: number,
+): string[] {
+  const newest = new Map<string, UnreadRow>();
+  for (const row of unread) {
+    const ref = refForMessage({ ...row, direction: 'inbound' });
+    if (!ref) continue;
+    const key = threadKey(ref);
+    if (presentKeys.has(key)) continue;
+    const current = newest.get(key);
+    if (!current || row.created_at > current.created_at) newest.set(key, row);
+  }
+  return [...newest.values()]
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, max)
+    .map((row) => row.id);
 }
 
 export function customerName(

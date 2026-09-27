@@ -257,16 +257,14 @@ export async function createJobStaged(
     try {
       if (input.assigneeIds.length > 0) {
         unwrap(
-          await supabase
-            .from('job_assignments')
-            .upsert(
-              input.assigneeIds.map((memberId) => ({
-                shop_id: shopId,
-                job_id: jobId,
-                member_id: memberId,
-              })),
-              { onConflict: 'shop_id,job_id,member_id', ignoreDuplicates: true },
-            ),
+          await supabase.from('job_assignments').upsert(
+            input.assigneeIds.map((memberId) => ({
+              shop_id: shopId,
+              job_id: jobId,
+              member_id: memberId,
+            })),
+            { onConflict: 'shop_id,job_id,member_id', ignoreDuplicates: true },
+          ),
         );
       }
       progress.assignmentsSaved = true;

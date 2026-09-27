@@ -9,6 +9,7 @@ import {
   type Builder,
 } from '@/test/supabaseMock';
 import { notificationLink } from './links';
+import { UNREAD_PAGE_SIZE } from './api';
 import NotificationsPage from './NotificationsPage';
 
 vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
@@ -42,13 +43,27 @@ type FakeRow = Omit<typeof unreadRow, 'body' | 'job_id' | 'read_at'> & {
 function serve({
   unread = [unreadRow],
   read = [readRow],
-}: { unread?: FakeRow[]; read?: FakeRow[] } = {}) {
+  failWrites = false,
+}: { unread?: FakeRow[]; read?: FakeRow[]; failWrites?: boolean } = {}) {
   const state: { unread: FakeRow[]; read: FakeRow[] } = { unread: [...unread], read: [...read] };
   supabase.from.mockImplementation((table: string) => {
     const builder: Builder = createBuilder({ data: [] });
     let wantsRead = false;
-    // A write "moves" everything to read on the fake server.
+    let writing = false;
+    let head = false;
+    let range: [number, number] = [0, 999];
+    builder.select.mockImplementation((_cols: string, opts?: { head?: boolean }) => {
+      head = opts?.head === true;
+      return builder;
+    });
+    builder.range.mockImplementation((from: number, to: number) => {
+      range = [from, to];
+      return builder;
+    });
+    // A write "moves" everything to read on the fake server (unless it fails).
     builder.update.mockImplementation(() => {
+      writing = true;
+      if (failWrites) return builder;
       state.read = [
         ...state.unread.map((r) => ({ ...r, read_at: '2026-09-27T15:00:00Z' })),
         ...state.read,
@@ -60,12 +75,16 @@ function serve({
       wantsRead = true;
       return builder;
     });
-    (builder as { then: PromiseLike<unknown>['then'] }).then = (ok, fail) =>
-      Promise.resolve({
-        data: wantsRead ? state.read : state.unread,
-        error: null,
-        count: null,
-      }).then(ok, fail);
+    (builder as { then: PromiseLike<unknown>['then'] }).then = (ok, fail) => {
+      const rows = wantsRead ? state.read : state.unread;
+      const result =
+        writing && failWrites
+          ? { data: null, error: { code: '08006', message: 'connection failure' }, count: null }
+          : head
+            ? { data: null, error: null, count: rows.length }
+            : { data: rows.slice(range[0], range[1] + 1), error: null, count: null };
+      return Promise.resolve(result).then(ok, fail);
+    };
     (builders[table] ??= []).push(builder);
     return builder;
   });
@@ -161,6 +180,34 @@ describe('NotificationsPage', () => {
     await waitFor(() =>
       expect(builders.notifications?.some((b) => b.delete.mock.calls.length > 0)).toBe(true),
     );
+  });
+
+  it('pages through unread past the first page, with the exact unread count', async () => {
+    const many = Array.from({ length: UNREAD_PAGE_SIZE + 5 }, (_, i) => ({
+      ...unreadRow,
+      id: `u-${i}`,
+      title: `Unread number ${i + 1}`,
+      created_at: new Date(Date.UTC(2026, 8, 27, 14, 0) - i * 60_000).toISOString(),
+    }));
+    serve({ unread: many, read: [] });
+    const { user } = setup();
+    const unread = await screen.findByRole('list', { name: 'Unread notifications' });
+    expect(within(unread).getAllByRole('listitem')).toHaveLength(UNREAD_PAGE_SIZE);
+    expect(await screen.findByText(`${UNREAD_PAGE_SIZE + 5} new`)).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: 'Show more unread (5 more)' }));
+    expect(await within(unread).findByText(`Unread number ${UNREAD_PAGE_SIZE + 5}`)).toBeVisible();
+    expect(within(unread).getAllByRole('listitem')).toHaveLength(UNREAD_PAGE_SIZE + 5);
+    expect(screen.queryByRole('button', { name: /Show more unread/ })).not.toBeInTheDocument();
+  });
+
+  it('rolls back and announces a failed mark-read', async () => {
+    serve({ failWrites: true });
+    const { user } = setup();
+    const unread = await screen.findByRole('list', { name: 'Unread notifications' });
+    await user.click(within(unread).getByRole('button', { name: 'Mark read' }));
+    expect(await screen.findByText('Couldn’t mark the notification read')).toBeInTheDocument();
+    expect(await within(unread).findByRole('button', { name: 'Mark read' })).toBeInTheDocument();
+    expect(within(unread).getByText('(unread)')).toBeInTheDocument();
   });
 
   it('shows empty states', async () => {

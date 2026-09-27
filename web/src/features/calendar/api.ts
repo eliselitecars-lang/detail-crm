@@ -38,7 +38,10 @@ const rowSchema = z.object({
   location_type: z.enum(['shop', 'mobile']).nullable(),
   service_address: z.string().nullable(),
   resource_id: z.string().nullable(),
-  assigned_member_ids: z.array(z.string()).nullable().transform((v) => v ?? []),
+  assigned_member_ids: z
+    .array(z.string())
+    .nullable()
+    .transform((v) => v ?? []),
   member_id: z.string().nullable(),
   title: z.string().nullable(),
 });
@@ -46,11 +49,7 @@ const rowSchema = z.object({
 export function useCalendarEvents(range: CalendarRange | null, includeCancelled: boolean) {
   const { shopId } = useShop();
   return useQuery({
-    queryKey: calendarKeys.events(
-      shopId,
-      range ?? { from: '', to: '' },
-      includeCancelled,
-    ),
+    queryKey: calendarKeys.events(shopId, range ?? { from: '', to: '' }, includeCancelled),
     enabled: range !== null,
     placeholderData: keepPreviousData,
     queryFn: async (): Promise<CalendarRow[]> => {

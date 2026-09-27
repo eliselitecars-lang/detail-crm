@@ -100,7 +100,7 @@ export function StatusControl({ job }: StatusControlProps) {
                   aria-hidden="true"
                   className={cn(
                     'flex size-5 items-center justify-center rounded-full text-[11px] font-semibold',
-                    step.state === 'done' && 'bg-success text-white',
+                    step.state === 'done' && 'bg-success-soft text-success-ink',
                     step.state === 'current' && 'bg-primary text-primary-fg',
                     step.state === 'upcoming' && 'bg-surface-3 text-muted',
                   )}
@@ -129,9 +129,7 @@ export function StatusControl({ job }: StatusControlProps) {
                 ) : (
                   <span
                     aria-current={step.state === 'current' ? 'step' : undefined}
-                    title={
-                      step.transition && needsSchedule ? 'Schedule the job first' : undefined
-                    }
+                    title={step.transition && needsSchedule ? 'Schedule the job first' : undefined}
                     className={cn(
                       base,
                       step.state === 'current'

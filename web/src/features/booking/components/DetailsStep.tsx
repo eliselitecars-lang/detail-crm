@@ -15,6 +15,7 @@ import { Banner } from '@/features/public-docs/shared/PublicPage';
 import { useValidateCoupon, type ShopProfile } from '../api';
 import {
   COUPON_RE,
+  isNanpCountry,
   locationFor,
   validateDetails,
   type DetailsInput,
@@ -57,7 +58,7 @@ export function DetailsStep({
   const update = (patch: Partial<DetailsInput>) => {
     const next = { ...value, ...patch };
     onChange(next);
-    if (submitted) setErrors(validateDetails(next, businessType));
+    if (submitted) setErrors(validateDetails(next, businessType, profile.country));
   };
 
   const applyCoupon = () => {
@@ -91,7 +92,7 @@ export function DetailsStep({
 
   const next = () => {
     setSubmitted(true);
-    const found = validateDetails(value, businessType);
+    const found = validateDetails(value, businessType, profile.country);
     setErrors(found);
     if (Object.keys(found).length === 0) onContinue();
   };
@@ -135,7 +136,13 @@ export function DetailsStep({
             maxLength={254}
           />
         </FormField>
-        <FormField label="Mobile phone" error={errors.phone}>
+        <FormField
+          label="Mobile phone"
+          error={errors.phone}
+          help={
+            isNanpCountry(profile.country) ? undefined : 'Include your country code, starting with +.'
+          }
+        >
           <PhoneInput value={value.phone} onChange={(phone) => update({ phone })} />
         </FormField>
       </div>

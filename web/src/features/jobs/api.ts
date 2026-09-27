@@ -15,7 +15,13 @@ import { AppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
-import { JOB_STATUSES, type JobFilters, type JobStatus, type StatusTransition } from './model';
+import {
+  JOB_STATUSES,
+  reorderLineSorts,
+  type JobFilters,
+  type JobStatus,
+  type StatusTransition,
+} from './model';
 
 export const JOB_PAGE_SIZE = 25;
 
@@ -23,7 +29,8 @@ export const jobKeys = {
   all: (shopId: string) => shopKey(shopId, 'jobs'),
   list: (shopId: string, filters: JobFilters) => [...jobKeys.all(shopId), 'list', filters] as const,
   detail: (shopId: string, id: string) => [...jobKeys.all(shopId), 'detail', id] as const,
-  part: (shopId: string, id: string, part: string) => [...jobKeys.detail(shopId, id), part] as const,
+  part: (shopId: string, id: string, part: string) =>
+    [...jobKeys.detail(shopId, id), part] as const,
   transitions: () => ['reference', 'job_status_transitions'] as const,
   team: (shopId: string) => shopKey(shopId, 'team', 'directory'),
   resources: (shopId: string) => shopKey(shopId, 'settings', 'resources'),
@@ -347,10 +354,7 @@ export function useJobs(filters: JobFilters) {
       const columns = filters.assigneeId
         ? `${LIST_COLUMNS}, assignee_filter:job_assignments!inner(member_id)`
         : LIST_COLUMNS;
-      let request = supabase
-        .from('jobs')
-        .select(columns, { count: 'exact' })
-        .eq('shop_id', shopId);
+      let request = supabase.from('jobs').select(columns, { count: 'exact' }).eq('shop_id', shopId);
       if (filters.statuses.length > 0) request = request.in('status', filters.statuses);
       if (filters.from || filters.to) {
         const range = shopDateRangeUtc(
@@ -614,13 +618,30 @@ export function useUpdateJob(jobId: string) {
   });
 }
 
-/** Reschedule (calendar drag/resize or schedule edit). */
+/** Reschedule (calendar drag/resize or schedule edit), optionally to another bay / van. */
 export function useReschedule() {
   const { shopId } = useShop();
   const invalidate = useInvalidateJobs();
   return useMutation({
-    mutationFn: ({ jobId, start, end }: { jobId: string; start: string; end: string }) =>
-      updateJob(shopId, jobId, { scheduled_start: start, scheduled_end: end }),
+    mutationFn: ({
+      jobId,
+      start,
+      end,
+      resourceId,
+    }: {
+      jobId: string;
+      start: string;
+      end: string;
+      /** Set only when the job also moves to another bay / van (resource view). */
+      resourceId?: string | null;
+    }) =>
+      updateJob(
+        shopId,
+        jobId,
+        resourceId === undefined
+          ? { scheduled_start: start, scheduled_end: end }
+          : { scheduled_start: start, scheduled_end: end, resource_id: resourceId },
+      ),
     onSettled: invalidate,
   });
 }
@@ -709,20 +730,34 @@ export function useUpdateLineItem() {
   });
 }
 
-/** Swaps the sort of two neighbouring lines (move up / down). */
+/**
+ * Moves a line one step up / down. The whole list is renumbered 1..n
+ * (reorderLineSorts) so equal or gapped sort values — the column defaults
+ * to 0 — still move; only changed rows are written. If a write fails midway
+ * the next move renumbers from the refetched order and converges.
+ */
 export function useMoveLineItem() {
   const { shopId } = useShop();
   const invalidate = useInvalidateJobs();
   return useMutation({
-    mutationFn: async ({ a, b }: { a: Pick<LineItem, 'id' | 'sort'>; b: Pick<LineItem, 'id' | 'sort'> }) => {
-      // Equal sorts (lines added together) still need distinct values.
-      const aSort = a.sort === b.sort ? b.sort + 1 : b.sort;
-      unwrap(
-        await supabase.from('job_line_items').update({ sort: aSort }).eq('shop_id', shopId).eq('id', a.id),
-      );
-      unwrap(
-        await supabase.from('job_line_items').update({ sort: a.sort }).eq('shop_id', shopId).eq('id', b.id),
-      );
+    mutationFn: async ({
+      rows,
+      index,
+      delta,
+    }: {
+      rows: readonly Pick<LineItem, 'id' | 'sort'>[];
+      index: number;
+      delta: -1 | 1;
+    }) => {
+      for (const change of reorderLineSorts(rows, index, delta)) {
+        unwrap(
+          await supabase
+            .from('job_line_items')
+            .update({ sort: change.sort })
+            .eq('shop_id', shopId)
+            .eq('id', change.id),
+        );
+      }
     },
     onSettled: invalidate,
   });

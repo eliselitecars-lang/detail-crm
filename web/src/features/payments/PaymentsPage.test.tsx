@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute } from '@/test/render';
 import {
@@ -78,6 +78,12 @@ describe('PaymentsPage', () => {
     setup('/app/payments?from=2026-09-30&to=2026-09-01');
     expect(await screen.findByText('Fix the date range to see payments')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Export CSV' })).toBeDisabled();
+    // totals are not loading (their query is off): each tile says "not available"
+    const totals = screen.getByRole('region', { name: 'Totals for these dates' });
+    expect(within(totals).getAllByText('Not available')).toHaveLength(4);
+    expect(totals.querySelector('.animate-pulse')).toBeNull();
+    expect(within(totals).getByText('Fix the date range to see totals.')).toBeInTheDocument();
+    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
   it('exports the filtered ledger as CSV', async () => {

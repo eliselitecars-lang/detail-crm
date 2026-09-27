@@ -167,4 +167,46 @@ describe('CatalogPage', () => {
     expect(await screen.findByText('Couldn’t load the catalog')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
+
+  it('never shows "Not set" prices when base prices failed to load', async () => {
+    setTableResult('service_prices', { error: { code: '57014', message: 'timeout' } });
+    renderAs('manager');
+    const table = await screen.findByRole('table', { name: 'Catalog items' });
+    expect(await screen.findByText('Couldn’t load base prices')).toBeInTheDocument();
+    const row = within(table).getByRole('row', { name: /Full Detail/ });
+    expect(row).toHaveTextContent('Unavailable');
+    expect(within(table).queryByText('Not set')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('keeps checklist service links honest when services fail to load', async () => {
+    setTableResult('services', { error: { code: '57014', message: 'timeout' } });
+    setTableResult('checklist_templates', {
+      data: [
+        {
+          id: 'tpl-1',
+          shop_id: 'shop-1',
+          name: 'Coating QC',
+          service_id: 'svc-1',
+          items: [{ id: 'i1', label: 'Panel wipe' }],
+          created_at: '',
+          updated_at: '',
+        },
+      ],
+    });
+    renderAs('manager', '/app/catalog?tab=checklists');
+    const list = await screen.findByRole('list', { name: 'Checklist templates' });
+    expect(await screen.findByText('Couldn’t load linked service names')).toBeInTheDocument();
+    expect(within(list).getByText('Auto-added with a linked service')).toBeInTheDocument();
+    expect(within(list).queryByText('Added manually')).not.toBeInTheDocument();
+  });
+
+  it('does not report 0 items per category when services fail to load', async () => {
+    setTableResult('services', { error: { code: '57014', message: 'timeout' } });
+    renderAs('manager', '/app/catalog?tab=categories');
+    const list = await screen.findByRole('list', { name: 'Service categories' });
+    expect(await screen.findByText('Couldn’t count items per category')).toBeInTheDocument();
+    expect(within(list).getAllByText('Item count unavailable')).toHaveLength(2);
+    expect(within(list).queryByText('0 items')).not.toBeInTheDocument();
+  });
 });

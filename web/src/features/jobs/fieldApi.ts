@@ -210,7 +210,9 @@ export function useDeleteChecklistItem(jobId: string) {
   const invalidate = useInvalidateJob(jobId);
   return useMutation({
     mutationFn: async (id: string) => {
-      unwrap(await supabase.from('job_checklist_items').delete().eq('shop_id', shopId).eq('id', id));
+      unwrap(
+        await supabase.from('job_checklist_items').delete().eq('shop_id', shopId).eq('id', id),
+      );
     },
     onSettled: invalidate,
   });
@@ -295,7 +297,8 @@ export function useUploadPhoto(jobId: string) {
       caption: string | null;
     }) => {
       const ext = photoExtension(file);
-      if (!ext) throw new AppError('Choose a JPEG, PNG, WebP or HEIC image.', { kind: 'validation' });
+      if (!ext)
+        throw new AppError('Choose a JPEG, PNG, WebP or HEIC image.', { kind: 'validation' });
       const path = jobPhotoPath(shopId, jobId, ext, newId());
       await uploadObject('job-photos', path, file, file.type || `image/${ext}`);
       const { error } = await supabase
@@ -436,7 +439,7 @@ export function useUpdateInspection(jobId: string) {
       patch,
     }: {
       id: string;
-      patch: { mileage?: number | null; fuel_level?: number | null; notes?: string | null };
+      patch: Partial<InspectionDetails>;
     }) => {
       unwrap(await supabase.from('inspections').update(patch).eq('shop_id', shopId).eq('id', id));
     },
@@ -473,7 +476,8 @@ export function useAddMark(jobId: string) {
       let photoPath: string | null = null;
       if (mark.photo) {
         const ext = photoExtension(mark.photo);
-        if (!ext) throw new AppError('Choose a JPEG, PNG, WebP or HEIC image.', { kind: 'validation' });
+        if (!ext)
+          throw new AppError('Choose a JPEG, PNG, WebP or HEIC image.', { kind: 'validation' });
         photoPath = jobPhotoPath(shopId, jobId, ext, newId());
         await uploadObject('job-photos', photoPath, mark.photo, mark.photo.type || `image/${ext}`);
       }
@@ -501,14 +505,28 @@ export function useDeleteMark(jobId: string) {
   const invalidate = useInvalidateJob(jobId);
   return useMutation({
     mutationFn: async (mark: Pick<InspectionMark, 'id' | 'photo_path'>) => {
-      unwrap(await supabase.from('inspection_marks').delete().eq('shop_id', shopId).eq('id', mark.id));
+      unwrap(
+        await supabase.from('inspection_marks').delete().eq('shop_id', shopId).eq('id', mark.id),
+      );
       if (mark.photo_path) await removeObject('job-photos', mark.photo_path);
     },
     onSettled: invalidate,
   });
 }
 
-/** Customer signs the inspection: upload the PNG, then save path + name (server stamps signed_at). */
+/** Mileage / fuel / notes of an inspection (what the customer signs off on). */
+export interface InspectionDetails {
+  mileage: number | null;
+  fuel_level: number | null;
+  notes: string | null;
+}
+
+/**
+ * Customer signs the inspection: upload the PNG, then save the details the
+ * customer was shown together with path + name in ONE update (server stamps
+ * signed_at and locks the row) — details can never be left unsaved behind a
+ * signature.
+ */
 export function useSignInspection(jobId: string) {
   const { shopId } = useShop();
   const invalidate = useInvalidateJob(jobId);
@@ -517,17 +535,25 @@ export function useSignInspection(jobId: string) {
       inspectionId,
       signerName,
       signature,
+      details,
     }: {
       inspectionId: string;
       signerName: string;
       signature: Blob;
+      details: InspectionDetails;
     }) => {
       const path = signaturePath(shopId, 'inspections', inspectionId, newId());
       await uploadObject('signatures', path, signature, 'image/png');
       const rows = unwrapList(
         await supabase
           .from('inspections')
-          .update({ customer_signature_path: path, signed_by_name: signerName.trim() })
+          .update({
+            mileage: details.mileage,
+            fuel_level: details.fuel_level,
+            notes: details.notes,
+            customer_signature_path: path,
+            signed_by_name: signerName.trim(),
+          })
           .eq('shop_id', shopId)
           .eq('id', inspectionId)
           .select('id'),
@@ -593,7 +619,10 @@ export function useForms(jobId: string) {
   });
 }
 
-export type FormTemplate = Pick<Row<'form_templates'>, 'id' | 'name' | 'body' | 'requires_signature'>;
+export type FormTemplate = Pick<
+  Row<'form_templates'>,
+  'id' | 'name' | 'body' | 'requires_signature'
+>;
 
 export function useFormTemplates(enabled: boolean) {
   const { shopId } = useShop();
@@ -744,6 +773,7 @@ export function useJobClock(jobId: string) {
 export type JobMessage = Pick<
   Row<'messages'>,
   | 'id'
+  | 'job_id'
   | 'direction'
   | 'channel'
   | 'body'
@@ -754,7 +784,11 @@ export type JobMessage = Pick<
   | 'error'
 >;
 
-export function useJobMessages(jobId: string, enabled: boolean) {
+/**
+ * Recent messages for this job plus the customer's messages that are not
+ * tied to any job (e.g. inbound texts) — newest first.
+ */
+export function useJobMessages(jobId: string, customerId: string, enabled: boolean) {
   const { shopId } = useShop();
   return useQuery({
     queryKey: jobKeys.part(shopId, jobId, 'messages'),
@@ -763,9 +797,11 @@ export function useJobMessages(jobId: string, enabled: boolean) {
       unwrapList(
         await supabase
           .from('messages')
-          .select('id, direction, channel, body, subject, status, template_key, created_at, error')
+          .select(
+            'id, job_id, direction, channel, body, subject, status, template_key, created_at, error',
+          )
           .eq('shop_id', shopId)
-          .eq('job_id', jobId)
+          .or(`job_id.eq.${jobId},and(customer_id.eq.${customerId},job_id.is.null)`)
           .order('created_at', { ascending: false })
           .limit(20),
       ),
@@ -798,7 +834,13 @@ export function useSendJobTemplate(jobId: string) {
       const result: { data: unknown; error: unknown } = await supabase.functions.invoke<unknown>(
         'messaging',
         {
-          body: { action: 'send', shop_id: shopId, job_id: jobId, channel, template_key: templateKey },
+          body: {
+            action: 'send',
+            shop_id: shopId,
+            job_id: jobId,
+            channel,
+            template_key: templateKey,
+          },
         },
       );
       if (result.error) throw await edgeFunctionError(result.error);

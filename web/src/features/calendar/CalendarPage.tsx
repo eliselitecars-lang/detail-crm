@@ -24,7 +24,16 @@ import {
   useToast,
 } from '@/components/ui';
 import { cn } from '@/lib/cn';
-import { formatInTz, formatTimeRange, shopLocalToUtcIso } from '@/lib/dates';
+import {
+  addLocalDays,
+  formatInTz,
+  formatLocalDate,
+  formatTimeRange,
+  shopDayRangeUtc,
+  shopLocalToUtcIso,
+  shopToday,
+  type LocalDate,
+} from '@/lib/dates';
 import { readLocal, writeLocal } from '@/lib/storage';
 import { useRealtime } from '@/lib/useRealtime';
 import { useShop } from '@/features/shop/shopContext';
@@ -34,15 +43,20 @@ import { useBusinessHours, useCalendarEvents, type CalendarRange } from './api';
 import {
   CALENDAR_VIEWS,
   isCalendarView,
+  isGridView,
   jobIdFromEventId,
   LEGEND_STATUSES,
+  resourceColumns,
+  resourceDayBounds,
   scrollTimeFor,
   STATUS_PALETTE,
   toBusinessHours,
   toEventInputs,
+  UNASSIGNED_COLUMN_NAME,
   type CalendarFilters,
   type CalendarView,
 } from './model';
+import { ResourceDayView, type ResourceMove } from './ResourceDayView';
 
 const VIEW_KEY = 'detailcrm:calendarView';
 
@@ -53,7 +67,10 @@ interface PendingMove {
   fromEnd: string;
   toStart: string;
   toEnd: string;
+  /** Set when the job also moves to another bay / van (resource view). */
+  toResource?: { id: string | null; name: string; fromName: string };
   revert: () => void;
+  settle?: () => void;
 }
 
 function initialView(): CalendarView {
@@ -62,13 +79,10 @@ function initialView(): CalendarView {
   return window.innerWidth < 640 ? 'listWeek' : 'timeGridWeek';
 }
 
-function toIso(value: string): string {
-  return new Date(value).toISOString();
-}
-
 export default function CalendarPage() {
   const { shopId, timezone } = useShop();
   const canManage = useCan('jobs.manage');
+  const canAdmin = useCan('settings.manage');
   const navigate = useNavigate();
   const toast = useToast();
   const calendarRef = useRef<FullCalendar>(null);
@@ -76,12 +90,21 @@ export default function CalendarPage() {
   const [view, setView] = useState<CalendarView>(initialView);
   const [title, setTitle] = useState('');
   const [range, setRange] = useState<CalendarRange | null>(null);
+  // Grid views: the visible local dates (from datesSet). Resource view: the
+  // shown day. Each seeds the other when the user switches between them.
+  const [visible, setVisible] = useState<{ start: LocalDate; end: LocalDate } | null>(null);
+  const [focusDate, setFocusDate] = useState<LocalDate>(() => shopToday(timezone));
+  const resourceMode = !isGridView(view);
   const [filters, setFilters] = useState<CalendarFilters>({ memberId: null, resourceId: null });
   const [includeCancelled, setIncludeCancelled] = useState(false);
   const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
 
   useRealtime({ table: 'jobs', shopId });
-  const events = useCalendarEvents(range, includeCancelled);
+  const activeRange = useMemo(
+    () => (resourceMode ? shopDayRangeUtc(focusDate, timezone) : range),
+    [resourceMode, focusDate, timezone, range],
+  );
+  const events = useCalendarEvents(activeRange, includeCancelled);
   const hours = useBusinessHours();
   const team = useTeam();
   const resources = useResources();
@@ -103,12 +126,33 @@ export default function CalendarPage() {
   const changeView = (next: CalendarView) => {
     setView(next);
     writeLocal(VIEW_KEY, next);
-    api()?.changeView(next);
+    if (!isGridView(next)) {
+      // Into the bay / van day view: today if it is on screen, else the first visible day.
+      if (!resourceMode && visible) {
+        const now = shopToday(timezone);
+        setFocusDate(now >= visible.start && now < visible.end ? now : visible.start);
+      }
+      return;
+    }
+    // Leaving the resource view remounts the grid at focusDate (initialDate).
+    if (!resourceMode) api()?.changeView(next);
   };
+
+  const goToday = () => (resourceMode ? setFocusDate(shopToday(timezone)) : api()?.today());
+  const step = (days: -1 | 1) =>
+    resourceMode
+      ? setFocusDate((d) => addLocalDays(d, days))
+      : days < 0
+        ? api()?.prev()
+        : api()?.next();
 
   const onDatesSet = (arg: DatesSetArg) => {
     setTitle(arg.view.title);
-    const next = { from: toIso(arg.startStr), to: toIso(arg.endStr) };
+    const start = formatInTz(arg.view.currentStart, timezone, 'yyyy-MM-dd');
+    setVisible({ start, end: formatInTz(arg.view.currentEnd, timezone, 'yyyy-MM-dd') });
+    setFocusDate(start);
+    // arg.start/end are real instants (luxon3 converts from the shop zone).
+    const next = { from: arg.start.toISOString(), to: arg.end.toISOString() };
     setRange((prev) => (prev && prev.from === next.from && prev.to === next.to ? prev : next));
   };
 
@@ -145,9 +189,49 @@ export default function CalendarPage() {
     if (info.allDay) {
       query.set('start', shopLocalToUtcIso(info.startStr.slice(0, 10), '09:00', timezone));
     } else {
-      query.set('start', toIso(info.startStr));
-      query.set('end', toIso(info.endStr));
+      query.set('start', info.start.toISOString());
+      query.set('end', info.end.toISOString());
     }
+    void navigate(`/app/jobs/new?${query.toString()}`);
+  };
+
+  const resourceName = (id: string | null) =>
+    id === null
+      ? UNASSIGNED_COLUMN_NAME
+      : ((resources.data ?? []).find((r) => r.id === id)?.name ?? 'Unavailable bay / van');
+
+  const onResourceMove = (move: ResourceMove) => {
+    const row = rowsById.get(move.jobId);
+    if (!row) {
+      move.revert();
+      return;
+    }
+    const changesResource =
+      move.toResourceId !== undefined && move.toResourceId !== (row.resource_id ?? null);
+    setPendingMove({
+      jobId: move.jobId,
+      label: row.job_number !== null ? `Job #${row.job_number}` : 'this job',
+      fromStart: row.starts_at,
+      fromEnd: row.ends_at,
+      toStart: move.start,
+      toEnd: move.end,
+      ...(changesResource && move.toResourceId !== undefined
+        ? {
+            toResource: {
+              id: move.toResourceId,
+              name: resourceName(move.toResourceId),
+              fromName: resourceName(row.resource_id),
+            },
+          }
+        : {}),
+      revert: move.revert,
+      ...(move.settle ? { settle: move.settle } : {}),
+    });
+  };
+
+  const onResourceSelect = (resourceId: string | null, start: string, end: string) => {
+    const query = new URLSearchParams({ start, end });
+    if (resourceId) query.set('resourceId', resourceId);
     void navigate(`/app/jobs/new?${query.toString()}`);
   };
 
@@ -158,8 +242,15 @@ export default function CalendarPage() {
         jobId: pendingMove.jobId,
         start: pendingMove.toStart,
         end: pendingMove.toEnd,
+        ...(pendingMove.toResource ? { resourceId: pendingMove.toResource.id } : {}),
       });
-      toast.success(`${pendingMove.label} rescheduled`);
+      // the refetched rows now hold the job; drop the drag's temporary copy
+      pendingMove.settle?.();
+      toast.success(
+        pendingMove.toResource
+          ? `${pendingMove.label} moved to ${pendingMove.toResource.name}`
+          : `${pendingMove.label} rescheduled`,
+      );
     } catch (error) {
       pendingMove.revert();
       toast.error(error);
@@ -178,6 +269,15 @@ export default function CalendarPage() {
 
   const activeTeam = (team.data ?? []).filter((m) => m.active);
   const activeResources = (resources.data ?? []).filter((r) => r.active && !r.archived_at);
+  const columns = useMemo(
+    () => resourceColumns(resources.data ?? [], rows, filters.resourceId),
+    [resources.data, rows, filters.resourceId],
+  );
+  const bounds = useMemo(
+    () => resourceDayBounds(hours.data ?? [], rows, focusDate, timezone),
+    [hours.data, rows, focusDate, timezone],
+  );
+  const heading = resourceMode ? formatLocalDate(focusDate, 'EEEE, MMMM d, yyyy') : title;
 
   return (
     <>
@@ -197,21 +297,21 @@ export default function CalendarPage() {
         <div className="border-line flex flex-col gap-3 border-b p-3 sm:p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-1">
-              <Button size="sm" variant="secondary" onClick={() => api()?.today()}>
+              <Button size="sm" variant="secondary" onClick={goToday}>
                 Today
               </Button>
               <IconButton
-                label="Previous"
+                label={resourceMode ? 'Previous day' : 'Previous'}
                 icon={<ChevronLeft className="size-4" />}
-                onClick={() => api()?.prev()}
+                onClick={() => step(-1)}
               />
               <IconButton
-                label="Next"
+                label={resourceMode ? 'Next day' : 'Next'}
                 icon={<ChevronRight className="size-4" />}
-                onClick={() => api()?.next()}
+                onClick={() => step(1)}
               />
               <h2 className="text-ink ml-1 truncate text-base font-semibold" aria-live="polite">
-                {title}
+                {heading}
               </h2>
               {events.isFetching && <Spinner className="text-muted ml-2 size-4" />}
             </div>
@@ -254,9 +354,7 @@ export default function CalendarPage() {
               <Select
                 selectSize="sm"
                 value={filters.resourceId ?? ''}
-                onChange={(e) =>
-                  setFilters((f) => ({ ...f, resourceId: e.target.value || null }))
-                }
+                onChange={(e) => setFilters((f) => ({ ...f, resourceId: e.target.value || null }))}
                 options={[
                   { value: '', label: 'All' },
                   ...activeResources.map((r) => ({ value: r.id, label: r.name })),
@@ -282,6 +380,11 @@ export default function CalendarPage() {
             retrying={events.isRefetching}
           />
         )}
+        {events.isPending && activeRange !== null && (
+          <p role="status" className="text-muted px-4 pt-3 text-sm">
+            Loading jobs…
+          </p>
+        )}
         {events.isSuccess && jobCount === 0 && (
           <p role="status" className="text-muted px-4 pt-3 text-sm">
             No jobs in this range
@@ -290,32 +393,79 @@ export default function CalendarPage() {
           </p>
         )}
 
-        <div className="p-2 sm:p-3">
-          <FullCalendar
-            ref={calendarRef}
-            plugins={[luxonPlugin, dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
-            timeZone={timezone}
-            initialView={view}
-            headerToolbar={false}
-            height={view === 'timeGridDay' || view === 'timeGridWeek' ? 680 : 'auto'}
-            events={eventInputs}
-            businessHours={businessHours}
-            scrollTime={scrollTimeFor(hours.data ?? [])}
-            nowIndicator
-            dayMaxEvents
-            eventInteractive
-            selectable={canManage}
-            selectMirror
-            editable={canManage}
-            eventTimeFormat={{ hour: 'numeric', minute: '2-digit', meridiem: 'short' }}
-            slotLabelFormat={{ hour: 'numeric', meridiem: 'short' }}
-            datesSet={onDatesSet}
-            eventClick={onEventClick}
-            eventDrop={onMoved}
-            eventResize={onMoved}
-            select={onSelect}
-            noEventsText="No jobs in this range"
+        {resourceMode && resources.isError && (
+          <ErrorState
+            compact
+            title="Couldn’t load bays and vans"
+            error={resources.error}
+            onRetry={() => void resources.refetch()}
+            retrying={resources.isRefetching}
           />
+        )}
+        {resourceMode && resources.isSuccess && activeResources.length === 0 && (
+          <p role="status" className="text-muted px-4 pt-3 text-sm">
+            No bays or vans set up yet — every job shows under “{UNASSIGNED_COLUMN_NAME}”.
+            {canAdmin && (
+              <>
+                {' '}
+                <Link to="/app/settings/resources" className="text-primary-ink underline">
+                  Add bays and vans
+                </Link>
+              </>
+            )}
+          </p>
+        )}
+
+        <div className="p-2 sm:p-3" aria-busy={events.isFetching}>
+          {resourceMode ? (
+            resources.isPending ? (
+              <p role="status" className="text-muted px-2 py-6 text-sm">
+                Loading bays and vans…
+              </p>
+            ) : (
+              <ResourceDayView
+                date={focusDate}
+                timezone={timezone}
+                columns={columns}
+                rows={rows}
+                filters={filters}
+                canManage={canManage}
+                businessHours={businessHours}
+                slotMinTime={bounds.slotMinTime}
+                slotMaxTime={bounds.slotMaxTime}
+                onOpenJob={(jobId) => void navigate(`/app/jobs/${jobId}`)}
+                onMove={onResourceMove}
+                onSelect={onResourceSelect}
+              />
+            )
+          ) : (
+            <FullCalendar
+              ref={calendarRef}
+              plugins={[luxonPlugin, dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
+              timeZone={timezone}
+              initialView={view}
+              initialDate={focusDate}
+              headerToolbar={false}
+              height={view === 'timeGridDay' || view === 'timeGridWeek' ? 680 : 'auto'}
+              events={eventInputs}
+              businessHours={businessHours}
+              scrollTime={scrollTimeFor(hours.data ?? [])}
+              nowIndicator
+              dayMaxEvents
+              eventInteractive
+              selectable={canManage}
+              selectMirror
+              editable={canManage}
+              eventTimeFormat={{ hour: 'numeric', minute: '2-digit', meridiem: 'short' }}
+              slotLabelFormat={{ hour: 'numeric', meridiem: 'short' }}
+              datesSet={onDatesSet}
+              eventClick={onEventClick}
+              eventDrop={onMoved}
+              eventResize={onMoved}
+              select={onSelect}
+              noEventsText="No jobs in this range"
+            />
+          )}
         </div>
 
         <ul
@@ -361,6 +511,12 @@ export default function CalendarPage() {
               <span className="block">
                 Was: {describeWhen(pendingMove.fromStart, pendingMove.fromEnd)}
               </span>
+              {pendingMove.toResource && (
+                <span className="block">
+                  Bay / van: <strong>{pendingMove.toResource.name}</strong> (was{' '}
+                  {pendingMove.toResource.fromName})
+                </span>
+              )}
             </>
           ) : undefined
         }

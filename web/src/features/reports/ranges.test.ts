@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { centsCell, csvCell, toCsv } from './csv';
 import { outstandingReportSchema, teamHasPay, teamRowSchema } from './model';
-import { bucketLabel, defaultBucket, presetRange, rangeError, readParams } from './ranges';
+import { assertCompleteRevenue } from './api';
+import {
+  bucketAllowed,
+  bucketCount,
+  bucketLabel,
+  bucketStart,
+  defaultBucket,
+  MAX_BUCKETS,
+  presetRange,
+  rangeError,
+  readParams,
+} from './ranges';
 
 describe('presetRange', () => {
   // 2026-03-05 is a Thursday.
@@ -66,6 +77,65 @@ describe('readParams', () => {
   });
 });
 
+describe('bucket limits (PostgREST max_rows would truncate report_revenue)', () => {
+  it('counts buckets like the server (natural bucket starts)', () => {
+    expect(bucketCount({ from: '2026-03-01', to: '2026-03-31' }, 'day')).toBe(31);
+    // Sun Mar 1 belongs to the week of Mon Feb 23; Mar 2..Mar 9 adds two more.
+    expect(bucketCount({ from: '2026-03-01', to: '2026-03-09' }, 'week')).toBe(3);
+    expect(bucketCount({ from: '2025-11-15', to: '2026-02-01' }, 'month')).toBe(4);
+    expect(bucketCount({ from: '2023-01-01', to: '2026-09-27' }, 'day')).toBe(1366);
+    expect(bucketStart('2026-03-01', 'week')).toBe('2026-02-23');
+    expect(bucketStart('2026-03-18', 'month')).toBe('2026-03-01');
+  });
+
+  it('never allows more than MAX_BUCKETS periods (well under max_rows = 1000)', () => {
+    expect(MAX_BUCKETS).toBeLessThan(1000);
+    const leapYear = { from: '2024-01-01', to: '2024-12-31' };
+    expect(bucketAllowed(leapYear, 'day')).toBe(true);
+    const long = { from: '2023-01-01', to: '2026-09-27' };
+    expect(bucketAllowed(long, 'day')).toBe(false);
+    expect(bucketAllowed(long, 'week')).toBe(true);
+    const tenYears = { from: '2016-10-01', to: '2026-09-27' };
+    expect(bucketAllowed(tenYears, 'week')).toBe(false);
+    expect(bucketAllowed(tenYears, 'month')).toBe(true);
+  });
+
+  it('coerces a too-fine ?bucket= to the automatic bucket', () => {
+    const result = readParams(
+      new URLSearchParams('range=custom&from=2023-01-01&to=2026-09-27&bucket=day'),
+      'UTC',
+    );
+    expect(result).toMatchObject({ valid: true, bucket: 'month' });
+    const week = readParams(
+      new URLSearchParams('range=custom&from=2023-01-01&to=2026-09-27&bucket=week'),
+      'UTC',
+    );
+    expect(week.bucket).toBe('week');
+  });
+
+  it('rejects a revenue response that stops before the last period', () => {
+    const row = (bucket_start: string) => ({
+      bucket_start,
+      gross_cents: 0,
+      refunds_cents: 0,
+      net_cents: 0,
+      tips_cents: 0,
+      payments_count: 0,
+    });
+    const range = { from: '2026-03-01', to: '2026-03-03' };
+    expect(() =>
+      assertCompleteRevenue([row('2026-03-01'), row('2026-03-02')], range, 'day'),
+    ).toThrow(/too many periods/);
+    expect(() =>
+      assertCompleteRevenue([row('2026-03-01'), row('2026-03-03')], range, 'day'),
+    ).not.toThrow();
+    // Week buckets start on Monday, before `to`.
+    expect(() =>
+      assertCompleteRevenue([row('2026-02-23'), row('2026-03-02')], range, 'week'),
+    ).not.toThrow();
+  });
+});
+
 describe('rangeError / defaultBucket', () => {
   it('rejects missing, invalid and too-long ranges', () => {
     expect(rangeError({ from: '', to: '2026-01-01' })).toMatch(/Choose/);
@@ -102,6 +172,14 @@ describe('csv', () => {
     expect(centsCell(-5)).toBe('-0.05');
     expect(centsCell(0)).toBe('0.00');
     expect(centsCell(null)).toBe('');
+  });
+
+  it('exports negative amounts as numbers, not formula-guarded text', () => {
+    expect(csvCell(centsCell(-5))).toBe('-0.05');
+    expect(toCsv(['Net'], [[centsCell(-12345)]])).toBe('Net\r\n-123.45\r\n');
+    // Text that merely starts with a minus is still neutralised.
+    expect(csvCell('-1+2')).toBe("'-1+2");
+    expect(csvCell('-A1')).toBe("'-A1");
   });
 });
 

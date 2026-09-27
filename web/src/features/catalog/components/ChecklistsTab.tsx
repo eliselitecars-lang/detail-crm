@@ -32,6 +32,23 @@ import {
   type ChecklistTemplateRow,
 } from '../model';
 
+/**
+ * What a template's service link reads as: null = not linked (added
+ * manually), undefined = still loading, otherwise a label. A link is never
+ * shown as "manual" just because the services failed to load.
+ */
+function linkedServiceLabel(
+  serviceId: string | null,
+  names: Map<string, string>,
+  services: { isPending: boolean; error: unknown },
+): string | null | undefined {
+  if (!serviceId) return null;
+  const name = names.get(serviceId);
+  if (name !== undefined) return name;
+  if (services.isPending) return undefined;
+  return 'a linked service';
+}
+
 export function ChecklistsTab({ canManage }: { canManage: boolean }) {
   const toast = useToast();
   const templates = useChecklistTemplates();
@@ -74,45 +91,60 @@ export function ChecklistsTab({ canManage }: { canManage: boolean }) {
     );
   else
     body = (
-      <ul className="divide-line divide-y" aria-label="Checklist templates">
-        {list.map((template) => {
-          const count = parseChecklistItems(template.items).length;
-          const linked = template.service_id ? serviceName.get(template.service_id) : undefined;
-          return (
-            <li key={template.id} className="flex items-center gap-3 px-4 py-3 sm:px-5">
-              <div className="min-w-0 flex-1">
-                <p className="text-ink truncate font-medium">{template.name}</p>
-                <p className="text-muted flex flex-wrap items-center gap-2 text-xs">
-                  <span>{count === 1 ? '1 item' : `${count} items`}</span>
-                  {linked ? (
-                    <Badge tone="info">Auto-added with {linked}</Badge>
-                  ) : (
-                    <span>Added manually</span>
-                  )}
-                </p>
-              </div>
-              {canManage ? (
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button size="sm" variant="secondary" onClick={() => setEditing(template)}>
-                    Edit
-                  </Button>
-                  <IconButton
-                    label={`Delete ${template.name}`}
-                    icon={<Trash2 className="size-4" />}
-                    size="sm"
-                    variant="danger"
-                    onClick={() => setDeleting(template)}
-                  />
+      <>
+        {services.error && list.some((t) => t.service_id) && (
+          <div className="border-line border-b">
+            <ErrorState
+              compact
+              error={services.error}
+              title="Couldn’t load linked service names"
+              onRetry={() => void services.refetch()}
+              retrying={services.isRefetching}
+            />
+          </div>
+        )}
+        <ul className="divide-line divide-y" aria-label="Checklist templates">
+          {list.map((template) => {
+            const count = parseChecklistItems(template.items).length;
+            const linked = linkedServiceLabel(template.service_id, serviceName, services);
+            return (
+              <li key={template.id} className="flex items-center gap-3 px-4 py-3 sm:px-5">
+                <div className="min-w-0 flex-1">
+                  <p className="text-ink truncate font-medium">{template.name}</p>
+                  <p className="text-muted flex flex-wrap items-center gap-2 text-xs">
+                    <span>{count === 1 ? '1 item' : `${count} items`}</span>
+                    {linked === null ? (
+                      <span>Added manually</span>
+                    ) : linked === undefined ? (
+                      <span className="text-subtle">Checking linked service…</span>
+                    ) : (
+                      <Badge tone="info">Auto-added with {linked}</Badge>
+                    )}
+                  </p>
                 </div>
-              ) : (
-                <Button size="sm" variant="ghost" onClick={() => setEditing(template)}>
-                  View
-                </Button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+                {canManage ? (
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button size="sm" variant="secondary" onClick={() => setEditing(template)}>
+                      Edit
+                    </Button>
+                    <IconButton
+                      label={`Delete ${template.name}`}
+                      icon={<Trash2 className="size-4" />}
+                      size="sm"
+                      variant="danger"
+                      onClick={() => setDeleting(template)}
+                    />
+                  </div>
+                ) : (
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(template)}>
+                    View
+                  </Button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </>
     );
 
   return (
@@ -205,6 +237,14 @@ export function ChecklistTemplateDialog({
   };
 
   const submit = async () => {
+    // A step typed into "Add an item…" but not yet added is saved too.
+    const pending = newLabel.trim();
+    const allItems: ChecklistDraftItem[] =
+      pending === '' ? items : [...items, { key: draftKey(), id: null, label: pending }];
+    if (pending !== '') {
+      setItems(allItems);
+      setNewLabel('');
+    }
     const trimmed = name.trim();
     const nextNameError =
       trimmed === ''
@@ -212,7 +252,7 @@ export function ChecklistTemplateDialog({
         : trimmed.length > 120
           ? 'Name must be 120 characters or fewer.'
           : null;
-    const nextItemsError = checklistItemsError(items);
+    const nextItemsError = checklistItemsError(allItems);
     setNameError(nextNameError);
     setItemsError(nextItemsError);
     if (nextNameError || nextItemsError) return;
@@ -221,7 +261,7 @@ export function ChecklistTemplateDialog({
         ...(template ? { id: template.id } : {}),
         name: trimmed,
         serviceId: serviceId === '' ? null : serviceId,
-        items: checklistPayload(items),
+        items: checklistPayload(allItems),
       });
       toast.success(template ? 'Checklist saved' : 'Checklist created');
       onClose();
@@ -231,11 +271,19 @@ export function ChecklistTemplateDialog({
   };
 
   if (readOnly && template) {
-    const linked = (services.data ?? []).find((s) => s.id === template.service_id);
+    const linked = linkedServiceLabel(
+      template.service_id,
+      new Map((services.data ?? []).map((s) => [s.id, s.name])),
+      services,
+    );
     return (
       <Dialog open onClose={onClose} title={template.name} size="md">
         <p className="text-muted mb-3 text-sm">
-          {linked ? `Added automatically to jobs with ${linked.name}.` : 'Added to jobs manually.'}
+          {linked === null
+            ? 'Added to jobs manually.'
+            : linked === undefined
+              ? 'Checking the linked service…'
+              : `Added automatically to jobs with ${linked}.`}
         </p>
         {items.length === 0 ? (
           <p className="text-muted text-sm">This checklist has no items.</p>
@@ -282,14 +330,28 @@ export function ChecklistTemplateDialog({
         <FormField
           label="Linked service"
           help="When a job includes this service (or a package containing it), the checklist is added automatically."
+          error={services.error ? 'Couldn’t load services. The current link is kept.' : undefined}
         >
           <Select
-            placeholder="None — add manually"
+            placeholder={services.isPending ? 'Loading services…' : 'None — add manually'}
             value={serviceId}
+            disabled={services.isPending || Boolean(services.error)}
             onChange={(e) => setServiceId(e.target.value)}
             options={serviceOptions}
           />
         </FormField>
+        {services.error && (
+          <div>
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={services.isRefetching}
+              onClick={() => void services.refetch()}
+            >
+              Retry loading services
+            </Button>
+          </div>
+        )}
         <fieldset className="flex flex-col gap-2">
           <legend className="text-ink mb-1 text-sm font-medium">Items</legend>
           {items.length === 0 ? (

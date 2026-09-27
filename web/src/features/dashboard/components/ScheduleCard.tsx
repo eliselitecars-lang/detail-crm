@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 import { EmptyState, ErrorState, LoadingState, SectionCard, StatusBadge } from '@/components/ui';
 import { formatTimeRange } from '@/lib/dates';
 import type { ScheduleJob } from '../api';
-import { servicesFromTitle } from '../summary';
+import { scheduleCustomerLabel, servicesFromTitle } from '../summary';
 
 interface ScheduleQuery {
   isPending: boolean;
@@ -53,7 +53,7 @@ export function ScheduleCard({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="text-ink block text-sm font-medium break-words">
-                    {job.customer_name ?? 'Customer'}
+                    {scheduleCustomerLabel(job)}
                     {job.job_number !== null && (
                       <span className="text-muted font-normal"> · #{job.job_number}</span>
                     )}

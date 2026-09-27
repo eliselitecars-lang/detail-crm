@@ -84,6 +84,12 @@ export const SETTINGS_SECTIONS = [
     description: 'The phone number your texts are sent from.',
     view: 'shop.manageSmsNumber',
   },
+  {
+    path: 'delete-shop',
+    label: 'Delete shop',
+    description: 'Permanently delete this shop and everything in it.',
+    view: 'shop.delete',
+  },
 ] as const satisfies readonly SettingsSection[];
 
 export type SettingsSectionPath = (typeof SETTINGS_SECTIONS)[number]['path'];

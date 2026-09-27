@@ -46,10 +46,8 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
   const nextSort = rows.reduce((max, l) => Math.max(max, l.sort), 0) + 1;
 
   const onMove = (index: number, delta: -1 | 1) => {
-    const a = rows[index];
-    const b = rows[index + delta];
-    if (!a || !b) return;
-    move.mutateAsync({ a, b }).catch((error: unknown) => toast.error(error));
+    if (!rows[index] || !rows[index + delta]) return;
+    move.mutateAsync({ rows, index, delta }).catch((error: unknown) => toast.error(error));
   };
 
   const discountLabel =

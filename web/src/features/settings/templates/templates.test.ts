@@ -8,7 +8,14 @@ import {
   patchFor,
   validateDraft,
 } from './drafts';
-import { describeOffset, offsetFromInput, previewVars, templateMeta, TEMPLATE_KEYS } from './meta';
+import {
+  describeOffset,
+  offsetFromInput,
+  placeholdersFor,
+  previewVars,
+  templateMeta,
+  TEMPLATE_KEYS,
+} from './meta';
 import { placeholdersIn, renderTemplate, smsSegments } from './render';
 
 describe('renderTemplate (parity with SQL render_template)', () => {
@@ -61,6 +68,16 @@ describe('smsSegments', () => {
     expect(smsSegments('It’s ready')).toEqual({ segments: 1, unicode: true });
     expect(smsSegments('é'.repeat(71)).unicode).toBe(false);
     expect(smsSegments('😀'.repeat(71))).toEqual({ segments: 2, unicode: true });
+  });
+
+  it('counts GSM-7 extension characters as two septets', () => {
+    // 159 + one extension char = 161 septets → two texts, still GSM-7.
+    expect(smsSegments(`${'a'.repeat(159)}€`)).toEqual({ segments: 2, unicode: false });
+    expect(smsSegments(`${'a'.repeat(158)}{`)).toEqual({ segments: 1, unicode: false });
+    expect(smsSegments('[]{}^~|\\€'.repeat(16))).toEqual({ segments: 2, unicode: false });
+    // 306 septets fit two parts (2 × 153); one more extension char needs a third.
+    expect(smsSegments(`${'a'.repeat(304)}^`)).toEqual({ segments: 2, unicode: false });
+    expect(smsSegments(`${'a'.repeat(305)}^`)).toEqual({ segments: 3, unicode: false });
   });
 });
 
@@ -155,5 +172,14 @@ describe('template drafts', () => {
       caret: 16,
     });
     expect(insertPlaceholder('Hi XX', 'a', 3, 5).text).toBe('Hi {{a}}');
+  });
+});
+
+describe('invite placeholders', () => {
+  it('offers every variable the invites edge function supplies', () => {
+    // supabase/functions/invites buildInviteEmail: shop_name, shop_phone, invite_link.
+    expect(placeholdersFor('invite').map((p) => p.name)).toEqual(
+      expect.arrayContaining(['shop_name', 'shop_phone', 'invite_link']),
+    );
   });
 });

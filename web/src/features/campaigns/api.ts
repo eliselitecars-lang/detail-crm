@@ -227,3 +227,21 @@ export function useCampaignStats(id: string, status: CampaignStatus, recipients:
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// Public unsubscribe page (/u/:token) — anonymous visitors
+// ---------------------------------------------------------------------------
+
+/**
+ * Records the email opt-out behind a campaign email's unsubscribe link
+ * (public_unsubscribe, granted to anon; the token is that email's message
+ * id). Resolves true when done (idempotent), false for an unknown link.
+ */
+export function useUnsubscribe() {
+  return useMutation({
+    mutationFn: async (token: string) => {
+      const result = await supabase.rpc('public_unsubscribe', { p_token: token });
+      return z.boolean().parse(unwrap(result));
+    },
+  });
+}

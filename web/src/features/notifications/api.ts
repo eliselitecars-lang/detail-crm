@@ -6,11 +6,12 @@
 import {
   useInfiniteQuery,
   useMutation,
-  useQuery,
   useQueryClient,
   type InfiniteData,
 } from '@tanstack/react-query';
+import { useToast } from '@/components/ui';
 import { unwrap } from '@/lib/db';
+import { toAppError } from '@/lib/errors';
 import { shellKeys } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import type { Row } from '@/lib/db';
@@ -20,8 +21,10 @@ export type NotificationRow = Pick<
   'id' | 'kind' | 'title' | 'body' | 'job_id' | 'read_at' | 'created_at'
 >;
 
+type NotificationPages = InfiniteData<NotificationRow[], number>;
+
 const COLUMNS = 'id, kind, title, body, job_id, read_at, created_at';
-export const UNREAD_LIMIT = 100;
+export const UNREAD_PAGE_SIZE = 50;
 export const READ_PAGE_SIZE = 30;
 
 export const notificationKeys = {
@@ -32,11 +35,17 @@ export const notificationKeys = {
     [...shellKeys.notifications(shopId), 'page', userId, 'read'] as const,
 };
 
+/**
+ * Unread notifications, newest first, paged like the read list so none are
+ * hidden behind a cap (the page offers "Load more"). Offsets are recomputed
+ * from fresh pages on refetch, so marking rows read never skips any.
+ */
 export function useUnreadNotifications(shopId: string, userId: string) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: notificationKeys.unread(shopId, userId),
     enabled: userId !== '',
-    queryFn: async (): Promise<NotificationRow[]> =>
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }): Promise<NotificationRow[]> =>
       unwrap(
         await supabase
           .from('notifications')
@@ -46,8 +55,10 @@ export function useUnreadNotifications(shopId: string, userId: string) {
           .is('read_at', null)
           .order('created_at', { ascending: false })
           .order('id')
-          .limit(UNREAD_LIMIT),
+          .range(pageParam, pageParam + UNREAD_PAGE_SIZE - 1),
       ) ?? [],
+    getNextPageParam: (last, pages) =>
+      last.length < UNREAD_PAGE_SIZE ? undefined : pages.length * UNREAD_PAGE_SIZE,
   });
 }
 
@@ -75,10 +86,13 @@ export function useReadNotifications(shopId: string, userId: string) {
 
 /**
  * Marks one notification read. Optimistic (allowed: local, reversible,
- * non-money) — the row shows as read at once and rolls back on error.
+ * non-money) — the row shows as read at once and rolls back on error, with a
+ * toast so the failure is announced (the toast region is a live region and
+ * outlives the page, e.g. when the deep link navigated away).
  */
 export function useMarkNotificationRead(shopId: string, userId: string) {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const key = notificationKeys.unread(shopId, userId);
   return useMutation({
     mutationFn: async (id: string) => {
@@ -94,14 +108,23 @@ export function useMarkNotificationRead(shopId: string, userId: string) {
     },
     onMutate: async (id) => {
       await queryClient.cancelQueries({ queryKey: key });
-      const previous = queryClient.getQueryData<NotificationRow[]>(key);
-      queryClient.setQueryData<NotificationRow[]>(key, (rows) =>
-        rows?.map((r) => (r.id === id ? { ...r, read_at: new Date().toISOString() } : r)),
+      const previous = queryClient.getQueryData<NotificationPages>(key);
+      const readAt = new Date().toISOString();
+      queryClient.setQueryData<NotificationPages>(
+        key,
+        (data) =>
+          data && {
+            ...data,
+            pages: data.pages.map((page) =>
+              page.map((r) => (r.id === id ? { ...r, read_at: readAt } : r)),
+            ),
+          },
       );
       return { previous };
     },
-    onError: (_error, _id, context) => {
+    onError: (error, _id, context) => {
       if (context?.previous) queryClient.setQueryData(key, context.previous);
+      toast.error('Couldn’t mark the notification read', toAppError(error).message);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: notificationKeys.all(shopId) }),
   });
@@ -131,14 +154,10 @@ export function useDismissNotification(shopId: string, userId: string) {
       );
     },
     onSuccess: (_data, id) => {
-      queryClient.setQueryData<NotificationRow[]>(notificationKeys.unread(shopId, userId), (rows) =>
-        rows?.filter((r) => r.id !== id),
-      );
-      queryClient.setQueryData<InfiniteData<NotificationRow[], number>>(
-        notificationKeys.read(shopId, userId),
-        (data) =>
-          data && { ...data, pages: data.pages.map((page) => page.filter((r) => r.id !== id)) },
-      );
+      const drop = (data: NotificationPages | undefined) =>
+        data && { ...data, pages: data.pages.map((page) => page.filter((r) => r.id !== id)) };
+      queryClient.setQueryData<NotificationPages>(notificationKeys.unread(shopId, userId), drop);
+      queryClient.setQueryData<NotificationPages>(notificationKeys.read(shopId, userId), drop);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: notificationKeys.all(shopId) }),
   });

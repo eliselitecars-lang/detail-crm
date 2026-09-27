@@ -66,9 +66,7 @@ export function CustomerCard({ job }: { job: JobDetail }) {
             {c.email}
           </a>
         )}
-        {address && job.location_type === 'shop' && (
-          <p className="text-muted text-sm">{address}</p>
-        )}
+        {address && job.location_type === 'shop' && <p className="text-muted text-sm">{address}</p>}
       </div>
     </SectionCard>
   );
@@ -86,8 +84,18 @@ export function VehicleCard({ job }: { job: JobDetail }) {
           </p>
           <KeyValueList
             items={[
-              ...(v.license_plate ? [{ key: 'plate', label: 'Plate', value: v.license_plate }] : []),
-              ...(v.vin ? [{ key: 'vin', label: 'VIN', value: <span className="font-mono text-xs">{v.vin}</span> }] : []),
+              ...(v.license_plate
+                ? [{ key: 'plate', label: 'Plate', value: v.license_plate }]
+                : []),
+              ...(v.vin
+                ? [
+                    {
+                      key: 'vin',
+                      label: 'VIN',
+                      value: <span className="font-mono text-xs">{v.vin}</span>,
+                    },
+                  ]
+                : []),
             ]}
           />
         </div>

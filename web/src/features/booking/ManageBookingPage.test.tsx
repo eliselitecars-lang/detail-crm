@@ -105,6 +105,23 @@ describe('ManageBookingPage', () => {
     expect(screen.queryByRole('button', { name: /deposit/ })).not.toBeInTheDocument();
   });
 
+  it('does not show the job total as a balance on a cancelled booking', async () => {
+    const cancelled = bookingDocFixture({
+      booking: { ...bookingDocFixture().booking, status: 'cancelled' },
+      cancellation: { ...bookingDocFixture().cancellation, allowed: false },
+    });
+    mockRpc({ public_get_booking: { data: cancelled } });
+    render();
+    expect(await screen.findByText('This booking was cancelled')).toBeInTheDocument();
+    expect(screen.queryByText('Balance')).not.toBeInTheDocument();
+  });
+
+  it('shows the balance on an open booking', async () => {
+    mockRpc({ public_get_booking: { data: bookingDocFixture() } });
+    render();
+    expect(await screen.findByText('Balance')).toBeInTheDocument();
+  });
+
   it('shows the server’s reason when cancelling is refused', async () => {
     mockRpc({
       public_get_booking: { data: bookingDocFixture() },

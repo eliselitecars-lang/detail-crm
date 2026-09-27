@@ -25,7 +25,7 @@ import {
   type SalesRow,
   type TeamRow,
 } from './model';
-import type { Bucket, DateRange } from './ranges';
+import { bucketStart, type Bucket, type DateRange } from './ranges';
 
 export const reportKeys = {
   all: (shopId: string) => shopKey(shopId, 'reports'),
@@ -53,6 +53,21 @@ function parse<T>(schema: z.ZodType<T>, data: unknown): T {
   return result.data;
 }
 
+/**
+ * report_revenue returns every bucket through the one containing `to`
+ * (ascending). If the response was cut short (PostgREST max_rows), the
+ * totals would silently understate the period — fail loudly instead.
+ */
+export function assertCompleteRevenue(rows: RevenueRow[], range: DateRange, bucket: Bucket): void {
+  const last = rows.at(-1);
+  if (last && last.bucket_start < bucketStart(range.to, bucket)) {
+    throw new AppError(
+      'This report has too many periods to show at once. Choose a shorter range or group by month.',
+      { kind: 'validation' },
+    );
+  }
+}
+
 interface Options {
   enabled?: boolean;
 }
@@ -66,8 +81,8 @@ export function useRevenueReport(
   return useQuery({
     queryKey: reportKeys.revenue(shopId, range, bucket),
     enabled,
-    queryFn: async (): Promise<RevenueRow[]> =>
-      parse(
+    queryFn: async (): Promise<RevenueRow[]> => {
+      const rows = parse(
         z.array(revenueRowSchema),
         unwrap(
           await supabase.rpc('report_revenue', {
@@ -77,7 +92,10 @@ export function useRevenueReport(
             p_bucket: bucket,
           }),
         ) ?? [],
-      ),
+      );
+      assertCompleteRevenue(rows, range, bucket);
+      return rows;
+    },
   });
 }
 

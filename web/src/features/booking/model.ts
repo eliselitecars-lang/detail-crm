@@ -268,9 +268,27 @@ export function validateVehicle(
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export const COUPON_RE = /^[A-Za-z0-9_-]{1,40}$/;
 
+/**
+ * The server (create_online_booking → normalize_phone_e164 with the shop's
+ * country) reads bare 10-digit numbers as NANP only for US/CA shops; anywhere
+ * else it needs the international "+" form, the same rule lib/phone applies.
+ * Say so, rather than a bare "invalid", to customers of non-NANP shops.
+ */
+export function isNanpCountry(country: string | null): boolean {
+  return ['US', 'CA'].includes((country ?? 'US').trim().toUpperCase());
+}
+
+export function phoneHint(country: string | null): string {
+  return isNanpCountry(country)
+    ? 'Enter a valid phone number.'
+    : 'Enter your number with the country code, starting with + (e.g. +44 7700 900123).';
+}
+
 export function validateDetails(
   details: DetailsInput,
   businessType: ShopProfile['business_type'],
+  /** Shop country (public_shop_profile.country); drives the phone hint. */
+  country: string | null = 'US',
 ): FieldErrors<keyof DetailsInput> {
   const errors: FieldErrors<keyof DetailsInput> = {};
   const max = (key: keyof DetailsInput, value: string, limit: number, label: string) => {
@@ -284,7 +302,7 @@ export function validateDetails(
   else if (!EMAIL_RE.test(email) || email.length > 254)
     errors.email = 'Enter a valid email address.';
   if (details.phone.trim() && normalizePhone(details.phone) === null) {
-    errors.phone = 'Enter a valid phone number.';
+    errors.phone = phoneHint(country);
   }
   if (details.smsOptIn && !details.phone.trim()) {
     errors.phone = 'Add a mobile number to get text updates.';
@@ -441,4 +459,17 @@ export function classifyBookingError(error: unknown): ClassifiedBookingError {
     return { kind: 'field', message, step };
   }
   return { kind: 'other', message, step: null };
+}
+
+/**
+ * Whether the booking's totals show a Balance row. booking_public_json derives
+ * the balance as `invoice balance ?? job total − paid` regardless of status, so
+ * a cancelled or no-show booking would otherwise show the whole job total as
+ * owed. Anything genuinely owed on those (e.g. a no-show fee) is invoiced and
+ * shown on the invoice card instead. Completed jobs only show a non-zero balance.
+ */
+export function showsBalance(status: string, balanceCents: number): boolean {
+  if (status === 'cancelled' || status === 'no_show') return false;
+  if (status === 'completed') return balanceCents > 0;
+  return true;
 }

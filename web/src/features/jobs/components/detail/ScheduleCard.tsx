@@ -182,10 +182,16 @@ function ScheduleDialog({ job, onClose, resources }: ScheduleDialogProps) {
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-3">
           <FormField label="Start date">
-            <DateInput value={form.startDate} onChange={(e) => set({ startDate: e.target.value })} />
+            <DateInput
+              value={form.startDate}
+              onChange={(e) => set({ startDate: e.target.value })}
+            />
           </FormField>
           <FormField label="Start time">
-            <TimeInput value={form.startTime} onChange={(e) => set({ startTime: e.target.value })} />
+            <TimeInput
+              value={form.startTime}
+              onChange={(e) => set({ startTime: e.target.value })}
+            />
           </FormField>
           <FormField label="End date">
             <DateInput value={form.endDate} onChange={(e) => set({ endDate: e.target.value })} />
@@ -218,17 +224,33 @@ function ScheduleDialog({ job, onClose, resources }: ScheduleDialogProps) {
               />
             </FormField>
             <FormField label="Apt, suite, etc." className="sm:col-span-2">
-              <Input value={form.line2} maxLength={200} onChange={(e) => set({ line2: e.target.value })} />
+              <Input
+                value={form.line2}
+                maxLength={200}
+                onChange={(e) => set({ line2: e.target.value })}
+              />
             </FormField>
             <FormField label="City">
-              <Input value={form.city} maxLength={100} onChange={(e) => set({ city: e.target.value })} />
+              <Input
+                value={form.city}
+                maxLength={100}
+                onChange={(e) => set({ city: e.target.value })}
+              />
             </FormField>
             <div className="grid grid-cols-2 gap-3">
               <FormField label="State">
-                <Input value={form.region} maxLength={100} onChange={(e) => set({ region: e.target.value })} />
+                <Input
+                  value={form.region}
+                  maxLength={100}
+                  onChange={(e) => set({ region: e.target.value })}
+                />
               </FormField>
               <FormField label="ZIP">
-                <Input value={form.postal} maxLength={20} onChange={(e) => set({ postal: e.target.value })} />
+                <Input
+                  value={form.postal}
+                  maxLength={20}
+                  onChange={(e) => set({ postal: e.target.value })}
+                />
               </FormField>
             </div>
           </div>
@@ -237,7 +259,10 @@ function ScheduleDialog({ job, onClose, resources }: ScheduleDialogProps) {
           <Select
             value={form.resourceId}
             onChange={(e) => set({ resourceId: e.target.value })}
-            options={[{ value: '', label: 'None' }, ...resources.map((r) => ({ value: r.id, label: r.name }))]}
+            options={[
+              { value: '', label: 'None' },
+              ...resources.map((r) => ({ value: r.id, label: r.name })),
+            ]}
           />
         </FormField>
         {error && (

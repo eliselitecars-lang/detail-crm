@@ -13,6 +13,7 @@ import { useShop } from '@/features/shop/shopContext';
 import {
   bySortThenName,
   serviceImagePath,
+  soleAddonServices,
   type CategoryRow,
   type ChecklistItemPayload,
   type ChecklistTemplateRow,
@@ -34,6 +35,8 @@ export const catalogKeys = {
     [...catalogKeys.all(shopId), 'package-items', id] as const,
   addons: (shopId: string, id: string) => [...catalogKeys.all(shopId), 'addons', id] as const,
   usage: (shopId: string, id: string) => [...catalogKeys.all(shopId), 'usage', id] as const,
+  addonSoleLinks: (shopId: string, id: string) =>
+    [...catalogKeys.all(shopId), 'addon-sole-links', id] as const,
   vehicleCategories: (shopId: string) =>
     [...catalogKeys.all(shopId), 'vehicle-categories'] as const,
   checklists: (shopId: string) => [...catalogKeys.all(shopId), 'checklists'] as const,
@@ -249,6 +252,40 @@ export function useServiceUsage(serviceId: string, enabled: boolean) {
           }),
       ]);
       return { jobLines, quoteLines, invoiceLines, packages, plans };
+    },
+  });
+}
+
+/**
+ * Services whose ONLY selected add-on is `addonId`. service_addons rows
+ * cascade away when the add-on is deleted, and "no rows" means "every
+ * add-on is offered" — so deleting it would quietly widen those services
+ * (including on the public booking page). Returns their ids.
+ */
+export function useAddonSoleLinks(addonId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: catalogKeys.addonSoleLinks(shopId, addonId),
+    enabled,
+    staleTime: 0,
+    queryFn: async (): Promise<string[]> => {
+      const linked = listOf(
+        await supabase
+          .from('service_addons')
+          .select('service_id')
+          .eq('shop_id', shopId)
+          .eq('addon_id', addonId),
+      );
+      const serviceIds = [...new Set(linked.map((l) => l.service_id))];
+      if (serviceIds.length === 0) return [];
+      const links = listOf(
+        await supabase
+          .from('service_addons')
+          .select('service_id, addon_id')
+          .eq('shop_id', shopId)
+          .in('service_id', serviceIds),
+      );
+      return soleAddonServices(addonId, serviceIds, links);
     },
   });
 }

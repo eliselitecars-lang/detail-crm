@@ -14,7 +14,10 @@ function Outline({ view }: { view: VehicleView }): ReactNode {
     case 'left':
     case 'right':
       return (
-        <g transform={view === 'right' ? `translate(${W} 0) scale(-1 1)` : undefined} strokeWidth={2}>
+        <g
+          transform={view === 'right' ? `translate(${W} 0) scale(-1 1)` : undefined}
+          strokeWidth={2}
+        >
           <path
             className={body}
             d="M30 165 L30 135 Q32 118 60 112 L120 104 L165 66 Q176 58 196 58 L270 58 Q290 58 302 70 L338 108 L362 116 Q374 122 374 138 L374 165 Z"
@@ -106,7 +109,11 @@ export function VehicleDiagram({ view, marks, onAdd, className }: VehicleDiagram
       <Outline view={view} />
       {marks.map((m) => (
         <g key={m.id} transform={`translate(${m.x * W} ${m.y * H})`}>
-          <circle r="11" className="fill-[var(--dc-danger)] stroke-[var(--dc-surface)]" strokeWidth={2} />
+          <circle
+            r="11"
+            className="fill-[var(--dc-danger)] stroke-[var(--dc-surface)]"
+            strokeWidth={2}
+          />
           <text
             textAnchor="middle"
             dominantBaseline="central"
@@ -122,7 +129,11 @@ export function VehicleDiagram({ view, marks, onAdd, className }: VehicleDiagram
   const frame = cn('rounded-control border-line bg-surface block w-full border p-2', className);
   if (!onAdd) {
     return (
-      <div className={frame} role="img" aria-label={`${VIEW_LABELS[view]} view with ${marks.length} damage marks`}>
+      <div
+        className={frame}
+        role="img"
+        aria-label={`${VIEW_LABELS[view]} view with ${marks.length} damage marks`}
+      >
         {svg}
       </div>
     );

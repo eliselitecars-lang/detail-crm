@@ -423,3 +423,74 @@ export function clampUnit(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, Math.round(value * 1000) / 1000));
 }
+
+// ---------------------------------------------------------------------------
+// Inspection details (mileage / fuel / notes)
+// ---------------------------------------------------------------------------
+
+export interface InspectionDetailsDraft {
+  mileage: string;
+  fuel: string;
+  notes: string;
+}
+
+/** Form strings → the inspection columns, or a user-facing error. */
+export function parseInspectionDetails(
+  draft: InspectionDetailsDraft,
+):
+  | {
+      ok: true;
+      details: { mileage: number | null; fuel_level: number | null; notes: string | null };
+    }
+  | { ok: false; error: string } {
+  const m = draft.mileage.trim() === '' ? null : Number(draft.mileage.trim());
+  const f = draft.fuel.trim() === '' ? null : Number(draft.fuel.trim());
+  if (m !== null && (!Number.isInteger(m) || m < 0 || m > 9_999_999)) {
+    return { ok: false, error: 'Mileage must be a whole number.' };
+  }
+  if (f !== null && (!Number.isInteger(f) || f < 0 || f > 100)) {
+    return { ok: false, error: 'Fuel level is a percentage from 0 to 100.' };
+  }
+  return { ok: true, details: { mileage: m, fuel_level: f, notes: draft.notes.trim() || null } };
+}
+
+/** Server row → form strings. */
+export function inspectionDetailsDraft(row: {
+  mileage: number | null;
+  fuel_level: number | null;
+  notes: string | null;
+}): InspectionDetailsDraft {
+  return {
+    mileage: row.mileage?.toString() ?? '',
+    fuel: row.fuel_level?.toString() ?? '',
+    notes: row.notes ?? '',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Line-item ordering
+// ---------------------------------------------------------------------------
+
+/**
+ * Moves the line at `index` one step up (-1) or down (+1) and renumbers the
+ * whole list 1..n, returning only the rows whose `sort` must change. Robust
+ * to equal / gapped sort values (job_line_items.sort defaults to 0, and two
+ * concurrent adds can pick the same value): the result is always a strict
+ * order, and re-running after a partial failure converges.
+ */
+export function reorderLineSorts(
+  rows: readonly { id: string; sort: number }[],
+  index: number,
+  delta: -1 | 1,
+): { id: string; sort: number }[] {
+  const target = index + delta;
+  if (index < 0 || index >= rows.length || target < 0 || target >= rows.length) return [];
+  const order = [...rows];
+  const [moved] = order.splice(index, 1);
+  if (!moved) return [];
+  order.splice(target, 0, moved);
+  return order
+    .map((row, i) => ({ id: row.id, sort: i + 1, was: row.sort }))
+    .filter((row) => row.sort !== row.was)
+    .map(({ id, sort }) => ({ id, sort }));
+}

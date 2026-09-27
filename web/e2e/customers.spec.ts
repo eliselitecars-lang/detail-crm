@@ -131,6 +131,71 @@ test.describe('customers', () => {
     });
   });
 
+  test('a pause after a space keeps multi-word search intact', async ({ page }) => {
+    const searches: string[][] = [];
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: [],
+        customers: ({ url }) => {
+          const q = url.searchParams.getAll('search_text');
+          if (q.length) searches.push(q);
+          return [CUSTOMER];
+        },
+      },
+    });
+    await page.goto('/app/customers');
+    const box = page.getByRole('searchbox', { name: 'Search customers' });
+    await expect(page.getByRole('table', { name: 'Customers' })).toBeVisible();
+    await box.pressSequentially('jane ');
+    await expect(page).toHaveURL(/q=jane\+$/);
+    await page.waitForTimeout(400);
+    await expect(box).toHaveValue('jane ');
+    await box.pressSequentially('doe');
+    await expect(box).toHaveValue('jane doe');
+    await expect(page).toHaveURL(/q=jane\+doe$/);
+    await expect.poll(() => searches.at(-1)).toEqual(['ilike.%jane%', 'ilike.%doe%']);
+  });
+
+  test('a page past the end steps back instead of claiming there are no customers', async ({
+    page,
+  }) => {
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: [],
+        customers: [CUSTOMER],
+      },
+      counts: { customers: 26 },
+    });
+    // PostgREST answers an offset beyond the total with 416 when counting.
+    await page.route('https://e2e-mock.supabase.co/rest/v1/customers?*', async (route) => {
+      const url = new URL(route.request().url());
+      if (route.request().method() === 'GET' && Number(url.searchParams.get('offset')) >= 26) {
+        return route.fulfill({
+          status: 416,
+          contentType: 'application/json',
+          headers: { 'access-control-allow-origin': '*' },
+          body: JSON.stringify({
+            code: 'PGRST103',
+            message: 'Requested range not satisfiable',
+            details: 'An offset of 200 was requested, but there are only 26 rows.',
+            hint: null,
+          }),
+        });
+      }
+      return route.fallback();
+    });
+    await page.goto('/app/customers?page=9');
+    await expect(page).toHaveURL(/\/app\/customers\?page=2$/);
+    await expect(
+      page.getByRole('table', { name: 'Customers' }).getByRole('link', { name: 'Jane Doe' }),
+    ).toBeVisible();
+    await expect(page.getByText('No customers yet')).toHaveCount(0);
+  });
+
   test('owner creates a customer', async ({ page }) => {
     let inserted: unknown = null;
     await mockSupabase(page, {

@@ -13,6 +13,11 @@ export interface TotalsCardProps {
   paidCents?: number;
   tipCents?: number;
   balanceCents?: number;
+  /**
+   * Invoices: the document is still a draft, so nothing is owed yet — the
+   * balance row says so instead of "Paid in full" / an amount due.
+   */
+  notIssued?: boolean;
   footer?: ReactNode;
   title?: string;
 }
@@ -31,6 +36,7 @@ export function TotalsCard({
   paidCents,
   tipCents,
   balanceCents,
+  notIssued = false,
   footer,
   title = 'Totals',
 }: TotalsCardProps) {
@@ -81,14 +87,15 @@ export function TotalsCard({
       key: 'balance',
       label: 'Balance due',
       emphasis: true,
-      value:
-        balanceCents > 0 ? (
-          <Badge tone="money">{money(balanceCents)}</Badge>
-        ) : balanceCents < 0 ? (
-          <Badge tone="info">Credit {money(-balanceCents)}</Badge>
-        ) : (
-          <Badge tone="success">Paid in full</Badge>
-        ),
+      value: notIssued ? (
+        <Badge tone="neutral">Not issued yet</Badge>
+      ) : balanceCents > 0 ? (
+        <Badge tone="money">{money(balanceCents)}</Badge>
+      ) : balanceCents < 0 ? (
+        <Badge tone="info">Credit {money(-balanceCents)}</Badge>
+      ) : (
+        <Badge tone="success">Paid in full</Badge>
+      ),
     });
   }
   return (

@@ -26,6 +26,32 @@ const revenue = [
   },
 ];
 
+/**
+ * report_revenue as the server shapes it: one row per day from p_from through
+ * p_to (the client rejects a response that stops early), with the sample
+ * payments on the first two days.
+ */
+function dailyRevenue({ body }: { body: unknown }) {
+  const { p_from, p_to } = body as { p_from: string; p_to: string };
+  const rows: Record<string, unknown>[] = [];
+  for (let d = new Date(`${p_from}T00:00:00Z`); d <= new Date(`${p_to}T00:00:00Z`);) {
+    const i = rows.length;
+    const sample = revenue[i];
+    rows.push({
+      ...(sample ?? {
+        gross_cents: 0,
+        refunds_cents: 0,
+        net_cents: 0,
+        tips_cents: 0,
+        payments_count: 0,
+      }),
+      bucket_start: d.toISOString().slice(0, 10),
+    });
+    d = new Date(d.getTime() + 86_400_000);
+  }
+  return rows as never;
+}
+
 const methods = ['card', 'card_present', 'cash', 'check', 'bank_transfer', 'other'].map((m) => ({
   method: m,
   payments_count: m === 'card' ? 3 : m === 'cash' ? 1 : 0,
@@ -246,6 +272,25 @@ test.describe('reports', () => {
     expect(overflow).toBeLessThanOrEqual(0);
   });
 
+  test('owner reports fit a 360px screen', async ({ page }) => {
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: { shop_members: [membershipRow(OWNER, 'owner')], notifications: [] },
+      rpc: { report_revenue: dailyRevenue, report_payments: methods },
+    });
+    await page.setViewportSize({ width: 360, height: 780 });
+    const overflow = () =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      );
+    await page.goto('/app/reports');
+    await expect(page.getByRole('img', { name: /Revenue chart/ })).toBeVisible();
+    expect(await overflow()).toBeLessThanOrEqual(0);
+    await page.getByRole('tab', { name: 'Payments' }).click();
+    await expect(page.getByRole('heading', { name: 'Payments by method' })).toBeVisible();
+    expect(await overflow()).toBeLessThanOrEqual(0);
+  });
+
   test('custom range errors block the query', async ({ page }) => {
     let queried = false;
     await mockSupabase(page, {
@@ -268,5 +313,27 @@ test.describe('reports', () => {
     await page.getByLabel('To', { exact: true }).fill('2026-03-20');
     await expect(page.getByText('No payments in this period')).toBeVisible();
     expect(queried).toBe(true);
+  });
+
+  test('long ranges cannot be grouped by day (server rows are capped)', async ({ page }) => {
+    const buckets: unknown[] = [];
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: { shop_members: [membershipRow(OWNER, 'owner')], notifications: [] },
+      rpc: {
+        report_revenue: ({ body }: { body: unknown }) => {
+          buckets.push((body as { p_bucket: string }).p_bucket);
+          return [] as never;
+        },
+      },
+    });
+    await page.goto('/app/reports?range=custom&from=2023-01-01&to=2026-09-27&bucket=day');
+    await expect(page.getByText('No payments in this period')).toBeVisible();
+    expect(buckets).toEqual(['month']);
+    const groupBy = page.getByRole('combobox', { name: 'Group by' });
+    await expect(groupBy).toHaveValue('month');
+    await expect(groupBy.getByRole('option', { name: 'Daily (range too long)' })).toBeDisabled();
+    await groupBy.selectOption('week');
+    await expect.poll(() => buckets.at(-1)).toBe('week');
   });
 });

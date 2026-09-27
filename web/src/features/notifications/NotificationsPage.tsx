@@ -24,6 +24,7 @@ import {
   SectionCard,
   useToast,
 } from '@/components/ui';
+import { useUnreadCount } from '@/components/layout/shellApi';
 import { useAuth } from '@/features/auth/authContext';
 import { useShop } from '@/features/shop/shopContext';
 import { cn } from '@/lib/cn';
@@ -69,7 +70,11 @@ export default function NotificationsPage() {
     enabled: userId !== '',
   });
 
-  const unreadCount = unread.data?.filter((n) => !n.read_at).length ?? 0;
+  const unreadRows = unread.data?.pages.flat() ?? [];
+  const loadedUnread = unreadRows.filter((n) => !n.read_at).length;
+  // Exact server count (the list is paged, so loaded rows can be fewer).
+  const unreadTotal = useUnreadCount(shopId, userId);
+  const unreadCount = Math.max(unreadTotal.data ?? 0, loadedUnread);
   const readRows = read.data?.pages.flat() ?? [];
 
   const onMarkAll = async () => {
@@ -108,9 +113,9 @@ export default function NotificationsPage() {
         >
           {unread.isPending ? (
             <LoadingState variant="rows" rows={3} label="Loading notifications…" />
-          ) : unread.isError ? (
+          ) : unread.isError && unreadRows.length === 0 ? (
             <ErrorState compact error={unread.error} onRetry={() => void unread.refetch()} />
-          ) : unread.data.length === 0 ? (
+          ) : unreadRows.length === 0 ? (
             <EmptyState
               compact
               icon={<Check aria-hidden="true" />}
@@ -118,12 +123,22 @@ export default function NotificationsPage() {
               description="New notifications show up here as they happen."
             />
           ) : (
-            <NotificationList
-              rows={unread.data}
-              shopId={shopId}
-              userId={userId}
-              label="Unread notifications"
-            />
+            <>
+              <NotificationList
+                rows={unreadRows}
+                shopId={shopId}
+                userId={userId}
+                label="Unread notifications"
+              />
+              <LoadMore
+                query={unread}
+                label={
+                  unreadCount > unreadRows.length
+                    ? `Show more unread (${unreadCount - unreadRows.length} more)`
+                    : 'Show more unread'
+                }
+              />
+            </>
           )}
         </SectionCard>
 
@@ -146,28 +161,41 @@ export default function NotificationsPage() {
                 userId={userId}
                 label="Earlier notifications"
               />
-              {(read.hasNextPage || read.isFetchNextPageError) && (
-                <div className="border-line flex flex-col items-center gap-2 border-t px-4 py-3">
-                  {read.isFetchNextPageError && (
-                    <p role="alert" className="text-danger-ink text-sm">
-                      {toAppError(read.error).message}
-                    </p>
-                  )}
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    loading={read.isFetchingNextPage}
-                    onClick={() => void read.fetchNextPage()}
-                  >
-                    Load more
-                  </Button>
-                </div>
-              )}
+              <LoadMore query={read} label="Load more" />
             </>
           )}
         </SectionCard>
       </div>
     </>
+  );
+}
+
+interface PagedQuery {
+  hasNextPage: boolean;
+  isFetchNextPageError: boolean;
+  isFetchingNextPage: boolean;
+  error: unknown;
+  fetchNextPage: () => Promise<unknown>;
+}
+
+function LoadMore({ query, label }: { query: PagedQuery; label: string }) {
+  if (!query.hasNextPage && !query.isFetchNextPageError) return null;
+  return (
+    <div className="border-line flex flex-col items-center gap-2 border-t px-4 py-3">
+      {query.isFetchNextPageError && (
+        <p role="alert" className="text-danger-ink text-sm">
+          {toAppError(query.error).message}
+        </p>
+      )}
+      <Button
+        variant="secondary"
+        size="sm"
+        loading={query.isFetchingNextPage}
+        onClick={() => void query.fetchNextPage()}
+      >
+        {label}
+      </Button>
+    </div>
   );
 }
 

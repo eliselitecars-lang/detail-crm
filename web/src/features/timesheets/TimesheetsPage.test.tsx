@@ -149,6 +149,26 @@ describe('TimesheetsPage', () => {
     });
   });
 
+  it('editing only the notes does not rewrite the clock times', async () => {
+    const withSeconds = { ...entries[0], clock_in: '2026-03-10T13:00:41.5+00:00' };
+    setTableResult('time_entries', { data: [withSeconds] });
+    const { user } = renderAs('manager');
+    await setRange('2026-03-09', '2026-03-15');
+    await user.click((await screen.findAllByRole('button', { name: /Edit entry/ }))[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Edit time entry' });
+    expect(within(dialog).getAllByLabelText(/Time/)[0]).toHaveValue('08:00');
+    const notes = within(dialog).getByRole('textbox', { name: 'Notes' });
+    await user.clear(notes);
+    await user.type(notes, 'Detail van');
+    setTableResult('time_entries', { data: { id: 'e1' } });
+    await user.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Edit time entry' })).not.toBeInTheDocument(),
+    );
+    const update = builders.time_entries?.find((b) => b.update.mock.calls.length > 0)?.update;
+    expect(update).toHaveBeenCalledWith({ notes: 'Detail van' });
+  });
+
   it('technician sees only their own time and can clock in', async () => {
     setTableResult('time_entries', { data: [] });
     rpcResults({

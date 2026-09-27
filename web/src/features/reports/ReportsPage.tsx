@@ -1,5 +1,5 @@
 import { CalendarRange } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { Card, EmptyState, PageHeader, Tabs, type TabItem } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
@@ -12,6 +12,7 @@ import { RevenueReport } from './components/RevenueReport';
 import { SalesReport } from './components/SalesReport';
 import { TeamReport } from './components/TeamReport';
 import { readParams, type Bucket, type DateRange, type Preset } from './ranges';
+import { useShopDayClock } from './useShopDayClock';
 
 const ALL_TABS = ['revenue', 'payments', 'sales', 'team', 'customers', 'outstanding'] as const;
 type ReportTab = (typeof ALL_TABS)[number];
@@ -31,31 +32,40 @@ export default function ReportsPage() {
   // reports are manager+ on the server too.
   const canViewAll = useCan('reports.view');
   const [params, setParams] = useSearchParams();
-  const [now] = useState(() => new Date());
+  // Presets (Today / This week / …) roll over at the shop's midnight.
+  const { now, refresh: refreshNow } = useShopDayClock(timezone);
   const { preset, range, bucket, valid, error } = readParams(params, timezone, now);
 
   const tabs: readonly ReportTab[] = canViewAll ? ALL_TABS : ['team'];
   const rawTab = params.get('tab');
   const tab: ReportTab = tabs.find((t) => t === rawTab) ?? tabs[0] ?? 'team';
 
+  // Functional update: quick successive edits (From then To) each apply to
+  // the latest URL, never to a stale render's params.
   const update = (patch: Record<string, string | null>) => {
-    const next = new URLSearchParams(params);
-    for (const [key, value] of Object.entries(patch)) {
-      if (value === null) next.delete(key);
-      else next.set(key, value);
-    }
-    setParams(next, { replace: true });
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === null) next.delete(key);
+          else next.set(key, value);
+        }
+        return next;
+      },
+      { replace: true },
+    );
   };
 
   const onPresetChange = (nextPreset: Preset) => {
+    refreshNow();
     if (nextPreset === 'custom') {
       update({ range: 'custom', from: range.from, to: range.to });
     } else {
       update({ range: nextPreset, from: null, to: null, bucket: null });
     }
   };
-  const onCustomChange = (next: DateRange) =>
-    update({ range: 'custom', from: next.from, to: next.to, bucket: null });
+  const onCustomChange = (next: Partial<DateRange>) =>
+    update({ range: 'custom', ...next, bucket: null });
   const onBucketChange = (next: Bucket) => update({ bucket: next });
 
   const needsRange = tab !== 'outstanding';

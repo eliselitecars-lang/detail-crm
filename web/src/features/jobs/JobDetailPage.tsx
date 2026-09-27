@@ -31,8 +31,20 @@ export default function JobDetailPage() {
   const detailKey = [jobKeys.detail(shopId, jobId)];
   useRealtime({ table: 'jobs', shopId, filter: `id=eq.${jobId}` });
   useRealtime({ table: 'payments', shopId, filter: `job_id=eq.${jobId}`, invalidate: detailKey });
-  useRealtime({ table: 'messages', shopId, filter: `job_id=eq.${jobId}`, invalidate: detailKey });
-  useRealtime({ table: 'time_entries', shopId, filter: `job_id=eq.${jobId}`, invalidate: detailKey });
+  const customerId = job.data?.customer_id;
+  useRealtime({
+    table: 'messages',
+    shopId,
+    filter: `customer_id=eq.${customerId ?? ''}`,
+    invalidate: detailKey,
+    enabled: customerId !== undefined,
+  });
+  useRealtime({
+    table: 'time_entries',
+    shopId,
+    filter: `job_id=eq.${jobId}`,
+    invalidate: detailKey,
+  });
 
   if (job.isPending) {
     return (

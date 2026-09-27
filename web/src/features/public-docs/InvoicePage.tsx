@@ -115,7 +115,8 @@ function InvoiceDocumentView({
 
   return (
     <PublicLayout shop={toBranding(shop)}>
-      <div className="flex flex-col gap-4 sm:gap-5">
+      {/* Printable: actions/banners are print:hidden; cards print flat and unsplit. */}
+      <div className="flex flex-col gap-4 sm:gap-5 print:gap-3 print:text-black print:[&_*]:shadow-none print:[&>*]:break-inside-avoid">
         <DocumentTitle
           title={`Invoice #${invoice.number}`}
           badge={<StatusBadge kind="invoice" status={invoice.status} />}
@@ -318,7 +319,9 @@ function PayPanel({
 
   const pay = () => {
     if (tip === null) {
-      setError(`Enter a tip between $0.00 and ${formatCents(balanceCents, { currency })}.`);
+      setError(
+        `Enter a tip between ${formatCents(0, { currency })} and ${formatCents(balanceCents, { currency })}.`,
+      );
       return;
     }
     setError(null);

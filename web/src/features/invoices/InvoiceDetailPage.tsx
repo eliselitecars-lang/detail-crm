@@ -1,4 +1,4 @@
-import { Banknote, Copy, CreditCard, MoreHorizontal, Send } from 'lucide-react';
+import { Banknote, Copy, CreditCard, Hourglass, MoreHorizontal, Send } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import {
@@ -28,12 +28,17 @@ import { SendDocumentDialog } from '@/features/quotes/shared/SendDocumentDialog'
 import { TotalsCard } from '@/features/quotes/shared/TotalsCard';
 import {
   areInvoiceLinesEditable,
+  cancelOpenPaymentsSummary,
   invoiceKeys,
   isInvoiceOverdue,
+  isPaymentInFlight,
+  isPaymentInProgressError,
+  useCancelOpenPayments,
   useDeleteInvoice,
   useInvoice,
   useInvoiceLineMutations,
   useInvoiceLines,
+  useInvoicePayments,
   useMarkInvoiceSent,
   useUpdateInvoice,
   useVoidInvoice,
@@ -70,7 +75,7 @@ export default function InvoiceDetailPage() {
   return <InvoiceView invoice={invoice.data} lines={lines.data} />;
 }
 
-type Pending = 'send' | 'record' | 'charge' | 'void' | 'delete' | null;
+type Pending = 'send' | 'record' | 'charge' | 'void' | 'delete' | 'cancelOpen' | null;
 
 function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[] }) {
   const { timezone, currency } = useShop();
@@ -88,8 +93,12 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   const markSent = useMarkInvoiceSent(invoice.id);
   const voidInvoice = useVoidInvoice(invoice.id);
   const remove = useDeleteInvoice();
+  const cancelOpen = useCancelOpenPayments(invoice.id);
+  const payments = useInvoicePayments(invoice.id);
   const [pending, setPending] = useState<Pending>(null);
   const [voidReason, setVoidReason] = useState('');
+  /** The server refused a change because a card payment is in flight. */
+  const [heldByPayment, setHeldByPayment] = useState(false);
 
   const today = shopToday(timezone);
   const label = `Invoice #${invoice.number}`;
@@ -100,6 +109,32 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   const overdue = isInvoiceOverdue(invoice);
   const linesEditable = canManage && areInvoiceLinesEditable(invoice);
   const firstVehicle = vehicles.data?.find((v) => v.category_id) ?? null;
+  const paymentInFlight = (payments.data ?? []).some((p) => isPaymentInFlight(p));
+  const canCancelOpen = canManage && !isVoid;
+  const showHold = canCancelOpen && (paymentInFlight || heldByPayment);
+
+  /** Runs a change and, when an in-flight payment blocked it, offers to release the hold. */
+  const holdAware = async <T,>(work: Promise<T>): Promise<T> => {
+    try {
+      return await work;
+    } catch (error) {
+      if (isPaymentInProgressError(error)) setHeldByPayment(true);
+      throw error;
+    }
+  };
+
+  const runCancelOpen = async () => {
+    try {
+      const result = await cancelOpen.mutateAsync();
+      const summary = cancelOpenPaymentsSummary(result);
+      if (result.in_progress > 0) toast.info(summary.title, summary.description);
+      else toast.success(summary.title, summary.description);
+      setHeldByPayment(false);
+      setPending(null);
+    } catch (error) {
+      toast.error(error);
+    }
+  };
 
   const copyLink = async () => {
     if (await copyText(link)) toast.success('Pay link copied');
@@ -107,6 +142,16 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   };
 
   const menu: DropdownMenuEntry[] = [];
+  if (
+    canCancelOpen &&
+    (invoice.status === 'open' || invoice.status === 'partially_paid' || showHold)
+  ) {
+    menu.push({
+      key: 'cancel-open',
+      label: 'Cancel open payments…',
+      onSelect: () => setPending('cancelOpen'),
+    });
+  }
   if (canVoid && !isVoid) {
     menu.push({
       key: 'void',
@@ -204,6 +249,30 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
         }
       />
 
+      {showHold && (
+        <div
+          role="status"
+          className="bg-warning-soft text-warning-ink rounded-card mb-4 flex flex-col gap-3 px-4 py-3 text-sm sm:flex-row sm:items-center"
+        >
+          <Hourglass className="size-5 shrink-0" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">A card payment is in progress on this invoice.</p>
+            <p className="mt-0.5">
+              Until it finishes or is cancelled, the invoice can’t be voided, edited or charged. If
+              the customer walked away from it, cancel it to release the invoice.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="shrink-0"
+            onClick={() => setPending('cancelOpen')}
+          >
+            Cancel open payments
+          </Button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="flex min-w-0 flex-col gap-4 lg:col-span-2">
           <LineItemsEditor
@@ -217,9 +286,9 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
               vehicleId: firstVehicle?.id ?? null,
               vehicleCategoryId: firstVehicle?.category_id ?? null,
             }}
-            onAdd={(drafts) => lineMutations.add.mutateAsync(drafts)}
-            onUpdate={(id, patch) => lineMutations.update.mutateAsync({ id, patch })}
-            onRemove={(id) => lineMutations.remove.mutateAsync(id)}
+            onAdd={(drafts) => holdAware(lineMutations.add.mutateAsync(drafts))}
+            onUpdate={(id, patch) => holdAware(lineMutations.update.mutateAsync({ id, patch }))}
+            onRemove={(id) => holdAware(lineMutations.remove.mutateAsync(id))}
           />
           <InvoicePaymentsCard invoiceId={invoice.id} currency={currency} timezone={timezone} />
         </div>
@@ -231,9 +300,15 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
             taxCents={invoice.tax_cents}
             taxRateBps={invoice.tax_rate_bps}
             totalCents={invoice.total_cents}
-            paidCents={invoice.amount_paid_cents}
+            // A draft bills nothing yet: no "Paid" row unless money is already on it.
+            paidCents={
+              invoice.status !== 'draft' || invoice.amount_paid_cents > 0
+                ? invoice.amount_paid_cents
+                : undefined
+            }
             tipCents={invoice.tip_cents}
             balanceCents={isVoid ? undefined : invoice.balance_cents}
+            notIssued={invoice.status === 'draft'}
           />
           <InvoiceDetailsCard
             invoice={invoice}
@@ -249,10 +324,12 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
               currency={currency}
               editable={linesEditable}
               onSave={(kind, value) =>
-                update.mutateAsync({
-                  discount_kind: kind,
-                  discount_value: kind === 'none' ? 0 : value,
-                })
+                holdAware(
+                  update.mutateAsync({
+                    discount_kind: kind,
+                    discount_value: kind === 'none' ? 0 : value,
+                  }),
+                )
               }
             />
           )}
@@ -309,7 +386,18 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
             setPending(null);
             setVoidReason('');
           } catch (error) {
-            toast.error(error);
+            if (canCancelOpen && isPaymentInProgressError(error)) {
+              setHeldByPayment(true);
+              setPending(null);
+              toast.show({
+                tone: 'error',
+                title: 'A card payment is in progress on this invoice',
+                description: 'Cancel the open payments first, then void the invoice.',
+                action: { label: 'Cancel open payments', onClick: () => setPending('cancelOpen') },
+              });
+            } else {
+              toast.error(error);
+            }
           }
         }}
       >
@@ -325,6 +413,19 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
           />
         </FormField>
       </ConfirmDialog>
+      {canCancelOpen && (
+        <ConfirmDialog
+          open={pending === 'cancelOpen'}
+          onClose={() => setPending(null)}
+          loading={cancelOpen.isPending}
+          tone="danger"
+          title="Cancel open card payments?"
+          description="Cancels card payments on this invoice that were started but never confirmed (for example a payment sheet left open on a phone) and expires its open pay links. Payments the bank is already processing are not touched. The customer can still pay later with a fresh link."
+          confirmLabel="Cancel open payments"
+          cancelLabel="Keep them"
+          onConfirm={runCancelOpen}
+        />
+      )}
       <ConfirmDialog
         open={pending === 'delete'}
         onClose={() => setPending(null)}

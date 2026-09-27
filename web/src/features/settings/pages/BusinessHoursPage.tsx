@@ -45,7 +45,7 @@ function HoursForm({ rows, canEdit }: { rows: BusinessHoursRow[]; canEdit: boole
       return;
     }
     try {
-      await save.mutateAsync({ rows: weekToRows(week), previous: rows });
+      await save.mutateAsync({ rows: weekToRows(week) });
       toast.success('Business hours saved');
     } catch (error) {
       toast.error(error);

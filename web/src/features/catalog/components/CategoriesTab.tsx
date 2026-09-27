@@ -34,8 +34,15 @@ export function CategoriesTab({ canManage }: { canManage: boolean }) {
   const [deleting, setDeleting] = useState<CategoryRow | null>(null);
 
   const list = categories.data ?? [];
-  const countFor = (id: string) =>
-    (services.data ?? []).filter((s) => s.category_id === id && s.archived_at === null).length;
+  /** Item count label; never "0 items" just because services haven't loaded. */
+  const countLabel = (id: string): string => {
+    if (services.isPending) return 'Counting items…';
+    if (services.error) return 'Item count unavailable';
+    const count = services.data.filter(
+      (s) => s.category_id === id && s.archived_at === null,
+    ).length;
+    return count === 1 ? '1 item' : `${count} items`;
+  };
 
   const move = (index: number, delta: number) => {
     const changes = resequence(moveItem(list, index, index + delta));
@@ -70,50 +77,62 @@ export function CategoriesTab({ canManage }: { canManage: boolean }) {
     );
   else
     body = (
-      <ul className="divide-line divide-y" aria-label="Service categories">
-        {list.map((category, index) => {
-          const count = countFor(category.id);
-          return (
-            <li key={category.id} className="flex items-center gap-3 px-4 py-3 sm:px-5">
-              <div className="min-w-0 flex-1">
-                <p className="text-ink truncate font-medium">{category.name}</p>
-                <p className="text-muted text-xs">{count === 1 ? '1 item' : `${count} items`}</p>
-              </div>
-              {canManage && (
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <IconButton
-                    label={`Move ${category.name} up`}
-                    icon={<ArrowUp className="size-4" />}
-                    size="sm"
-                    disabled={index === 0 || reorder.isPending}
-                    onClick={() => move(index, -1)}
-                  />
-                  <IconButton
-                    label={`Move ${category.name} down`}
-                    icon={<ArrowDown className="size-4" />}
-                    size="sm"
-                    disabled={index === list.length - 1 || reorder.isPending}
-                    onClick={() => move(index, 1)}
-                  />
-                  <IconButton
-                    label={`Rename ${category.name}`}
-                    icon={<Pencil className="size-4" />}
-                    size="sm"
-                    onClick={() => setEditing(category)}
-                  />
-                  <IconButton
-                    label={`Delete ${category.name}`}
-                    icon={<Trash2 className="size-4" />}
-                    size="sm"
-                    variant="danger"
-                    onClick={() => setDeleting(category)}
-                  />
+      <>
+        {services.error && (
+          <div className="border-line border-b">
+            <ErrorState
+              compact
+              error={services.error}
+              title="Couldn’t count items per category"
+              onRetry={() => void services.refetch()}
+              retrying={services.isRefetching}
+            />
+          </div>
+        )}
+        <ul className="divide-line divide-y" aria-label="Service categories">
+          {list.map((category, index) => {
+            return (
+              <li key={category.id} className="flex items-center gap-3 px-4 py-3 sm:px-5">
+                <div className="min-w-0 flex-1">
+                  <p className="text-ink truncate font-medium">{category.name}</p>
+                  <p className="text-muted text-xs">{countLabel(category.id)}</p>
                 </div>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+                {canManage && (
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    <IconButton
+                      label={`Move ${category.name} up`}
+                      icon={<ArrowUp className="size-4" />}
+                      size="sm"
+                      disabled={index === 0 || reorder.isPending}
+                      onClick={() => move(index, -1)}
+                    />
+                    <IconButton
+                      label={`Move ${category.name} down`}
+                      icon={<ArrowDown className="size-4" />}
+                      size="sm"
+                      disabled={index === list.length - 1 || reorder.isPending}
+                      onClick={() => move(index, 1)}
+                    />
+                    <IconButton
+                      label={`Rename ${category.name}`}
+                      icon={<Pencil className="size-4" />}
+                      size="sm"
+                      onClick={() => setEditing(category)}
+                    />
+                    <IconButton
+                      label={`Delete ${category.name}`}
+                      icon={<Trash2 className="size-4" />}
+                      size="sm"
+                      variant="danger"
+                      onClick={() => setDeleting(category)}
+                    />
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </>
     );
 
   const lastSort = list.reduce((max, c) => Math.max(max, c.sort), 0);

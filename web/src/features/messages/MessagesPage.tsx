@@ -30,7 +30,7 @@ export default function MessagesPage() {
   const search = params.toString();
   const selected = useMemo(() => refFromSearch(new URLSearchParams(search)), [search]);
   const selectedKey = selected ? threadKey(selected) : null;
-  const totalUnread = (inbox.data?.threads ?? []).reduce((sum, t) => sum + t.unread, 0);
+  const totalUnread = inbox.data?.unreadTotal ?? 0;
 
   return (
     <>

@@ -43,17 +43,23 @@ export function placeholdersIn(body: string): string[] {
 }
 
 /**
- * SMS segment estimate for the counter: GSM-7 text is 160 chars (153 per
- * part when split); anything outside GSM-7 (emoji, curly quotes…) is UCS-2 at
- * 70 (67 per part).
+ * SMS segment estimate for the counter: GSM-7 text is 160 septets (153 per
+ * part when split); characters from the GSM-7 extension table (^ { } \ [ ~ ]
+ * | €) are sent as ESC + char and so take two septets each. Anything outside
+ * GSM-7 (emoji, curly quotes…) makes the whole text UCS-2 at 70 characters
+ * (67 per part).
  */
-const GSM7 =
-  '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà^{}\\[~]|€';
+const GSM7_BASIC =
+  '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà';
+const GSM7_EXTENSION = '^{}\\[~]|€';
 
 export function smsSegments(text: string): { segments: number; unicode: boolean } {
   if (text.length === 0) return { segments: 0, unicode: false };
-  const unicode = [...text].some((ch) => !GSM7.includes(ch));
-  const length = unicode ? [...text].length : text.length;
+  const chars = [...text];
+  const unicode = chars.some((ch) => !GSM7_BASIC.includes(ch) && !GSM7_EXTENSION.includes(ch));
+  const length = unicode
+    ? chars.length
+    : chars.reduce((sum, ch) => sum + (GSM7_EXTENSION.includes(ch) ? 2 : 1), 0);
   const single = unicode ? 70 : 160;
   const part = unicode ? 67 : 153;
   return { segments: length <= single ? 1 : Math.ceil(length / part), unicode };

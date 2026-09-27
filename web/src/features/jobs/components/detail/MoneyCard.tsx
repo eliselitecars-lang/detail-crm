@@ -104,7 +104,9 @@ export function MoneyCard({ job }: { job: JobDetail }) {
               {
                 key: 'balance',
                 label: 'Balance',
-                value: <span className="text-money-ink font-semibold">{money(s?.balance_cents)}</span>,
+                value: (
+                  <span className="text-money-ink font-semibold">{money(s?.balance_cents)}</span>
+                ),
                 emphasis: true,
               },
             ]}

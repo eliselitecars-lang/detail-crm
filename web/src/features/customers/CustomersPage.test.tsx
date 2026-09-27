@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { membership, renderRoute, shopValue, signedInAuth } from '@/test/render';
 import {
   builders,
@@ -12,7 +12,13 @@ import CustomersPage from './CustomersPage';
 
 vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
+const defaultFrom = supabase.from.getMockImplementation();
+
 beforeEach(() => resetSupabaseMock());
+// Tests that script `from` per request must not leak into the next test.
+afterEach(() => {
+  if (defaultFrom) supabase.from.mockImplementation(defaultFrom);
+});
 
 const jane = {
   id: 'c-1',
@@ -82,6 +88,65 @@ describe('CustomersPage', () => {
     );
     const searched = builders.customers?.find((b) => b.ilike.mock.calls.length > 0);
     expect(searched?.ilike).toHaveBeenCalledWith('search_text', '%50\\%%');
+  });
+
+  it('keeps the space typed before a pause so multi-word search works', async () => {
+    setTableResult('customers', { data: [jane], count: 1 });
+    const { user, router } = setup();
+    await screen.findByRole('table', { name: 'Customers' });
+    const box = screen.getByRole('searchbox', { name: 'Search customers' });
+    await user.type(box, 'jane ');
+    // Past the 250ms debounce: the URL round-trip must not eat the space.
+    await waitFor(() => expect(router.state.location.search).toBe('?q=jane+'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(box).toHaveValue('jane ');
+    await user.type(box, 'doe{Enter}');
+    expect(box).toHaveValue('jane doe');
+    await waitFor(() => expect(router.state.location.search).toBe('?q=jane+doe'));
+    await waitFor(() =>
+      expect(
+        builders.customers?.some((b) => b.ilike.mock.calls.some(([, p]) => p === '%doe%')),
+      ).toBe(true),
+    );
+    const searched = builders.customers?.find((b) =>
+      b.ilike.mock.calls.some(([, p]) => p === '%doe%'),
+    );
+    expect(searched?.ilike.mock.calls).toEqual([
+      ['search_text', '%jane%'],
+      ['search_text', '%doe%'],
+    ]);
+  });
+
+  it('steps back to the last page when the page is past the end', async () => {
+    // Page 9 of a 30-customer list: PostgREST answers 416 (PGRST103), then
+    // the count query reports the real total.
+    supabase.from.mockImplementation((table: string) => {
+      const builder = createBuilder({ data: [jane], count: 30 });
+      builder.range.mockImplementation((from: number) => {
+        (builder as { then: PromiseLike<unknown>['then'] }).then = (ok, fail) =>
+          Promise.resolve(
+            from >= 30
+              ? {
+                  data: null,
+                  count: null,
+                  error: { code: 'PGRST103', message: 'Requested range not satisfiable' },
+                }
+              : { data: [jane], count: 30, error: null },
+          ).then(ok, fail);
+        return builder;
+      });
+      (builders[table] ??= []).push(builder);
+      return builder;
+    });
+    const { router } = setup('owner', '/app/customers?page=9');
+    await waitFor(() => expect(router.state.location.search).toBe('?page=2'));
+    expect(await screen.findByRole('table', { name: 'Customers' })).toBeInTheDocument();
+    expect(screen.queryByText('No customers yet')).not.toBeInTheDocument();
+    const counted = builders.customers?.find((b) =>
+      b.select.mock.calls.some(([, opts]) => (opts as { head?: boolean } | undefined)?.head),
+    );
+    expect(counted?.select).toHaveBeenCalledWith('id', { count: 'exact', head: true });
+    expect(counted?.is).toHaveBeenCalledWith('archived_at', null);
   });
 
   it('sorts by the Added column', async () => {

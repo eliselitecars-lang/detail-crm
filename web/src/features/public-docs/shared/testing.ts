@@ -49,5 +49,5 @@ export function resetPublicMocks() {
   resetSupabaseMock();
   edge.invoke.mockReset();
   storageBucket.upload.mockReset();
-  supabase.storage.from.mockImplementation((() => storageBucket) as never);
+  supabase.storage.from.mockImplementation(() => storageBucket);
 }

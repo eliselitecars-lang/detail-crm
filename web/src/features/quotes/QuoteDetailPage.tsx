@@ -308,6 +308,8 @@ function QuoteView({ quote, lines }: { quote: QuoteRow; lines: DocLine[] }) {
         quoteId={quote.id}
         response={response}
         onClose={() => setResponse(null)}
+        lines={lines}
+        currency={currency}
       />
       <ConfirmDialog
         open={pending === 'revise'}

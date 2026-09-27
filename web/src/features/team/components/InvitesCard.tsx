@@ -59,7 +59,9 @@ export function InvitesCard({ onInvite, now }: { onInvite: () => void; now: Date
               key={invite.id}
               className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 sm:px-5"
             >
-              <div className="min-w-0 flex-1">
+              {/* min-w-48: on narrow screens the badge and actions wrap below the text
+                  instead of squeezing it to a sliver. */}
+              <div className="min-w-48 flex-1">
                 <p className="text-ink truncate text-sm font-medium">{invite.email}</p>
                 <p className="text-muted text-xs">
                   {ROLE_LABELS[invite.role]} · sent {formatDate(invite.created_at, timezone)} ·{' '}

@@ -12,6 +12,7 @@ import type { BusinessHoursRow } from '@/features/shop/businessHours';
 import { unwrap, unwrapRequired, type InsertRow, type Row, type UpdateRow } from '@/lib/db';
 import { AppError, edgeFunctionError, toAppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
+import { HOURS_NOT_RESTORED_MESSAGE, planHoursReplace } from './hoursPlan';
 import { supabase } from '@/lib/supabase';
 
 /** `unwrap` for list selects: a successful select never yields null rows. */
@@ -31,7 +32,12 @@ export const settingsKeys = {
   blocked: (shopId: string, showPast: boolean) =>
     [...settingsKeys.all(shopId), 'blocked', { showPast }] as const,
   members: (shopId: string) => [...settingsKeys.all(shopId), 'members'] as const,
-  resources: (shopId: string) => [...settingsKeys.all(shopId), 'resources'] as const,
+  /**
+   * NOT `'resources'`: `shopKey(shopId, 'settings', 'resources')` is the jobs
+   * feature's picker list (all rows incl. archived, no `sort`). Sharing it would
+   * serve one feature the other's differently shaped rows.
+   */
+  resources: (shopId: string) => [...settingsKeys.all(shopId), 'resource-admin'] as const,
   categories: (shopId: string) => [...settingsKeys.all(shopId), 'vehicle-categories'] as const,
   categoryUsage: (shopId: string, categoryId: string) =>
     [...settingsKeys.all(shopId), 'vehicle-category-usage', categoryId] as const,
@@ -41,6 +47,32 @@ export const settingsKeys = {
   forms: (shopId: string) => [...settingsKeys.all(shopId), 'forms'] as const,
   stripe: (shopId: string) => [...settingsKeys.all(shopId), 'stripe'] as const,
 };
+
+/**
+ * Other features' caches that read settings tables (keys owned by those
+ * features; prefixes so every variant matches):
+ *   - calendar events + blocked-time busy blocks: `jobs/calendar/…`
+ *     (calendar/api.ts calendarKeys.events)
+ *   - calendar hours, job resource/category/form-template pickers live under
+ *     the `settings` domain (`settings/business_hours`, `settings/resources`,
+ *     `settings/vehicle_categories`, `settings/form_templates/active`), so
+ *     `settingsKeys.all` covers them
+ *   - job coupon picker: `catalog/coupons/active` (jobs/api.ts)
+ *   - inbox template list and rendered previews: `messages/templates`,
+ *     `messages/preview/…` (messages/api.ts)
+ */
+export const dependentKeys = {
+  calendarEvents: (shopId: string) => shopKey(shopId, 'jobs', 'calendar'),
+  coupons: (shopId: string) => shopKey(shopId, 'catalog', 'coupons'),
+  messageTemplates: (shopId: string) => shopKey(shopId, 'messages', 'templates'),
+  messagePreviews: (shopId: string) => shopKey(shopId, 'messages', 'preview'),
+};
+
+type QueryClient = ReturnType<typeof useQueryClient>;
+
+function invalidateAll(queryClient: QueryClient, keys: readonly (readonly unknown[])[]) {
+  return Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+}
 
 // ---------------------------------------------------------------------------
 // Shop profile / taxes / SMS number (the `shops` row)
@@ -248,40 +280,66 @@ export function useBusinessHours() {
 }
 
 /**
- * Replaces the weekly hours. The exclusion constraint forbids overlapping
- * rows, so old rows go first; if the insert fails the previous week is put
- * back so the shop is never left without hours by a failed save.
+ * Replaces the weekly hours. There is no transactional RPC for this yet, and
+ * the `business_hours_no_overlap` exclusion constraint forces old rows out
+ * before new ones go in, so the save:
+ *   1. re-reads the stored rows (never trusts the page's possibly stale copy),
+ *   2. deletes only intervals that changed and inserts only new ones
+ *      (unchanged days are never touched — see planHoursReplace),
+ *   3. if the insert fails, puts the removed rows back, and if THAT fails,
+ *      says plainly that the changed days are now closed.
  */
 export function useSaveBusinessHours() {
   const { shopId } = useShop();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({
-      rows,
-      previous,
-    }: {
-      rows: readonly BusinessHoursRow[];
-      previous: readonly BusinessHoursRow[];
-    }): Promise<void> => {
-      unwrap(await supabase.from('business_hours').delete().eq('shop_id', shopId));
-      if (rows.length === 0) return;
-      const inserted = await supabase
-        .from('business_hours')
-        .insert(rows.map((row) => ({ ...row, shop_id: shopId })));
-      if (inserted.error) {
-        if (previous.length > 0) {
+    mutationFn: async ({ rows }: { rows: readonly BusinessHoursRow[] }): Promise<void> => {
+      const stored = unwrapList(
+        await supabase
+          .from('business_hours')
+          .select('id, weekday, opens_at, closes_at')
+          .eq('shop_id', shopId),
+      );
+      const plan = planHoursReplace(stored, rows);
+      if (plan.remove.length > 0) {
+        unwrap(
           await supabase
             .from('business_hours')
-            .insert(previous.map((row) => ({ ...row, shop_id: shopId })));
-        }
-        throw toAppError(inserted.error);
+            .delete()
+            .eq('shop_id', shopId)
+            .in(
+              'id',
+              plan.remove.map((row) => row.id),
+            ),
+        );
       }
+      if (plan.insert.length === 0) return;
+      const inserted = await supabase
+        .from('business_hours')
+        .insert(plan.insert.map((row) => ({ ...row, shop_id: shopId })));
+      if (!inserted.error) return;
+      if (plan.remove.length > 0) {
+        const restored = await supabase.from('business_hours').insert(
+          plan.remove.map((row) => ({
+            weekday: row.weekday,
+            opens_at: row.opens_at,
+            closes_at: row.closes_at,
+            shop_id: shopId,
+          })),
+        );
+        if (restored.error) {
+          throw new AppError(HOURS_NOT_RESTORED_MESSAGE, {
+            kind: 'server',
+            cause: inserted.error,
+          });
+        }
+      }
+      throw toAppError(inserted.error);
     },
+    // settings/* covers this page and the calendar's hours shading
+    // (settings/business_hours); jobs/calendar re-reads availability.
     onSettled: () =>
-      Promise.all([
-        queryClient.invalidateQueries({ queryKey: settingsKeys.hours(shopId) }),
-        queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'calendar') }),
-      ]),
+      invalidateAll(queryClient, [settingsKeys.all(shopId), dependentKeys.calendarEvents(shopId)]),
   });
 }
 
@@ -368,10 +426,10 @@ export function useDeleteBlockedTime() {
   });
 }
 
-function invalidateBlocked(queryClient: ReturnType<typeof useQueryClient>, shopId: string) {
-  return Promise.all([
-    queryClient.invalidateQueries({ queryKey: [...settingsKeys.all(shopId), 'blocked'] }),
-    queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'calendar') }),
+function invalidateBlocked(queryClient: QueryClient, shopId: string) {
+  return invalidateAll(queryClient, [
+    [...settingsKeys.all(shopId), 'blocked'],
+    dependentKeys.calendarEvents(shopId),
   ]);
 }
 
@@ -446,11 +504,11 @@ export function useArchiveResource() {
   });
 }
 
-function invalidateResources(queryClient: ReturnType<typeof useQueryClient>, shopId: string) {
-  return Promise.all([
-    queryClient.invalidateQueries({ queryKey: settingsKeys.resources(shopId) }),
-    queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'calendar') }),
-    queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'resources') }),
+/** settings/* = this page + the jobs resource picker (settings/resources). */
+function invalidateResources(queryClient: QueryClient, shopId: string) {
+  return invalidateAll(queryClient, [
+    settingsKeys.all(shopId),
+    dependentKeys.calendarEvents(shopId),
   ]);
 }
 
@@ -476,12 +534,16 @@ export function useVehicleCategories() {
   });
 }
 
-function invalidateCategories(queryClient: ReturnType<typeof useQueryClient>, shopId: string) {
-  return Promise.all([
-    queryClient.invalidateQueries({ queryKey: settingsKeys.categories(shopId) }),
-    queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'catalog') }),
-    queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'vehicles') }),
-    queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'customers') }),
+/**
+ * settings/* also covers the job editor's picker (settings/vehicle_categories);
+ * catalog/customers/vehicles hold prices and vehicles keyed by category.
+ */
+function invalidateCategories(queryClient: QueryClient, shopId: string) {
+  return invalidateAll(queryClient, [
+    settingsKeys.all(shopId),
+    shopKey(shopId, 'catalog'),
+    shopKey(shopId, 'vehicles'),
+    shopKey(shopId, 'customers'),
   ]);
 }
 
@@ -650,8 +712,13 @@ export function useSaveCoupon() {
         );
       }
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: settingsKeys.coupons(shopId) }),
+    onSuccess: () => invalidateCoupons(queryClient, shopId),
   });
+}
+
+/** Plus the job editor's coupon picker (catalog/coupons/active). */
+function invalidateCoupons(queryClient: QueryClient, shopId: string) {
+  return invalidateAll(queryClient, [settingsKeys.coupons(shopId), dependentKeys.coupons(shopId)]);
 }
 
 export function useDeleteCoupon() {
@@ -661,7 +728,7 @@ export function useDeleteCoupon() {
     mutationFn: async (id: string): Promise<void> => {
       unwrap(await supabase.from('coupons').delete().eq('id', id).eq('shop_id', shopId));
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: settingsKeys.coupons(shopId) }),
+    onSuccess: () => invalidateCoupons(queryClient, shopId),
   });
 }
 
@@ -723,8 +790,13 @@ export interface TemplatePatch {
   offset_minutes?: number | null;
 }
 
-function invalidateTemplates(queryClient: ReturnType<typeof useQueryClient>, shopId: string) {
-  return queryClient.invalidateQueries({ queryKey: settingsKeys.templates(shopId) });
+/** Plus the inbox's template list and rendered previews (messages/…). */
+function invalidateTemplates(queryClient: QueryClient, shopId: string) {
+  return invalidateAll(queryClient, [
+    settingsKeys.templates(shopId),
+    dependentKeys.messageTemplates(shopId),
+    dependentKeys.messagePreviews(shopId),
+  ]);
 }
 
 export function useUpdateTemplate() {
@@ -839,7 +911,8 @@ export function useSaveFormTemplate() {
         );
       }
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: settingsKeys.forms(shopId) }),
+    // settings/* also covers the job form picker (settings/form_templates/active).
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: settingsKeys.all(shopId) }),
   });
 }
 
@@ -850,7 +923,8 @@ export function useDeleteFormTemplate() {
     mutationFn: async (id: string): Promise<void> => {
       unwrap(await supabase.from('form_templates').delete().eq('id', id).eq('shop_id', shopId));
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: settingsKeys.forms(shopId) }),
+    // settings/* also covers the job form picker (settings/form_templates/active).
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: settingsKeys.all(shopId) }),
   });
 }
 
@@ -867,7 +941,14 @@ export const stripeStatusSchema = z.object({
 });
 export type StripeStatus = z.infer<typeof stripeStatusSchema>;
 
-const linkSchema = z.object({ url: z.url() });
+/**
+ * Account/login links are one-time https URLs on stripe.com
+ * (connect.stripe.com). Anything else — javascript:, data:, http:, another
+ * host — is refused before `window.location.assign` sees it.
+ */
+export const stripeLinkSchema = z.object({
+  url: z.url({ protocol: /^https$/, hostname: /(^|\.)stripe\.com$/ }),
+});
 
 /** Url-safe, 8–64 chars (functions/_shared/schemas.ts `requestNonce`). */
 export function requestNonce(): string {
@@ -898,9 +979,76 @@ export function useStripeStatus(enabled: boolean) {
 export function useStripeLink() {
   const { shopId } = useShop();
   return useMutation({
-    mutationFn: async (action: 'create_account_link' | 'login_link'): Promise<string> =>
-      linkSchema.parse(
+    mutationFn: async (action: 'create_account_link' | 'login_link'): Promise<string> => {
+      const parsed = stripeLinkSchema.safeParse(
         await invokeStripeConnect({ action, shop_id: shopId, request_nonce: requestNonce() }),
-      ).url,
+      );
+      if (!parsed.success) {
+        throw new AppError('Stripe returned an unexpected link. Please try again.', {
+          kind: 'server',
+          cause: parsed.error,
+        });
+      }
+      return parsed.data.url;
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Delete shop (SPEC §3: owner only — RLS `shops_delete`, capability shop.delete)
+// ---------------------------------------------------------------------------
+
+/**
+ * Memberships that still bill (or may still bill) through a Stripe
+ * subscription on the connected account. Deleting the shop removes the rows
+ * but not the Stripe subscriptions, so customers would keep being charged —
+ * the page refuses to delete while any exist.
+ */
+export function useBillingMembershipCount(enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: [...settingsKeys.all(shopId), 'delete-shop', 'billing-memberships'] as const,
+    enabled,
+    queryFn: async (): Promise<number> => {
+      const result = await supabase
+        .from('memberships')
+        .select('id', { count: 'exact', head: true })
+        .eq('shop_id', shopId)
+        .neq('status', 'cancelled')
+        .not('stripe_subscription_id', 'is', null);
+      if (result.error) throw toAppError(result.error);
+      return result.count ?? 0;
+    },
+  });
+}
+
+/**
+ * Deletes the current shop; every tenant table cascades. RLS lets only the
+ * owner delete, and a denied delete affects 0 rows without an error, so the
+ * deleted row is selected back to tell the two apart. Afterwards the shop's
+ * cached queries are dropped and the membership list is refetched, which
+ * switches to another shop (or to onboarding when none are left).
+ */
+export function useDeleteShop() {
+  const { shopId } = useShop();
+  const { refetch } = useShopContext();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      const deleted = unwrapList(
+        await supabase.from('shops').delete().eq('id', shopId).select('id'),
+      );
+      if (deleted.length === 0) {
+        throw new AppError('Only the shop owner can delete this shop.', { kind: 'permission' });
+      }
+    },
+    onSuccess: async () => {
+      // Membership list first: the shell moves off the deleted shop, so its
+      // pages unmount before the shop's cache entries are dropped.
+      await refetch();
+      const tenantKey = ['shop', shopId] as const;
+      await queryClient.cancelQueries({ queryKey: tenantKey });
+      queryClient.removeQueries({ queryKey: tenantKey });
+    },
   });
 }

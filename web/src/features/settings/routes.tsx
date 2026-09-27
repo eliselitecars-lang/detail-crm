@@ -52,6 +52,15 @@ export const routes: FeatureRoutes = {
               ),
               children: [{ index: true, lazy: lazyPage(() => import('./pages/SmsPage')) }],
             },
+            {
+              path: 'delete-shop',
+              element: (
+                <RequireRole capability="shop.delete">
+                  <Outlet />
+                </RequireRole>
+              ),
+              children: [{ index: true, lazy: lazyPage(() => import('./pages/DeleteShopPage')) }],
+            },
             { path: '*', element: <Navigate to="/app/settings/business" replace /> },
           ],
         },

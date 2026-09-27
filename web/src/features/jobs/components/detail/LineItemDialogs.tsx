@@ -143,7 +143,11 @@ export function LineDialog({ job, line, nextSort, onClose }: LineDialogProps) {
         <FormField label="Unit price" required error={errors.price}>
           <MoneyInput value={price} onChange={setPrice} />
         </FormField>
-        <FormField label="Line discount" error={errors.discount} help={`In ${currency.toUpperCase()}`}>
+        <FormField
+          label="Line discount"
+          error={errors.discount}
+          help={`In ${currency.toUpperCase()}`}
+        >
           <MoneyInput value={discount} onChange={setDiscount} />
         </FormField>
         <FormField label="Duration (minutes)" error={errors.duration}>
@@ -268,9 +272,13 @@ export function CatalogDialog({ job, nextSort, onClose }: CatalogDialogProps) {
         ) : catalog.isError ? (
           <ErrorState compact error={catalog.error} onRetry={() => void catalog.refetch()} />
         ) : services.length === 0 ? (
-          <EmptyState compact title="No services found" description="Add services in the catalog." />
+          <EmptyState
+            compact
+            title="No services found"
+            description="Add services in the catalog."
+          />
         ) : (
-          <fieldset className="border-line max-h-64 overflow-y-auto rounded-control border p-3">
+          <fieldset className="border-line rounded-control max-h-64 overflow-y-auto border p-3">
             <legend className="sr-only">Services</legend>
             <div className="flex flex-col gap-2.5">
               {services.map((s) => {
@@ -303,7 +311,9 @@ export function CatalogDialog({ job, nextSort, onClose }: CatalogDialogProps) {
             custom item instead.
           </p>
         )}
-        {lines.some((l) => l.membership_included) && <Badge tone="success">Membership applied</Badge>}
+        {lines.some((l) => l.membership_included) && (
+          <Badge tone="success">Membership applied</Badge>
+        )}
       </div>
     </Dialog>
   );
