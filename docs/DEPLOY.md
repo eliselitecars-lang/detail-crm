@@ -89,6 +89,16 @@ removes them from the project if it finds them).
 | `DEPLOY_WEB` | variable | no | `true` = also deploy on every push to `main` that touches `web/` |
 | `WEB_EMBED_PATHS` | variable | no | comma-separated paths other sites may iframe, e.g. `/book/*` (default: none; see [4.3](#43-framing-embeds)) |
 | `WEB_EMBED_ANCESTORS` | variable | no | who may frame those paths (default `*`) |
+| `LEGAL_ENTITY_NAME` | variable | no (recommended) | your legal company name, shown on `/privacy` and `/terms` (becomes `VITE_LEGAL_ENTITY_NAME`) |
+| `SUPPORT_EMAIL` | variable | no (recommended) | where people send privacy requests and questions; a `mailto:` link on both pages (becomes `VITE_SUPPORT_EMAIL`) |
+| `LEGAL_COUNTRY` | variable | no (recommended) | the governing law of the terms, written as it reads after "the laws of", e.g. `the State of Delaware, United States` (becomes `VITE_LEGAL_COUNTRY`) |
+| `LEGAL_ADDRESS` | variable | no | postal address for the contact sections; `\n` or real line breaks separate lines (becomes `VITE_LEGAL_ADDRESS`) |
+
+The four `LEGAL_*` / `SUPPORT_EMAIL` values are public (they ship in the
+build). Without them the legal pages still render and say "the operator of
+this service" instead of a name, and name no address, email or country; the
+workflow prints a warning. They are read at build time, so re-run deploy-web
+after changing them.
 
 ### iPhone (ios-testflight)
 
@@ -275,7 +285,10 @@ run unless `--strict`. Exit code 1 on any `FAIL`.
 ### 3.7 Tests of the deploy tooling
 
 `node --test "scripts/deploy/test/*.test.mjs"` (the backend workflow runs it
-first). It drives `deploy_backend.sh` end to end against a fake Supabase CLI
+first, and `.github/workflows/deploy-tools.yml` runs it on every push or pull
+request that changes `scripts/deploy/`, `supabase/config.toml`,
+`supabase/setup/cron.sql`, a function's `index.ts`, `_shared/env.ts`,
+`_shared/stripe.ts` or the webhook's `handlers.ts`). It drives `deploy_backend.sh` end to end against a fake Supabase CLI
 and a fake Management + Stripe API: command order, verify_jwt flags, dry run
 without mutations, missing/invalid inputs, no secret in output or argv,
 idempotent re-runs, `config push` never invoked, a foreign Stripe endpoint

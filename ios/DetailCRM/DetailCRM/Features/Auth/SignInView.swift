@@ -8,6 +8,7 @@ import DetailCore
 
 struct SignInView: View {
     @Binding var path: [AuthRoute]
+    @Environment(AppState.self) private var appState
 
     @State private var email = ""
     @State private var password = ""
@@ -32,6 +33,10 @@ struct SignInView: View {
             )
 
             VStack(spacing: Theme.Spacing.lg) {
+                // Why the app signed the user out (an expired session).
+                if let notice = appState.signInNotice, errorMessage == nil {
+                    InlineMessage(text: notice, kind: .info)
+                }
                 ThemedTextField(label: "Email", placeholder: "you@yourshop.com", text: $email,
                                 kind: .email, error: emailError)
                 ThemedTextField(label: "Password", placeholder: "Password", text: $password,

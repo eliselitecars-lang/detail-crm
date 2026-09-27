@@ -17,6 +17,17 @@ export const E2E_SUPABASE_URL = 'https://e2e-mock.supabase.co';
 
 const executablePath = process.env.PW_CHROMIUM_EXECUTABLE;
 
+/**
+ * Operator details for /privacy and /terms stay unset (an .env.local value
+ * would otherwise leak in), so e2e/legal.spec.ts checks the neutral wording.
+ */
+const BLANK_LEGAL_ENV = {
+  VITE_LEGAL_ENTITY_NAME: '',
+  VITE_SUPPORT_EMAIL: '',
+  VITE_LEGAL_COUNTRY: '',
+  VITE_LEGAL_ADDRESS: '',
+};
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -49,6 +60,7 @@ export default defineConfig({
       env: {
         VITE_SUPABASE_URL: E2E_SUPABASE_URL,
         VITE_SUPABASE_ANON_KEY: 'e2e-anon-key',
+        ...BLANK_LEGAL_ENV,
       },
     },
     {
@@ -59,6 +71,7 @@ export default defineConfig({
       env: {
         VITE_SUPABASE_URL: '',
         VITE_SUPABASE_ANON_KEY: '',
+        ...BLANK_LEGAL_ENV,
       },
     },
   ],

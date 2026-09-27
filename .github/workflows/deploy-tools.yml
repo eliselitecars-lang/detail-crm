@@ -1,0 +1,53 @@
+# Tests of the deploy tooling (docs/DEPLOY.md 3.7): deploy_backend.sh end to
+# end against a fake Supabase CLI and fake Management/Stripe APIs,
+# verify_live.mjs against a fake project, the web header generator and the
+# Pages-semantics static server. No secrets, no network: runs on every change
+# to the tooling or to the files it reads (config.toml verify_jwt, cron.sql
+# placeholders, function env names, the webhook's event list and Stripe API
+# version).
+name: deploy-tools
+
+on:
+  push:
+    paths:
+      - "scripts/deploy/**"
+      - "supabase/config.toml"
+      - "supabase/setup/cron.sql"
+      - "supabase/functions/*/index.ts"
+      - "supabase/functions/_shared/env.ts"
+      - "supabase/functions/_shared/stripe.ts"
+      - "supabase/functions/stripe-webhook/handlers.ts"
+      - ".github/workflows/deploy-tools.yml"
+  pull_request:
+    paths:
+      - "scripts/deploy/**"
+      - "supabase/config.toml"
+      - "supabase/setup/cron.sql"
+      - "supabase/functions/*/index.ts"
+      - "supabase/functions/_shared/env.ts"
+      - "supabase/functions/_shared/stripe.ts"
+      - "supabase/functions/stripe-webhook/handlers.ts"
+      - ".github/workflows/deploy-tools.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-tools-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: node --test scripts/deploy/test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Deploy tooling tests (fake CLI + fake APIs)
+        run: node --test "scripts/deploy/test/*.test.mjs"

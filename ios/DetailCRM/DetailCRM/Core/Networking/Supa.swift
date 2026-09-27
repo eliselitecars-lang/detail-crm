@@ -16,6 +16,7 @@
 
 import Foundation
 import Supabase
+import DetailCore
 
 enum Supa {
 
@@ -42,9 +43,18 @@ enum Supa {
         )
     }()
 
-    /// The signed-in auth user id. Throws when signed out.
+    /// The signed-in auth user id. Throws when signed out. Reading the session
+    /// refreshes an expired access token; when Auth refuses that refresh the
+    /// session is over app-wide, so AppState is told (it signs out once).
     static func currentUserID() async throws -> UUID {
-        try await client.auth.session.user.id
+        do {
+            return try await client.auth.session.user.id
+        } catch {
+            if SessionExpiry.sessionIsGone(after: SessionMonitor.refreshOutcome(of: error)) {
+                await SessionMonitor.report(.refreshRefused)
+            }
+            throw error
+        }
     }
 
     // MARK: - Filter value helpers

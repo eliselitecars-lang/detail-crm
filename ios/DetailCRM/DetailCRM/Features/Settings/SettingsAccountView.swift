@@ -3,9 +3,10 @@
 //  DetailCRM
 //
 //  The signed-in user's own details: profile name and mobile number
-//  (shared across shops) and the name teammates see in this shop, and
-//  deleting the account (every role; App Store guideline 5.1.1(v)).
-//  Signing out lives in the More tab.
+//  (shared across shops) and the name teammates see in this shop, the
+//  Privacy Policy and Terms of Service (web pages), and deleting the
+//  account (every role; App Store guideline 5.1.1(v)). Signing out lives in
+//  the More tab.
 //
 
 import SwiftUI
@@ -80,6 +81,7 @@ struct SettingsAccountView: View {
             Text("To sign out or switch shops, use the More tab.")
                 .font(Theme.Typography.footnote)
                 .foregroundStyle(Theme.textTertiary)
+            SettingsLegalSection()
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 SectionHeader(title: "Delete account")
                 Text("Permanently deletes your sign-in and profile and removes you from every shop. The shops' customers, jobs and payments stay with the shops. A shop owner must first transfer ownership or delete the shop.")

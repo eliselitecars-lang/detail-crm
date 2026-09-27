@@ -40,6 +40,16 @@ ios/
   access token has expired (`emitLocalSessionAsInitialSession`); bootstrap
   refreshes it, so opening the app offline lands on `failed` (Retry) rather
   than Sign In, and a later `.tokenRefreshed` finishes the bootstrap.
+  **Session expiry:** when the session is over (Auth refuses a refresh, or
+  the Auth client drops the session itself) AppState signs out through its
+  one sign-out path, on this device only, and the sign-in screen shows
+  `signInNotice`. Services report through `SessionMonitor`
+  (`EdgeFunctions.failure(from:)` for a gateway 401 without our envelope,
+  `Supa.currentUserID()` for a refused refresh); a gateway 401 is checked
+  with one token refresh before anyone is signed out, and 401s in our
+  `{error, code, details}` envelope never sign out. The rules and the gate
+  that makes one lost session sign out exactly once are DetailCore's
+  `SessionExpiry` / `SessionExpiryGate`.
   Membership API: `refreshMemberships()` (re-read the list, never changes the
   active shop or phase), `activateShop(_:)` (after create/join),
   `refreshCurrentShop()` (after settings edits), `selectShop(_:)`,
@@ -56,7 +66,8 @@ ios/
   rules, quote/invoice/payment/membership statuses, `ShopRole`/`Capability`,
   `TemplateRenderer` (`{{placeholder}}`), `PhoneNumber` (E.164), `VIN`,
   `ShopClock` (shop-timezone days/weeks, DST-safe), `Validation` (email and
-  slug rules identical to the database).
+  slug rules identical to the database), `SessionExpiry` (when a refused
+  request means the session is over; `SessionExpiryGate`).
 
 ## Conventions (follow these in every feature)
 
@@ -100,7 +111,9 @@ ios/
    concurrency errors; keep UI types on the main actor.
 9. **Edge functions.** Call them through `EdgeFunctions.invoke("name", body:)`
    (or `MoneyEdge.invoke` in the money services) with a string literal name
-   (`swift_sanity.py` checks it names a real function). Every failure is an
+   (`swift_sanity.py` and `check_contracts.py` check it names a real
+   function); code that calls `functions.invoke` itself reads failures with
+   `EdgeFunctions.failure(from:)` so a gateway 401 reaches AppState. Every failure is an
    `EdgeFunctionError` (`EdgeErrorDecoder`): our `{error, code, details}`
    envelope keeps the server's wording and `details.reason`; a gateway /
    non-envelope body is worded from the HTTP status (401 "Your session has

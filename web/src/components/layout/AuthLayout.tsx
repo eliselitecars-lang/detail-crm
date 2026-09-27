@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Card } from '@/components/ui';
+import { LegalLinks } from './LegalLinks';
 import { Logo } from './Logo';
 
 export interface AuthLayoutProps {
@@ -29,6 +30,7 @@ export function AuthLayout({ title, description, children, footer }: AuthLayoutP
           <div className="mt-5">{children}</div>
         </Card>
         {footer && <div className="text-muted mt-5 text-center text-sm">{footer}</div>}
+        <LegalLinks className="text-muted mt-6 text-xs" />
       </main>
     </div>
   );

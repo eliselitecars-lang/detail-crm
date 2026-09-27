@@ -47,6 +47,12 @@ jobs:
       CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
       WEB_EMBED_PATHS: ${{ vars.WEB_EMBED_PATHS }}
       WEB_EMBED_ANCESTORS: ${{ vars.WEB_EMBED_ANCESTORS }}
+      # Operator details on /privacy and /terms (optional: the pages use
+      # neutral wording without them). Public values: they ship in the build.
+      VITE_LEGAL_ENTITY_NAME: ${{ vars.LEGAL_ENTITY_NAME }}
+      VITE_SUPPORT_EMAIL: ${{ vars.SUPPORT_EMAIL }}
+      VITE_LEGAL_COUNTRY: ${{ vars.LEGAL_COUNTRY }}
+      VITE_LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
     steps:
       - name: Check required secrets and variables
         run: |
@@ -70,6 +76,14 @@ jobs:
             *) echo "::error::SUPABASE_URL must be https://..."; exit 1 ;;
           esac
           echo "All required settings are present."
+          unset_legal=()
+          for name in LEGAL_ENTITY_NAME SUPPORT_EMAIL LEGAL_COUNTRY; do
+            var="VITE_$name"
+            [ -n "${!var:-}" ] || unset_legal+=("$name")
+          done
+          if [ "${#unset_legal[@]}" -gt 0 ]; then
+            echo "::warning::Not set: ${unset_legal[*]}. /privacy and /terms leave those details out (neutral wording such as \"the operator of this service\"); see docs/DEPLOY.md."
+          fi
 
       - uses: actions/checkout@v4
 

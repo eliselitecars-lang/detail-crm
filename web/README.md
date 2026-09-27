@@ -30,10 +30,19 @@ Node 22, npm (commit `package-lock.json`). CI: `.github/workflows/web.yml`.
 
 ### Environment
 
-| Variable                 | Meaning                     |
-| ------------------------ | --------------------------- |
-| `VITE_SUPABASE_URL`      | `https://<ref>.supabase.co` |
-| `VITE_SUPABASE_ANON_KEY` | the **anon** public key     |
+| Variable                 | Meaning                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------- |
+| `VITE_SUPABASE_URL`      | `https://<ref>.supabase.co`                                                             |
+| `VITE_SUPABASE_ANON_KEY` | the **anon** public key                                                                 |
+| `VITE_LEGAL_ENTITY_NAME` | optional: legal name of the operator, shown on `/privacy` and `/terms`                  |
+| `VITE_SUPPORT_EMAIL`     | optional: where privacy requests and questions go (a `mailto:` link on both pages)      |
+| `VITE_LEGAL_COUNTRY`     | optional: governing law, as it reads after "the laws of" (`the State of Delaware, USA`) |
+| `VITE_LEGAL_ADDRESS`     | optional: postal address (`\n` for line breaks)                                         |
+
+The legal pages render without the `VITE_LEGAL_*` values: they then say "the
+operator of this service" and never show a made-up name, address or email.
+Their wording lives in `src/features/legal/content.tsx` and must stay true to
+what the code does (update it, and `LEGAL_LAST_UPDATED`, with the change).
 
 Only public values may be `VITE_` variables — they ship to every browser.
 Stripe/Twilio/Resend secrets and the service-role key live in Supabase function
@@ -124,7 +133,8 @@ export const routes: FeatureRoutes = {
 Route map: `/login`, `/signup`, `/forgot-password`, `/reset-password`,
 `/invite/:token`, `/book/:slug`, `/booking/:token`, `/q/:token`, `/i/:token`,
 `/f/:token`, `/u/:token` (email unsubscribe), `/portal`, `/account` (every
-signed-in role: delete account), `/app` (dashboard), `/app/{calendar,jobs,customers,
+signed-in role: delete account), `/privacy`, `/terms` (public; linked under the
+auth pages, in the public page footer and on `/account`), `/app` (dashboard), `/app/{calendar,jobs,customers,
 quotes,invoices,payments,memberships,messages,campaigns,reports,team,timesheets,
 catalog,settings,notifications}`, `/app/onboarding`.
 

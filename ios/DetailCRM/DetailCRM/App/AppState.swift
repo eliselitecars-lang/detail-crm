@@ -15,6 +15,13 @@
 //                 access token); Retry reruns it, and a later successful
 //                 token refresh finishes it automatically
 //
+//  Session expiry: when the session is over (Auth refuses a refresh, or the
+//  Auth client drops the session itself) the user is signed out through the
+//  same path as the Sign out button — once, on this device only — and the
+//  sign-in screen shows `signInNotice`. A gateway 401 from an edge function
+//  (SessionMonitor) is checked with a refresh first. SessionExpiryGate
+//  (DetailCore) keeps concurrent reports from signing out twice or looping.
+//
 
 import Foundation
 import Observation
@@ -49,13 +56,18 @@ final class AppState {
     /// The active shop + the user's membership in it (nil unless `.ready`,
     /// or while switching shops).
     private(set) var current: ShopMembership?
+    /// Why the user was signed out (an expired session), for the sign-in
+    /// screen; cleared by the next sign-in or the user's own sign-out.
+    private(set) var signInNotice: String?
 
     @ObservationIgnored private var authListener: Task<Void, Never>?
+    @ObservationIgnored private var sessionGate = SessionExpiryGate()
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         startAuthListener()
+        startSessionMonitor()
     }
 
     // MARK: - Convenience accessors
@@ -131,7 +143,18 @@ final class AppState {
                 await resolveSession(userID: session.user.id, email: session.user.email)
             }
         case .signedOut:
-            clearSession()
+            // Our own sign-outs pass here while the gate is signing out, and a
+            // repeated event finds nobody signed in: both only clear state.
+            // Otherwise the Auth client dropped the session by itself because
+            // the server no longer accepts it (a revoked or reused refresh
+            // token): the same sign-out, explained on the sign-in screen.
+            if userID != nil, sessionGate.beginSignOut() {
+                signInNotice = SessionExpiry.notice
+                clearSession()
+                sessionGate.finishSignOut()
+            } else {
+                clearSession()
+            }
         case .userUpdated:
             if let session {
                 userEmail = session.user.email
@@ -155,6 +178,7 @@ final class AppState {
         if self.userID == userID, phase == .ready || phase == .needsShop {
             return
         }
+        signInNotice = nil
         if self.userID != userID {
             // A different account: nothing from the previous one survives.
             memberships = []
@@ -167,16 +191,18 @@ final class AppState {
     }
 
     /// Launch / Retry: loads profile + memberships and picks the phase.
-    /// Fetching refreshes an expired access token first; when that fails
-    /// because the session is gone the user is signed out, any other
-    /// failure (offline, server down) shows `.failed` with Retry.
+    /// Fetching refreshes an expired access token first; when Auth refuses
+    /// that refresh the user is signed out (with the expiry notice), any
+    /// other failure (offline, server down) shows `.failed` with Retry.
     private func bootstrap() async {
         do {
             try await fetchProfileAndMemberships()
             chooseShop(preferred: nil)
         } catch {
-            if Self.isSessionGone(error) {
-                clearSession()
+            // The stored session is over (Auth refused its refresh): sign in
+            // again, with the notice. Offline or server trouble: Retry.
+            if SessionExpiry.sessionIsGone(after: SessionMonitor.refreshOutcome(of: error)) {
+                await endExpiredSession()
                 return
             }
             Self.log.error("Bootstrap failed: \(error.localizedDescription, privacy: .public)")
@@ -194,13 +220,61 @@ final class AppState {
         memberships = loadedMemberships
     }
 
-    /// The stored session no longer exists or was revoked (not a network
-    /// problem), so the only way forward is signing in again.
-    private static func isSessionGone(_ error: Error) -> Bool {
-        if let authError = error as? AuthError, case .sessionMissing = authError {
-            return true
+    // MARK: - Session expiry
+
+    private func startSessionMonitor() {
+        guard AppConfig.isConfigured else { return }
+        SessionMonitor.setListener { [weak self] signal in
+            guard let self else { return }
+            Task { await self.handleSessionSignal(signal) }
         }
-        return false
+    }
+
+    /// A request found the session refused. A refused refresh ends it; the
+    /// gateway's 401 is first checked with one refresh (a slow device clock
+    /// also causes it, and the refresh fixes that), so the user is signed out
+    /// only when Auth confirms the session is over. Offline: nothing happens.
+    private func handleSessionSignal(_ signal: SessionMonitor.Signal) async {
+        switch signal {
+        case .refreshRefused:
+            await endExpiredSession()
+        case .gatewayRejected:
+            guard let ticket = sessionGate.beginVerification(signedIn: userID != nil) else { return }
+            let outcome: SessionExpiry.RefreshOutcome
+            do {
+                _ = try await Supa.client.auth.refreshSession()
+                outcome = .refreshed
+            } catch {
+                outcome = SessionMonitor.refreshOutcome(of: error)
+            }
+            if sessionGate.finishVerification(ticket: ticket, outcome: outcome, signedIn: userID != nil) {
+                Self.log.info("Session refused by the server; signing out")
+                await performSignOut(scope: .local, notice: SessionExpiry.notice)
+            }
+        }
+    }
+
+    /// Signs out a session the server no longer accepts: on this device only
+    /// (the account's other devices keep their sessions), with the notice.
+    /// Does nothing when nobody is signed in or a sign-out is running.
+    private func endExpiredSession() async {
+        guard userID != nil, sessionGate.beginSignOut() else { return }
+        Self.log.info("Session expired; signing out")
+        await performSignOut(scope: .local, notice: SessionExpiry.notice)
+    }
+
+    /// The one sign-out path (the gate is already `.signingOut`). The notice
+    /// is set first: the sign-in screen appears as soon as the Auth client
+    /// emits `.signedOut`, before the server call returns.
+    private func performSignOut(scope: SignOutScope, notice: String?) async {
+        signInNotice = notice
+        do {
+            try await AuthService.signOut(scope: scope)
+        } catch {
+            Self.log.error("Sign out failed: \(error.localizedDescription, privacy: .public)")
+        }
+        clearSession()
+        sessionGate.finishSignOut()
     }
 
     private func chooseShop(preferred: UUID?) {
@@ -316,12 +390,10 @@ final class AppState {
         try await refreshMemberships()
     }
 
+    /// The Sign out button (and after deleting the account): every session
+    /// of the account. Ignored while a sign-out is already running.
     func signOut() async {
-        do {
-            try await AuthService.signOut()
-        } catch {
-            Self.log.error("Sign out failed: \(error.localizedDescription, privacy: .public)")
-        }
-        clearSession()
+        guard sessionGate.beginSignOut() else { return }
+        await performSignOut(scope: .global, notice: nil)
     }
 }

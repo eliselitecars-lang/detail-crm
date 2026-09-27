@@ -12,7 +12,8 @@
 	<string>YOUR_SUPABASE_URL</string>
 	<key>SUPABASE_ANON_KEY</key>
 	<string>YOUR_SUPABASE_ANON_KEY</string>
-	<!-- Web app base URL used for shareable links (booking pages, invites). -->
+	<!-- Web app base URL used for shareable links (booking pages, invites)
+	     and the Privacy Policy / Terms of Service rows (<url>/privacy, /terms). -->
 	<key>WEB_APP_URL</key>
 	<string>YOUR_WEB_APP_URL</string>
 </dict>

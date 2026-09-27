@@ -16,9 +16,15 @@ actually use it:
     keys and `onConflict` columns; `.rpc('<fn>', { args })` — the function,
     its argument names and a matching overload (also through a local TS
     wrapper such as `rpc(ctx, '<fn>', { args })` whose body forwards its
-    parameters to `.rpc(fn, args)`, and for a name assigned just before the
-    call: `op = '<fn>'; ... .rpc(op, ...)`); `.storage.from('<bucket>')`;
-    `functions.invoke('<name>')` targets an existing edge function;
+    parameters to `.rpc(fn, args)`, also with type arguments of any shape
+    such as `rpc<{ disputed_cents?: number } | null>(ctx, '<fn>', {...})`,
+    and for a name assigned just before the call: `op = '<fn>'; ...
+    .rpc(op, ...)`); `.storage.from('<bucket>')`; `functions.invoke('<name>')`
+    (or `.invoke<T>(...)`) targets an existing edge function — also through
+    a wrapper that forwards its parameter as the function name, in TS
+    (`invokeEdge('payments', ...)`, defined locally or imported) and Swift
+    (`EdgeFunctions.invoke("payments", body:)`, `MoneyEdge.invoke(...)`, any
+    chain of such wrappers across files);
   * iOS (ios/DetailCRM): the same chains in Swift (`.eq("col", value:)`,
     `.select(Model.selectColumns)`, `params: Params(p_x: ...)` or
     `["p_x": ...]`, encodable payload structs), every `// table: <name>`
@@ -446,6 +452,210 @@ def arg_label(arg: list[Tok]) -> tuple[str | None, list[Tok]]:
     return None, arg
 
 
+_CLOSERS = {"(": ")", "[": "]", "{": "}"}
+
+
+def skip_generic(toks: list[Tok], i: int) -> int:
+    """Index just past a balanced `<...>` type-argument list starting at toks[i],
+    or i when toks[i] is not `<` or no list closes there. Bracketed parts are
+    skipped whole, so object-literal, tuple and function types work:
+    `rpc<{ disputed_cents?: number } | null>(`, `f<[A, B]>(`, `g<(x: T) => U>(`."""
+    if i >= len(toks) or toks[i].kind != "p" or toks[i].val != "<":
+        return i
+    depth, j, limit = 0, i, min(len(toks), i + 400)
+    while j < limit:
+        t = toks[j]
+        if t.kind == "p":
+            if t.val == "<":
+                depth += 1
+            elif t.val == ">":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            elif t.val in _CLOSERS:
+                close = match_close(toks, j)
+                if close >= len(toks) or toks[close].val != _CLOSERS[t.val]:
+                    return i
+                j = close
+            elif t.val in (")", "]", "}", ";"):
+                return i
+        j += 1
+    return i
+
+
+@dataclass
+class FuncDef:
+    """A function definition: its parameters (Swift: external label + internal
+    name; TS: name only) and the token span of its body `{ ... }`."""
+    owner: str | None             # Swift: innermost enclosing type / extension
+    name: str
+    params: list[tuple[str | None, str | None]]   # (label, internal name)
+    body: tuple[int, int]
+
+
+def ts_function_defs(toks: list[Tok]) -> list[FuncDef]:
+    """`function NAME<T>(a, b) {` and `const NAME = async <T>(a, b) => {`."""
+    out, n = [], len(toks)
+    for i, t in enumerate(toks):
+        name, open_i = None, None
+        if t.kind == "id" and t.val == "function" and i + 1 < n and toks[i + 1].kind == "id":
+            name = toks[i + 1].val
+            open_i = skip_generic(toks, i + 2)
+        elif (t.kind == "id" and t.val in ("const", "let") and i + 3 < n and toks[i + 1].kind == "id"
+              and toks[i + 2].val == "="):
+            name = toks[i + 1].val
+            j = i + 3
+            if toks[j].kind == "id" and toks[j].val == "async":
+                j += 1
+            open_i = skip_generic(toks, j)
+        if name is None or open_i is None or open_i >= n or toks[open_i].val != "(":
+            continue
+        close = match_close(toks, open_i)
+        params = [(None, next((x.val for x in a if x.kind == "id"), None)) for a in split_args(toks, open_i, close)]
+        body = next((j for j in range(close + 1, min(n, close + 40)) if toks[j].val == "{"), None)
+        if body is None or (t.val != "function" and not any(toks[j].val == "=>" for j in range(close, body))):
+            continue
+        out.append(FuncDef(None, name, params, (body, match_close(toks, body))))
+    return out
+
+
+SWIFT_TYPE_KEYWORDS = ("enum", "struct", "class", "actor", "extension")
+
+
+def swift_function_defs(toks: list[Tok]) -> list[FuncDef]:
+    """`func NAME<T>(_ a: String, b: B) ... {` with the innermost enclosing
+    enum / struct / class / actor / extension as `owner`."""
+    n = len(toks)
+    scopes = []  # (open, close, type name)
+    for i, t in enumerate(toks):
+        if t.kind == "id" and t.val in SWIFT_TYPE_KEYWORDS and i + 1 < n and toks[i + 1].kind == "id" \
+                and toks[i + 1].val not in ("func", "var", "let", "subscript", "init") \
+                and not (i > 0 and toks[i - 1].val == "."):
+            j = next((k for k in range(i + 2, min(n, i + 80)) if toks[k].kind == "p" and toks[k].val in "{;}"),
+                     None)
+            if j is not None and toks[j].val == "{":
+                scopes.append((j, match_close(toks, j), toks[i + 1].val))
+    out = []
+    for i, t in enumerate(toks):
+        if not (t.kind == "id" and t.val == "func" and i + 1 < n and toks[i + 1].kind == "id"):
+            continue
+        open_i = skip_generic(toks, i + 2)
+        if open_i >= n or toks[open_i].val != "(":
+            continue
+        close = match_close(toks, open_i)
+        params: list[tuple[str | None, str | None]] = []
+        for a in split_args(toks, open_i, close):
+            colon = next((k for k, x in enumerate(a) if x.kind == "p" and x.val == ":"), None)
+            names = [x.val for x in a[:colon] if x.kind == "id"] if colon is not None else []
+            if len(names) >= 2:
+                params.append((names[-2], names[-1]))
+            elif len(names) == 1:
+                params.append((names[0], names[0]))
+            else:
+                params.append((None, None))
+        body = None
+        for j in range(close + 1, min(n, close + 60)):
+            if toks[j].kind == "p" and toks[j].val in ("{", ";", "}"):
+                body = j if toks[j].val == "{" else None
+                break
+        if body is None:
+            continue
+        inner = [s for s in scopes if s[0] < i < s[1]]
+        owner = max(inner, key=lambda s: s[0])[2] if inner else None
+        out.append(FuncDef(owner, toks[i + 1].val, params, (body, match_close(toks, body))))
+    return out
+
+
+@dataclass
+class EdgeWrapper:
+    """A function that forwards one of its parameters as the edge-function name
+    to `functions.invoke(...)` (directly or through another wrapper)."""
+    param_index: int
+    label: str | None   # Swift external label of that parameter ('_' = none)
+
+
+@dataclass
+class EdgeWrappers:
+    swift: dict = field(default_factory=dict)   # (owner type, func name) -> EdgeWrapper
+    ts: dict = field(default_factory=dict)      # (file rel, function name) -> EdgeWrapper
+    bodies: dict = field(default_factory=dict)  # file rel -> [(body start, body end, forwarded param)]
+
+    @property
+    def ts_names(self) -> set[str]:
+        return {name for _rel, name in self.ts}
+
+    def forwarded(self, rel: str, idx: int, name: str) -> bool:
+        """True inside a wrapper body when `name` is the parameter it forwards."""
+        return any(s <= idx < e and p == name for s, e, p in self.bodies.get(rel, ()))
+
+
+def edge_name_arg(toks: list[Tok], open_i: int, wrapper: EdgeWrapper, swift: bool) -> list[Tok] | None:
+    """The argument that names the edge function in a wrapper call whose `(`
+    is at open_i (Swift: only when its label matches the parameter's)."""
+    args = split_args(toks, open_i, match_close(toks, open_i))
+    if wrapper.param_index >= len(args):
+        return None
+    arg = args[wrapper.param_index]
+    if not swift:
+        return arg
+    lab, expr = arg_label(arg)
+    return expr if lab == (None if wrapper.label in (None, "_") else wrapper.label) else None
+
+
+DIRECT_INVOKE = EdgeWrapper(0, "_")  # `functions.invoke(<name>, ...)`
+
+
+def find_edge_wrappers(files: list["SourceFile"]) -> EdgeWrappers:
+    """Functions whose body passes one of their parameters as the function name
+    to `functions.invoke(` (TS: also `functions.invoke<T>(`) or, in Swift, to
+    another such wrapper:
+      Swift: `static func invoke<B, R>(_ functionName: String, body: B)` in
+             `enum EdgeFunctions`, called as `EdgeFunctions.invoke("payments", body: b)`
+             (and `MoneyEdge.invoke`, which forwards to it);
+      TS:    `async function invokeEdge(fn: EdgeFunctionName, ...)`, called as
+             `invokeEdge('payments', ...)` in its file or through an import.
+    Their call sites are checked like `functions.invoke('<name>')`, and the
+    forwarding call inside the wrapper is not reported as a run-time name."""
+    wrappers = EdgeWrappers()
+    defs = {sf.rel: (swift_function_defs(sf.toks) if sf.lang == "swift" else ts_function_defs(sf.toks))
+            for sf in files}
+    changed = True
+    while changed:  # wrappers of wrappers, in any file order
+        changed = False
+        for sf in files:
+            swift, toks = sf.lang == "swift", sf.toks
+            table = wrappers.swift if swift else wrappers.ts
+            for fd in defs[sf.rel]:
+                key = (fd.owner, fd.name) if swift else (sf.rel, fd.name)
+                if key in table or (swift and fd.owner is None):
+                    continue
+                internal = [p for _l, p in fd.params]
+                start, end = fd.body
+                for j in range(start, end - 2):
+                    if not (toks[j].kind == "p" and toks[j].val == "." and j >= 1
+                            and toks[j - 1].kind == "id" and toks[j + 1].kind == "id"):
+                        continue
+                    recv, meth = toks[j - 1].val, toks[j + 1].val
+                    open_i = j + 2 if swift else skip_generic(toks, j + 2)
+                    if open_i >= end or toks[open_i].val != "(":
+                        continue
+                    if recv == "functions" and meth == "invoke":
+                        inner = DIRECT_INVOKE
+                    elif swift and (recv, meth) in wrappers.swift:
+                        inner = wrappers.swift[(recv, meth)]
+                    else:
+                        continue
+                    arg = edge_name_arg(toks, open_i, inner, swift)
+                    if not arg or len(arg) != 1 or arg[0].kind != "id" or arg[0].val not in internal:
+                        continue
+                    k = internal.index(arg[0].val)
+                    table[key] = EdgeWrapper(k, fd.params[k][0])
+                    wrappers.bodies.setdefault(sf.rel, []).append((start, end, arg[0].val))
+                    changed = True
+                    break
+    return wrappers
+
+
 # ==========================================================================
 # Source files and constant evaluation
 # ==========================================================================
@@ -511,6 +721,7 @@ class Corpus:
         self.files = files
         self.by_path = {f.path.resolve(): f for f in files}
         self.swift_types: dict[str, list[tuple[SourceFile, "SwiftType"]]] = {}
+        self.edge_wrappers = EdgeWrappers()
 
     # ---- TS constant evaluation -------------------------------------------
     def resolve_module(self, sf: SourceFile, spec: str) -> SourceFile | None:
@@ -1192,21 +1403,9 @@ class SourceScanner:
 
     # ---- local RPC wrappers ------------------------------------------------
     def _skip_generic(self, i: int) -> int:
-        """Index just past a `<...>` type-argument list starting at toks[i] (or i)."""
-        toks = self.toks
-        if i >= len(toks) or toks[i].val != "<":
-            return i
-        depth = 0
-        for j in range(i, min(len(toks), i + 200)):
-            if toks[j].val == "<":
-                depth += 1
-            elif toks[j].val == ">":
-                depth -= 1
-                if depth == 0:
-                    return j + 1
-            elif toks[j].val in (";", "{", "}"):
-                break
-        return i
+        """Index just past a balanced `<...>` type-argument list starting at
+        toks[i] (or i), object-literal types included (see skip_generic)."""
+        return skip_generic(self.toks, i)
 
     def _find_rpc_wrappers(self) -> dict:
         """TS helpers such as `async function rpc<T>(ctx, fn: string, args) {
@@ -1477,8 +1676,31 @@ class SourceScanner:
                     continue
                 if meth == "rpc":
                     self.handle_rpc(i)
-                if meth == "invoke" and i >= 1 and toks[i - 1].kind == "id" and toks[i - 1].val == "functions":
-                    self.handle_invoke(i)
+                if i >= 1 and toks[i - 1].kind == "id":
+                    recv = toks[i - 1].val
+                    if meth == "invoke" and recv == "functions":
+                        self.handle_invoke(i + 2, DIRECT_INVOKE)
+                    elif self.sf.lang == "swift" and (recv, meth) in self.k.c.edge_wrappers.swift:
+                        # EdgeFunctions.invoke("payments", body:) / MoneyEdge.invoke(...)
+                        self.handle_invoke(i + 2, self.k.c.edge_wrappers.swift[(recv, meth)])
+            # TS type arguments before the call: .rpc<T>(...), .invoke<T>(...)
+            if t.kind == "p" and t.val == "." and self.sf.lang == "ts" and i + 2 < n and toks[i + 1].kind == "id" \
+                    and toks[i + 1].val in ("rpc", "invoke") and toks[i + 2].val == "<":
+                open_i = self._skip_generic(i + 2)
+                if open_i < n and open_i != i + 2 and toks[open_i].val == "(":
+                    if toks[i + 1].val == "rpc":
+                        self.handle_rpc(i, open_i)
+                    elif i >= 1 and toks[i - 1].kind == "id" and toks[i - 1].val == "functions":
+                        self.handle_invoke(open_i, DIRECT_INVOKE)
+            # call of a TS edge-function wrapper: invokeEdge('payments', ...) / invokeEdge<T>(...)
+            if t.kind == "id" and self.sf.lang == "ts" and i + 1 < n and toks[i + 1].val in ("(", "<") \
+                    and not (i > 0 and toks[i - 1].val in (".", "function")) \
+                    and not (i > 0 and toks[i - 1].kind == "id" and toks[i - 1].val in ("const", "let", "var")):
+                wrapper = self.ts_edge_wrapper(t.val)
+                if wrapper is not None:
+                    open_i = self._skip_generic(i + 1)
+                    if open_i < n and toks[open_i].val == "(":
+                        self.handle_invoke(open_i, wrapper)
             # call of a local RPC wrapper: NAME( / NAME<T>(
             if t.kind == "id" and t.val in self.rpc_wrappers and i + 1 < n and toks[i + 1].val in ("(", "<") \
                     and not (i > 0 and toks[i - 1].val in (".", "function")) \
@@ -1656,9 +1878,9 @@ class SourceScanner:
             ref = opt("referencedTable") or opt("foreignTable")
             k.check_filter_col(where, table, ctx.embeds, val[0], role, ref[0] if ref else None, ctx.embeds_known)
 
-    def handle_rpc(self, dot_i: int) -> None:
+    def handle_rpc(self, dot_i: int, open_i: int | None = None) -> None:
         toks = self.toks
-        args, _close = self.call_args(dot_i + 2)
+        args, _close = self.call_args(dot_i + 2 if open_i is None else open_i)
         where = self.sf.where(toks[dot_i + 1].line)
         if not args:
             return
@@ -1704,12 +1926,32 @@ class SourceScanner:
             return
         self.k.check_rpc(where, val[0], keys, open_, self.sf.surface)
 
-    def handle_invoke(self, dot_i: int) -> None:
-        args, _c = self.call_args(dot_i + 2)
-        where = self.sf.where(self.toks[dot_i + 1].line)
-        if not args:
+    def ts_edge_wrapper(self, name: str) -> EdgeWrapper | None:
+        """The TS edge-function wrapper `name` refers to here: defined in this
+        file, or imported (`import { invokeEdge } from '@/features/quotes/shared/edge'`)."""
+        wrappers = self.k.c.edge_wrappers.ts
+        if (self.sf.rel, name) in wrappers:
+            return wrappers[(self.sf.rel, name)]
+        if name in self.sf.imports:
+            spec, exported = self.sf.imports[name]
+            if exported not in self.k.c.edge_wrappers.ts_names:
+                return None
+            target = self.k.c.resolve_module(self.sf, spec)
+            if target is not None:
+                return wrappers.get((target.rel, exported))
+        return None
+
+    def handle_invoke(self, open_i: int, wrapper: EdgeWrapper) -> None:
+        """`functions.invoke('<name>', ...)` or a wrapper call naming the function
+        in its `wrapper.param_index` argument."""
+        toks = self.toks
+        where = self.sf.where(toks[open_i].line)
+        arg = edge_name_arg(toks, open_i, wrapper, self.sf.lang == "swift")
+        if not arg:
             return
-        val = self.eval_str(args[0])
+        if len(arg) == 1 and arg[0].kind == "id" and self.k.c.edge_wrappers.forwarded(self.sf.rel, open_i, arg[0].val):
+            return  # a wrapper forwarding its parameter: its call sites are checked instead
+        val = self.eval_str(arg)
         if val is None or not val[1]:
             self.k.r.skip(where, "edge function name chosen at run time")
             return
@@ -1842,6 +2084,7 @@ def run_checks(schema: Schema, repo: Path, files: list[SourceFile] | None = None
     report = Report()
     files = files if files is not None else collect_sources(repo)
     corpus = Corpus(repo, files)
+    corpus.edge_wrappers = find_edge_wrappers(files)
     for sf in files:
         if sf.lang == "swift":
             for st in parse_swift_types(sf):
@@ -2084,6 +2327,120 @@ def self_test() -> int:
     expect("wrapper and assigned calls counted", wrap.counts.get("rpcs", 0) == 6, str(wrap.counts))
     expect("callers recorded per RPC", wrap.rpc_callers.get("create_job") == {"supabase/functions/w/handlers.ts"}
            and "no_such_rpc" not in wrap.rpc_callers, str(wrap.rpc_callers))
+
+    # --- type arguments before the call: object literals, tuples, functions ---------
+    gen = run({"supabase/functions/g/handlers.ts":
+               "async function rpc<T>(ctx: Ctx, fn: string, args: Record<string, unknown>): Promise<T> {\n"
+               "  return (await ctx.admin.rpc(fn, args)).data as T;\n}\n"
+               "export async function g(ctx: Ctx) {\n"
+               "  await rpc<{ disputed_cents?: number } | null>(ctx, 'purge_all', { p_limitt: 5 });\n"
+               "  await rpc<Array<{ a: [number, string] }>>(ctx, 'no_such_rpc', {});\n"
+               "  await rpc<(row: { id: string }) => void>(ctx, 'create_job', { p_shop_id: 's', p_customer_id: 'c' });\n"
+               "  await ctx.admin.rpc<{ id: string }[]>('create_jobb', {});\n"
+               "  await ctx.admin.functions.invoke<{ ok: boolean }>('no-such-fn', { body: {} });\n"
+               "  type X = Awaited<ReturnType<typeof ctx.admin.functions.invoke<unknown>>>;\n"
+               "  return a < b && c > d ? rpc(ctx, 'public_quote', { p_token: 't' }) : null;\n"
+               "}\n"})
+    for needle in ("handlers.ts:5: RPC 'purge_all' has no argument 'p_limitt'",
+                   "handlers.ts:6: RPC 'no_such_rpc' does not exist",
+                   "handlers.ts:8: RPC 'create_jobb' does not exist",
+                   "handlers.ts:9: edge function 'no-such-fn' does not exist"):
+        expect(f"generic call: {needle}", has(gen, needle), "; ".join(gen.errors))
+    expect("generic calls: nothing else reported", len(gen.errors) == 4 and not gen.dynamic,
+           f"{gen.errors} {gen.dynamic}")
+    expect("generic calls counted", gen.counts.get("rpcs", 0) == 5 and gen.counts.get("edge_functions", 0) == 1,
+           str(gen.counts))
+    expect("skip_generic: a comparison '<' is not a type list",
+           skip_generic(tokenize("a < b; c(", "ts"), 1) == 1, "")
+    expect("skip_generic: an object-literal type list is skipped whole",
+           skip_generic(tokenize("f<{ a: 1 }>(x)", "ts"), 1) == 8, "")
+
+    # --- edge-function wrappers (Swift, across files and wrapper chains; TS imports) ----
+    edge = run({
+        # A file sorted before the wrapper it forwards to: discovery is order-independent.
+        "ios/DetailCRM/DetailCRM/Core/AMoneyEdge.swift": '''
+enum MoneyEdge {
+    static func wire(_ id: UUID) -> String { id.uuidString }
+    static func invoke<Body: Encodable, Reply: Decodable>(
+        _ functionName: String,
+        body: Body
+    ) async throws -> Reply {
+        try await EdgeFunctions.invoke(functionName, body: body)
+    }
+}
+''',
+        "ios/DetailCRM/DetailCRM/Core/ZEdge.swift": '''
+enum EdgeFunctions {
+    static func invoke<Body: Encodable, Reply: Decodable>(_ functionName: String, body: Body) async throws -> Reply {
+        do {
+            let reply: Reply = try await Supa.client.functions.invoke(
+                functionName,
+                options: FunctionInvokeOptions(body: body)
+            )
+            return reply
+        } catch let error as FunctionsError {
+            throw error
+        }
+    }
+}
+''',
+        "ios/DetailCRM/DetailCRM/Services/Svc.swift": '''
+enum Svc {
+    static func go() async throws {
+        let name = pick()
+        let a: R = try await EdgeFunctions.invoke("payments", body: B())
+        let b: R = try await MoneyEdge.invoke("no-such-fn", body: B())
+        let c: R = try await EdgeFunctions.invoke(name, body: B())
+        let d: R = try await Supa.client.functions.invoke("payments", options: .init(body: B()))
+        _ = MoneyEdge.wire(UUID())
+    }
+}
+''',
+        "web/src/features/q/edge.ts":
+            "export async function invokeEdge<S>(fn: string, action: string, schema: S) {\n"
+            "  const r = await supabase.functions.invoke<unknown>(fn, { body: { action } });\n"
+            "  return r;\n}\n",
+        "web/src/features/a/api.ts":
+            "import { invokeEdge } from '@/features/q/edge';\n"
+            "const call = async (name: string) => { return supabase.functions.invoke(name); };\n"
+            "export async function a(s: S) {\n"
+            "  await invokeEdge('payments', 'refund', s);\n"
+            "  await invokeEdge<Z>('nope-fn', 'x', s);\n"
+            "  await call('payments');\n"
+            "}\n",
+    })
+    for needle in ("Svc.swift:6: edge function 'no-such-fn' does not exist",
+                   "a/api.ts:5: edge function 'nope-fn' does not exist"):
+        expect(f"edge wrapper: {needle}", has(edge, needle), "; ".join(edge.errors))
+    expect("edge wrappers: nothing else reported", len(edge.errors) == 2, "; ".join(edge.errors))
+    expect("edge wrappers: call sites counted", edge.counts.get("edge_functions", 0) == 6, str(edge.counts))
+    expect("edge wrappers: only the run-time name at a call site is listed, not the forwarding bodies",
+           len(edge.dynamic) == 1 and "Svc.swift:7: edge function name chosen at run time" in edge.dynamic[0],
+           "; ".join(edge.dynamic))
+
+    labeled = run({"ios/DetailCRM/DetailCRM/Services/Msg.swift": '''
+enum EdgeFunctions {
+    static func invoke<B: Encodable, R: Decodable>(_ functionName: String, body: B) async throws -> R {
+        try await Supa.client.functions.invoke(functionName, options: FunctionInvokeOptions(body: body))
+    }
+}
+extension Msg {
+    static func send(to function: String, body: B) async throws {
+        let _: R = try await EdgeFunctions.invoke(function, body: body)
+    }
+}
+enum Use {
+    static func go() async throws {
+        try await Msg.send(to: "bad-fn", body: B())
+        try await Msg.send(to: "payments", body: B())
+        try await Msg.other("bad-too")
+    }
+}
+'''})
+    expect("edge wrapper with a labeled parameter (in an extension) is checked at its call sites",
+           has(labeled, "Msg.swift:14: edge function 'bad-fn' does not exist") and len(labeled.errors) == 1
+           and labeled.counts.get("edge_functions", 0) == 2 and not labeled.dynamic,
+           f"{labeled.errors} {labeled.counts} {labeled.dynamic}")
 
     # --- privileges on app surfaces ----------------------------------------------
     priv = run({"web/src/features/j.ts":

@@ -77,7 +77,7 @@ enum TeamService {
             )
             return TeamInviteOutcome.from(reply, isResend: false)
         } catch let error as FunctionsError {
-            let edge = EdgeErrorDecoder.error(from: error)
+            let edge = await EdgeFunctions.failure(from: error)
             // A 404 without our envelope: the invites function isn't deployed.
             if edge.status == 404 && !edge.isEnvelope {
                 let invite = try await createInviteDirectly(shopID: shopID, email: address, role: role)
@@ -120,7 +120,7 @@ enum TeamService {
             )
             return TeamInviteOutcome.from(reply, isResend: true)
         } catch let error as FunctionsError {
-            let edge = EdgeErrorDecoder.error(from: error)
+            let edge = await EdgeFunctions.failure(from: error)
             // A 404 without our envelope: the invites function isn't deployed.
             if edge.status == 404 && !edge.isEnvelope {
                 if !invite.isExpired() {

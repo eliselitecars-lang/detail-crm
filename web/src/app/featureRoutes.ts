@@ -13,6 +13,7 @@ import { routes as customers } from '@/features/customers/routes';
 import { routes as dashboard } from '@/features/dashboard/routes';
 import { routes as invoices } from '@/features/invoices/routes';
 import { routes as jobs } from '@/features/jobs/routes';
+import { routes as legal } from '@/features/legal/routes';
 import { routes as memberships } from '@/features/memberships/routes';
 import { routes as messages } from '@/features/messages/routes';
 import { routes as notifications } from '@/features/notifications/routes';
@@ -37,6 +38,7 @@ export const FEATURES: Readonly<Record<string, FeatureRoutes>> = {
   dashboard,
   invoices,
   jobs,
+  legal,
   memberships,
   messages,
   notifications,

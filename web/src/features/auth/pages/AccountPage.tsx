@@ -1,8 +1,9 @@
-import { ArrowLeft, Store, Trash2 } from 'lucide-react';
+import { ArrowLeft, FileText, Shield, Store, Trash2 } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import { Button, Dialog, FormField, Input, SectionCard } from '@/components/ui';
+import { PRIVACY_PATH, TERMS_PATH } from '@/features/legal/paths';
 import { errorMessage } from '@/lib/errors';
 import { storageKeys, writeLocal } from '@/lib/storage';
 import { ownedShopsOf, useDeleteAccount, type OwnedShop } from '../accountApi';
@@ -48,8 +49,36 @@ export default function AccountPage() {
           {user?.email && <p className="text-muted text-sm break-all">Signed in as {user.email}</p>}
         </div>
         <DeleteAccountCard />
+        <LegalCard />
       </div>
     </PublicLayout>
+  );
+}
+
+/** The operator's Privacy Policy and Terms of Service (every role). */
+function LegalCard() {
+  const link =
+    'text-primary-ink inline-flex w-fit items-center gap-2 text-sm font-medium hover:underline';
+  return (
+    <SectionCard
+      title="Privacy and terms"
+      description="How your information is handled and the terms for using the service."
+    >
+      <ul className="flex flex-col gap-2.5">
+        <li>
+          <Link to={PRIVACY_PATH} className={link}>
+            <Shield className="size-4" aria-hidden="true" />
+            Privacy Policy
+          </Link>
+        </li>
+        <li>
+          <Link to={TERMS_PATH} className={link}>
+            <FileText className="size-4" aria-hidden="true" />
+            Terms of Service
+          </Link>
+        </li>
+      </ul>
+    </SectionCard>
   );
 }
 

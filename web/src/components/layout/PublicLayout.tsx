@@ -3,6 +3,7 @@ import { cn } from '@/lib/cn';
 import { shopAssetUrl } from '@/lib/supabase';
 import { brandStyle } from './brand';
 import { formatPhone } from '@/lib/phone';
+import { LegalLinks } from './LegalLinks';
 
 export interface PublicShopBranding {
   name: string;
@@ -18,6 +19,11 @@ export interface PublicShopBranding {
 export interface PublicLayoutProps {
   /** Shop branding from the page's public RPC; null while loading/unknown. */
   shop: PublicShopBranding | null;
+  /**
+   * Replaces the shop mark in the header (pages that belong to the service,
+   * not to a shop: /privacy, /terms).
+   */
+  brand?: ReactNode;
   children: ReactNode;
   /** Narrow (documents/forms) or wide (booking wizard). */
   width?: 'narrow' | 'wide';
@@ -27,9 +33,16 @@ export interface PublicLayoutProps {
 /**
  * Shop-branded frame for customer-facing pages (/book, /booking, /q, /i, /f,
  * /portal). Use the `brand` colour utilities (bg-brand text-brand-fg) inside
- * for shop-coloured accents; Amber stays reserved for pay buttons.
+ * for shop-coloured accents; Amber stays reserved for pay buttons. The footer
+ * links the operator's Privacy Policy and Terms of Service.
  */
-export function PublicLayout({ shop, children, width = 'narrow', className }: PublicLayoutProps) {
+export function PublicLayout({
+  shop,
+  brand,
+  children,
+  width = 'narrow',
+  className,
+}: PublicLayoutProps) {
   const logoUrl = shopAssetUrl(shop?.logoPath);
   return (
     <div className="bg-canvas flex min-h-dvh flex-col" style={brandStyle(shop?.brandColor)}>
@@ -40,7 +53,9 @@ export function PublicLayout({ shop, children, width = 'narrow', className }: Pu
             width === 'narrow' ? 'max-w-3xl' : 'max-w-5xl',
           )}
         >
-          {shop ? (
+          {brand ? (
+            brand
+          ) : shop ? (
             <>
               {logoUrl ? (
                 <img src={logoUrl} alt="" className="h-9 w-auto max-w-32 rounded object-contain" />
@@ -81,6 +96,7 @@ export function PublicLayout({ shop, children, width = 'narrow', className }: Pu
             </a>
           )}
           <span>Powered by Detail CRM</span>
+          <LegalLinks />
         </div>
       </footer>
     </div>

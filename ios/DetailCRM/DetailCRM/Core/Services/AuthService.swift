@@ -53,8 +53,12 @@ enum AuthService {
         }
     }
 
-    static func signOut() async throws {
-        try await Supa.client.auth.signOut()
+    /// Signs out. `.global` (the Sign out button) ends every session of the
+    /// account; `.local` ends only this device's (an expired session, so the
+    /// user's other devices stay signed in). The local session is removed
+    /// even when the server can't be reached; that error is then thrown.
+    static func signOut(scope: SignOutScope = .global) async throws {
+        try await Supa.client.auth.signOut(scope: scope)
     }
 
     /// The signed-in user's email address, if any.

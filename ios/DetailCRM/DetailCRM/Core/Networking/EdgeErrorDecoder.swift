@@ -11,9 +11,14 @@
 //  overloaded platform may send no JSON at all. Those never reach people as
 //  raw text: the HTTP status decides the sentence.
 //
+//  The gateway's 401 also tells AppState (through SessionMonitor) that the
+//  session may be over; AppState checks it with a token refresh and signs
+//  out when Auth refuses. A 401 in our envelope never does.
+//
 
 import Foundation
 import Supabase
+import DetailCore
 
 /// A refused edge-function request, readable by people (`message`) and by
 /// code (`status`, the envelope's `code`, `details.reason`, `details`).
@@ -38,9 +43,10 @@ struct EdgeFunctionError: LocalizedError, Equatable {
         reason == "authentication_required"
     }
 
-    /// The gateway refused the session (expired / revoked access token).
+    /// The gateway refused the session (expired / revoked access token), as
+    /// opposed to a 401 the function answered in our envelope.
     var isSessionExpired: Bool {
-        status == 401 && !isEnvelope
+        SessionExpiry.isGatewayRejection(status: status, isEnvelope: isEnvelope)
     }
 }
 
@@ -125,7 +131,19 @@ enum EdgeFunctions {
             )
             return reply
         } catch let error as FunctionsError {
-            throw EdgeErrorDecoder.error(from: error)
+            throw await failure(from: error)
         }
+    }
+
+    /// Reads a failed call (`EdgeErrorDecoder`). When the gateway refused the
+    /// access token, AppState is told to check the session; the caller still
+    /// gets the error to show. Services that call `functions.invoke`
+    /// themselves use this too.
+    static func failure(from error: FunctionsError) async -> EdgeFunctionError {
+        let edge = EdgeErrorDecoder.error(from: error)
+        if edge.isSessionExpired {
+            await SessionMonitor.report(.gatewayRejected)
+        }
+        return edge
     }
 }

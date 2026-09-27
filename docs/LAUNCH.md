@@ -166,8 +166,11 @@ shop (self-serve numbers are on the roadmap, gated on the Twilio ISV setup).
 - [ ] Supabase stays on `https://<ref>.supabase.co`. A custom API domain is a
       paid Supabase add-on; if you add one later, Stripe, Twilio and the apps
       must be pointed at it (re-run all deploys).
-- [ ] A **privacy policy** page and a **support** page/email on your domain
-      (App Store Connect requires both URLs; shops will ask too).
+- [ ] A **privacy policy** and a **support** page/email on your domain
+      (App Store Connect requires both URLs; shops will ask too). The web app
+      serves the privacy policy at `<APP_BASE_URL>/privacy` and the terms of
+      service at `<APP_BASE_URL>/terms` (section 6); a support page or email
+      is yours to provide.
 
 ---
 
@@ -178,6 +181,10 @@ database password, anon key; Stripe `sk_live`/`pk_live`; Twilio SID + token;
 Resend key + sender; Cloudflare token + account id + project name; Apple Key
 ID, Issuer ID, `.p8`, Team ID; your `APP_BASE_URL`. Also generate the cron
 secret once (`openssl rand -hex 32`, or any 32+ random letters and digits).
+For the legal pages: your legal company name, a support email for privacy
+requests, the governing law of your terms and (optionally) a postal address
+(`LEGAL_ENTITY_NAME`, `SUPPORT_EMAIL`, `LEGAL_COUNTRY`, `LEGAL_ADDRESS` in
+[DEPLOY.md section 2](DEPLOY.md#2-settings-reference)).
 
 ---
 
@@ -238,6 +245,24 @@ project with Stripe test keys.
 TestFlight for your own team needs none of this; public App Store release
 does ([App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)).
 
+- [ ] **Privacy policy and terms**: the web app serves them at
+      `<APP_BASE_URL>/privacy` and `<APP_BASE_URL>/terms` (no sign-in), and
+      links them under the sign-in and sign-up pages, in the footer of the
+      public booking, quote, invoice, form and portal pages, on the web
+      Your account page and in the iPhone app (More -> Your account).
+      **Have your lawyer review both texts before launch**: they describe
+      what this code does (wording in `web/src/features/legal/content.tsx`),
+      but they are not legal advice and the legal choices in them (liability
+      cap, governing law, notice of changes, the shop's responsibility for
+      refunds, disputes and negative balances) are yours to confirm. Set the
+      `LEGAL_*` / `SUPPORT_EMAIL` variables
+      ([DEPLOY.md section 2](DEPLOY.md#2-settings-reference)) so the pages name you;
+      without them they say "the operator of this service". When the product
+      changes what it collects or who receives it, update the text and its
+      "Last updated" date (`LEGAL_LAST_UPDATED`) in the same change.
+- [ ] **Privacy policy URL** in App Store Connect (App Information -> Privacy
+      Policy URL): `<APP_BASE_URL>/privacy`, e.g.
+      `https://app.yourdomain.com/privacy`.
 - [ ] **Demo account**: create a real shop yourself (e.g. "Review Demo
       Detailing") with an owner login, a few services, a customer and a job,
       and give the email/password in App Store Connect -> App Review
@@ -269,12 +294,14 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
 - [ ] **Account deletion inside the app** (Guideline 5.1.1(v), required for any
       app that lets people create an account:
       [Apple's page](https://developer.apple.com/support/offering-account-deletion-in-your-app/)).
-      **Not built yet** in this version: it must be added before submission
-      (see "Gaps before App Store submission" below).
+      Built: More -> Your account -> Delete account in the iPhone app, and
+      the Your account page on the web (the `account` function). Shop owners
+      must first transfer ownership or delete the shop. Mention the path in
+      App Review Information if asked.
 - [ ] **Privacy manifest**: the app stores its chosen shop in `UserDefaults`,
-      a "required reason" API, so it needs a `PrivacyInfo.xcprivacy`
-      declaring it ([required reasons](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api)).
-      Not in this version yet (see below).
+      a "required reason" API; `PrivacyInfo.xcprivacy` in the app target
+      declares it (reason CA92.1) and no tracking
+      ([required reasons](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api)).
 - [ ] **Export compliance**: already answered in the app
       (`ITSAppUsesNonExemptEncryption = NO`: it only uses the encryption built
       into iOS for HTTPS), so no questionnaire per build.
@@ -284,20 +311,8 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       accordingly if asked.
 - [ ] Sign in with Apple is not required: the app has no third-party sign-in
       (email and password only).
-- [ ] Privacy policy URL, support URL, screenshots, description, age rating in
-      App Store Connect.
-
-### Gaps before App Store submission
-
-These are outside the deploy tooling and need a product change first:
-
-1. **In-app account deletion** (Apple 5.1.1(v)): a "Delete account" button in
-   the iPhone app (and the web app), backed by a server function that deletes
-   the signed-in user through the Supabase Auth admin API. Shop owners must
-   first transfer ownership or delete the shop (the database already refuses
-   to delete an owner).
-2. **`PrivacyInfo.xcprivacy`** in the app target declaring `UserDefaults`
-   (reason CA92.1) and no tracking.
+- [ ] Support URL, screenshots, description, age rating in App Store Connect
+      (the privacy policy URL is above).
 
 ---
 

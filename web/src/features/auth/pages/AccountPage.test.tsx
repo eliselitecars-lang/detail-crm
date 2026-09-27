@@ -92,6 +92,19 @@ describe('AccountPage', () => {
     expect(router.state.location.pathname).toBe('/app/team');
   });
 
+  it('links the Privacy Policy and Terms of Service for every role', () => {
+    setup();
+    const card = screen.getByRole('region', { name: 'Privacy and terms' });
+    expect(within(card).getByRole('link', { name: 'Privacy Policy' })).toHaveAttribute(
+      'href',
+      '/privacy',
+    );
+    expect(within(card).getByRole('link', { name: 'Terms of Service' })).toHaveAttribute(
+      'href',
+      '/terms',
+    );
+  });
+
   it('shows other failures and keeps the account', async () => {
     invoke.mockResolvedValueOnce({
       data: null,
