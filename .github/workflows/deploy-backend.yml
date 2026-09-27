@@ -1,0 +1,133 @@
+# Production backend deploy (docs/DEPLOY.md): migrations, edge functions
+# (verify_jwt from supabase/config.toml), function secrets, production Auth
+# through the Management API (config.toml is never pushed), the platform setup
+# of supabase/setup/cron.sql, optionally the Stripe Connect webhook endpoint;
+# then read-only smoke checks against the live project. Manual only; the dry
+# run (default) changes nothing.
+name: deploy-backend
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: validate inputs, list pending migrations, print the plan; change nothing"
+        type: boolean
+        default: true
+      stripe_webhooks:
+        description: "Create/update the Stripe Connect webhook endpoint and store its signing secret"
+        type: boolean
+        default: false
+      include_all_migrations:
+        description: "Pass --include-all to supabase db push (a migration numbered below one already applied)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SUPABASE_CLI_VERSION: 2.118.0
+
+jobs:
+  deploy:
+    name: ${{ inputs.dry_run && 'Dry run' || 'Deploy' }} backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    env:
+      DRY_RUN: ${{ inputs.dry_run }}
+      STRIPE_WEBHOOKS: ${{ inputs.stripe_webhooks }}
+      INCLUDE_ALL: ${{ inputs.include_all_migrations }}
+      # Deploy inputs
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF || secrets.SUPABASE_PROJECT_REF }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      # Function secrets (supabase/functions/README.md "Secrets")
+      APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+      STRIPE_PUBLISHABLE_KEY: ${{ vars.STRIPE_PUBLISHABLE_KEY || secrets.STRIPE_PUBLISHABLE_KEY }}
+      STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+      PLATFORM_FEE_BPS: ${{ vars.PLATFORM_FEE_BPS }}
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+      CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
+      # Optional knobs (docs/DEPLOY.md)
+      REQUIRE_LIVE_STRIPE: ${{ vars.REQUIRE_LIVE_STRIPE }}
+      AUTH_SMTP_SENDER_EMAIL: ${{ vars.AUTH_SMTP_SENDER_EMAIL }}
+      AUTH_SMTP_SENDER_NAME: ${{ vars.AUTH_SMTP_SENDER_NAME }}
+      AUTH_ADDITIONAL_REDIRECT_URLS: ${{ vars.AUTH_ADDITIONAL_REDIRECT_URLS }}
+      AUTH_RATE_LIMIT_EMAIL_SENT: ${{ vars.AUTH_RATE_LIMIT_EMAIL_SENT }}
+      AUTH_PASSWORD_MIN_LENGTH: ${{ vars.AUTH_PASSWORD_MIN_LENGTH }}
+      AUTH_PASSWORD_HIBP: ${{ vars.AUTH_PASSWORD_HIBP }}
+      # verify_live.mjs (the anon key is fetched with the access token when unset)
+      SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+    steps:
+      - name: Check required secrets and variables
+        run: |
+          missing=()
+          need() { [ -n "${!1:-}" ] || missing+=("$1 ($2)"); }
+          need SUPABASE_ACCESS_TOKEN "secret"
+          need SUPABASE_PROJECT_REF "variable"
+          need SUPABASE_DB_PASSWORD "secret"
+          need APP_BASE_URL "variable"
+          need CRON_SECRET "secret"
+          need STRIPE_SECRET_KEY "secret"
+          need STRIPE_PUBLISHABLE_KEY "variable"
+          need TWILIO_ACCOUNT_SID "secret"
+          need TWILIO_AUTH_TOKEN "secret"
+          need RESEND_API_KEY "secret"
+          need EMAIL_FROM "variable"
+          if [ "$STRIPE_WEBHOOKS" != "true" ]; then
+            need STRIPE_WEBHOOK_SECRET "secret, or run with stripe_webhooks"
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing repository/environment settings: ${missing[*]}"
+            echo "Add them under Settings -> Secrets and variables -> Actions (the 'production'"
+            echo "environment or the repository). Where each value comes from: docs/DEPLOY.md."
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+          echo "All required settings are present."
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Self-test the deploy tooling (fake CLI + fake APIs)
+        run: node --test "scripts/deploy/test/*.test.mjs"
+
+      - name: Deploy backend
+        run: |
+          flags=()
+          [ "$DRY_RUN" = "true" ] && flags+=(--dry-run)
+          [ "$STRIPE_WEBHOOKS" = "true" ] && flags+=(--stripe-webhooks)
+          [ "$INCLUDE_ALL" = "true" ] && flags+=(--include-all)
+          scripts/deploy/deploy_backend.sh "${flags[@]}"
+
+      - name: Verify the live project
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERIFY_WITH_SERVICE_KEY: "1"
+        run: node scripts/deploy/verify_live.mjs --json verify-live.json
+
+      - name: Upload the verification report
+        if: ${{ always() && !inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-live
+          path: verify-live.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,141 @@
+# Production web deploy to Cloudflare Pages (docs/DEPLOY.md "Web"): checks,
+# production build with the public VITE_* values, security headers generated
+# from the build (scripts/deploy/web_headers.mjs), `wrangler pages deploy`,
+# then a check that the deployment really serves those headers. Manual, or on
+# pushes to main once the repository variable DEPLOY_WEB is 'true'.
+name: deploy-web
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: check, build and generate headers only; do not upload"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "scripts/deploy/web_headers.mjs"
+      - "scripts/deploy/verify_web.mjs"
+      - "scripts/deploy/lib/static_server.mjs"
+      - ".github/workflows/deploy-web.yml"
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  WRANGLER_VERSION: 4.142.0
+
+jobs:
+  deploy:
+    name: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'Dry run' || 'Deploy' }} web
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.DEPLOY_WEB == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      VITE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+      WEB_EMBED_PATHS: ${{ vars.WEB_EMBED_PATHS }}
+      WEB_EMBED_ANCESTORS: ${{ vars.WEB_EMBED_ANCESTORS }}
+    steps:
+      - name: Check required secrets and variables
+        run: |
+          missing=()
+          need() { [ -n "${!1:-}" ] || missing+=("$1 ($2)"); }
+          need VITE_SUPABASE_URL "variable SUPABASE_URL, e.g. https://<ref>.supabase.co"
+          need VITE_SUPABASE_ANON_KEY "variable SUPABASE_ANON_KEY"
+          if [ "$DRY_RUN" != "true" ]; then
+            need CLOUDFLARE_API_TOKEN "secret"
+            need CLOUDFLARE_ACCOUNT_ID "variable or secret"
+            need CLOUDFLARE_PAGES_PROJECT "variable, the Pages project name"
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing repository/environment settings: ${missing[*]}"
+            echo "Add them under Settings -> Secrets and variables -> Actions. See docs/DEPLOY.md."
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+          case "$VITE_SUPABASE_URL" in
+            https://*) ;;
+            *) echo "::error::SUPABASE_URL must be https://..."; exit 1 ;;
+          esac
+          echo "All required settings are present."
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Typecheck, lint, unit tests
+        working-directory: web
+        run: npm run typecheck && npm run lint && npm run test
+
+      - name: Production build
+        working-directory: web
+        run: npx vite build
+
+      - name: Generate security headers + SPA config from the build
+        run: |
+          node --test scripts/deploy/test/web_headers.test.mjs
+          node scripts/deploy/web_headers.mjs --dist web/dist --print
+
+      - name: Keep the generated _headers / _redirects
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-headers
+          path: |
+            web/dist/_headers
+            web/dist/_redirects
+          retention-days: 30
+
+      - name: Ensure the Cloudflare Pages project exists
+        if: ${{ env.DRY_RUN != 'true' }}
+        run: |
+          if npx --yes "wrangler@${WRANGLER_VERSION}" pages project list 2>/dev/null \
+            | grep -qE "(^|[^A-Za-z0-9-])${CLOUDFLARE_PAGES_PROJECT}([^A-Za-z0-9-]|\$)"; then
+            echo "Pages project $CLOUDFLARE_PAGES_PROJECT exists."
+          else
+            npx --yes "wrangler@${WRANGLER_VERSION}" pages project create "$CLOUDFLARE_PAGES_PROJECT" --production-branch main
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        id: pages
+        if: ${{ env.DRY_RUN != 'true' }}
+        run: |
+          set -o pipefail
+          npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy web/dist \
+            --project-name "$CLOUDFLARE_PAGES_PROJECT" \
+            --branch main \
+            --commit-hash "$GITHUB_SHA" \
+            --commit-dirty=true 2>&1 | tee "$RUNNER_TEMP/wrangler.log"
+          url="$(grep -oE 'https://[a-z0-9.-]+\.pages\.dev' "$RUNNER_TEMP/wrangler.log" | tail -1 || true)"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the deployment serves the generated headers
+        if: ${{ env.DRY_RUN != 'true' && steps.pages.outputs.url != '' }}
+        env:
+          DEPLOY_URL: ${{ steps.pages.outputs.url }}
+        run: |
+          for _ in 1 2 3 4 5 6; do
+            if node scripts/deploy/verify_web.mjs "$DEPLOY_URL" --dist web/dist; then exit 0; fi
+            echo "retrying in 10 s (the deployment may still be propagating)"
+            sleep 10
+          done
+          exit 1

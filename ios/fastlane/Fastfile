@@ -1,0 +1,263 @@
+# frozen_string_literal: true
+
+# TestFlight lane for the Detail CRM iPhone app (docs/DEPLOY.md "iOS",
+# .github/workflows/ios-testflight.yml).
+#
+# Signing: Xcode automatic signing with cloud-managed certificates, authorized
+# by an App Store Connect API key (xcodebuild -allowProvisioningUpdates
+# -authenticationKeyPath/-authenticationKeyID/-authenticationKeyIssuerID).
+# The team is a build-setting override (DEVELOPMENT_TEAM=...): the committed
+# project keeps DEVELOPMENT_TEAM = "" and is not edited.
+#
+# Environment:
+#   ASC_KEY_ID, ASC_ISSUER_ID   App Store Connect API key (Users and Access -> Integrations)
+#   ASC_KEY_PATH | ASC_KEY_P8   the AuthKey_<id>.p8 file, or its content (PEM or base64 of it)
+#   APPLE_TEAM_ID               10-character Apple Developer team id
+#   SUPABASE_URL, SUPABASE_ANON_KEY, WEB_APP_URL
+#                               written into DetailCRM/Config.plist for this build only
+#                               (AppConfig.swift reads it; restored afterwards)
+#   BUNDLE_ID                   optional (default com.detailcrm.app)
+#   BUILD_NUMBER                optional override (default: latest TestFlight build + 1)
+#   SKIP_UPLOAD=1               archive + export only
+#   SPM_DIR                     optional -clonedSourcePackagesDirPath (CI cache)
+#
+#   cd ios && bundle exec fastlane beta
+
+require "base64"
+require "fileutils"
+require "shellwords"
+require "tmpdir"
+require "uri"
+
+IOS_DIR = File.expand_path("..", __dir__)
+PROJECT = File.join(IOS_DIR, "DetailCRM", "DetailCRM.xcodeproj")
+SCHEME = "DetailCRM"
+APP_TARGET = "DetailCRM"
+CONFIG_PLIST = File.join(IOS_DIR, "DetailCRM", "DetailCRM", "Config.plist")
+DEFAULT_BUNDLE_ID = "com.detailcrm.app"
+BUILD_DIR = File.join(IOS_DIR, "build")
+OUTPUT_DIR = File.join(BUILD_DIR, "output")
+LOG_DIR = File.join(BUILD_DIR, "logs")
+
+default_platform(:ios)
+
+def env_value(name)
+  value = ENV[name].to_s.strip
+  value.empty? ? nil : value
+end
+
+def require_env!(names)
+  missing = names.reject { |n| env_value(n) }
+  return if missing.empty?
+
+  UI.user_error!("Missing environment: #{missing.join(', ')} (see docs/DEPLOY.md, section iOS)")
+end
+
+def https_url!(name)
+  uri = URI.parse(env_value(name).to_s)
+  UI.user_error!("#{name} must be an https:// URL") unless uri.is_a?(URI::HTTPS) && uri.host && !uri.host.empty?
+  env_value(name).sub(%r{/+\z}, "")
+rescue URI::InvalidURIError
+  UI.user_error!("#{name} is not a URL")
+end
+
+# The .p8 key as a file xcodebuild can read: ASC_KEY_PATH, or ASC_KEY_P8
+# (raw PEM or base64 of it) written to a private temp file.
+def asc_key_file
+  path = env_value("ASC_KEY_PATH")
+  return path if path && File.file?(path)
+
+  content = ENV["ASC_KEY_P8"].to_s
+  UI.user_error!("Set ASC_KEY_PATH (a .p8 file) or ASC_KEY_P8 (its content)") if content.strip.empty?
+  pem = if content.include?("BEGIN PRIVATE KEY")
+          content.gsub('\n', "\n")
+        else
+          begin
+            Base64.strict_decode64(content.gsub(/\s+/, ""))
+          rescue ArgumentError
+            UI.user_error!("ASC_KEY_P8 is neither a PEM (-----BEGIN PRIVATE KEY-----) nor base64 of one")
+          end
+        end
+  UI.user_error!("ASC_KEY_P8 does not contain a private key") unless pem.include?("BEGIN PRIVATE KEY")
+  dir = Dir.mktmpdir("asc-key")
+  at_exit { FileUtils.rm_rf(dir) }
+  file = File.join(dir, "AuthKey_#{env_value('ASC_KEY_ID')}.p8")
+  File.write(file, pem.end_with?("\n") ? pem : "#{pem}\n")
+  File.chmod(0o600, file)
+  file
+end
+
+def xcode_version
+  out = `xcodebuild -version 2>/dev/null`
+  Gem::Version.new(out[/Xcode (\d+(\.\d+)*)/, 1] || "0")
+end
+
+# Runs a command array, output to a log file (and xcbeautify when present).
+def run_logged(cmd, log_name)
+  FileUtils.mkdir_p(LOG_DIR)
+  log = File.join(LOG_DIR, log_name)
+  formatter = system("command -v xcbeautify >/dev/null 2>&1") ? "xcbeautify --quieter" : "cat"
+  sh("set -o pipefail && #{cmd.shelljoin} 2>&1 | tee #{log.shellescape} | #{formatter}", log: false)
+rescue StandardError => e
+  errors = log && File.exist?(log) ? File.readlines(log).grep(/error:|fatal error|No profiles|Provisioning|signing/i).uniq.first(40) : []
+  UI.error("---- #{log_name}: first error lines ----\n#{errors.join}") unless errors.empty?
+  raise e
+end
+
+# Config.plist holds only YOUR_... placeholders in git (ios/README.md). Write
+# the real values for this build and put the committed file back afterwards.
+def with_app_config
+  original = File.read(CONFIG_PLIST)
+  values = {
+    "SUPABASE_URL" => https_url!("SUPABASE_URL"),
+    "SUPABASE_ANON_KEY" => env_value("SUPABASE_ANON_KEY"),
+    "WEB_APP_URL" => https_url!("WEB_APP_URL")
+  }
+  values.each do |key, value|
+    UI.user_error!("#{key} is still a placeholder") if value.nil? || value.start_with?("YOUR_")
+    sh("plutil", "-replace", key, "-string", value, CONFIG_PLIST, log: false)
+  end
+  UI.message("Config.plist: SUPABASE_URL=#{values['SUPABASE_URL']} WEB_APP_URL=#{values['WEB_APP_URL']} (anon key set)")
+  yield
+ensure
+  File.write(CONFIG_PLIST, original) if original
+end
+
+# A non-default bundle id is set on the APP TARGET only, for this build, and
+# restored afterwards. (A PRODUCT_BUNDLE_IDENTIFIER=... command-line override
+# would also rename the Swift packages' resource bundles and App Store Connect
+# rejects the duplicate identifiers, ITMS-90685.)
+def with_bundle_id(bundle_id)
+  return yield if bundle_id == DEFAULT_BUNDLE_ID
+
+  pbxproj = File.join(PROJECT, "project.pbxproj")
+  original = File.read(pbxproj)
+  require "xcodeproj"
+  project = Xcodeproj::Project.open(PROJECT)
+  target = project.targets.find { |t| t.name == APP_TARGET } || UI.user_error!("target #{APP_TARGET} not found")
+  target.build_configurations.each { |c| c.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = bundle_id }
+  project.save
+  UI.important("Building with bundle id #{bundle_id} (app target only; the project file is restored after the build)")
+  yield
+ensure
+  File.write(pbxproj, original) if original
+end
+
+def export_options(team_id)
+  method = xcode_version >= Gem::Version.new("15.3") ? "app-store-connect" : "app-store"
+  <<~PLIST
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+      <key>method</key><string>#{method}</string>
+      <key>destination</key><string>export</string>
+      <key>signingStyle</key><string>automatic</string>
+      <key>teamID</key><string>#{team_id}</string>
+      <key>uploadSymbols</key><true/>
+      <key>stripSwiftSymbols</key><true/>
+      <key>manageAppVersionAndBuildNumber</key><false/>
+    </dict>
+    </plist>
+  PLIST
+end
+
+platform :ios do
+  desc "Archive with cloud-managed automatic signing and upload to TestFlight"
+  lane :beta do
+    require_env!(%w[ASC_KEY_ID ASC_ISSUER_ID APPLE_TEAM_ID SUPABASE_URL SUPABASE_ANON_KEY WEB_APP_URL])
+    UI.user_error!("#{PROJECT} not found") unless File.directory?(PROJECT)
+    team_id = env_value("APPLE_TEAM_ID")
+    UI.user_error!("APPLE_TEAM_ID must be the 10-character team id") unless team_id.match?(/\A[A-Z0-9]{10}\z/)
+    bundle_id = env_value("BUNDLE_ID") || DEFAULT_BUNDLE_ID
+    UI.user_error!("BUNDLE_ID #{bundle_id} is not a reverse-DNS identifier") unless bundle_id.match?(/\A[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+\z/)
+    key_path = asc_key_file
+
+    api_key = app_store_connect_api_key(
+      key_id: env_value("ASC_KEY_ID"),
+      issuer_id: env_value("ASC_ISSUER_ID"),
+      key_filepath: key_path,
+      duration: 1200,
+      in_house: false
+    )
+
+    build_number = env_value("BUILD_NUMBER")
+    unless build_number
+      latest = begin
+        latest_testflight_build_number(api_key: api_key, app_identifier: bundle_id, initial_build_number: 0)
+      rescue StandardError => e
+        UI.user_error!("Could not read TestFlight builds for #{bundle_id} (#{e.message}). Create the app record in " \
+                       "App Store Connect (Apps -> + -> New App) with this bundle id, and check the API key's role.")
+      end
+      build_number = (latest.to_s.split(".").first.to_i + 1).to_s
+    end
+    UI.user_error!("BUILD_NUMBER must be a positive integer") unless build_number.match?(/\A[1-9]\d*\z/)
+    UI.message("Bundle #{bundle_id}, team #{team_id}, build number #{build_number}")
+
+    auth = [
+      "-allowProvisioningUpdates",
+      "-authenticationKeyPath", key_path,
+      "-authenticationKeyID", env_value("ASC_KEY_ID"),
+      "-authenticationKeyIssuerID", env_value("ASC_ISSUER_ID")
+    ]
+    spm = env_value("SPM_DIR") ? ["-clonedSourcePackagesDirPath", env_value("SPM_DIR")] : []
+    archive_path = File.join(BUILD_DIR, "DetailCRM.xcarchive")
+    export_dir = File.join(BUILD_DIR, "export")
+    FileUtils.rm_rf([archive_path, export_dir, OUTPUT_DIR])
+    FileUtils.mkdir_p([OUTPUT_DIR, export_dir])
+
+    with_app_config do
+      with_bundle_id(bundle_id) do
+        run_logged(
+          ["xcodebuild", "archive",
+           "-project", PROJECT,
+           "-scheme", SCHEME,
+           "-configuration", "Release",
+           "-destination", "generic/platform=iOS",
+           "-archivePath", archive_path,
+           "-derivedDataPath", File.join(BUILD_DIR, "DerivedData"),
+           *spm,
+           "-skipPackagePluginValidation",
+           "-skipMacroValidation",
+           *auth,
+           "DEVELOPMENT_TEAM=#{team_id}",
+           "CURRENT_PROJECT_VERSION=#{build_number}"],
+          "archive.log"
+        )
+      end
+    end
+
+    options = File.join(BUILD_DIR, "ExportOptions.plist")
+    File.write(options, export_options(team_id))
+    run_logged(
+      ["xcodebuild", "-exportArchive",
+       "-archivePath", archive_path,
+       "-exportPath", export_dir,
+       "-exportOptionsPlist", options,
+       *auth],
+      "export.log"
+    )
+
+    ipa = Dir[File.join(export_dir, "*.ipa")].first || UI.user_error!("export produced no .ipa (see #{LOG_DIR}/export.log)")
+    FileUtils.cp(ipa, File.join(OUTPUT_DIR, "DetailCRM.ipa"))
+    dsyms = File.join(archive_path, "dSYMs")
+    if Dir.exist?(dsyms) && !Dir.empty?(dsyms)
+      sh("cd #{dsyms.shellescape} && zip -qry #{File.join(OUTPUT_DIR, 'DetailCRM.app.dSYM.zip').shellescape} .", log: false)
+    end
+    File.write(File.join(OUTPUT_DIR, "build_number.txt"), "#{build_number}\n")
+
+    if env_value("SKIP_UPLOAD") == "1"
+      UI.important("SKIP_UPLOAD=1: not uploading. The .ipa is in #{OUTPUT_DIR}")
+      next
+    end
+
+    upload_to_testflight(
+      api_key: api_key,
+      ipa: File.join(OUTPUT_DIR, "DetailCRM.ipa"),
+      app_identifier: bundle_id,
+      skip_waiting_for_build_processing: true,
+      distribute_external: false
+    )
+    UI.success("Uploaded build #{build_number} of #{bundle_id} to TestFlight (processing takes a few minutes)")
+  end
+end

@@ -1,0 +1,6 @@
+# frozen_string_literal: true
+
+# App identity for fastlane (the Fastfile passes it explicitly too). With an
+# App Store Connect API key no Apple ID / password is used.
+app_identifier(ENV["BUNDLE_ID"].to_s.strip.empty? ? "com.detailcrm.app" : ENV["BUNDLE_ID"].strip)
+team_id(ENV["APPLE_TEAM_ID"].strip) unless ENV["APPLE_TEAM_ID"].to_s.strip.empty?

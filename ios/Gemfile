@@ -1,0 +1,7 @@
+# frozen_string_literal: true
+
+# fastlane for the TestFlight pipeline (.github/workflows/ios-testflight.yml,
+# docs/DEPLOY.md "iOS"). Local use: cd ios && bundle install && bundle exec fastlane beta
+source "https://rubygems.org"
+
+gem "fastlane", "~> 2.240"

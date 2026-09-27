@@ -21,6 +21,7 @@ DerivedData/
 .build/
 .swiftpm/
 ios/DetailCore/Package.resolved
+ios/build/
 
 # Supabase local
 supabase/.temp/

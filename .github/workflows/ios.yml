@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "ios/**"
+      - "ios/DetailCRM/**"
+      - "ios/DetailCore/**"
       - "scripts/swift_sanity.py"
       - ".github/workflows/ios.yml"
 

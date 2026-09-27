@@ -1,0 +1,163 @@
+# TestFlight build of the iPhone app (docs/DEPLOY.md "iOS"): archive with
+# Xcode cloud-managed automatic signing through an App Store Connect API key,
+# build number = latest TestFlight build + 1, upload, keep .ipa + dSYMs.
+# Config.plist gets the real Supabase URL / anon key / web URL for this build
+# only (the committed file keeps its YOUR_... placeholders). Runs on manual
+# dispatch or a push that touches .github/trigger-testflight.
+name: ios-testflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_upload:
+        description: "Archive, sign and export only (no TestFlight upload)"
+        type: boolean
+        default: false
+  push:
+    paths:
+      - ".github/trigger-testflight"
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SPM_DIR: ${{ github.workspace }}/.spm-cache
+  FASTLANE_SKIP_UPDATE_CHECK: "1"
+  FASTLANE_HIDE_CHANGELOG: "1"
+  FASTLANE_SKIP_DOCS: "1"
+  FASTLANE_OPT_OUT_USAGE: "1"
+  LC_ALL: en_US.UTF-8
+  LANG: en_US.UTF-8
+
+jobs:
+  testflight:
+    name: Archive and upload to TestFlight
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: production
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'com.detailcrm.app' }}
+      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY }}
+      WEB_APP_URL: ${{ vars.APP_BASE_URL }}
+      SKIP_UPLOAD: ${{ (github.event_name == 'workflow_dispatch' && inputs.skip_upload) && '1' || '' }}
+    steps:
+      - name: Check required secrets and variables
+        run: |
+          missing=()
+          need() { [ -n "${!1:-}" ] || missing+=("$1 ($2)"); }
+          need ASC_KEY_ID "secret: App Store Connect API key id"
+          need ASC_ISSUER_ID "secret: App Store Connect issuer id"
+          need ASC_KEY_P8 "secret: the AuthKey_<id>.p8 content, raw or base64"
+          need APPLE_TEAM_ID "secret: 10-character team id"
+          need SUPABASE_URL "variable: https://<ref>.supabase.co"
+          need SUPABASE_ANON_KEY "variable: the anon key"
+          need WEB_APP_URL "variable APP_BASE_URL: the web app origin"
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing repository/environment settings: ${missing[*]}"
+            echo "Add them under Settings -> Secrets and variables -> Actions. See docs/DEPLOY.md (iOS)."
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+          echo "All required settings are present (bundle id $BUNDLE_ID)."
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode (newest 16.x, else newest installed)
+        run: |
+          set -euo pipefail
+          ls -d /Applications/Xcode*.app || true
+          # Same choice as ios.yml (find instead of ls for shellcheck).
+          XCODE=$(find /Applications -maxdepth 1 -name 'Xcode_16*.app' 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$XCODE" ]; then
+            XCODE=$(find /Applications -maxdepth 1 -name 'Xcode_*.app' 2>/dev/null | sort -V | tail -1 || true)
+          fi
+          if [ -z "$XCODE" ]; then XCODE=/Applications/Xcode.app; fi
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          echo "XCODE_VERSION=$(xcodebuild -version | head -1 | awk '{print $2}')" >> "$GITHUB_ENV"
+
+      - name: Swift sanity
+        run: python3 scripts/swift_sanity.py
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SPM_DIR }}
+          key: spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('ios/DetailCRM/**/Package.resolved', 'ios/DetailCRM/DetailCRM.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-
+
+      - name: Ruby + fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: ios
+
+      - name: Write the App Store Connect API key
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/asc"
+          key="$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8"
+          if printf '%s' "$ASC_KEY_P8" | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s\n' "$ASC_KEY_P8" > "$key"
+          elif ! printf '%s' "$ASC_KEY_P8" | tr -d '[:space:]' | base64 --decode > "$key" 2>/dev/null; then
+            echo "::error::ASC_KEY_P8 is neither the .p8 file content nor base64 of it"
+            exit 1
+          fi
+          if ! grep -q "BEGIN PRIVATE KEY" "$key"; then
+            echo "::error::ASC_KEY_P8 does not decode to a private key (-----BEGIN PRIVATE KEY-----)"
+            exit 1
+          fi
+          echo "ASC_KEY_PATH=$key" >> "$GITHUB_ENV"
+
+      - name: Archive, sign, upload (fastlane beta)
+        working-directory: ios
+        run: bundle exec fastlane ios beta
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo "### TestFlight"
+            echo "- bundle id: \`$BUNDLE_ID\`"
+            echo "- build number: \`$(cat ios/build/output/build_number.txt)\`"
+            if [ "$SKIP_UPLOAD" = "1" ]; then echo "- upload skipped (skip_upload)"; else echo "- uploaded; App Store Connect processes it for a few minutes before testers see it"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the .ipa and dSYMs
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DetailCRM-testflight
+          path: |
+            ios/build/output/DetailCRM.ipa
+            ios/build/output/DetailCRM.app.dSYM.zip
+            ios/build/output/build_number.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Keep the build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DetailCRM-testflight-logs
+          path: ios/build/logs
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Remove the API key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/asc"
