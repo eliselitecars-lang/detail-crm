@@ -1,0 +1,105 @@
+name: e2e-stack
+
+# End-to-end checks against the REAL Supabase stack (supabase start: Postgres
+# 17, GoTrue, PostgREST, Realtime, Storage, edge runtime) with stripe-mock and
+# the local Twilio/Resend mock — no mocked Supabase. See scripts/stack/README.md.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'supabase/**'
+      - 'web/**'
+      - 'scripts/stack/**'
+      - '.github/workflows/e2e-stack.yml'
+
+concurrency:
+  group: e2e-stack-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SUPABASE_CLI_VERSION: 2.118.0
+  STRIPE_MOCK_VERSION: 0.205.0
+
+jobs:
+  stack:
+    name: real stack · verify · SQL suite · Playwright
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Install stripe-mock
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/stripe/stripe-mock/releases/download/v${STRIPE_MOCK_VERSION}/stripe-mock_${STRIPE_MOCK_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" stripe-mock
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Ensure the psql client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Start the real stack (all migrations via supabase db reset)
+        run: scripts/stack/up.sh
+
+      # First, on the freshly reset database: the suite assumes empty tables.
+      - name: SQL test suite on the real database
+        run: scripts/stack/test_db_stack.sh
+
+      - name: Verify platform, PostgREST, GoTrue, Storage, Realtime, edge functions
+        run: node scripts/stack/verify_stack.mjs --json scripts/stack/.state/verify.json
+
+      - name: Playwright against the real stack
+        working-directory: web
+        run: npx playwright test -c playwright.stack.config.ts
+        env:
+          CI: 'true'
+
+      - name: Collect container logs
+        if: failure()
+        run: |
+          mkdir -p scripts/stack/.state/docker
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^supabase_'); do
+            docker logs "$c" > "scripts/stack/.state/docker/$c.log" 2>&1 || true
+          done
+
+      # Always: on success it keeps verify.json (with the KNOWN-issue evidence)
+      # and the Playwright report (with the test.fail expected-failure errors).
+      - name: Upload reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-stack-report
+          path: |
+            web/playwright-report-stack
+            web/test-results-stack
+            scripts/stack/.state/*.log
+            scripts/stack/.state/*.json
+            scripts/stack/.state/docker
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Stop the stack
+        if: always()
+        run: scripts/stack/down.sh

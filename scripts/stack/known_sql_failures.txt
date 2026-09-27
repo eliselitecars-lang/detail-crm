@@ -1,0 +1,7 @@
+# SQL test files that are KNOWN to fail on the real Supabase stack (but pass on
+# the shim) because of a test-portability issue, not an app defect.
+# scripts/stack/test_db_stack.sh reports them as KNOWN (not failures) unless
+# STACK_STRICT=1, and as FIXED once they pass — then delete the line.
+# Format: <file under supabase/tests>  # reason
+# (empty) 00_audit_user_delete.sql used to be listed here; it now runs with
+# scripts/stack/sql/prelude/00_audit_user_delete.sql and passes.
