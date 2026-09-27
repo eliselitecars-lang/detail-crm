@@ -60,7 +60,36 @@ begin
 end
 $$;
 
--- created_by is always the acting user when there is one; never editable.
+-- Audit references to auth.users (created_by, recorded_by, uploaded_by, ...)
+-- are write-once: BEFORE UPDATE triggers pin them with
+--   new.col := public.audit_user_ref(new.col, old.col);
+-- The one legitimate change is the column's own ON DELETE SET NULL when the
+-- account is deleted (Supabase auth.admin.deleteUser, an erasure request):
+-- the referential action runs an UPDATE through those same triggers, and
+-- pinning the old id there made the re-checked FK fail (23503) and rolled
+-- the whole account deletion back. So the value may become NULL, and only
+-- once the referenced account no longer exists; any other change keeps the
+-- old value. SECURITY DEFINER to read auth.users; it answers only inside a
+-- trigger (pg_trigger_depth() > 0), where its arguments are a row's own
+-- values, so calling it directly reveals nothing about which accounts exist.
+create function public.audit_user_ref(p_new uuid, p_old uuid) returns uuid
+language sql stable security definer
+set search_path = ''
+as $$
+  select case
+           when p_new is null and p_old is not null
+                and pg_catalog.pg_trigger_depth() > 0
+                and not exists (select 1 from auth.users u where u.id = p_old)
+             then null
+           else p_old
+         end
+$$;
+
+comment on function public.audit_user_ref(uuid, uuid) is
+  'Pinned value of a write-once auth.users audit column on UPDATE: the old value, or NULL when the change is the ON DELETE SET NULL of a deleted account.';
+
+-- created_by is always the acting user when there is one; never editable
+-- (except the ON DELETE SET NULL of a deleted account: audit_user_ref).
 create function public.set_created_by() returns trigger
 language plpgsql
 set search_path = ''
@@ -69,7 +98,7 @@ begin
   if tg_op = 'INSERT' then
     new.created_by := coalesce(auth.uid(), new.created_by);
   else
-    new.created_by := old.created_by;
+    new.created_by := public.audit_user_ref(new.created_by, old.created_by);
   end if;
   return new;
 end
@@ -162,6 +191,58 @@ create function public.is_valid_timezone(p text) returns boolean
 language sql stable
 set search_path = ''
 as $$ select p is not null and exists (select 1 from pg_catalog.pg_timezone_names where name = p) $$;
+
+-- ---------------------------------------------------------------------------
+-- Shop assets (SPEC §4.6): shops.logo_path and services.image_path name an
+-- object in the public `shop-assets` bucket, stored WITHOUT the bucket. The
+-- first folder of every object name is the owning shop's id, so a row may
+-- only name an object under its OWN shop's folder — the storage version of
+-- the composite-FK rule (a shop must never display another tenant's file,
+-- nor keep it "in use" for the purge queue, 0025).
+-- ---------------------------------------------------------------------------
+
+-- "<shop_id>/<file...>" for exactly this shop: the folder is the canonical
+-- (lower-case uuid::text) form the storage policies and the purge queue
+-- match (0020, 0025), followed by a file name; and the name obeys the same
+-- rules as public.is_safe_storage_path (0020): 1-1024 chars, no leading or
+-- trailing slash, no empty, "." or ".." segments, no backslashes or control
+-- characters. Pure, so it backs CHECK constraints.
+create function public.is_shop_asset_path(p_shop_id uuid, p_path text) returns boolean
+language sql immutable
+set search_path = ''
+as $$
+  select p_shop_id is not null
+     and p_path is not null
+     and char_length(p_path) between 1 and 1024
+     and p_path !~ '^/'
+     and p_path !~ '/$'
+     and p_path !~ '//'
+     and p_path !~ '(^|/)\.{1,2}(/|$)'
+     and p_path !~ '[\\[:cntrl:]]'
+     and pg_catalog.starts_with(p_path, p_shop_id::text || '/')
+$$;
+
+-- AFTER INSERT OR UPDATE trigger: the object named by column TG_ARGV[0] must
+-- already exist in the shop-assets bucket when the path is set or changed
+-- (upload first, then save the path — like job photos, 0022). The table's
+-- CHECK (is_shop_asset_path) has already pinned the path to the row's own
+-- shop, so this reveals nothing about other shops' files. SECURITY DEFINER:
+-- storage.objects sits behind storage RLS.
+create function public.require_shop_asset_object() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_path text := pg_catalog.to_jsonb(new) ->> tg_argv[0];
+begin
+  if v_path is not null
+     and (tg_op = 'INSERT' or v_path is distinct from (pg_catalog.to_jsonb(old) ->> tg_argv[0]))
+     and not exists (select 1 from storage.objects o where o.bucket_id = 'shop-assets' and o.name = v_path) then
+    raise exception 'upload the image to shop-assets before saving its path' using errcode = '23514';
+  end if;
+  return null;
+end
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Canonical totals (SPEC §4.5) — the ONLY implementation of document math.
@@ -274,8 +355,14 @@ comment on function public.compute_document_totals(jsonb, public.discount_kind, 
   'Canonical SPEC §4.5 totals. Pure; reused by jobs, quotes and invoices.';
 
 -- Trigger functions are never called directly.
-revoke execute on function public.set_updated_at(), public.set_created_by(), public.prevent_shop_change()
+revoke execute on function public.set_updated_at(), public.set_created_by(), public.prevent_shop_change(),
+                            public.require_shop_asset_object()
   from public, anon, authenticated;
+
+-- Called from invoker triggers during direct (authenticated / service_role)
+-- writes; anon never writes tables directly.
+revoke execute on function public.audit_user_ref(uuid, uuid) from public, anon;
+grant execute on function public.audit_user_ref(uuid, uuid) to authenticated, service_role;
 
 -- The request clock is internal: called only from SECURITY DEFINER RPCs.
 revoke execute on function public.is_api_request(), public.effective_now(timestamptz)

@@ -191,9 +191,10 @@ begin
                  'plan_name', p.name,
                  'plan_description', p.description,
                  'status', ms.status,
-                 'price_cents', p.price_cents,
-                 'interval', p.interval,
-                 'interval_count', p.interval_count,
+                 -- what this membership is billed (not the plan's current price)
+                 'price_cents', ms.price_cents,
+                 'interval', ms.interval,
+                 'interval_count', ms.interval_count,
                  'discount_bps', p.discount_bps,
                  'included_services', coalesce((
                    select jsonb_agg(sv.name order by sv.sort, sv.name, sv.id)

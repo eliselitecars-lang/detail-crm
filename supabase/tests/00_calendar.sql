@@ -58,8 +58,26 @@ select tests.eq((select string_agg(coalesce(title, '<hidden>'), ',' order by sta
                    from public.calendar_events(tests.fx('shop_a'), '2025-06-02', '2025-06-03') where event_type = 'blocked_time'),
                 'Team training,<hidden>,School pickup', 'technicians see shop-wide and own block reasons only');
 -- the busy block leaks nothing the tech could not otherwise read
-select tests.eq(tests.row_count($$select * from public.jobs where id = tests.fx('job_a2')$$), 0::bigint,
+select tests.eq(tests.row_count($$select id from public.jobs where id = tests.fx('job_a2')$$), 0::bigint,
                 'the busy block''s job row itself stays unreadable');
+-- ... and neither does the table behind blocked-time events (regression:
+-- technicians could read another member's private reason straight from it)
+select tests.eq((select reason from public.blocked_times where member_id = tests.fx('m_tech2_a')), null::text,
+                'technician cannot read another member''s blocked-time reason directly');
+select tests.eq(tests.row_count($$select * from public.blocked_times where member_id = tests.fx('m_tech2_a')$$), 0::bigint,
+                'another member''s blocked-time row is invisible to a technician');
+select tests.eq((select string_agg(reason, ',' order by starts_at) from public.blocked_times),
+                'Team training,School pickup', 'technician reads shop-wide and own blocked times directly');
+select tests.authenticate_as(tests.fx('u_tech2_a'));
+select tests.eq((select string_agg(reason, ',' order by starts_at) from public.blocked_times),
+                'Team training,Doctor appointment', 'the other technician reads their own reason');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq((select string_agg(reason, ',' order by starts_at) from public.blocked_times),
+                'Team training,Doctor appointment,School pickup', 'managers read every member''s blocked time');
+select tests.authenticate_as(tests.fx('u_tech_b'));
+select tests.eq(tests.row_count($$select * from public.blocked_times where shop_id = tests.fx('shop_a')$$), 0::bigint,
+                'technician of B reads none of A''s blocked times');
+select tests.authenticate_as(tests.fx('u_tech_a'));
 
 -- ------------------------------------------------------------ denial paths
 select tests.throws($$select * from public.calendar_events(tests.fx('shop_b'), '2025-06-02', '2025-06-03')$$, '42501',

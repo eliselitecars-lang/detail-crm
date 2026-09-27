@@ -153,8 +153,9 @@ create trigger shops_seed_shop_setup after insert on public.shops
   for each row execute function public.shops_seed_shop_setup();
 
 -- ---------------------------------------------------------------------------
--- RLS — all members read; settings are owner/admin; blocked times are part
--- of the calendar so managers may edit them too (SPEC §3 "Jobs / calendar").
+-- RLS — all members read (blocked times: technicians only shop-wide + own);
+-- settings are owner/admin; blocked times are part of the calendar so
+-- managers may edit them too (SPEC §3 "Jobs / calendar").
 -- ---------------------------------------------------------------------------
 alter table public.vehicle_categories enable row level security;
 alter table public.business_hours     enable row level security;
@@ -180,8 +181,13 @@ create policy business_hours_update on public.business_hours for update to authe
 create policy business_hours_delete on public.business_hours for delete to authenticated
   using (public.is_shop_admin(shop_id));
 
+-- Technicians read shop-wide blocks and their own; other members' blocks
+-- (and their private reasons) reach them only as anonymous busy time through
+-- calendar_events (0007).
 create policy blocked_times_select on public.blocked_times for select to authenticated
-  using (public.is_shop_member(shop_id));
+  using (public.is_shop_manager(shop_id)
+         or (public.is_shop_member(shop_id)
+             and (member_id is null or public.is_own_member(member_id))));
 create policy blocked_times_insert on public.blocked_times for insert to authenticated
   with check (public.is_shop_manager(shop_id));
 create policy blocked_times_update on public.blocked_times for update to authenticated

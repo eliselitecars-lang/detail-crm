@@ -111,6 +111,13 @@ select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(tests.row_count($$update public.shops set tax_rate_bps = 1 where id = tests.fx('shop_a')$$), 0::bigint,
                 'manager cannot update shop settings (read only)');
 select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_a')$$), 0::bigint, 'manager cannot delete shop');
+select tests.as_superuser();
+-- the platform binds the shop's SMS number first (comms, 0033), when that range is applied
+do $$ begin
+  if to_regclass('public.shop_sms_numbers') is not null then
+    execute format('insert into public.shop_sms_numbers (phone_number, shop_id) values (%L, %L)', '+12055550123', tests.fx('shop_a'));
+  end if;
+end $$;
 select tests.authenticate_as(tests.fx('u_admin_a'));
 select tests.eq(tests.row_count($$update public.shops set tax_rate_bps = 900, brand_color = '#112233', sms_from_number = '+12055550123'
                                   where id = tests.fx('shop_a')$$), 1::bigint, 'admin updates shop settings');
@@ -138,6 +145,8 @@ select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('
 select tests.as_superuser();
 select tests.eq((select count(*) from public.shop_members where shop_id = tests.fx('shop_b')), 0::bigint, 'members cascade');
 select tests.eq((select count(*) from public.jobs where shop_id = tests.fx('shop_b')), 0::bigint, 'jobs cascade');
+select tests.eq((select count(*) from public.job_assignments where shop_id = tests.fx('shop_b')), 0::bigint,
+                'assignments go with the shop (their member FK is NO ACTION, not RESTRICT)');
 select tests.eq((select count(*) from public.customers where shop_id = tests.fx('shop_b')), 0::bigint, 'customers cascade');
 select tests.eq((select count(*) from public.shop_counters where shop_id = tests.fx('shop_b')), 0::bigint, 'counters cascade');
 select tests.eq((select count(*) from public.shops where id = tests.fx('shop_a')), 1::bigint, 'other shop untouched');

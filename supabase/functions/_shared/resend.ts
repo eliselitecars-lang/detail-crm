@@ -1,7 +1,11 @@
 /** Email via the Resend REST API (no SDK). */
+import { apiBaseFromEnv, DEFAULT_RESEND_API_BASE } from "./api_base.ts";
 import { UpstreamError } from "./errors.ts";
 
-export const RESEND_API_URL = "https://api.resend.com/emails";
+/** https://api.resend.com/emails unless RESEND_API_BASE (local harness only) overrides the host. */
+export const RESEND_API_URL = `${
+  apiBaseFromEnv("RESEND_API_BASE", DEFAULT_RESEND_API_BASE)
+}/emails`;
 
 export interface SendEmailParams {
   /** "Shop Name <notifications@yourdomain>" — must be a verified Resend domain. */

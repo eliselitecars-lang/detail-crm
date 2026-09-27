@@ -1,10 +1,101 @@
-# Placeholder so workflow_dispatch is available; the real pipeline lives on
-# the development branch until it is merged.
+# Database: every migration from zero on a throwaway Postgres 16 cluster plus
+# the SQL test suite (scripts/test_db.sh), then the contracts: the generated
+# web/src/lib/database.types.ts and docs/SCHEMA.md must be committed and
+# current, and every table / column / RPC / bucket the web app, the iOS app
+# and the edge functions reference must exist (scripts/check_contracts.py).
+#
+# Postgres 16 is preinstalled on the ubuntu-24.04 runner image under
+# /usr/lib/postgresql/16/bin (server stopped); test_db.sh starts its own
+# private, socket-only cluster, so no service container is used.
 name: db
+
 on:
+  push:
+    paths:
+      - "supabase/**"
+      - "scripts/test_db.sh"
+      - "scripts/*.py"
+      - ".github/workflows/db.yml"
+      # contract inputs: the generated files and the client code that is checked
+      - "docs/SCHEMA.md"
+      - "web/src/**"
+      - "web/package-lock.json"
+      - "ios/**/*.swift"
+  pull_request:
+    paths:
+      - "supabase/**"
+      - "scripts/test_db.sh"
+      - "scripts/*.py"
+      - ".github/workflows/db.yml"
+      - "docs/SCHEMA.md"
+      - "web/src/**"
+      - "web/package-lock.json"
+      - "ios/**/*.swift"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  placeholder:
+  db:
+    name: migrations · SQL tests · contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PG_BIN: /usr/lib/postgresql/16/bin
     steps:
-      - run: echo "db pipeline not merged yet"
+      - uses: actions/checkout@v4
+
+      - name: Postgres 16 binaries
+        run: |
+          if [ ! -x "$PG_BIN/initdb" ]; then
+            echo "Postgres 16 is not preinstalled on this image; installing postgresql-16"
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-16
+          fi
+          "$PG_BIN/postgres" --version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # gen_types.py formats database.types.ts with the web project's pinned
+      # prettier (web/package-lock.json), exactly like local runs.
+      - name: Install web dependencies (prettier)
+        working-directory: web
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Migrations from zero + SQL tests
+        run: scripts/test_db.sh
+
+      - name: Regenerate database.types.ts and SCHEMA.md
+        run: python3 scripts/gen_types.py --dump-meta "$RUNNER_TEMP/schema-meta.json"
+
+      - name: Generated contracts are committed and current
+        run: |
+          files=(web/src/lib/database.types.ts docs/SCHEMA.md)
+          untracked="$(git ls-files --others --exclude-standard -- "${files[@]}")"
+          if [ -n "$untracked" ]; then
+            echo "::error::generated files are not committed: $untracked (run python3 scripts/gen_types.py and commit them)"
+            exit 1
+          fi
+          if ! git diff --exit-code --stat -- "${files[@]}"; then
+            git diff -- "${files[@]}" | head -n 200
+            echo "::error::generated contract files are stale: run python3 scripts/gen_types.py and commit the result"
+            exit 1
+          fi
+
+      - name: Contract check (web, iOS, edge functions)
+        run: python3 scripts/check_contracts.py --meta "$RUNNER_TEMP/schema-meta.json"
+
+      - name: Contract checker self-test
+        run: python3 scripts/check_contracts.py --self-test
+
+      - name: Type generator self-test
+        run: python3 scripts/gen_types.py --self-test

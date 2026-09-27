@@ -64,6 +64,7 @@ export function queuedMessage(overrides: Row = {}): Row {
     job_id: null,
     campaign_id: null,
     template_key: null,
+    unsubscribe_token: null,
     direction: "outbound",
     channel: "sms",
     to_address: CUSTOMER_PHONE,
@@ -172,6 +173,10 @@ function enqueueTemplate(
   ) {
     return null;
   }
+  // 0033: marketing email gets its own random unsubscribe token and link
+  const unsubscribeToken = channel === "email" && MARKETING_KEYS.includes(key)
+    ? crypto.randomUUID()
+    : null;
   const row = insertMessage(db, {
     shop_id: shopId,
     customer_id: customerId,
@@ -180,9 +185,13 @@ function enqueueTemplate(
     template_key: key,
     to_address: channel === "sms" ? customer.phone : customer.email,
     subject: channel === "email" ? `${template.subject}` : null,
-    body: `${template.body}`,
+    body: `${template.body}`.replaceAll(
+      "{{unsubscribe_link}}",
+      unsubscribeToken ? `${APP_BASE}/u/${unsubscribeToken}` : "",
+    ),
     sent_by: sentBy,
     send_after: NOW.toISOString(),
+    unsubscribe_token: unsubscribeToken,
   });
   return row.id as string;
 }
@@ -233,6 +242,8 @@ export function setup(
         },
         { id: OTHER_SHOP, name: "Other", email: null, phone: null, sms_from_number: null },
       ],
+      // the platform's binding of each Twilio number to its shop (0033)
+      shop_sms_numbers: [{ phone_number: SHOP_NUMBER, shop_id: SHOP }],
       customers: [
         {
           id: CUSTOMER,
@@ -378,6 +389,7 @@ export function setup(
         job_id: updated.job_id,
         campaign_id: updated.campaign_id,
         template_key: updated.template_key,
+        unsubscribe_token: updated.unsubscribe_token ?? null,
       });
     }
     return out;
@@ -428,7 +440,9 @@ export function setup(
     if (!e164.test(String(args.p_to)) || !e164.test(String(args.p_from))) {
       throw new FakeRpcError("22023", "to and from must be E.164 phone numbers");
     }
-    const shop = ctx.db.table("shops").find((s) => s.sms_from_number === args.p_to);
+    // 0033: routed by the platform binding (shop_sms_numbers), not sms_from_number
+    const binding = ctx.db.table("shop_sms_numbers").find((n) => n.phone_number === args.p_to);
+    const shop = binding ? ctx.db.table("shops").find((s) => s.id === binding.shop_id) : undefined;
     if (!shop) return [];
     const existing = args.p_provider_id
       ? ctx.db.table("messages").find((m) => m.provider_message_id === args.p_provider_id)
@@ -589,9 +603,12 @@ export function setup(
   });
 
   db.onRpc("public_unsubscribe", (args, ctx) => {
+    // 0035: only a marketing email's unsubscribe_token (never a message id)
     const msg = ctx.db.table("messages").find((m) =>
-      m.id === args.p_token && m.direction === "outbound" && m.channel === "email" &&
-      m.customer_id !== null
+      typeof args.p_token === "string" && m.unsubscribe_token === args.p_token &&
+      m.direction === "outbound" &&
+      m.channel === "email" && m.customer_id !== null &&
+      (m.campaign_id !== null || MARKETING_KEYS.includes(String(m.template_key)))
     );
     if (!msg) return false;
     const customers = ctx.db.table("customers");

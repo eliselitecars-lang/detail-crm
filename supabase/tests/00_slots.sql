@@ -175,11 +175,12 @@ select tests.eq((select array_agg(to_char(starts_at at time zone 'America/Chicag
                 array['00:00', '00:30', '01:00', '01:30', '03:00', '03:30', '04:00', '04:30', '05:00'],
                 'spring-forward 30-min grid: 02:00 and 02:30 never offered');
 update public.booking_settings set slot_interval_minutes = 60 where shop_id = tests.fx('shop_a');
--- fall back 2025-11-02: 01:00 local happens twice; offered once, no duplicates
+-- fall back 2025-11-02: 01:00 local happens twice; offered once (its first
+-- occurrence, 01:00 CDT), no duplicates
 select tests.eq(pg_temp.slots('2025-11-02', '2025-11-02', array[tests.fx('hour_a')], '2025-10-20 00:00Z'),
-                array['11-02 05:00', '11-02 07:00', '11-02 08:00', '11-02 09:00', '11-02 10:00', '11-02 11:00',
+                array['11-02 05:00', '11-02 06:00', '11-02 08:00', '11-02 09:00', '11-02 10:00', '11-02 11:00',
                       '11-02 14:00', '11-02 15:00'],
-                'fall-back: 00:00 CDT then 01:00..05:00 CST (01:00 once), 08:00 local is now UTC-6');
+                'fall-back: 00:00 and 01:00 CDT then 02:00..05:00 CST (01:00 once), 08:00 local is now UTC-6');
 select tests.eq((select count(*) = count(distinct starts_at) from public.get_available_slots('shop-a', array[tests.fx('hour_a')], null,
                   '2025-11-01', '2025-11-03', '2025-10-20 00:00Z')), true, 'no duplicate slots across the fall-back weekend');
 select tests.eq((select count(distinct to_char(starts_at at time zone 'America/Chicago', 'YYYY-MM-DD HH24:MI'))

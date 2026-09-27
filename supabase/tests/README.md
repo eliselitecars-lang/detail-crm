@@ -122,3 +122,26 @@ every key. Files under `fixtures/` are not run as tests.
   DEFINER functions pin `search_path = ''`, and anon may only execute
   `public_*` / booking entry points. New domains get these checks for free —
   if one fails after you add a table, fix the table, not the test.
+
+## Contract files (SPEC §8.2)
+
+Any migration change also changes the generated contract, so after the SQL
+suite passes run:
+
+```bash
+python3 scripts/gen_types.py        # rewrites web/src/lib/database.types.ts + docs/SCHEMA.md
+python3 scripts/check_contracts.py  # fails on stale generated files or any drifted reference
+python3 scripts/check_contracts.py --self-test
+```
+
+Both build the schema the same way as this runner (`scripts/test_db.sh --tests
+none --keep` on a throwaway cluster, always removed afterwards) and need
+`web/node_modules` (prettier formats the TypeScript exactly as committed).
+`gen_types.py --check` only compares the generated files. `check_contracts.py`
+scans `web/src`, `supabase/functions` and `ios/` for `.from(...)` chains
+(columns in selects, embeds, filters, payload keys), `.rpc(...)` names and
+argument names, storage buckets, `functions.invoke(...)` targets, Swift
+`// table:` / `// rpc:` models (CodingKeys, `selectColumns`) and Swift
+`String` enums that mirror Postgres enums; app surfaces are also checked
+against the `authenticated` grants. Names built at run time are listed with
+`--verbose` instead of being counted as verified.

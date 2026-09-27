@@ -11,6 +11,9 @@ import Foundation
 import DetailCore
 
 // table: invoices
+/// Staff never read `public_token` (the customer's /i link credential; the
+/// column is not selectable). Owners/admins/managers get it from
+/// `InvoiceService.linkToken(invoiceID:)`.
 struct Invoice: Codable, Identifiable, Hashable, Sendable {
     var id: UUID
     var shopID: UUID
@@ -38,7 +41,6 @@ struct Invoice: Codable, Identifiable, Hashable, Sendable {
     /// total − paid (tips never count; negative = customer credit).
     var balanceCents: Int
     var tipCents: Int
-    var publicToken: UUID
     var createdAt: Date
     var updatedAt: Date
 
@@ -68,7 +70,6 @@ struct Invoice: Codable, Identifiable, Hashable, Sendable {
         case amountPaidCents = "amount_paid_cents"
         case balanceCents = "balance_cents"
         case tipCents = "tip_cents"
-        case publicToken = "public_token"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -78,7 +79,7 @@ struct Invoice: Codable, Identifiable, Hashable, Sendable {
         "sent_at", "paid_at", "voided_at", "void_reason", "notes", "terms", "internal_notes",
         "discount_kind", "discount_value", "tax_rate_bps", "subtotal_cents", "discount_cents",
         "tax_cents", "total_cents", "amount_paid_cents", "balance_cents", "tip_cents",
-        "public_token", "created_at", "updated_at",
+        "created_at", "updated_at",
     ].joined(separator: ",")
 
     /// "Invoice #1042"

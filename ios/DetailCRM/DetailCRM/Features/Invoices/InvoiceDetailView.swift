@@ -99,6 +99,7 @@ struct InvoiceDetailView: View {
             case .chargeSavedCard:
                 InvoiceChargeSavedCardSheet(
                     invoice: data.invoice,
+                    linkToken: data.linkToken,
                     cards: data.savedCards,
                     canMessage: permissions.canManage
                 ) {
@@ -128,8 +129,14 @@ struct InvoiceDetailView: View {
         state.beginLoading()
         let id = invoiceID
         let includeCards = appState.can(.useSavedCards)
+        let includeLink = appState.can(.manageInvoices)
         let result = await LoadState<InvoiceService.DetailData>.result {
-            try await InvoiceService.detail(shopID: shopID, invoiceID: id, includeSavedCards: includeCards)
+            try await InvoiceService.detail(
+                shopID: shopID,
+                invoiceID: id,
+                includeSavedCards: includeCards,
+                includeLinkToken: includeLink
+            )
         }
         if let message = result.errorMessage, state.value != nil {
             toasts.show(message, style: .error)
@@ -166,7 +173,12 @@ private struct InvoiceDetailContent: View {
                     clock: clock,
                     onRefund: { payment in present(.refund(payment)) }
                 ))
-                AnyView(InvoiceManageSection(invoice: data.invoice, permissions: permissions, present: present))
+                AnyView(InvoiceManageSection(
+                    invoice: data.invoice,
+                    linkToken: data.linkToken,
+                    permissions: permissions,
+                    present: present
+                ))
                 AnyView(InvoiceNotesSection(invoice: data.invoice, showInternal: permissions.canManage))
             }
             .padding(.horizontal, Theme.Spacing.gutter)
@@ -482,6 +494,8 @@ struct InvoicePaymentRow: View {
 
 private struct InvoiceManageSection: View {
     let invoice: Invoice
+    /// The customer's pay-link token; loaded for managers+ only.
+    let linkToken: UUID?
     let permissions: InvoicePermissions
     let present: (InvoiceDetailSheet) -> Void
 
@@ -495,8 +509,8 @@ private struct InvoiceManageSection: View {
                 }
                 .buttonStyle(.themePrimary)
             }
-            if invoice.status != .draft && invoice.status != .void {
-                if let url = MoneyLinks.invoice(token: invoice.publicToken) {
+            if permissions.canManage, let linkToken, invoice.status != .draft && invoice.status != .void {
+                if let url = MoneyLinks.invoice(token: linkToken) {
                     ShareLink(item: url) {
                         Label("Share pay link", systemImage: "square.and.arrow.up")
                     }

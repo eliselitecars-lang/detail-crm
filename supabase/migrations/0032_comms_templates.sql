@@ -10,7 +10,8 @@
 -- All channels of one key share one offset (kept in sync by trigger), so an
 -- automation fires once per job and delivers on every enabled channel.
 --
--- Placeholders ({{name}}; unknown or missing ones render as empty text):
+-- Placeholders ({{name}}; unknown ones render as empty text; for missing
+-- optional values see "Unavailable links and values" below):
 --   {{customer_first_name}}  first name (else company, else last name, else "there")
 --   {{customer_name}}        full name (else company)
 --   {{shop_name}}            shop name
@@ -21,15 +22,31 @@
 --   {{vehicle}}              job vehicle, e.g. 2021 Honda Civic
 --   {{services}}             job line item names, comma separated
 --   {{booking_link}}         link to the customer's booking page  (/booking/<job token>)
---   {{booking_page_link}}    link to the shop's online booking page (/book/<shop slug>)
---   {{quote_link}}           link to the job's quote (/q/<quote token>)
---   {{invoice_link}}         link to the job's invoice (/i/<invoice token>)
---   {{review_link}}          the shop's review URL
+--   {{booking_page_link}}    link to the shop's online booking page (/book/<shop slug>);
+--                            only while the shop's online booking is on
+--   {{quote_link}}           link to the job's quote (/q/<quote token>); once the quote was sent
+--   {{invoice_link}}         link to the job's invoice (/i/<invoice token>); once it was issued
+--   {{review_link}}          the shop's review URL; once the shop set one
 --   {{amount}}               invoice total (else job total), e.g. $1,234.56
 --   {{balance}}              balance still due, e.g. $0.00
 --   {{invite_link}}          staff invite link (invite template; supplied by the sender)
---   {{unsubscribe_link}}     email unsubscribe link (campaign emails)
+--   {{unsubscribe_link}}     email unsubscribe link (/u/<token>) of marketing email: campaigns and
+--                            follow_up; where the wording does not place it, it is appended as a
+--                            footer. Renders empty in SMS and transactional email.
 -- Callers of enqueue_customer_template may override/add variables.
+-- Unavailable links and values (0033 comms_omit_unavailable_values): a line
+-- of a message whose link placeholder (booking_link, booking_page_link,
+-- quote_link, invoice_link, review_link) or optional value placeholder
+-- (shop_phone, customer_name, job_date, job_time, job_number, vehicle,
+-- services, amount, balance) has no value is left out of it, so e.g. a
+-- deposit receipt (no invoice yet) omits "View your invoice: …", a
+-- membership welcome omits "book here: …" while online booking is off, and
+-- a shop without a phone number sends no "Questions? Call us at ." line;
+-- quote_sent, invoice_sent and review_request are not sent at all without
+-- their quote / invoice / review link (comms_key_required_link). The
+-- default wording therefore keeps every optional value on a line of its
+-- own that the message reads well without ("Vehicle: …", "Questions? Call
+-- …") and never builds its main sentence on one.
 -- ============================================================================
 
 create table public.message_templates (
@@ -91,22 +108,22 @@ as $$
      E'Hi {{customer_first_name}},\n\nYour appointment with {{shop_name}} is confirmed.\n\nDate: {{job_date}}\nTime: {{job_time}}\nVehicle: {{vehicle}}\nServices: {{services}}\n\nView or manage your booking here: {{booking_link}}\n\nQuestions? Call us at {{shop_phone}}.\n\n{{shop_name}}',
      true, null),
     ('appointment_reminder', 'sms', null,
-     'Reminder: your appointment with {{shop_name}} is on {{job_date}} at {{job_time}}. Need to make a change? Visit {{booking_link}} or call {{shop_phone}}.',
+     E'Reminder: your appointment with {{shop_name}} is on {{job_date}} at {{job_time}}. Need to make a change? Visit {{booking_link}}\nQuestions? Call {{shop_phone}}.',
      true, -1440),
     ('appointment_reminder', 'email', 'Appointment reminder - {{shop_name}}',
-     E'Hi {{customer_first_name}},\n\nThis is a friendly reminder of your upcoming appointment with {{shop_name}}.\n\nDate: {{job_date}}\nTime: {{job_time}}\nVehicle: {{vehicle}}\nServices: {{services}}\n\nNeed to make a change? Visit {{booking_link}} or call us at {{shop_phone}}.\n\n{{shop_name}}',
+     E'Hi {{customer_first_name}},\n\nThis is a friendly reminder of your upcoming appointment with {{shop_name}}.\n\nDate: {{job_date}}\nTime: {{job_time}}\nVehicle: {{vehicle}}\nServices: {{services}}\n\nNeed to make a change? Visit {{booking_link}}\n\nQuestions? Call us at {{shop_phone}}.\n\n{{shop_name}}',
      true, -1440),
     ('on_the_way', 'sms', null,
      'Hi {{customer_first_name}}, your technician from {{shop_name}} is on the way. See you soon!',
      true, null),
     ('job_started', 'sms', null,
-     'Hi {{customer_first_name}}, we have started work on your {{vehicle}}. We''ll let you know as soon as it''s ready. - {{shop_name}}',
+     'Hi {{customer_first_name}}, we have started work on your vehicle. We''ll let you know as soon as it''s ready. - {{shop_name}}',
      true, null),
     ('job_completed', 'sms', null,
-     'Hi {{customer_first_name}}, your {{vehicle}} is all done! Thank you for choosing {{shop_name}}.',
+     'Hi {{customer_first_name}}, your vehicle is all done! Thank you for choosing {{shop_name}}.',
      true, null),
     ('job_completed', 'email', 'Your vehicle is ready - {{shop_name}}',
-     E'Hi {{customer_first_name}},\n\nGood news: the work on your {{vehicle}} is complete.\n\nServices: {{services}}\n\nThank you for choosing {{shop_name}}. Questions? Call us at {{shop_phone}}.\n\n{{shop_name}}',
+     E'Hi {{customer_first_name}},\n\nGood news: the work on your vehicle is complete.\n\nVehicle: {{vehicle}}\nServices: {{services}}\n\nThank you for choosing {{shop_name}}.\n\nQuestions? Call us at {{shop_phone}}.\n\n{{shop_name}}',
      true, null),
     ('quote_sent', 'sms', null,
      'Hi {{customer_first_name}}, {{shop_name}} sent you a quote. Review and approve it here: {{quote_link}}',
@@ -121,7 +138,7 @@ as $$
      E'Hi {{customer_first_name}},\n\nThank you for your business. Your invoice from {{shop_name}} is ready.\n\nTotal: {{amount}}\nBalance due: {{balance}}\n\nView and pay online: {{invoice_link}}\n\nQuestions? Call us at {{shop_phone}}.\n\n{{shop_name}}',
      true, null),
     ('payment_receipt', 'sms', null,
-     'Thank you, {{customer_first_name}}! {{shop_name}} received your payment of {{amount}}. Remaining balance: {{balance}}.',
+     E'Thank you, {{customer_first_name}}! {{shop_name}} received your payment of {{amount}}.\nRemaining balance: {{balance}}.',
      true, null),
     ('payment_receipt', 'email', 'Payment received - {{shop_name}}',
      E'Hi {{customer_first_name}},\n\nThank you! We received your payment of {{amount}}.\n\nRemaining balance: {{balance}}\n\nView your invoice: {{invoice_link}}\n\n{{shop_name}}',
@@ -133,13 +150,13 @@ as $$
      E'Hi {{customer_first_name}},\n\nThank you for choosing {{shop_name}}. We hope you love the results!\n\nIf you have a moment, we would really appreciate a review: {{review_link}}\n\nThank you,\n{{shop_name}}',
      true, 120),
     ('follow_up', 'sms', null,
-     'Hi {{customer_first_name}}, it has been a while since your last visit to {{shop_name}}. Ready to keep your {{vehicle}} looking its best? Book here: {{booking_page_link}}',
+     'Hi {{customer_first_name}}, it has been a while since your last visit to {{shop_name}}. Ready to keep your vehicle looking its best? Book here: {{booking_page_link}}',
      false, 43200),
     ('follow_up', 'email', 'Time for your next visit? - {{shop_name}}',
-     E'Hi {{customer_first_name}},\n\nIt has been a while since your last visit to {{shop_name}}. Regular care keeps your {{vehicle}} protected and looking its best.\n\nBook your next appointment here: {{booking_page_link}}\n\n{{shop_name}}',
+     E'Hi {{customer_first_name}},\n\nIt has been a while since your last visit to {{shop_name}}. Regular care keeps your vehicle protected and looking its best.\n\nBook your next appointment here: {{booking_page_link}}\n\n{{shop_name}}',
      false, 43200),
     ('membership_welcome', 'sms', null,
-     'Hi {{customer_first_name}}, welcome to your {{shop_name}} membership! We are glad to have you. Questions? Call {{shop_phone}}.',
+     E'Hi {{customer_first_name}}, welcome to your {{shop_name}} membership! We are glad to have you.\nQuestions? Call {{shop_phone}}.',
      true, null),
     ('membership_welcome', 'email', 'Welcome to your membership - {{shop_name}}',
      E'Hi {{customer_first_name}},\n\nWelcome to your {{shop_name}} membership! We are glad to have you.\n\nWhenever you are ready for your next visit, book here: {{booking_page_link}}\n\nQuestions? Call us at {{shop_phone}}.\n\n{{shop_name}}',

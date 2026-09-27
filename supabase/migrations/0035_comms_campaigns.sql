@@ -21,9 +21,28 @@
 -- Consent is re-checked when each message is sent (claim_queued_messages):
 -- an opt-out, a withdrawn opt-in or a cancelled campaign stops messages that
 -- are still queued, including retries of in-flight ones.
--- Compliance footers are appended automatically: SMS bodies that do not
--- mention STOP get "Reply STOP to opt out."; emails get an unsubscribe link
--- unless the body already contains {{unsubscribe_link}}.
+-- Compliance footers are appended automatically: SMS bodies without an
+-- opt-out instruction ("Reply STOP", "Text STOP" …; merely using the word
+-- "stop" does not count) get "Reply STOP to opt out." (comms_sms_with_optout,
+-- 0033); emails get an unsubscribe link unless the body already places
+-- {{unsubscribe_link}} (comms_email_with_unsubscribe, 0033). Each email's
+-- link carries its own random unsubscribe_token (never the message id).
+-- Emails of the promotional follow_up template get the same treatment
+-- (enqueue_customer_template, 0033).
+-- A campaign that was launched is the record of what was sent and keeps its
+-- messages linked (their consent / cancellation checks depend on it): it
+-- can be cancelled but never deleted. Only never-launched campaigns (drafts,
+-- cancelled drafts) can be deleted.
+-- launch_campaign stamps launched_at and the send time with the server
+-- clock for API callers (effective_now). It refuses (55000) while
+-- platform_config has no app_base_url when an email campaign needs its
+-- unsubscribe links or an SMS campaign's wording uses a customer link
+-- ({{booking_page_link}} …): those would go out blank. For the same reason
+-- it refuses (55000) wording that uses a link that is not available to a
+-- campaign (comms_unavailable_links): {{booking_page_link}} while the shop's
+-- online booking is off, {{review_link}} without a review URL, and the
+-- job links ({{booking_link}}, {{quote_link}}, {{invoice_link}}), which a
+-- campaign never has.
 -- ============================================================================
 
 -- Pure validator used by the CHECK constraint and the RPCs.
@@ -116,6 +135,10 @@ begin
     if old.status = 'launched' then
       raise exception 'a launched campaign cannot be deleted; cancel it instead' using errcode = '42501';
     end if;
+    if old.launched_at is not null then
+      raise exception 'a campaign that was launched is kept as the record of what was sent; it cannot be deleted'
+        using errcode = '42501';
+    end if;
     return old;
   end if;
   if tg_op = 'INSERT' then
@@ -161,10 +184,14 @@ create trigger campaigns_20_normalize before insert or update on public.campaign
 create trigger campaigns_90_set_updated_at before update on public.campaigns
   for each row execute function public.set_updated_at();
 
--- messages.campaign_id (declared in 0033) gets its composite FK.
+-- messages.campaign_id (declared in 0033) gets its composite FK. NO ACTION:
+-- a campaign with messages cannot be deleted (unlinking them would turn a
+-- cancelled campaign's in-flight message, or one to a customer who withdrew
+-- marketing consent, into an ordinary message that a retry re-sends);
+-- deleting the whole shop still works (both sides go in one statement).
 alter table public.messages
   add constraint messages_campaign_fk foreign key (shop_id, campaign_id)
-    references public.campaigns (shop_id, id) on delete set null (campaign_id);
+    references public.campaigns (shop_id, id);
 
 -- ---------------------------------------------------------------------------
 -- campaign_recipients — materialized once at launch.
@@ -298,6 +325,8 @@ $$;
 -- launch_campaign (manager+). Materializes recipients and queues one message
 -- each, exactly once: the campaign row is locked and must still be a draft.
 -- Messages are sent at scheduled_at (or now when unset / in the past).
+-- "now" is the server clock for API callers; p_now is honoured only for
+-- trusted callers (tests, direct sessions) per effective_now.
 -- ---------------------------------------------------------------------------
 create function public.launch_campaign(p_campaign_id uuid, p_now timestamptz default now())
 returns public.campaigns
@@ -305,7 +334,7 @@ language plpgsql security definer
 set search_path = ''
 as $$
 declare
-  v_now      timestamptz := coalesce(p_now, now());
+  v_now      timestamptz := public.effective_now(p_now);
   v_c        public.campaigns;
   v_shop     public.shops;
   v_body     text;
@@ -313,10 +342,11 @@ declare
   v_r        record;
   v_vars     jsonb;
   v_msg_id   uuid;
+  v_token    uuid;
+  v_unsub    text;
   v_text     text;
+  v_missing  text[];
   v_count    integer := 0;
-  c_sms_footer   constant text := E'\nReply STOP to opt out.';
-  c_email_footer constant text := E'\n\nTo unsubscribe from these emails, visit: {{unsubscribe_link}}';
 begin
   select * into v_c from public.campaigns c where c.id = p_campaign_id for update;
   if not found or not public.is_shop_member(v_c.shop_id) then
@@ -335,6 +365,10 @@ begin
     if v_shop.sms_from_number is null then
       raise exception 'text messaging is not set up for this shop' using errcode = '55000';
     end if;
+    if public.comms_uses_app_links(v_body) and public.app_url('/') is null then
+      raise exception 'customer links are not set up on this platform yet, so this campaign cannot be sent'
+        using errcode = '55000', hint = 'The platform operator must set app_base_url (supabase/setup/cron.sql).';
+    end if;
   else
     if v_c.subject is null then
       raise exception 'an email campaign needs a subject' using errcode = '22023';
@@ -342,9 +376,18 @@ begin
     if public.app_url('/') is null then
       raise exception 'email campaigns need the app URL configured for unsubscribe links' using errcode = '55000';
     end if;
-    if v_body !~ '\{\{[ \t]*unsubscribe_link[ \t]*\}\}' then
-      v_body := v_body || c_email_footer;
-    end if;
+  end if;
+  -- every link the wording uses must be available (the shop-level links are
+  -- the same for every recipient)
+  v_missing := public.comms_unavailable_links(
+                 v_body || case when v_c.channel = 'email' then E'\n' || coalesce(v_c.subject, '') else '' end,
+                 public.comms_customer_vars(v_c.shop_id, null));
+  if cardinality(v_missing) > 0 then
+    raise exception 'this campaign uses a link that is not available: %',
+      (select string_agg('{{' || x || '}}', ', ' order by x) from unnest(v_missing) x)
+      using errcode = '55000',
+            hint = '{{booking_page_link}} needs online booking turned on, {{review_link}} needs the shop''s review link, '
+                   'and job links ({{booking_link}}, {{quote_link}}, {{invoice_link}}) cannot be used in campaigns.';
   end if;
   v_send := greatest(coalesce(v_c.scheduled_at, v_now), v_now);
 
@@ -354,26 +397,25 @@ begin
      order by a.to_address
   loop
     v_msg_id := gen_random_uuid();
+    v_token := case when v_c.channel = 'email' then gen_random_uuid() end;
+    v_unsub := case when v_token is not null then public.app_url('/u/' || v_token::text) end;
     v_vars := public.comms_customer_vars(v_c.shop_id, v_r.customer_id)
-              || jsonb_build_object('unsubscribe_link', public.app_url('/u/' || v_msg_id::text));
-    v_text := btrim(public.render_template(v_body, v_vars), E' \t\r\n');
+              || case when v_unsub is not null then jsonb_build_object('unsubscribe_link', v_unsub)
+                      else '{}'::jsonb end;
+    v_text := nullif(btrim(public.render_template(v_body, v_vars), E' \t\r\n'), '');
+    continue when v_text is null;
     if v_c.channel = 'sms' then
-      if v_text !~* '\mstop\M' then
-        v_text := left(v_text, 1600 - char_length(c_sms_footer)) || c_sms_footer;
-      else
-        v_text := left(v_text, 1600);
-      end if;
+      v_text := public.comms_sms_with_optout(v_text);
     else
-      v_text := left(v_text, 50000);
+      v_text := public.comms_email_with_unsubscribe(v_text, v_unsub);
     end if;
-    continue when btrim(v_text) = '';
 
     insert into public.messages (id, shop_id, customer_id, campaign_id, direction, channel, to_address,
-                                 subject, body, status, send_after, sent_by)
+                                 subject, body, status, send_after, sent_by, unsubscribe_token)
     values (v_msg_id, v_c.shop_id, v_r.customer_id, v_c.id, 'outbound', v_c.channel, v_r.to_address,
             case when v_c.channel = 'email'
                  then coalesce(left(nullif(btrim(public.render_template(v_c.subject, v_vars)), ''), 500), v_shop.name) end,
-            v_text, 'queued', v_send, auth.uid());
+            v_text, 'queued', v_send, auth.uid(), v_token);
     insert into public.campaign_recipients (shop_id, campaign_id, customer_id, message_id, to_address)
     values (v_c.shop_id, v_c.id, v_r.customer_id, v_msg_id, v_r.to_address);
     v_count := v_count + 1;
@@ -426,27 +468,37 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- public_unsubscribe (anyone holding an email's unsubscribe link: /u/<token>,
--- token = that email message's id). Records the email opt-out of the
--- ADDRESS the email went to (comms_suppress: every customer of the shop
--- with it, queued email to it withdrawn) and of the message's customer.
--- Returns true when the link was valid.
+-- token = that marketing email's messages.unsubscribe_token — random, set
+-- only on campaign emails and marketing template emails, and never the
+-- message id, which staff RPCs such as enqueue_template_message return to
+-- technicians). The token is resolved through comms_unsubscribe_tokens
+-- (0033), which outlives the message, so the link keeps working after its
+-- customer (and the message with them) was deleted. Records the email
+-- opt-out of the ADDRESS the email went to (comms_suppress: every customer
+-- of the shop with it, now or later, and queued email to it withdrawn) and,
+-- while the message exists, of its customer. Returns true when the link was
+-- valid.
 -- ---------------------------------------------------------------------------
 create function public.public_unsubscribe(p_token uuid) returns boolean
 language plpgsql security definer
 set search_path = ''
 as $$
 declare
-  v_msg public.messages;
+  v_tok public.comms_unsubscribe_tokens;
 begin
-  select * into v_msg from public.messages m
-   where m.id = p_token and m.direction = 'outbound' and m.channel = 'email' and m.customer_id is not null;
+  if p_token is null then
+    return false;
+  end if;
+  select * into v_tok from public.comms_unsubscribe_tokens t where t.token = p_token;
   if not found then
     return false;
   end if;
-  perform public.comms_suppress(v_msg.shop_id, 'email', v_msg.to_address, now());
+  perform public.comms_suppress(v_tok.shop_id, 'email', v_tok.address, now());
   update public.customers c
      set email_opted_out_at = coalesce(c.email_opted_out_at, now()), email_opt_in = false
-   where c.id = v_msg.customer_id and c.shop_id = v_msg.shop_id
+    from public.messages m
+   where m.id = v_tok.message_id and m.shop_id = v_tok.shop_id
+     and c.id = m.customer_id and c.shop_id = m.shop_id
      and (c.email_opted_out_at is null or c.email_opt_in);
   return true;
 end

@@ -79,7 +79,7 @@ select tests.throws_like($$select public.create_membership(tests.fx('plan_a'), t
                          'archived plans take no new members');
 update public.membership_plans set archived_at = null where id = tests.fx('plan_a');
 
--- staff edits: vehicle only; incomplete -> cancelled only
+-- staff edits: vehicle only; status is billing's (membership_cancel)
 select tests.throws_like($$update public.memberships set vehicle_id = tests.fx('veh_a2') where id = tests.fx('mem_a')$$, '23514',
                          '%does not belong%', 'membership vehicle must belong to the customer');
 select tests.throws_like($$update public.memberships set status = 'active' where id = tests.fx('mem_a')$$, '42501', '%billing%',
@@ -88,14 +88,42 @@ select tests.throws($$update public.memberships set stripe_subscription_id = 'su
                     'staff cannot set Stripe fields');
 select tests.throws($$update public.memberships set current_period_end = now() where id = tests.fx('mem_a')$$, '42501',
                     'staff cannot set billing periods');
-select tests.lives($$update public.memberships set status = 'cancelled', cancelled_at = '2020-01-01Z' where id = tests.fx('mem_a_novehicle')$$,
-                   'staff abandon an incomplete membership');
+-- An incomplete membership may have a payable subscription-mode Checkout link
+-- (membership_checkout) the database does not know about: only
+-- membership_cancel, which expires those links first, abandons it.
+select tests.throws_like($$update public.memberships set status = 'cancelled', cancelled_at = '2020-01-01Z' where id = tests.fx('mem_a_novehicle')$$,
+                         '42501', '%membership_cancel%',
+                         'staff cannot cancel an incomplete membership behind membership_cancel''s back');
+select tests.throws($$delete from public.memberships where id = tests.fx('mem_a_novehicle')$$, '42501',
+                    'staff cannot delete an incomplete membership (its checkout link would stay payable)');
+select tests.eq((select status::text from public.memberships where id = tests.fx('mem_a_novehicle')), 'incomplete',
+                'the membership is untouched');
+select tests.authenticate_as(tests.fx('u_owner_a'));
+select tests.throws($$delete from public.memberships where id = tests.fx('mem_a_novehicle')$$, '42501', 'nor can the owner');
+select tests.throws($$update public.memberships set status = 'cancelled' where id = tests.fx('mem_a_novehicle')$$, '42501',
+                    'nor cancel it directly');
+-- membership_cancel (payments edge function, service_role) abandons it once its links are expired
+select tests.as_service();
+select tests.eq(tests.row_count($$update public.memberships set status = 'cancelled'
+                                  where id = tests.fx('mem_a_novehicle') and status = 'incomplete' and stripe_subscription_id is null$$),
+                1::bigint, 'membership_cancel abandons the incomplete membership');
 select tests.eq((select cancelled_at from public.memberships where id = tests.fx('mem_a_novehicle')), now(), 'cancelled_at is server-stamped');
-select tests.lives($$select public.create_membership(tests.fx('plan_a'), tests.fx('cust_a'))$$, 'a cancelled membership frees the slot');
-select tests.eq(tests.row_count($$delete from public.memberships where id = tests.fx('mem_a_novehicle')$$), 0::bigint,
-                'cancelled memberships are history (not deletable)');
-select tests.eq(tests.row_count($$delete from public.memberships where customer_id = tests.fx('cust_a') and vehicle_id is null and status = 'incomplete'$$),
-                1::bigint, 'never-billed incomplete memberships can be deleted');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.lives($$select tests.fx_set('mem_a_again', (public.create_membership(tests.fx('plan_a'), tests.fx('cust_a'))).id)$$,
+                   'a cancelled membership frees the slot');
+select tests.throws($$delete from public.memberships where id = tests.fx('mem_a_novehicle')$$, '42501',
+                    'cancelled memberships are history (not deletable)');
+select tests.throws($$delete from public.memberships where id = tests.fx('mem_a_again')$$, '42501',
+                    'never-billed incomplete memberships are not deletable either');
+select tests.throws($$update public.memberships set status = 'cancelled' where id = tests.fx('mem_a_again')$$, '42501',
+                    'nor cancellable directly');
+select tests.authenticate_as(tests.fx('u_tech_a'));
+select tests.throws($$delete from public.memberships where id = tests.fx('mem_a_again')$$, '42501', 'technicians cannot delete memberships');
+select tests.authenticate_as(tests.fx('u_manager_b'));
+select tests.throws($$delete from public.memberships where id = tests.fx('mem_a_again')$$, '42501', 'another shop''s manager cannot delete them');
+select tests.eq(tests.row_count($$update public.memberships set status = 'cancelled' where id = tests.fx('mem_a_again')$$), 0::bigint,
+                'nor cancel them (RLS: not visible)');
+select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.throws($$delete from public.membership_plans where id = tests.fx('plan_a')$$, '23503', 'plans with memberships cannot be deleted');
 
 -- ------------------------------------------------------------ sync_stripe_subscription (service_role)
@@ -152,7 +180,7 @@ select tests.authenticate_as(tests.fx('u_manager_b'));
 select tests.eq(tests.row_count($$select * from public.memberships where shop_id = tests.fx('shop_a')$$), 0::bigint, 'B cannot read A''s memberships');
 select tests.eq(tests.row_count($$update public.memberships set vehicle_id = null where shop_id = tests.fx('shop_a')$$), 0::bigint, 'nor edit them');
 select tests.authenticate_as(tests.fx('u_admin_a'));
-select tests.eq(tests.row_count($$select * from public.memberships where shop_id = tests.fx('shop_a')$$), 3::bigint, 'admin reads memberships');
+select tests.eq(tests.row_count($$select * from public.memberships where shop_id = tests.fx('shop_a')$$), 4::bigint, 'admin reads memberships');
 
 -- ------------------------------------------------------------ customer_payment_methods (saved cards)
 select tests.authenticate_as(tests.fx('u_manager_a'));

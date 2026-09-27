@@ -23,7 +23,8 @@
  * up in the account (IncomingPhoneNumbers) and require that its SmsUrl points
  * at this function with this message's shop_id; inbound webhooks carry the
  * same shop_id inside the signed URL and are only routed when it matches the
- * shop whose sms_from_number is the `To` number.
+ * shop the `To` number is bound to in shop_sms_numbers (whether or not that
+ * shop currently sends from it).
  *
  * `#rc=3&rp=all` are Twilio connection overrides: Twilio only retries a
  * webhook on connect timeout by default, not on a 5xx, so without them a

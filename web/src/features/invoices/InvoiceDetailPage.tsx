@@ -37,6 +37,7 @@ import {
   useDeleteInvoice,
   useInvoice,
   useInvoiceLineMutations,
+  useInvoiceLinkToken,
   useInvoiceLines,
   useInvoicePayments,
   useMarkInvoiceSent,
@@ -102,7 +103,9 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
 
   const today = shopToday(timezone);
   const label = `Invoice #${invoice.number}`;
-  const link = publicDocUrl('invoice', invoice.public_token);
+  // the pay link is the customer's credential: managers+ only
+  const linkToken = useInvoiceLinkToken(invoice.id, canManage);
+  const link = linkToken.data ? publicDocUrl('invoice', linkToken.data) : null;
   const isVoid = invoice.status === 'void';
   const payable =
     (invoice.status === 'open' || invoice.status === 'partially_paid') && invoice.balance_cents > 0;
@@ -137,6 +140,7 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   };
 
   const copyLink = async () => {
+    if (!link) return;
     if (await copyText(link)) toast.success('Pay link copied');
     else toast.error('Couldn’t copy the link', link);
   };
@@ -226,7 +230,7 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
                 {invoice.status === 'draft' ? 'Send invoice' : 'Resend'}
               </Button>
             )}
-            {!isVoid && invoice.status !== 'draft' && (
+            {link && !isVoid && invoice.status !== 'draft' && (
               <Button
                 variant="secondary"
                 leadingIcon={<Copy className="size-4" aria-hidden="true" />}
@@ -336,7 +340,7 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
         </div>
       </div>
 
-      {customer.data && canManage && (
+      {customer.data && canManage && link && (
         <SendDocumentDialog
           open={pending === 'send'}
           onClose={() => setPending(null)}

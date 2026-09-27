@@ -123,20 +123,55 @@ Deno.test("process_queue: emails via Resend as the shop, reply-to shop, message-
 });
 
 Deno.test("process_queue: campaign emails carry RFC 8058 one-click List-Unsubscribe", async () => {
+  const token = "80000000-0000-4000-8000-000000000001";
   const msg = queuedMessage({
     channel: "email",
     to_address: "dana@example.com",
     subject: "Fall special",
     campaign_id: "60000000-0000-4000-8000-000000000001",
+    unsubscribe_token: token,
   });
   const { db, handler } = setup({ messages: [msg] });
   await (await handler(cron())).body?.cancel();
   const body = db.http.callsTo("POST", RESEND_URL)[0]?.json as Record<string, unknown>;
+  // The credential is the unsubscribe token, never the message id.
   assertEquals(body.headers, {
     "List-Unsubscribe":
-      `<https://fake-project.supabase.co/functions/v1/messaging?action=unsubscribe&token=${msg.id}>`,
+      `<https://fake-project.supabase.co/functions/v1/messaging?action=unsubscribe&token=${token}>`,
     "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
   });
+});
+
+Deno.test("process_queue: marketing follow_up emails get List-Unsubscribe; transactional mail none", async () => {
+  // Regression: headers were added only when campaign_id was set, so a
+  // promotional follow_up email went out with no way to unsubscribe.
+  const token = "80000000-0000-4000-8000-000000000002";
+  const followUp = queuedMessage({
+    channel: "email",
+    to_address: "dana@example.com",
+    subject: "Time for your next visit?",
+    template_key: "follow_up",
+    unsubscribe_token: token,
+    send_after: "2026-09-27T14:00:00.000Z",
+  });
+  const receipt = queuedMessage({
+    channel: "email",
+    to_address: "dana@example.com",
+    subject: "Payment received",
+    template_key: "payment_receipt",
+    send_after: "2026-09-27T14:01:00.000Z",
+  });
+  const { db, handler } = setup({ messages: [followUp, receipt] });
+  await (await handler(cron())).body?.cancel();
+  const calls = db.http.callsTo("POST", RESEND_URL).map((c) => c.json as Record<string, unknown>);
+  const bySubject = new Map(calls.map((c) => [String(c.subject), c.headers]));
+  assertEquals(bySubject.get("Time for your next visit?"), {
+    "List-Unsubscribe":
+      `<https://fake-project.supabase.co/functions/v1/messaging?action=unsubscribe&token=${token}>`,
+    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+  });
+  assert(bySubject.has("Payment received"));
+  assertEquals(bySubject.get("Payment received"), undefined); // no headers at all
 });
 
 Deno.test("process_queue: partial failures are isolated per message", async () => {

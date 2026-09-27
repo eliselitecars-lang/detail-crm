@@ -3,6 +3,9 @@
 -- enqueue_template_message / enqueue_customer_template / preview, the
 -- messages table's role rules and cross-shop isolation.
 \ir fixtures/two_shops.psql
+-- shop A takes online bookings, so {{booking_page_link}} links to a live page
+-- (it is blank while online booking is off: 30_link_availability.sql)
+update public.booking_settings set enabled = true where shop_id = tests.fx('shop_a');
 
 -- ------------------------------------------------------------ formatting
 select tests.eq(public.format_money(0, 'usd'), '$0.00', 'zero');
@@ -35,6 +38,8 @@ select tests.throws($$select public.app_url('/x')$$, '42501', 'app_url is intern
 select tests.as_superuser();
 
 -- shop A setup
+-- the platform binds each shop's Twilio number (supabase/setup/twilio.md)
+insert into public.shop_sms_numbers (phone_number, shop_id) values ('+12055550100', tests.fx('shop_a'));
 update public.shops set sms_from_number = '+12055550100', phone = '+12055550199', review_url = 'https://reviews.example.test/shop-a'
  where id = tests.fx('shop_a');
 
@@ -316,7 +321,7 @@ select tests.ok(public.enqueue_template_message(tests.fx('job_a'), 'review_reque
 select tests.fx_set('msg_rcpt', public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'payment_receipt', 'sms',
                                                                  tests.fx('job_a'), '{"amount": "$25.00"}'));
 select tests.eq((select body from public.messages where id = tests.fx('msg_rcpt')),
-                'Thank you, Alice! Shop A received your payment of $25.00. Remaining balance: '
+                E'Thank you, Alice! Shop A received your payment of $25.00.\nRemaining balance: '
                   || (public.comms_job_vars(tests.fx('job_a')) ->> 'balance') || '.',
                 'extra vars override job vars');
 select tests.ok((select sent_by is null from public.messages where id = tests.fx('msg_rcpt')), 'no staff sender for automated sends');

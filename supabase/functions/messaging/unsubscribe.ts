@@ -1,10 +1,12 @@
 /**
- * `unsubscribe` — RFC 8058 one-click unsubscribe for campaign emails
- * (PUBLIC; the unguessable message id in `token` is the credential, exactly
- * like the /u/<message id> page, which calls the same public_unsubscribe).
+ * `unsubscribe` — RFC 8058 one-click unsubscribe for marketing emails
+ * (campaigns and follow_up; PUBLIC). The credential in `token` is the
+ * email's random messages.unsubscribe_token — never its message id, which
+ * staff RPCs return to their callers — exactly like the /u/<token> page,
+ * which calls the same public_unsubscribe.
  *
- * Campaign emails carry
- *   List-Unsubscribe: <…/functions/v1/messaging?action=unsubscribe&token=<message id>>
+ * Marketing emails carry
+ *   List-Unsubscribe: <…/functions/v1/messaging?action=unsubscribe&token=<unsubscribe token>>
  *   List-Unsubscribe-Post: List-Unsubscribe=One-Click
  *
  *   POST  (mailbox provider, body "List-Unsubscribe=One-Click")
@@ -59,6 +61,7 @@ export async function unsubscribe(svc: Services, req: Request): Promise<Response
   const { data, error } = await svc.admin.rpc("public_unsubscribe", { p_token: token });
   if (error) throw new DbError("public_unsubscribe", error);
   if (data !== true) throw errors.notFound("This unsubscribe link is not valid.");
-  svc.log.info("email_unsubscribed", { message_id: token, source: "one_click" });
+  // the token is a credential: never logged
+  svc.log.info("email_unsubscribed", { source: "one_click" });
   return { unsubscribed: true };
 }

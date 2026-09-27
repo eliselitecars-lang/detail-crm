@@ -34,10 +34,12 @@ create type public.notification_kind as enum (
 
 -- ---------------------------------------------------------------------------
 -- platform_config — deploy-wide settings (not per shop). Written by
--- service_role (setup scripts / dashboard); never readable by API clients.
+-- service_role / postgres (setup scripts); never readable by API clients.
 -- Known keys:
 --   app_base_url  public web origin used for customer links, e.g.
---                 https://app.example.com (no trailing slash needed)
+--                 https://app.example.com (no trailing slash needed).
+--                 REQUIRED: supabase/setup/cron.sql writes it through
+--                 set_app_base_url; it must equal the APP_BASE_URL secret.
 -- ---------------------------------------------------------------------------
 create table public.platform_config (
   key         text primary key check (key ~ '^[a-z][a-z0-9_]{0,62}$'),
@@ -70,6 +72,42 @@ as $$
   select case when b.base is null or p_path is null then null
               else b.base || p_path end
   from (select nullif(rtrim(public.platform_setting('app_base_url'), '/'), '') as base) b
+$$;
+
+-- Stores app_base_url (service_role / postgres). Part of the documented,
+-- idempotent deploy setup (supabase/setup/cron.sql calls it with the same
+-- origin as the APP_BASE_URL function secret). Without it no customer link
+-- can be built, so link-bearing templates are not queued (0033), due
+-- automations refuse to run (0034) and campaigns with links cannot launch
+-- (0035). Trailing slashes are dropped; returns the stored value.
+create function public.set_app_base_url(p_url text) returns text
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_url text := rtrim(btrim(coalesce(p_url, '')), '/');
+begin
+  if v_url !~ '^https?://[^[:space:]/?#]+(/[^[:space:]?#]*)?$' then
+    raise exception 'app_base_url must be the web app origin, e.g. https://app.example.com (got "%")', p_url
+      using errcode = '22023';
+  end if;
+  insert into public.platform_config (key, value) values ('app_base_url', v_url)
+  on conflict (key) do update set value = excluded.value
+    where public.platform_config.value is distinct from excluded.value;
+  return v_url;
+end
+$$;
+
+-- True when a template text uses a placeholder whose value is an app link
+-- (built with app_url: booking / booking page / quote / invoice /
+-- unsubscribe links). Such a message is never queued while app_base_url is
+-- unset: it would go out with a blank link.
+create function public.comms_uses_app_links(p_text text) returns boolean
+language sql immutable
+set search_path = ''
+as $$
+  select coalesce(p_text ~ '\{\{[ \t]*(booking_link|booking_page_link|quote_link|invoice_link|unsubscribe_link)[ \t]*\}\}',
+                  false)
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -127,5 +165,10 @@ $$;
 revoke execute on function public.platform_setting(text), public.app_url(text) from public, anon, authenticated;
 grant execute on function public.platform_setting(text), public.app_url(text) to service_role;
 
-revoke execute on function public.format_money(bigint, text), public.format_phone(text) from public, anon;
-grant execute on function public.format_money(bigint, text), public.format_phone(text) to authenticated, service_role;
+revoke execute on function public.set_app_base_url(text) from public, anon, authenticated;
+grant execute on function public.set_app_base_url(text) to service_role;
+
+revoke execute on function public.format_money(bigint, text), public.format_phone(text),
+                           public.comms_uses_app_links(text) from public, anon;
+grant execute on function public.format_money(bigint, text), public.format_phone(text),
+                          public.comms_uses_app_links(text) to authenticated, service_role;

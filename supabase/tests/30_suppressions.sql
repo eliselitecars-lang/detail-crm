@@ -7,6 +7,9 @@
 \ir fixtures/two_shops.psql
 
 insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+-- the platform binds each shop's Twilio number (supabase/setup/twilio.md)
+insert into public.shop_sms_numbers (phone_number, shop_id)
+  values ('+12055550100', tests.fx('shop_a')), ('+13125550199', tests.fx('shop_b'));
 update public.shops set sms_from_number = '+12055550100' where id = tests.fx('shop_a');
 update public.shops set sms_from_number = '+13125550199' where id = tests.fx('shop_b');
 update public.customers set email_opt_in = true where id = tests.fx('cust_a');
@@ -31,8 +34,9 @@ select tests.fx_set('msg1', (select id from public.messages where campaign_id = 
 select tests.eq((select customer_id from public.messages where id = tests.fx('msg1')), tests.fx('c_new'),
                 'the most recently created customer of the address is the recipient');
 
+select tests.fx_set('msg1_token', (select unsubscribe_token from public.messages where id = tests.fx('msg1')));
 select tests.as_anon();
-select tests.ok(public.public_unsubscribe(tests.fx('msg1')), 'unsubscribe link accepted');
+select tests.ok(public.public_unsubscribe(tests.fx('msg1_token')), 'unsubscribe link accepted');
 select tests.as_superuser();
 select tests.ok((select bool_and(email_opted_out_at = now() and not email_opt_in) and count(*) = 2
                    from public.customers where id in (tests.fx('c_old'), tests.fx('c_new'))),

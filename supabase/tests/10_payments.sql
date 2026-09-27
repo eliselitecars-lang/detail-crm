@@ -197,12 +197,27 @@ select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi
 select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_f', 'pending', 1500, p_job_id => tests.fx('job_a2'))$$);
 select tests.eq(pg_temp.pay('pi_f'), 'pending/1500/0/0', 'amount follows the latest pending state');
 select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_f', 'failed', 1500, p_job_id => tests.fx('job_a2'))$$);
-select tests.eq(pg_temp.pay('pi_f'), 'failed/1500/0/0', 'failed');
+select tests.eq(pg_temp.pay('pi_f'), 'pending/1500/0/0',
+                'a declined PaymentSheet attempt (no card on record yet) stays open: the sheet can confirm it again');
 select tests.eq((select sum(public.payment_net_amount(status, amount_cents, tip_cents, refunded_cents)) from public.payments
-                  where job_id = tests.fx('job_a2')), 0::numeric, 'failed payments count nothing');
+                  where job_id = tests.fx('job_a2')), 0::numeric, 'declined payments count nothing');
 select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_f', 'succeeded', 1500, p_job_id => tests.fx('job_a2'),
                      p_paid_at => '2025-06-03 10:00Z')$$, 'retry succeeds on the same intent');
-select tests.eq(pg_temp.pay('pi_f'), 'succeeded/1500/0/0', 'failed -> succeeded');
+select tests.eq(pg_temp.pay('pi_f'), 'succeeded/1500/0/0', 'declined -> succeeded');
+-- attempts that cannot be confirmed again are recorded failed as reported
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_fs', 'pending', 800, p_customer_id => tests.fx('cust_a3'),
+                     p_card_brand => 'visa', p_card_last4 => '4242')$$);
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_fs', 'failed', 800, p_customer_id => tests.fx('cust_a3'))$$);
+select tests.eq(pg_temp.pay('pi_fs'), 'failed/800/0/0', 'a saved-card charge (card recorded up front) fails');
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_fc', 'pending', 800, p_customer_id => tests.fx('cust_a3'),
+                     p_checkout_session_id => 'cs_test_fc')$$);
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_fc', 'failed', 800, p_customer_id => tests.fx('cust_a3'))$$);
+select tests.eq(pg_temp.pay('pi_fc'), 'failed/800/0/0', 'a Checkout Session payment fails');
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_fd', 'failed', 800, p_customer_id => tests.fx('cust_a3'))$$);
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_fd', 'failed', 800, p_customer_id => tests.fx('cust_a3'))$$);
+select tests.eq(pg_temp.pay('pi_fd'), 'failed/800/0/0', 'a decline recorded without an open attempt stays failed (replays too)');
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_fs', 'pending', 800, p_customer_id => tests.fx('cust_a3'))$$);
+select tests.eq(pg_temp.pay('pi_fs'), 'failed/800/0/0', 'a late pending report does not reopen a recorded decline');
 select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_f', 'succeeded', 9999, 50, p_job_id => tests.fx('job_a2'))$$);
 select tests.eq(pg_temp.pay('pi_f'), 'succeeded/1500/0/0', 'amounts are frozen once received');
 select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_cx', 'pending', 700, p_job_id => tests.fx('job_a2'))$$);

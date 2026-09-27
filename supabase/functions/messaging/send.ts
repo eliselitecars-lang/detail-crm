@@ -451,7 +451,12 @@ async function checkTemplateVariables(
   );
 
   if (!input.job_id) {
-    const jobOnly = names.filter((name) => !CUSTOMER_TEMPLATE_VARS.has(name));
+    // A marketing email gets its own {{unsubscribe_link}} from the database
+    // (enqueue_customer_template, 0033), with or without a job.
+    const marketingEmail = channel === "email" && MARKETING_TEMPLATE_KEYS.includes(templateKey);
+    const jobOnly = names.filter((name) =>
+      !CUSTOMER_TEMPLATE_VARS.has(name) && !(marketingEmail && name === "unsubscribe_link")
+    );
     if (jobOnly.length > 0) {
       throw refusal("job_required", channel, undefined, { details: { variables: jobOnly } });
     }
@@ -504,15 +509,26 @@ interface RecentMessage {
   template_key: string | null;
   subject: string | null;
   body: string;
+  /** Marketing email: its random unsubscribe token (appears in the body's link). */
+  unsubscribe_token: string | null;
   status: MessageStatus;
   error: string | null;
   created_at: string;
 }
 
 /**
+ * The body as sent, minus the email's own unsubscribe token: two sends of the
+ * same marketing email differ only in that per-email link.
+ */
+function comparableBody(m: RecentMessage): string {
+  return m.unsubscribe_token ? m.body.replaceAll(m.unsubscribe_token, "") : m.body;
+}
+
+/**
  * Called right after this request queued `messageId` and before anything is
  * sent. If the same caller queued an identical message (same customer,
- * channel, job, template, subject and body, as stored by the database) that
+ * channel, job, template, subject and body, as stored by the database, a
+ * marketing email's per-email unsubscribe token aside) that
  * is still live and was created at most DUPLICATE_WINDOW_MS before this one,
  * the EARLIEST such message is the one to keep: this request's row is
  * withdrawn (deleted while still 'queued'; it never reached a provider) and
@@ -531,7 +547,9 @@ async function earlierDuplicate(
 ): Promise<RecentMessage | null> {
   const since = new Date(svc.now().getTime() - DUPLICATE_WINDOW_MS - DUPLICATE_CLOCK_SKEW_MS);
   const { data, error } = await svc.admin.from("messages")
-    .select("id, job_id, campaign_id, template_key, subject, body, status, error, created_at")
+    .select(
+      "id, job_id, campaign_id, template_key, subject, body, unsubscribe_token, status, error, created_at",
+    )
     .eq("shop_id", shopId).eq("customer_id", customerId).eq("channel", channel)
     .eq("direction", "outbound").eq("sent_by", callerId)
     .gte("created_at", since.toISOString())
@@ -552,7 +570,7 @@ async function earlierDuplicate(
     m.id === ours.id || (
       m.campaign_id === null && LIVE_STATUSES.has(m.status) &&
       m.job_id === ours.job_id && m.template_key === ours.template_key &&
-      m.subject === ours.subject && m.body === ours.body &&
+      m.subject === ours.subject && comparableBody(m) === comparableBody(ours) &&
       oursAt - Date.parse(m.created_at) <= DUPLICATE_WINDOW_MS
     )
   );

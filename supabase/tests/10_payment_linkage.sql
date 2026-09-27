@@ -108,8 +108,9 @@ select tests.authenticate_as(tests.fx('u_manager_b'));
 select tests.eq(tests.row_count($$select 1 from public.payments where stripe_payment_intent_id = 'pi_late3'$$), 0::bigint,
                 'shop B cannot');
 
--- a job invoice whose job has since moved to another customer: the money is
--- the invoice customer's, not the new customer's
+-- a job whose (void) invoice was issued to its customer keeps that customer
+-- (jobs_customer_records_guard, 0023), so late money for that void invoice
+-- stays with the job and the customer who paid
 select tests.as_superuser();
 insert into public.customers (shop_id, first_name) values (tests.fx('shop_a'), 'Dana') returning tests.fx_set('cust_d', id);
 insert into public.jobs (shop_id, customer_id, status) values (tests.fx('shop_a'), tests.fx('cust_a'), 'requested')
@@ -118,13 +119,14 @@ insert into public.job_line_items (shop_id, job_id, name, unit_price_cents) valu
 select tests.authenticate_as(tests.fx('u_owner_a'));
 select tests.fx_set('inv_m', (select id from public.create_invoice_from_job(tests.fx('job_m'))));
 select public.void_invoice(tests.fx('inv_m'));
-update public.jobs set customer_id = tests.fx('cust_d') where id = tests.fx('job_m');
+select tests.throws($$update public.jobs set customer_id = tests.fx('cust_d') where id = tests.fx('job_m')$$, '23514',
+                    'a job with a void invoice keeps its customer');
 select tests.as_service();
 select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_late4', 'succeeded', 3000, 0, 'payment', 'card',
          p_invoice_id => tests.fx('inv_m'), p_job_id => tests.fx('job_m'), p_paid_at => '2025-06-01 12:00Z');
 select tests.as_superuser();
-select tests.eq(pg_temp.link('pi_late4'), concat_ws('/', 'succeeded', '-', '-', tests.fx('cust_a')),
-                'kept with the customer who paid, off the reassigned job');
+select tests.eq(pg_temp.link('pi_late4'), concat_ws('/', 'succeeded', '-', tests.fx('job_m'), tests.fx('cust_a')),
+                'kept on the job, with the customer who paid');
 
 -- ============================================================ manual payments vs. card payments in flight
 select tests.authenticate_as(tests.fx('u_manager_a'));
@@ -166,8 +168,13 @@ select tests.lives($$select public.record_manual_payment(tests.fx('inv6'), 10000
 select tests.as_service();
 select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_tipped', 'failed', 10000, 3000, 'payment', 'card');
 select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.throws($$select public.record_manual_payment(tests.fx('inv6'), 1, 'cash')$$, '22023',
+                    'a declined sheet can still be confirmed with another card: its amount stays reserved');
+select tests.as_service();
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_tipped', 'cancelled', 10000, 3000, 'payment', 'card');
+select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.lives($$select public.record_manual_payment(tests.fx('inv6'), 10000, 'cash')$$,
-                   'once the card attempt failed its amount can be collected another way');
+                   'once the card attempt is cancelled its amount can be collected another way');
 select tests.authenticate_as(tests.fx('u_manager_b'));
 select tests.throws($$select public.record_manual_payment(tests.fx('inv6'), 1, 'cash')$$, 'P0002',
                     'shop B cannot collect on A''s invoice');

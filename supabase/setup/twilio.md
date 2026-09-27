@@ -3,12 +3,17 @@
 All shops send through the platform's single Twilio account
 (`TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` function secrets). A shop's
 `shops.sms_from_number` is typed in by the shop's owner/admin on the SMS
-settings page, so on its own it proves nothing: the `messaging` function only
-**sends from** a number, and only **routes replies and STOP/START** received
-on it, when the platform has bound that number to the shop in Twilio.
+settings page, so on its own it proves nothing. The platform binds a number
+to its shop in two places, both set only by the platform operator:
 
-The binding is the number's inbound webhook URL, which only the platform
-operator can set.
+- **In the database:** `public.shop_sms_numbers` (service role only). A
+  shop can only save a `sms_from_number` bound to it there (anything else is
+  refused with "not provisioned for this shop"), so no tenant can claim
+  another shop's number, even before that shop saves it or while it has it
+  cleared. A number is bound to one shop at most.
+- **In Twilio:** the number's inbound webhook URL. The `messaging` function
+  only **sends from** a number, and only **routes replies and STOP/START**
+  received on it, when that URL names the shop.
 
 ## Each shop is its own A2P brand, campaign and Messaging Service
 
@@ -87,13 +92,22 @@ whose campaign is registered for another brand.
    With the service set to defer, this per-number setting is the one that
    applies (check that it still shows after adding the number to the
    service).
-4. Tell the shop the number; they enter it in Settings -> SMS (E.164, e.g.
+4. Bind the number to the shop in the database (SQL editor, as postgres /
+   service role):
+
+   ```sql
+   insert into public.shop_sms_numbers (phone_number, shop_id)
+   values ('+12055550100', '<SHOP_UUID>');
+   ```
+5. Tell the shop the number; they enter it in Settings -> SMS (E.164, e.g.
    `+12055550100`).
 
 Moving a number to another shop: move it to the new shop's Messaging
 Service (never keep it in the old shop's), change the `shop_id` in its
-webhook URL, then have the old shop clear the number and the new shop enter
-it.
+webhook URL, then re-bind it in the database
+(`delete from public.shop_sms_numbers where phone_number = '+1...'`, which
+also clears it from the old shop, then insert it for the new shop) and have
+the new shop enter it.
 Until both sides agree, sends from it fail with "this shop's text number is
 not provisioned for it on the platform" and inbound texts to it are
 acknowledged but not recorded (logged as `inbound_sms_ignored` /
@@ -123,7 +137,10 @@ again). Staff cannot, by design.
   fails without contacting the recipient. A lookup outage schedules a retry.
 - **Inbound** (`twilio_inbound`): after the X-Twilio-Signature check (over
   the configured URL, with or without the `#...` fragment), the signed
-  `shop_id` must be the shop whose `sms_from_number` is the `To` number.
+  `shop_id` must be the shop the `To` number is bound to in
+  `shop_sms_numbers`. Routing follows that binding, not `sms_from_number`,
+  so replies and STOPs still land while a shop has cleared its sending
+  number (e.g. to pause texting).
 - **Status callbacks** (`twilio_status`): the URL is sent with every message
   as `StatusCallback` (`...messaging?action=twilio_status#rc=3&rp=all`);
   nothing to configure.
@@ -139,14 +156,17 @@ again). Staff cannot, by design.
 
 ## Campaign email unsubscribe
 
-Campaign emails carry `List-Unsubscribe:
-<.../functions/v1/messaging?action=unsubscribe&token=<message id>>` and
+Marketing emails (campaigns and the promotional `follow_up` template) carry
+`List-Unsubscribe:
+<.../functions/v1/messaging?action=unsubscribe&token=<unsubscribe token>>` and
 `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058, required by
-Gmail/Yahoo for bulk senders). A POST to that URL unsubscribes
-(`public_unsubscribe`); a GET never unsubscribes (link scanners follow GETs)
-and redirects to the web app's `/u/<message id>` page. The footer link in
-every campaign email (`{{unsubscribe_link}}`, rendered by `launch_campaign`)
-points at that same page.
+Gmail/Yahoo for bulk senders). The token is the email's random
+`messages.unsubscribe_token` — never its message id. A POST to that URL
+unsubscribes (`public_unsubscribe`); a GET never unsubscribes (link scanners
+follow GETs) and redirects to the web app's `/u/<token>` page. The footer
+link in every marketing email (`{{unsubscribe_link}}`, rendered by
+`launch_campaign` / `enqueue_customer_template`) points at that same page.
+Transactional email has no unsubscribe token.
 
 **The web app must serve `/u/:token`** (public, no sign-in): it shows the
 shop name and a "Unsubscribe" button that calls the `public_unsubscribe`

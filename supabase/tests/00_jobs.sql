@@ -14,8 +14,10 @@ insert into public.jobs (shop_id, customer_id, number, public_token, created_by,
           '2025-06-03 15:00Z', '2025-06-03 16:00Z')
   returning tests.fx_set('job_m', id);
 select tests.eq((select number from public.jobs where id = tests.fx('job_m')), 1003::bigint, 'client-sent number ignored; next number issued');
+select tests.as_superuser();  -- staff cannot read job tokens once 0042 applies (customer credential)
 select tests.ok((select public_token <> '00000000-0000-0000-0000-000000000001' from public.jobs where id = tests.fx('job_m')),
                 'client-sent public_token ignored');
+select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq((select created_by from public.jobs where id = tests.fx('job_m')), tests.fx('u_manager_a'), 'created_by is the caller');
 select tests.eq((select status::text from public.jobs where id = tests.fx('job_m')), 'scheduled', 'staff jobs default to scheduled');
 select tests.throws($$update public.jobs set number = 5000 where id = tests.fx('job_m')$$, '42501', 'numbers are immutable');
@@ -117,7 +119,7 @@ select tests.throws($$insert into public.jobs (shop_id, customer_id, status) val
 select tests.throws($$update public.jobs set shop_id = tests.fx('shop_b') where id = tests.fx('job_a')$$, '42501', 'jobs cannot move shops');
 
 -- ------------------------------------------------------------ manager+ isolation
-select tests.eq(tests.row_count($$select * from public.jobs where shop_id = tests.fx('shop_b')$$), 0::bigint, 'cannot read B''s jobs');
+select tests.eq(tests.row_count($$select id from public.jobs where shop_id = tests.fx('shop_b')$$), 0::bigint, 'cannot read B''s jobs');
 select tests.eq(tests.row_count($$update public.jobs set notes = 'x' where id = tests.fx('job_b')$$), 0::bigint, 'cannot update B''s jobs');
 select tests.eq(tests.row_count($$delete from public.jobs where id = tests.fx('job_b')$$), 0::bigint, 'cannot delete B''s jobs');
 select tests.eq(tests.row_count($$select * from public.job_line_items where shop_id = tests.fx('shop_b')$$), 0::bigint, 'cannot read B''s lines');
@@ -185,7 +187,7 @@ select tests.eq(tests.row_count($$update public.jobs set internal_notes = 'x' wh
                 'tech B cannot update A''s jobs');
 
 select tests.authenticate_as(tests.fx('u_outsider'));
-select tests.eq(tests.row_count('select * from public.jobs'), 0::bigint, 'outsider sees no jobs');
+select tests.eq(tests.row_count('select id from public.jobs'), 0::bigint, 'outsider sees no jobs');
 select tests.eq(tests.row_count('select * from public.job_line_items'), 0::bigint, 'outsider sees no line items');
 select tests.eq(tests.row_count('select * from public.job_assignments'), 0::bigint, 'outsider sees no assignments');
 

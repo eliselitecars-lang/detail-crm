@@ -1,12 +1,17 @@
 -- 30 comms: queued messages follow their context until the sender claims
 -- them. Appointment messages are withdrawn when the job is cancelled,
--- marked no-show or moved to another customer, and re-rendered when it is
--- rescheduled; campaign messages stop when marketing consent is withdrawn
--- or the campaign is cancelled (also for in-flight retries); stale job and
--- campaign messages are never sent after a sender outage.
+-- marked no-show, moved to another customer or deleted, and re-rendered
+-- when it is rescheduled; campaign messages stop when marketing consent is
+-- withdrawn or the campaign is cancelled (also for in-flight retries, and a
+-- launched campaign cannot be deleted to escape that); messages never go to
+-- a customer's previous phone / email; stale job and campaign messages are
+-- never sent after a sender outage.
 \ir fixtures/two_shops.psql
 
 insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+-- the platform binds each shop's Twilio number (supabase/setup/twilio.md)
+insert into public.shop_sms_numbers (phone_number, shop_id)
+  values ('+12055550100', tests.fx('shop_a')), ('+13125550199', tests.fx('shop_b'));
 update public.shops set sms_from_number = '+12055550100' where id = tests.fx('shop_a');
 update public.shops set sms_from_number = '+13125550199' where id = tests.fx('shop_b');
 update public.customers set phone = '+13125550101' where id = tests.fx('cust_b');
@@ -123,6 +128,11 @@ insert into public.messages (shop_id, customer_id, job_id, direction, channel, t
 values
   (tests.fx('shop_a'), tests.fx('cust_a'), tests.fx('job_g'), 'outbound', 'sms', '+12055550101', 'rem grace', 'queued', '2025-07-20 15:00Z', 'appointment_reminder'),
   (tests.fx('shop_a'), tests.fx('cust_a'), tests.fx('job_g'), 'outbound', 'sms', '+12055550101', 'rem late', 'queued', '2025-07-20 15:01Z', 'appointment_reminder');
+-- 'rem grace' is the automation's offset-0 reminder: due at the start itself
+insert into public.job_automation_log (shop_id, job_id, customer_id, key, scheduled_for, due_at, processed_at, outcome,
+                                       message_ids)
+values (tests.fx('shop_a'), tests.fx('job_g'), tests.fx('cust_a'), 'appointment_reminder', '2025-07-20 15:00Z',
+        '2025-07-20 15:00Z', '2025-07-20 15:00Z', 'queued', array[(select id from public.messages where body = 'rem grace')]);
 select tests.as_service();
 select tests.eq((select array_agg(body) from public.claim_queued_messages(1, '2025-07-20 15:10Z')), array['rem grace'],
                 'a reminder at the appointment time goes out within 15 minutes');
@@ -207,3 +217,156 @@ select tests.throws($$select public.enqueue_template_message(tests.fx('job_a'), 
 select tests.as_superuser();
 update public.jobs set status = 'cancelled' where id = tests.fx('job_s');
 select tests.eq((select status::text from public.messages where id = tests.fx('rem_b')), 'queued', 'shop B''s reminder is untouched');
+
+-- ============================================================ cancelled campaign deleted while a message is in flight
+-- Regression: deleting a cancelled campaign set messages.campaign_id to
+-- null, so its in-flight message lost the campaign checks and a provider
+-- retry re-queued it as an ordinary message. Launched campaigns are now kept.
+select tests.as_superuser();
+update public.customers set sms_opt_in = true where id = tests.fx('cust_a');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+insert into public.campaigns (shop_id, name, channel, body) values (tests.fx('shop_a'), 'Promo 2', 'sms', 'Promo this weekend')
+  returning tests.fx_set('camp_y', id);
+select public.launch_campaign(tests.fx('camp_y'));
+select tests.as_service();
+select tests.fx_set('m_y', (select c.id from public.claim_queued_messages(50, now() + interval '1 minute') c
+                             where c.campaign_id = tests.fx('camp_y')));
+select tests.ok(tests.fx('m_y') is not null, 'the campaign message is in flight');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select public.cancel_campaign(tests.fx('camp_y'));
+select tests.throws($$delete from public.campaigns where id = tests.fx('camp_y')$$, '42501',
+                    'the cancelled campaign cannot be deleted while it has messages');
+select tests.eq(tests.row_count($$select 1 from public.campaigns where id = tests.fx('camp_y')$$), 1::bigint, 'it is still there');
+select tests.as_service();
+select tests.ok((select status = 'cancelled' and error = 'the campaign was cancelled' and campaign_id = tests.fx('camp_y')
+                   from public.mark_message_result(tests.fx('m_y'), 'queued', null, 'Twilio 429', null, now() + interval '2 minutes')),
+                'a message of a cancelled campaign must not be re-queued');
+select tests.eq((select count(*) from public.claim_queued_messages(50, now() + interval '1 hour') c where c.id = tests.fx('m_y')),
+                0::bigint, 'a message of a cancelled campaign must not be re-sent on retry');
+
+-- ============================================================ deleted appointment
+-- Regression: deleting a job set its messages' job_id to null, so queued
+-- reminders / confirmations of the deleted appointment were still sent.
+select tests.as_superuser();
+insert into public.jobs (shop_id, customer_id, status, scheduled_start, scheduled_end)
+  values (tests.fx('shop_a'), tests.fx('cust_a'), 'scheduled', '2025-08-05 15:00Z', '2025-08-05 16:00Z')
+  returning tests.fx_set('job_del', id);
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.fx_set('del_rem', public.enqueue_template_message(tests.fx('job_del'), 'appointment_reminder', '2025-08-04 15:00Z'));
+select tests.fx_set('del_conf', public.enqueue_template_message(tests.fx('job_del'), 'booking_confirmed', '2025-08-04 15:00Z', 'email'));
+select tests.fx_set('del_note', (public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'See you soon',
+                                                      tests.fx('job_del'))).id);
+select tests.ok(tests.fx('del_rem') is not null and tests.fx('del_conf') is not null, 'reminder and confirmation queued');
+select tests.as_superuser();
+insert into public.messages (shop_id, customer_id, job_id, direction, channel, to_address, body, status, send_after,
+                             template_key, attempts, claimed_at)
+  values (tests.fx('shop_a'), tests.fx('cust_a'), tests.fx('job_del'), 'outbound', 'sms', '+12055550101', 'On my way', 'sending',
+          '2025-08-05 14:00Z', 'on_the_way', 1, '2025-08-05 14:00Z')
+  returning tests.fx_set('del_otw', id);
+-- a delete that is refused (the job has an invoice) withdraws nothing
+insert into public.jobs (shop_id, customer_id, status, scheduled_start, scheduled_end)
+  values (tests.fx('shop_a'), tests.fx('cust_a'), 'scheduled', '2025-08-06 15:00Z', '2025-08-06 16:00Z')
+  returning tests.fx_set('job_inv', id);
+insert into public.job_line_items (shop_id, job_id, name, unit_price_cents)
+  values (tests.fx('shop_a'), tests.fx('job_inv'), 'Wash', 5000);
+select tests.authenticate_as(tests.fx('u_owner_a'));
+select public.create_invoice_from_job(tests.fx('job_inv'));
+select tests.fx_set('inv_rem', public.enqueue_template_message(tests.fx('job_inv'), 'appointment_reminder', '2025-08-05 15:00Z'));
+select tests.throws($$delete from public.jobs where id = tests.fx('job_inv')$$, null, 'a job with an invoice cannot be deleted');
+select tests.eq((select status::text from public.messages where id = tests.fx('inv_rem')), 'queued',
+                'so its reminder stays queued');
+
+select tests.authenticate_as(tests.fx('u_manager_b'));
+select tests.fx_set('del_b', public.enqueue_template_message(tests.fx('job_b'), 'booking_confirmed', '2025-08-04 15:00Z'));
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq(tests.row_count($$delete from public.jobs where id = tests.fx('job_del')$$), 1::bigint, 'the job is deleted');
+select tests.ok((select bool_and(status = 'cancelled' and error = 'the appointment was deleted') and count(*) = 2
+                   from public.messages where id in (tests.fx('del_rem'), tests.fx('del_conf'))),
+                'its queued templated messages are withdrawn');
+select tests.ok((select status = 'queued' and job_id is null from public.messages where id = tests.fx('del_note')),
+                'a free-form staff message is kept');
+select tests.as_superuser();
+select tests.eq((select status::text from public.messages where id = tests.fx('del_b')), 'queued',
+                'shop B''s queue is untouched');
+select tests.as_service();
+select tests.eq((select count(*) from public.claim_queued_messages(50, '2025-08-04 15:01Z') c
+                  where c.id in (tests.fx('del_rem'), tests.fx('del_conf'))),
+                0::bigint, 'an appointment reminder for a deleted appointment must not be sent');
+select tests.ok((select status = 'cancelled' and error = 'the appointment was deleted'
+                   from public.mark_message_result(tests.fx('del_otw'), 'queued', null, 'timeout', null, '2025-08-05 14:01Z')),
+                'an in-flight appointment message of a deleted job is not retried');
+
+-- ============================================================ changed phone number / email
+-- Regression: messages queued before staff corrected a customer's number or
+-- email still went to the previous address.
+select tests.as_superuser();
+insert into public.customers (shop_id, first_name, phone, email)
+  values (tests.fx('shop_a'), 'Carl', '+12055550171', 'carl@example.com') returning tests.fx_set('cust_carl', id);
+insert into public.customers (shop_id, first_name, phone, email)
+  values (tests.fx('shop_a'), 'Dora', '+12055550172', 'dora@example.com') returning tests.fx_set('cust_dora', id);
+insert into public.jobs (shop_id, customer_id, status, scheduled_start, scheduled_end) values
+  (tests.fx('shop_a'), tests.fx('cust_carl'), 'scheduled', '2025-08-12 15:00Z', '2025-08-12 16:00Z'),
+  (tests.fx('shop_a'), tests.fx('cust_dora'), 'scheduled', '2025-08-12 17:00Z', '2025-08-12 18:00Z');
+select tests.fx_set(k, (select id from public.jobs where customer_id = tests.fx(c)))
+  from (values ('job_carl', 'cust_carl'), ('job_dora', 'cust_dora')) v(k, c);
+select tests.as_service();
+select tests.eq(public.enqueue_due_automations('2025-08-11 15:00Z'), 2, 'Carl''s reminder queued sms + email');
+select tests.eq(public.enqueue_due_automations('2025-08-11 17:00Z'), 2, 'Dora''s too');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.fx_set('carl_note', (public.queue_message(tests.fx('shop_a'), tests.fx('cust_carl'), 'email', 'Hi', 'Parking info',
+                                                       tests.fx('job_carl'))).id);
+update public.customers set email = 'Dora@Example.com' where id = tests.fx('cust_dora');
+update public.customers set phone = '+12055550177', email = 'carl.new@example.com' where id = tests.fx('cust_carl');
+select tests.ok((select bool_and(status = 'cancelled' and error = 'the customer''s contact details changed before sending')
+                        and count(*) = 3
+                   from public.messages where customer_id = tests.fx('cust_carl')),
+                'everything queued to Carl''s previous number and address is withdrawn');
+select tests.ok((select bool_and(status = 'queued') and count(*) = 2 from public.messages where customer_id = tests.fx('cust_dora')),
+                'a change of letter case only is the same address; other customers are untouched');
+select tests.as_service();
+select tests.eq((select array_agg(c.to_address order by c.channel) from public.claim_queued_messages(50, '2025-08-11 17:01Z') c
+                  where c.customer_id = tests.fx('cust_carl')),
+                null::text[], 'no message may still go to the previous number / address');
+-- the claim / a retry re-checks the address (e.g. a message in flight when it changed)
+select tests.as_superuser();
+insert into public.messages (shop_id, customer_id, direction, channel, to_address, body, status, send_after, attempts, claimed_at)
+  values (tests.fx('shop_a'), tests.fx('cust_carl'), 'outbound', 'sms', '+12055550171', 'old number', 'sending',
+          '2025-08-11 17:00Z', 1, '2025-08-11 17:00Z')
+  returning tests.fx_set('carl_flight', id);
+insert into public.messages (shop_id, customer_id, direction, channel, to_address, body, status, send_after)
+  values (tests.fx('shop_a'), tests.fx('cust_carl'), 'outbound', 'sms', '+12055550171', 'behind the trigger', 'queued',
+          '2025-08-11 17:00Z')
+  returning tests.fx_set('carl_sneak', id);
+select tests.as_service();
+select tests.ok((select status = 'cancelled' and error = 'the customer''s contact details changed before sending'
+                   from public.mark_message_result(tests.fx('carl_flight'), 'queued', null, 'timeout', null, '2025-08-11 17:01Z')),
+                'a retry to the previous number is cancelled');
+select tests.eq((select count(*) from public.claim_queued_messages(50, '2025-08-11 17:02Z') c where c.id = tests.fx('carl_sneak')),
+                0::bigint, 'the claim cancels a message to an address the customer no longer has');
+-- the new address works as usual
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq((public.queue_message(tests.fx('shop_a'), tests.fx('cust_carl'), 'sms', null, 'New number saved')).to_address,
+                '+12055550177', 'new messages go to the new number');
+select tests.as_service();
+select tests.eq((select array_agg(c.to_address) from public.claim_queued_messages(50, now()) c where c.customer_id = tests.fx('cust_carl')),
+                array['+12055550177'], 'and are sent');
+
+-- ============================================================ deleting a whole shop
+-- Launched campaigns keep their messages (NO ACTION FK) and deleting a job
+-- withdraws its queued messages, yet deleting the shop still removes
+-- everything in one statement (and never touches another shop).
+select tests.as_superuser();
+update public.customers set sms_opt_in = true where id = tests.fx('cust_b');
+select tests.authenticate_as(tests.fx('u_manager_b'));
+insert into public.campaigns (shop_id, name, channel, body) values (tests.fx('shop_b'), 'B promo', 'sms', 'Promo')
+  returning tests.fx_set('camp_b', id);
+select public.launch_campaign(tests.fx('camp_b'));
+select tests.fx_set('b_rem', public.enqueue_template_message(tests.fx('job_b'), 'appointment_reminder', '2025-08-20 12:00Z'));
+select tests.as_superuser();
+create temp table a_before on commit drop as select count(*) as n from public.messages where shop_id = tests.fx('shop_a');
+select tests.as_service();
+select tests.lives($$delete from public.shops where id = tests.fx('shop_b')$$, 'a shop with launched campaigns and queued job messages can be deleted');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.messages where shop_id = tests.fx('shop_b')), 0::bigint, 'its messages are gone');
+select tests.eq((select count(*) from public.messages where shop_id = tests.fx('shop_a')), (select n from a_before),
+                'shop A''s messages are untouched');

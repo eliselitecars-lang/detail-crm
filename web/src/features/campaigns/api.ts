@@ -233,9 +233,10 @@ export function useCampaignStats(id: string, status: CampaignStatus, recipients:
 // ---------------------------------------------------------------------------
 
 /**
- * Records the email opt-out behind a campaign email's unsubscribe link
- * (public_unsubscribe, granted to anon; the token is that email's message
- * id). Resolves true when done (idempotent), false for an unknown link.
+ * Records the email opt-out behind a marketing email's unsubscribe link
+ * (public_unsubscribe, granted to anon; the token is that email's random
+ * unsubscribe token, never its message id). Resolves true when done
+ * (idempotent), false for an unknown link.
  */
 export function useUnsubscribe() {
   return useMutation({

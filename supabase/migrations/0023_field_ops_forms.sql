@@ -27,7 +27,33 @@
 --     only the signature objects of forms on jobs they work (0025), and a
 --     signed form's image can no longer be overwritten or deleted.
 --   * Signed submissions cannot be deleted through the API (job deletion
---     still cascades). Unsigned ones follow the job's customer.
+--     still cascades). Unsigned ones follow the job's customer (with a new
+--     token). A job that carries records issued to or signed by its customer
+--     (a signed form, any inspection, any invoice including void ones) keeps
+--     that customer in every context (23514): those documents are the
+--     customer's and their public links show the job, so moving the job would
+--     hand one customer's signed paperwork to the other (and the other's
+--     appointment to the first), and the new customer could never be asked
+--     to sign a template the previous one already signed (one per job).
+--     Book a new job for the other customer instead.
+--   * The form token is the customer's credential: whoever holds it can,
+--     without signing in, read the form and sign it as the customer
+--     (signed_by null = an anonymous signer). Staff roles that may not act
+--     as the customer must never see it (the same rule as jobs.public_token,
+--     0042): `authenticated` gets SELECT on every form_submissions column
+--     EXCEPT public_token, owners/admins/managers fetch it with
+--     form_link_token(submission_id) to share the /f link, and technicians
+--     collect signatures through sign_form_submission (attributed to them,
+--     and only while they work the job). A migration that adds a
+--     form_submissions column must grant SELECT on it to authenticated
+--     (20_form_token_privacy.sql checks the whole column set). Defence in
+--     depth: public_sign_form refuses a signed-in active member of the
+--     form's shop below manager (42501) unless they are the client linked to
+--     the form's customer.
+--   * Signing locks the job row (FOR SHARE) before the submission, the same
+--     order a customer move takes (job row, then its forms), so a form cannot
+--     be signed between the move's check and its commit, and a public signer
+--     whose link was re-tokenized by a concurrent move gets "form not found".
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -195,18 +221,35 @@ $$;
 create trigger jobs_attach_forms after insert on public.jobs
   for each row execute function public.jobs_attach_forms();
 
+-- The previous customer's public upload folder <shop_id>/forms/<old token>/
+-- may already hold a signature image they drew but never submitted. Nothing
+-- can reference it any more (the old link is dead and an unsigned form has
+-- no signature_path), so it is queued for the storage purge (0025) now;
+-- otherwise the customer's image would outlive the form and the job.
 create function public.jobs_sync_form_customer() returns trigger
 language plpgsql security definer
 set search_path = ''
 as $$
+declare
+  v_sub record;
 begin
   if new.customer_id is distinct from old.customer_id then
     -- a new token: the /f link sent to the previous customer must not show
     -- (or let them sign) the new customer's form
-    update public.form_submissions fs
-       set customer_id = new.customer_id,
-           public_token = gen_random_uuid()
-     where fs.job_id = new.id and fs.shop_id = new.shop_id and fs.signed_at is null;
+    for v_sub in
+      select fs.id, fs.public_token from public.form_submissions fs
+       where fs.job_id = new.id and fs.shop_id = new.shop_id and fs.signed_at is null
+       order by fs.id
+       for update
+    loop
+      update public.form_submissions fs
+         set customer_id = new.customer_id,
+             public_token = gen_random_uuid()
+       where fs.id = v_sub.id;
+      perform public.queue_storage_purge(new.shop_id, 'signatures',
+                                         new.shop_id::text || '/forms/' || v_sub.public_token::text || '/',
+                                         true, 'form_token_rotated');
+    end loop;
   end if;
   return null;
 end
@@ -214,6 +257,38 @@ $$;
 
 create trigger jobs_sync_form_customer after update of customer_id on public.jobs
   for each row execute function public.jobs_sync_form_customer();
+
+-- A job keeps its customer while it carries that customer's signed forms,
+-- inspections or invoices (void ones included; jobs_money_guard in 0012 also
+-- covers payments). All contexts. Inspections (0022) and form signing lock
+-- the job row FOR SHARE, and create_invoice_from_job locks it FOR UPDATE, so
+-- none of them can slip in between this check and the move's commit.
+create function public.jobs_customer_records_guard() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  if new.customer_id is distinct from old.customer_id then
+    if exists (select 1 from public.form_submissions fs
+               where fs.job_id = new.id and fs.shop_id = new.shop_id and fs.signed_at is not null) then
+      raise exception 'this job has a form signed by its customer; its customer cannot change (book a new job instead)'
+        using errcode = '23514';
+    end if;
+    if exists (select 1 from public.inspections i where i.job_id = new.id and i.shop_id = new.shop_id) then
+      raise exception 'this job has a vehicle inspection of its customer; its customer cannot change (book a new job instead)'
+        using errcode = '23514';
+    end if;
+    if exists (select 1 from public.invoices i where i.job_id = new.id and i.shop_id = new.shop_id and i.status = 'void') then
+      raise exception 'this job has an invoice (void) issued to its customer; its customer cannot change (book a new job instead)'
+        using errcode = '23514';
+    end if;
+  end if;
+  return null;
+end
+$$;
+
+create trigger jobs_customer_records_guard after update of customer_id on public.jobs
+  for each row execute function public.jobs_customer_records_guard();
 
 -- ---------------------------------------------------------------------------
 -- Curated public view of a submission (no internal ids, notes, IPs or paths
@@ -284,6 +359,15 @@ declare
   v_name   text := nullif(btrim(p_signer_name), '');
   v_path   text := nullif(btrim(p_signature_path), '');
 begin
+  select * into v_sub from public.form_submissions fs where fs.id = p_submission_id;
+  if not found then
+    raise exception 'form not found' using errcode = 'P0002';
+  end if;
+  -- job row first, then the submission: the lock order of a customer move
+  -- (jobs_customer_records_guard / jobs_sync_form_customer)
+  select j.status into v_status from public.jobs j
+   where j.id = v_sub.job_id and j.shop_id = v_sub.shop_id
+  for share;
   select * into v_sub from public.form_submissions fs where fs.id = p_submission_id for update;
   if not found then
     raise exception 'form not found' using errcode = 'P0002';
@@ -291,7 +375,6 @@ begin
   if v_sub.signed_at is not null then
     raise exception 'this form has already been signed' using errcode = '22023';
   end if;
-  select j.status into v_status from public.jobs j where j.id = v_sub.job_id and j.shop_id = v_sub.shop_id;
   if v_status in ('cancelled', 'no_show') then
     raise exception 'this form is void because the appointment was cancelled' using errcode = '22023';
   end if;
@@ -357,6 +440,20 @@ begin
   if not found then
     raise exception 'form not found' using errcode = 'P0002';
   end if;
+  -- lock the job, then look the token up again: a customer move committed
+  -- meanwhile re-tokenized the form, and this link is no longer its link
+  perform 1 from public.jobs j where j.id = v_sub.job_id and j.shop_id = v_sub.shop_id for share;
+  select * into v_sub from public.form_submissions fs where fs.public_token = p_token;
+  if not found then
+    raise exception 'form not found' using errcode = 'P0002';
+  end if;
+  -- staff below manager sign on device (sign_form_submission), never as the
+  -- customer through the customer's link
+  if auth.uid() is not null and public.is_shop_member(v_sub.shop_id) and not public.is_shop_manager(v_sub.shop_id)
+     and not exists (select 1 from public.customers c
+                      where c.id = v_sub.customer_id and c.shop_id = v_sub.shop_id and c.portal_user_id = auth.uid()) then
+    raise exception 'staff collect signatures on their device, not through the customer''s link' using errcode = '42501';
+  end if;
   -- directly inside the token folder: <shop_id>/forms/<token>/<file>
   if nullif(btrim(p_signature_path), '') is not null
      and cardinality(string_to_array(btrim(p_signature_path), '/')) <> 4 then
@@ -391,6 +488,7 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- Staff signing on device (managers+ or technicians assigned to the job).
+-- Returns the signed row without public_token (see the header).
 -- ---------------------------------------------------------------------------
 create function public.sign_form_submission(p_submission_id uuid, p_signer_name text,
                                             p_signature_path text default null)
@@ -408,7 +506,34 @@ begin
   if not public.can_work_job(v_sub.shop_id, v_sub.job_id) then
     raise exception 'only managers and staff assigned to this job can collect signatures' using errcode = '42501';
   end if;
-  return public.form_submission_sign(v_sub.id, p_signer_name, p_signature_path, v_sub.shop_id::text || '/');
+  v_sub := public.form_submission_sign(v_sub.id, p_signer_name, p_signature_path, v_sub.shop_id::text || '/');
+  v_sub.public_token := null;  -- the customer's credential: form_link_token
+  return v_sub;
+end
+$$;
+
+-- ---------------------------------------------------------------------------
+-- form_link_token(submission_id) — the /f/<token> credential for staff who
+-- may act for the customer (owner/admin/manager). Technicians: 42501.
+-- Unknown submission or another shop's: P0002.
+-- ---------------------------------------------------------------------------
+create function public.form_link_token(p_submission_id uuid) returns uuid
+language plpgsql stable security definer
+set search_path = ''
+as $$
+declare
+  v_shop  uuid;
+  v_token uuid;
+begin
+  select fs.shop_id, fs.public_token into v_shop, v_token
+    from public.form_submissions fs where fs.id = p_submission_id;
+  if v_shop is null or not public.is_shop_member(v_shop) then
+    raise exception 'form not found' using errcode = 'P0002';
+  end if;
+  if not public.is_shop_manager(v_shop) then
+    raise exception 'only owners, admins and managers can share the form link' using errcode = '42501';
+  end if;
+  return v_token;
 end
 $$;
 
@@ -441,12 +566,35 @@ revoke all on public.form_templates, public.form_submissions from anon;
 revoke truncate, trigger, references on public.form_templates, public.form_submissions from authenticated;
 revoke update on public.form_submissions from authenticated;
 
+-- form_submissions.public_token column privilege (see the header):
+-- authenticated reads every column except the token. service_role keeps full
+-- access; anon has no table access.
+revoke select on public.form_submissions from authenticated;
+do $$
+declare
+  v_cols text;
+begin
+  select string_agg(format('%I', a.attname), ', ' order by a.attnum)
+    into v_cols
+    from pg_catalog.pg_attribute a
+   where a.attrelid = 'public.form_submissions'::regclass
+     and a.attnum > 0
+     and not a.attisdropped
+     and a.attname <> 'public_token';
+  execute format('grant select (%s) on public.form_submissions to authenticated', v_cols);
+end
+$$;
+
+revoke execute on function public.form_link_token(uuid) from public, anon, service_role;
+grant execute on function public.form_link_token(uuid) to authenticated;
+
 revoke execute on function
   public.form_templates_normalize(),
   public.form_submissions_before_insert(),
   public.form_submissions_client_guard(),
   public.jobs_attach_forms(),
-  public.jobs_sync_form_customer()
+  public.jobs_sync_form_customer(),
+  public.jobs_customer_records_guard()
 from public, anon, authenticated;
 
 revoke execute on function

@@ -13,8 +13,10 @@
  *     https://<PROJECT_REF>.supabase.co/functions/v1/messaging?action=twilio_status#rc=3&rp=all
  *
  * `shop_id` is the platform's binding of the number to its shop (sender.ts):
- * an inbound text is only recorded when it matches the shop whose
- * sms_from_number is the `To` number. `#rc=3&rp=all` makes Twilio retry a 5xx
+ * an inbound text is only recorded when it matches the shop the `To` number
+ * is bound to in shop_sms_numbers (0033), whether or not that shop currently
+ * sends from it (shops.sms_from_number may be cleared to pause texting; the
+ * replies and STOPs to the number must still land). `#rc=3&rp=all` makes Twilio retry a 5xx
  * (by default it retries only connect timeouts), so a transient database
  * error answers 500 and the webhook is redelivered; both handlers are
  * idempotent (per MessageSid / forward-only status).
@@ -72,15 +74,15 @@ export async function twilioInbound(svc: Services, req: Request): Promise<Respon
   const body = form.get("Body") ?? "";
   const sid = form.get("MessageSid") ?? form.get("SmsSid") ?? null;
 
-  // Route only through a number the platform bound to its shop: the signed
-  // URL's shop_id must be the shop whose (tenant-editable) sms_from_number
-  // is `To`. Otherwise a tenant that typed in someone else's number would
-  // receive that number's replies and opt-outs.
+  // Route only through the platform's binding of `To` to its shop
+  // (shop_sms_numbers), never the tenant-editable sms_from_number, and only
+  // when the signed URL's shop_id is that shop. A shop that cleared its
+  // sending number still gets the replies and STOPs sent to its number.
   const boundShop = shopIdFromWebhookUrl(req.url);
-  const { data: shop, error: shopError } = await svc.admin.from("shops")
-    .select("id").eq("sms_from_number", to).maybeSingle();
-  if (shopError) throw new DbError("shops lookup", shopError);
-  const shopId = (shop as { id: string } | null)?.id ?? null;
+  const { data: binding, error: bindingError } = await svc.admin.from("shop_sms_numbers")
+    .select("shop_id").eq("phone_number", to).maybeSingle();
+  if (bindingError) throw new DbError("shop_sms_numbers lookup", bindingError);
+  const shopId = (binding as { shop_id: string } | null)?.shop_id ?? null;
   if (shopId === null) {
     svc.log.warn("inbound_sms_ignored", { reason: "unknown_number", message_sid: sid });
     return emptyTwiml();
@@ -116,7 +118,7 @@ export async function twilioInbound(svc: Services, req: Request): Promise<Respon
   if (!row?.message_id) {
     svc.log.warn("inbound_sms_ignored", { reason: "unknown_number", message_sid: sid });
   } else if (row.shop_id !== shopId) {
-    // sms_from_number changed between the check and the insert.
+    // The number was re-bound between the check and the insert.
     svc.log.error("inbound_sms_routing_changed", {
       message_id: row.message_id,
       shop_id: row.shop_id,

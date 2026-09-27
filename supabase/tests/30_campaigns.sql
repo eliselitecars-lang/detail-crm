@@ -4,8 +4,13 @@
 -- once, compliance footers, scheduling, cancel, email unsubscribe, role
 -- rules and cross-shop isolation.
 \ir fixtures/two_shops.psql
+-- shop A takes online bookings, so {{booking_page_link}} links to a live page
+-- (it is blank while online booking is off: 30_link_availability.sql)
+update public.booking_settings set enabled = true where shop_id = tests.fx('shop_a');
 
 insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+-- the platform binds each shop's Twilio number (supabase/setup/twilio.md)
+insert into public.shop_sms_numbers (phone_number, shop_id) values ('+12055550100', tests.fx('shop_a'));
 update public.shops set sms_from_number = '+12055550100' where id = tests.fx('shop_a');
 update public.customers set sms_opt_in = true, email_opt_in = true, tags = '{vip}' where id = tests.fx('cust_a');
 update public.customers set phone = '+13125550101', sms_opt_in = true where id = tests.fx('cust_b');
@@ -102,15 +107,18 @@ select tests.eq(tests.row_count($$select 1 from public.campaigns where shop_id =
                 'or read them');
 
 -- ------------------------------------------------------------ launch (exactly once)
+-- API callers launch on the server clock: a p_now they send is ignored.
+-- Regression: launched_at / the send time could be forged (e.g. 2020).
 select tests.authenticate_as(tests.fx('u_manager_a'));
-select tests.ok((select status = 'launched' and launched_at = '2025-06-01 12:00Z' and recipient_count = 2
+select tests.ok((select status = 'launched' and launched_at = now() and recipient_count = 2
                         and launched_by = tests.fx('u_manager_a')
-                   from public.launch_campaign(tests.fx('camp_sms'), '2025-06-01 12:00Z')), 'launched to 2 recipients');
+                   from public.launch_campaign(tests.fx('camp_sms'), '2020-01-01 00:00Z')),
+                'launched to 2 recipients; API callers must not choose launched_at / send time');
 select tests.eq((select array_agg(c.first_name order by c.first_name)
                    from public.campaign_recipients r join public.customers c on c.id = r.customer_id
                   where r.campaign_id = tests.fx('camp_sms')), array['Alice', 'Vera'], 'recipients materialized');
 select tests.ok((select bool_and(m.id = r.message_id and m.to_address = r.to_address and m.campaign_id = tests.fx('camp_sms')
-                                 and m.status = 'queued' and m.send_after = '2025-06-01 12:00Z'
+                                 and m.status = 'queued' and m.send_after = now()
                                  and m.template_key is null and m.sent_by = tests.fx('u_manager_a'))
                    from public.campaign_recipients r join public.messages m on m.id = r.message_id
                   where r.campaign_id = tests.fx('camp_sms')), 'one queued message per recipient');
@@ -126,8 +134,12 @@ select tests.eq(tests.row_count($$select 1 from public.campaign_recipients$$), 2
 select tests.throws($$delete from public.campaign_recipients$$, '42501', 'recipients are not writable');
 
 -- cancel: queued messages are withdrawn; in-flight ones stay
+select tests.as_superuser();   -- Alice's copy is first in line (other queued mail was queued "now" too)
+update public.messages set send_after = now() - interval '1 minute'
+ where campaign_id = tests.fx('camp_sms') and to_address = '+12055550101';
 select tests.as_service();
-select tests.eq((select count(*) from public.claim_queued_messages(1, '2025-06-01 12:00Z')), 1::bigint, 'one message goes out');
+select tests.eq((select array_agg(c.campaign_id) from public.claim_queued_messages(1, now()) c), array[tests.fx('camp_sms')],
+                'one message goes out');
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.ok((select status = 'cancelled' and cancelled_at = now() from public.cancel_campaign(tests.fx('camp_sms'))),
                 'campaign cancelled');
@@ -135,20 +147,53 @@ select tests.eq((select array_agg(status::text order by status) from public.mess
                 array['sending', 'cancelled'], 'queued messages cancelled, the one being sent is untouched');
 select tests.throws($$select public.cancel_campaign(tests.fx('camp_sms'))$$, '55000', 'already cancelled');
 select tests.throws($$select public.launch_campaign(tests.fx('camp_sms'))$$, '55000', 'cancelled campaigns cannot launch');
-
--- a body that already mentions STOP gets no footer; long bodies stay within 1600
+-- a campaign that was launched stays the record of what was sent, even once
+-- cancelled. Regression: deleting it unlinked its messages (campaign_id set
+-- null), so an in-flight one lost the "campaign cancelled" and marketing
+-- consent checks and was re-queued as an ordinary message on retry.
+select tests.throws_like($$delete from public.campaigns where id = tests.fx('camp_sms')$$, '42501', '%kept as the record%',
+                         'a cancelled campaign that was launched cannot be deleted');
+select tests.eq((select count(*) from public.messages where campaign_id = tests.fx('camp_sms')), 2::bigint,
+                'its messages keep their campaign');
+select tests.as_service();
+select tests.throws($$delete from public.campaigns where id = tests.fx('camp_sms')$$, '23503',
+                    'the messages FK keeps it even for trusted callers');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+insert into public.campaigns (shop_id, name, channel, body) values (tests.fx('shop_a'), 'Never sent', 'sms', 'Hello')
+  returning tests.fx_set('camp_cx', id);
+select public.cancel_campaign(tests.fx('camp_cx'));
+select tests.eq(tests.row_count($$delete from public.campaigns where id = tests.fx('camp_cx')$$), 1::bigint,
+                'a cancelled draft (never launched) can be deleted');
+-- a body that already has an opt-out instruction gets no footer; long bodies stay within 1600
 insert into public.campaigns (shop_id, name, channel, body, audience)
   values (tests.fx('shop_a'), 'Stop', 'sms', 'Big news from {{shop_name}}! Text STOP to unsubscribe.', '{"lifecycle": "lead"}')
   returning tests.fx_set('camp_stop', id);
-select tests.lives($$select public.launch_campaign(tests.fx('camp_stop'), '2025-06-01 12:00Z')$$);
+select tests.lives($$select public.launch_campaign(tests.fx('camp_stop'))$$);
 select tests.eq((select body from public.messages where campaign_id = tests.fx('camp_stop')),
                 'Big news from Shop A! Text STOP to unsubscribe.', 'no duplicate opt-out footer');
+-- Regression: any use of the word "stop" counted as opt-out language
+insert into public.campaigns (shop_id, name, channel, body, audience)
+  values (tests.fx('shop_a'), 'Spring', 'sms', 'Stop by this Saturday for our spring detail special!', '{"lifecycle": "lead"}')
+  returning tests.fx_set('camp_stopby', id);
+select tests.lives($$select public.launch_campaign(tests.fx('camp_stopby'))$$, 'launch');
+select tests.eq((select body from public.messages where campaign_id = tests.fx('camp_stopby')),
+                E'Stop by this Saturday for our spring detail special!\nReply STOP to opt out.',
+                'every marketing SMS must tell the recipient how to opt out');
+select tests.eq(public.comms_sms_with_optout('One-stop shop: we stop swirl marks. Non-stop deals!'),
+                E'One-stop shop: we stop swirl marks. Non-stop deals!\nReply STOP to opt out.', '"stop" in other senses');
+select tests.eq(public.comms_sms_with_optout('Deals! reply "stop" to end'), 'Deals! reply "stop" to end',
+                'a quoted instruction counts');
+select tests.eq(public.comms_sms_with_optout('Deals! Txt STOP to quit'), 'Deals! Txt STOP to quit', 'txt STOP counts');
+select tests.eq(public.comms_sms_with_optout(repeat('b', 1590) || ' Reply STOP to opt out.'),
+                left(repeat('b', 1590), 1577) || E'\nReply STOP to opt out.',
+                'an instruction cut off by the 1600 limit does not count');
+select tests.eq(public.comms_sms_with_optout('  '), null::text, 'blank stays blank');
 insert into public.campaigns (shop_id, name, channel, body, audience, scheduled_at)
-  values (tests.fx('shop_a'), 'Long', 'sms', repeat('a', 1600), '{"lifecycle": "lead"}', '2025-06-05 15:00Z')
+  values (tests.fx('shop_a'), 'Long', 'sms', repeat('a', 1600), '{"lifecycle": "lead"}', now() + interval '4 days')
   returning tests.fx_set('camp_long', id);
-select tests.lives($$select public.launch_campaign(tests.fx('camp_long'), '2025-06-01 12:00Z')$$);
+select tests.lives($$select public.launch_campaign(tests.fx('camp_long'))$$);
 select tests.ok((select char_length(body) = 1600 and body like '%a' || E'\nReply STOP to opt out.'
-                        and send_after = '2025-06-05 15:00Z'
+                        and send_after = now() + interval '4 days'
                    from public.messages where campaign_id = tests.fx('camp_long')),
                 'long bodies are trimmed to fit the footer; scheduled campaigns send at scheduled_at');
 
@@ -174,16 +219,28 @@ select tests.throws_like($$select public.launch_campaign(tests.fx('camp_mail'))$
 select tests.as_superuser();
 insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
 select tests.authenticate_as(tests.fx('u_manager_a'));
-select tests.eq((public.launch_campaign(tests.fx('camp_mail'), '2025-06-01 12:00Z')).recipient_count, 2, 'email launched');
+select tests.eq((public.launch_campaign(tests.fx('camp_mail'))).recipient_count, 2, 'email launched');
 select tests.fx_set('mail_alice', (select id from public.messages where campaign_id = tests.fx('camp_mail')
                                                                     and to_address = 'alice@example.com'));
+select tests.fx_set('mail_alice_token', (select unsubscribe_token from public.messages where id = tests.fx('mail_alice')));
 select tests.eq((select subject || ' | ' || body from public.messages where id = tests.fx('mail_alice')),
                 'News from Shop A | Hi Alice, our new ceramic coating packages are here.' || E'\n\n'
-                  || 'To unsubscribe from these emails, visit: https://app.example.test/u/' || tests.fx('mail_alice'),
+                  || 'To unsubscribe from these emails, visit: https://app.example.test/u/' || tests.fx('mail_alice_token'),
                 'email with a per-message unsubscribe link');
+select tests.ok((select count(distinct unsubscribe_token) = 2 and bool_and(unsubscribe_token <> id)
+                   from public.messages where campaign_id = tests.fx('camp_mail')),
+                'each email has its own random unsubscribe token, distinct from its message id');
+select tests.ok((select bool_and(unsubscribe_token is null) from public.messages where campaign_id = tests.fx('camp_stop')),
+                'text messages carry no unsubscribe token');
 
 select tests.as_anon();
-select tests.eq(public.public_unsubscribe(tests.fx('mail_alice')), true, 'anyone with the link can unsubscribe');
+select tests.eq(public.public_unsubscribe(tests.fx('mail_alice')), false, 'a message id is not an unsubscribe token');
+select tests.eq(public.public_unsubscribe(null), false, 'null token');
+select tests.as_superuser();
+select tests.ok((select email_opted_out_at is null and email_opt_in from public.customers where id = tests.fx('cust_a')),
+                'still subscribed after the message-id attempt');
+select tests.as_anon();
+select tests.eq(public.public_unsubscribe(tests.fx('mail_alice_token')), true, 'anyone with the link can unsubscribe');
 select tests.eq(public.public_unsubscribe(gen_random_uuid()), false, 'unknown token');
 select tests.as_superuser();
 select tests.ok((select email_opted_out_at = now() and not email_opt_in from public.customers where id = tests.fx('cust_a')),
@@ -193,7 +250,7 @@ select tests.eq(public.public_unsubscribe((select id from public.messages where 
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(public.preview_campaign_audience(tests.fx('shop_a'), 'email', '{}'), 1, 'Alice is no longer in email audiences');
 select tests.as_service();
-select tests.eq((select count(*) from public.claim_queued_messages(10, '2025-06-01 12:00Z') where id = tests.fx('mail_alice')),
+select tests.eq((select count(*) from public.claim_queued_messages(10, now()) where id = tests.fx('mail_alice')),
                 0::bigint, 'her queued email is withdrawn at send time');
 select tests.eq((select status::text from public.messages where id = tests.fx('mail_alice')), 'cancelled', 'cancelled');
 

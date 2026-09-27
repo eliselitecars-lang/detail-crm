@@ -87,6 +87,7 @@ select tests.eq((select public_token from public.quotes where id = tests.fx('q')
 select tests.fx_set('job_tok_alice', (select public_token from public.jobs where id = tests.fx('job_a')));
 select tests.authenticate_as(tests.fx('u_manager_a'));
 update public.jobs set internal_notes = 'Call first', scheduled_end = '2025-06-02 17:30+00' where id = tests.fx('job_a');
+select tests.as_superuser();  -- staff cannot read job tokens (customer credential, 0042)
 select tests.eq((select public_token from public.jobs where id = tests.fx('job_a')), tests.fx('job_tok_alice'),
                 'other job edits keep the booking link');
 select tests.authenticate_as(tests.fx('u_tech_a'));
@@ -143,22 +144,21 @@ select tests.fx_set('form_tok_unsigned', (select public_token from public.form_s
 select tests.fx_set('form_tok_signed', (select public_token from public.form_submissions
                                          where job_id = tests.fx('job_f') and title = 'Care instructions'));
 select tests.as_anon();
-select tests.lives($$select public.public_sign_form(tests.fx('form_tok_signed'), 'Alice Anders', null)$$, 'Alice signs one form');
 select tests.eq(public.public_get_form(tests.fx('form_tok_unsigned')) #>> '{job,vehicle}', '2021 Honda Civic',
                 'Alice''s unsigned form link shows her job');
 
+-- (a job with a form its customer already signed keeps its customer:
+-- 20_job_customer_records.sql)
 select tests.authenticate_as(tests.fx('u_manager_a'));
 update public.jobs set customer_id = tests.fx('cust_a2'), vehicle_id = tests.fx('veh_a2') where id = tests.fx('job_f');
 select tests.as_superuser();
-select tests.ok((select public_token <> tests.fx('form_tok_unsigned') and customer_id = tests.fx('cust_a2')
-                   from public.form_submissions where job_id = tests.fx('job_f') and title = 'Service agreement'),
-                'the unsigned form follows the new customer under a new token');
-select tests.ok((select public_token = tests.fx('form_tok_signed') and customer_id = tests.fx('cust_a')
-                   from public.form_submissions where job_id = tests.fx('job_f') and title = 'Care instructions'),
-                'the signed form stays Alice''s record, link unchanged');
+select tests.ok((select bool_and(public_token not in (tests.fx('form_tok_unsigned'), tests.fx('form_tok_signed'))
+                                 and customer_id = tests.fx('cust_a2'))
+                   from public.form_submissions where job_id = tests.fx('job_f')),
+                'the unsigned forms follow the new customer under new tokens');
 select tests.as_anon();
 select tests.throws($$select public.public_get_form(tests.fx('form_tok_unsigned'))$$, 'P0002',
                     'the form link already delivered to Alice no longer shows Aaron''s job');
-select tests.throws($$select public.public_sign_form(tests.fx('form_tok_unsigned'), 'Alice Anders', null)$$, 'P0002',
+select tests.throws($$select public.public_sign_form(tests.fx('form_tok_signed'), 'Alice Anders', null)$$, 'P0002',
                     'Alice cannot sign Aaron''s form');
 \endif

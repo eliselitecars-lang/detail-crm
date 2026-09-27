@@ -38,12 +38,15 @@ enabled = false
 enabled = true
 
 [studio]
+# Dashboard UI for local dev. scripts/stack/up.sh excludes it (and
+# postgres-meta, imgproxy, vector, logflare, supavisor) to save disk/RAM.
 enabled = true
 port = 54323
 api_url = "http://127.0.0.1"
 
-[inbucket]
-# Local email catcher for auth emails (confirmations, password resets).
+[local_smtp]
+# Local email catcher (mailpit; formerly [inbucket]) for auth emails
+# (password resets, invites, email changes). UI: http://127.0.0.1:54324
 enabled = true
 port = 54324
 
@@ -53,14 +56,36 @@ enabled = true
 # created by migrations so local and hosted match exactly.
 file_size_limit = "50MiB"
 
+[storage.image_transformation]
+# Not used by the app (thumbnails are sized client-side); off so the local
+# stack does not need the imgproxy container.
+enabled = false
+
 [auth]
 enabled = true
-# Vite dev server (web/vite.config.ts). Hosted: set Site URL to APP_BASE_URL.
-site_url = "http://localhost:5173"
+# Local web app origin (Vite dev server, web/vite.config.ts; the real-stack
+# harness scripts/stack/ serves it on 127.0.0.1). Hosted: set Site URL to
+# APP_BASE_URL in the Dashboard.
+site_url = "http://127.0.0.1:5173"
+# Every web route GoTrue may redirect back to (email links / OAuth):
+# /reset-password (recovery), /invite/:token (staff invites), /portal (client
+# portal magic links), /app (staff), /login. Both local hostnames are listed
+# because the browser treats localhost and 127.0.0.1 as different origins.
 additional_redirect_urls = [
-  "http://localhost:5173/**",
   "http://127.0.0.1:5173/**",
+  "http://localhost:5173/**",
+  "http://127.0.0.1:5173/reset-password",
+  "http://127.0.0.1:5173/invite/**",
+  "http://127.0.0.1:5173/portal",
+  "http://127.0.0.1:5173/app/**",
+  "http://127.0.0.1:5173/login",
+  "http://localhost:5173/reset-password",
+  "http://localhost:5173/invite/**",
+  "http://localhost:5173/portal",
+  "http://localhost:5173/app/**",
+  "http://localhost:5173/login",
 ]
+# Access tokens live 1 h (Supabase default); refresh tokens rotate.
 jwt_expiry = 3600
 enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
@@ -70,11 +95,21 @@ enable_signup = true
 enable_anonymous_sign_ins = false
 minimum_password_length = 8
 
+[auth.rate_limit]
+# LOCAL ONLY (hosted limits are set in the Dashboard): end-to-end suites sign
+# up / sign in many users from one IP within minutes; the GoTrue default (30
+# per 5 min) would make them flaky.
+sign_in_sign_ups = 1000
+token_verifications = 1000
+
 [auth.email]
 enable_signup = true
-# portal_claim_customers() links customers by CONFIRMED email, so
-# confirmations stay on locally to exercise the same flow as production.
-enable_confirmations = true
+# Local: sign-ups are confirmed immediately (GoTrue "autoconfirm" still sets
+# email_confirmed_at, so portal_claim_customers(), which links customers by
+# CONFIRMED email, behaves as in production). Hosted projects keep
+# confirmations ON (Dashboard -> Auth -> Email); mails are caught by mailpit
+# locally (port 54324) if a flow sends one.
+enable_confirmations = false
 double_confirm_changes = true
 secure_password_change = true
 max_frequency = "1s"
@@ -135,4 +170,11 @@ import_map = "./functions/deno.json"
 # Staff-only (admin+): emails invite links.
 [functions.invites]
 verify_jwt = true
+import_map = "./functions/deno.json"
+
+# pg_cron only (x-cron-secret): removes the stored files of deleted shops,
+# jobs, inspections and forms queued by migration 0025 (Storage API, service
+# role). No JWT is sent by pg_net.
+[functions.storage-purge]
+verify_jwt = false
 import_map = "./functions/deno.json"

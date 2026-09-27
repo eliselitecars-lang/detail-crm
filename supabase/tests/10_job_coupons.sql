@@ -33,6 +33,16 @@ select tests.fx_set('inv', (select id from public.create_invoice_from_job(tests.
 select tests.eq((select concat_ws('/', subtotal_cents, discount_cents, total_cents) from public.invoices where id = tests.fx('inv')),
                 '20000/2000/18000', 'the invoice copies the coupon discount');
 
+-- the invoiced job's coupon is frozen (its discount was billed) ...
+select tests.throws_like($$update public.jobs set coupon_id = null where id = tests.fx('job_a')$$,
+                         '23514', '%invoice #%', 'an invoiced job keeps its coupon');
+select tests.as_superuser();
+select tests.eq(pg_temp.redeemed(tests.fx('coupon_a')), 1, 'and its redemption');
+-- ... until the invoice is void
+select tests.authenticate_as(tests.fx('u_admin_a'));
+select public.void_invoice(tests.fx('inv'), 'wrong discount');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+
 -- removal releases the redemption and the discount
 update public.jobs set coupon_id = null where id = tests.fx('job_a');
 select tests.eq(pg_temp.totals(tests.fx('job_a')), '20000/0/20000', 'removing the coupon removes its discount');

@@ -40,6 +40,11 @@ $$;
 -- The uuid in folder position p_index (1-based) of an object name, or null
 -- when that segment is not a folder (the last segment is the file name) or
 -- is not a canonical uuid. Never raises, so it is safe inside RLS policies.
+-- Canonical means the lower-case text form Postgres prints (uuid::text):
+-- object names are case-sensitive, and the purge queue (0025) matches the
+-- folders of deleted shops, jobs and forms by that exact text, so a folder
+-- spelled in upper or mixed case must not be accepted by any storage policy
+-- or path validator (its files would never be purged).
 create function public.storage_path_uuid(p_name text, p_index integer) returns uuid
 language sql immutable
 set search_path = ''
@@ -47,7 +52,7 @@ as $$
   select case
            when p_index >= 1
             and cardinality(parts) > p_index
-            and parts[p_index] ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            and parts[p_index] ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
            then parts[p_index]::uuid
          end
   from (select string_to_array(p_name, '/') as parts) s

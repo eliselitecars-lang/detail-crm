@@ -142,6 +142,83 @@ create trigger vehicles_20_normalize before insert or update on public.vehicles
 create trigger vehicles_90_set_updated_at before update on public.vehicles
   for each row execute function public.set_updated_at();
 
+-- A vehicle's owner is part of every document that references it: jobs,
+-- job/quote/invoice lines, quotes, memberships and inspections all require
+-- their vehicle to belong to the document's customer. Moving a referenced
+-- vehicle to another customer would silently hand the old customer's history
+-- (and vehicle-scoped memberships) to the new one and break later steps such
+-- as converting an approved quote. So a vehicle may change customer only
+-- while nothing references it; a sold car becomes a new vehicle record for
+-- the new owner. Referencing tables are discovered from the catalog, so
+-- tables added by later migrations are covered without changes here. AFTER,
+-- so RLS and the composite customer FK (another shop's customer -> 23503)
+-- are checked first; runs in every context.
+create function public.vehicles_keep_owner_history() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  r        record;
+  v_found  boolean;
+begin
+  for r in
+    select format('%I.%I', n.nspname, cl.relname) as tbl,
+           cl.relname::text as label,
+           string_agg(format('t.%I = ($1).%I', a.attname, fa.attname), ' and ' order by k.ord) as cond
+    from pg_catalog.pg_constraint c
+    join pg_catalog.pg_class cl on cl.oid = c.conrelid
+    join pg_catalog.pg_namespace n on n.oid = cl.relnamespace
+    cross join lateral unnest(c.conkey, c.confkey) with ordinality as k(att, fatt, ord)
+    join pg_catalog.pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.att
+    join pg_catalog.pg_attribute fa on fa.attrelid = c.confrelid and fa.attnum = k.fatt
+    where c.contype = 'f' and c.confrelid = 'public.vehicles'::regclass
+    group by c.oid, n.nspname, cl.relname
+    order by n.nspname, cl.relname, c.oid
+  loop
+    execute format('select exists (select 1 from %s t where %s)', r.tbl, r.cond) into v_found using old;
+    if v_found then
+      raise exception 'this vehicle is referenced by % of its current customer and cannot be moved to another customer; add it as a new vehicle for the new owner',
+                      replace(r.label, '_', ' ')
+        using errcode = '23514';
+    end if;
+  end loop;
+  return null;
+end
+$$;
+
+create trigger vehicles_keep_owner_history after update of customer_id on public.vehicles
+  for each row when (new.customer_id is distinct from old.customer_id)
+  execute function public.vehicles_keep_owner_history();
+
+-- Race guard for the rule above. A document that starts referencing the
+-- vehicle takes only FOR KEY SHARE on it (its composite FK check), and a
+-- plain customer_id change takes FOR NO KEY UPDATE (customer_id is in no
+-- unique index); those do not conflict, so an owner change and an
+-- uncommitted job/quote/line/membership/inspection for the old owner could
+-- both commit, leaving the document with another customer's vehicle.
+-- Upgrading the row lock to FOR UPDATE before the row is changed conflicts
+-- with FOR KEY SHARE in both orders:
+--   * the reference came first: the move waits until it commits, then the
+--     AFTER check above (fresh snapshot) sees it and refuses the move;
+--   * the move came first: the other transaction's FK check waits until the
+--     move commits, then its AFTER validator (every vehicle-ownership
+--     validator is an AFTER trigger, and AFTER row triggers fire by name, so
+--     after the "RI_ConstraintTrigger_*" FK check) reads the new owner and
+--     refuses the document.
+create function public.vehicles_lock_owner_change() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  perform 1 from public.vehicles v where v.shop_id = old.shop_id and v.id = old.id for update;
+  return new;
+end
+$$;
+
+create trigger vehicles_15_lock_owner_change before update of customer_id on public.vehicles
+  for each row when (new.customer_id is distinct from old.customer_id)
+  execute function public.vehicles_lock_owner_change();
+
 -- ---------------------------------------------------------------------------
 -- RLS — owner/admin/manager: full access. (Technician read policies: 0006.)
 -- ---------------------------------------------------------------------------
@@ -167,5 +244,6 @@ create policy vehicles_delete on public.vehicles for delete to authenticated
   using (public.is_shop_manager(shop_id));
 
 revoke all on public.customers, public.vehicles from anon;
-revoke execute on function public.customers_client_guard(), public.vehicles_normalize()
+revoke execute on function public.customers_client_guard(), public.vehicles_normalize(),
+  public.vehicles_keep_owner_history(), public.vehicles_lock_owner_change()
   from public, anon, authenticated;

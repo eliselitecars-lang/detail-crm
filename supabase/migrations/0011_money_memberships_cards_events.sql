@@ -44,7 +44,9 @@ create index membership_plans_shop_sort_idx on public.membership_plans (shop_id,
 
 -- Direct writes cannot set Stripe ids; changing the billing terms detaches the
 -- (immutable) Stripe price so the next checkout creates a new one — existing
--- subscribers keep the price they signed up with.
+-- subscribers keep the price they signed up with (recorded on each
+-- membership: memberships.price_cents / interval / interval_count /
+-- stripe_price_id, see below).
 create function public.membership_plans_client_guard() returns trigger
 language plpgsql
 set search_path = ''
@@ -132,8 +134,28 @@ create trigger services_zz_membership_plans_drop after delete on public.services
 -- Status machine: incomplete -> active | past_due | cancelled;
 --                 active <-> past_due; active | past_due -> cancelled;
 --                 cancelled is terminal.
--- Staff may only abandon an incomplete membership (-> cancelled) and change
--- the vehicle; everything else is Stripe-driven (service_role).
+-- Staff may only change the vehicle directly; status is Stripe-driven
+-- (service_role). Even an incomplete membership may have a live Checkout
+-- link in subscription mode (membership_checkout) that the database does not
+-- know about, and paying it after the row was deleted or cancelled would
+-- start a subscription that bills with no active membership. So staff never
+-- delete memberships (they are history) and abandon an incomplete one only
+-- through the payments edge function's membership_cancel, which expires its
+-- open links (and stops a subscription a link already started) before it
+-- marks the row cancelled as service_role.
+--
+-- Billing terms (price_cents, interval, interval_count, stripe_price_id) are
+-- what THIS membership is billed, which is not necessarily the plan's current
+-- price: a plan price change only applies to new checkouts (the plan's Stripe
+-- price is detached), existing subscriptions keep billing theirs.
+--   * inserted: copied from the plan (memberships_billing_terms)
+--   * while never linked to a subscription (incomplete, no subscription id)
+--     they follow the plan, because the next checkout charges the plan's
+--     current terms (membership_plans_sync_open_memberships)
+--   * once a subscription is linked they change only through
+--     sync_stripe_subscription with the subscription's actual Stripe price
+--     (the webhook passes it on every sync)
+-- stripe_price_id is null until the Stripe price is known.
 -- ---------------------------------------------------------------------------
 create table public.memberships (
   id                      uuid primary key default gen_random_uuid(),
@@ -142,6 +164,10 @@ create table public.memberships (
   customer_id             uuid not null,
   vehicle_id              uuid,
   status                  public.membership_status not null default 'incomplete',
+  price_cents             bigint not null check (price_cents > 0),
+  interval                public.membership_interval not null,
+  interval_count          integer not null,
+  stripe_price_id         text check (stripe_price_id is null or stripe_price_id ~ '^price_[A-Za-z0-9]+$'),
   stripe_subscription_id  text unique check (stripe_subscription_id is null or stripe_subscription_id ~ '^sub_[A-Za-z0-9]+$'),
   current_period_end      timestamptz,
   cancel_at_period_end    boolean not null default false,
@@ -161,6 +187,11 @@ create table public.memberships (
   -- another vehicle first; membership history keeps its vehicle.
   constraint memberships_vehicle_fk foreign key (shop_id, vehicle_id)
     references public.vehicles (shop_id, id) on delete restrict,
+  -- Stripe's recurring limits (at most three years); a price edited in the
+  -- Stripe dashboard may exceed the plan form's range and is still recorded.
+  constraint memberships_interval_count check (
+    (interval = 'month' and interval_count between 1 and 36)
+    or (interval = 'year' and interval_count between 1 and 3)),
   constraint memberships_cancelled_stamp check ((status = 'cancelled') = (cancelled_at is not null)),
   constraint memberships_started_stamp check (status not in ('active', 'past_due') or started_at is not null)
 );
@@ -185,15 +216,16 @@ begin
     raise exception 'use create_membership to add a membership' using errcode = '42501';
   end if;
   if (new.plan_id, new.customer_id, new.stripe_subscription_id, new.current_period_end,
-      new.cancel_at_period_end, new.started_at, new.created_by)
+      new.cancel_at_period_end, new.started_at, new.created_by,
+      new.price_cents, new.interval, new.interval_count, new.stripe_price_id)
      is distinct from
      (old.plan_id, old.customer_id, old.stripe_subscription_id, old.current_period_end,
-      old.cancel_at_period_end, old.started_at, old.created_by) then
+      old.cancel_at_period_end, old.started_at, old.created_by,
+      old.price_cents, old.interval, old.interval_count, old.stripe_price_id) then
     raise exception 'only the vehicle can be edited; billing fields are managed by Stripe' using errcode = '42501';
   end if;
-  if new.status is distinct from old.status
-     and not (old.status = 'incomplete' and new.status = 'cancelled') then
-    raise exception 'staff can only cancel incomplete memberships; cancel active ones through billing'
+  if new.status is distinct from old.status then
+    raise exception 'membership status is managed by billing; cancel memberships through membership_cancel'
       using errcode = '42501';
   end if;
   new.cancelled_at := old.cancelled_at;
@@ -218,7 +250,7 @@ begin
     new.created_by := coalesce(auth.uid(), new.created_by);
     return new;
   end if;
-  new.created_by := old.created_by;
+  new.created_by := public.audit_user_ref(new.created_by, old.created_by);
   if new.status = old.status then
     return new;
   end if;
@@ -232,6 +264,35 @@ begin
   end if;
   if new.status = 'cancelled' and new.cancelled_at is not distinct from old.cancelled_at then
     new.cancelled_at := now();
+  end if;
+  return new;
+end
+$$;
+
+-- BEFORE INSERT (trusted inserts only: clients are refused by the guard and
+-- create_membership supplies none): terms not supplied as a complete set are
+-- the plan's current terms. A membership inserted already linked to a
+-- subscription without a Stripe price takes the plan's (current) price id.
+create function public.memberships_billing_terms() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_plan public.membership_plans;
+begin
+  if new.price_cents is not null and new.interval is not null and new.interval_count is not null then
+    return new;
+  end if;
+  select * into v_plan from public.membership_plans p where p.id = new.plan_id and p.shop_id = new.shop_id;
+  if not found then
+    -- what the composite FK would say (NOT NULL on the terms is checked first)
+    raise exception 'membership plan not found in this shop' using errcode = '23503';
+  end if;
+  new.price_cents := v_plan.price_cents;
+  new.interval := v_plan.interval;
+  new.interval_count := v_plan.interval_count;
+  if new.stripe_subscription_id is not null then
+    new.stripe_price_id := coalesce(new.stripe_price_id, v_plan.stripe_price_id);
   end if;
   return new;
 end
@@ -256,12 +317,42 @@ create trigger memberships_05_prevent_shop_change before update on public.member
   for each row execute function public.prevent_shop_change();
 create trigger memberships_10_client_guard before insert or update on public.memberships
   for each row execute function public.memberships_client_guard();
+create trigger memberships_20_billing_terms before insert on public.memberships
+  for each row execute function public.memberships_billing_terms();
 create trigger memberships_30_status_machine before insert or update on public.memberships
   for each row execute function public.memberships_status_machine();
 create trigger memberships_90_set_updated_at before update on public.memberships
   for each row execute function public.set_updated_at();
 create trigger memberships_validate after insert or update on public.memberships
   for each row execute function public.memberships_validate();
+
+-- A plan's new terms apply to the memberships whose checkout has not
+-- happened yet (the next checkout charges them); linked memberships keep
+-- what their subscription bills. Runs as the owner: the plan update was
+-- already authorized, and memberships are otherwise read-only for staff.
+create function public.membership_plans_sync_open_memberships() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  update public.memberships m
+     set price_cents = new.price_cents,
+         interval = new.interval,
+         interval_count = new.interval_count
+   where m.shop_id = new.shop_id and m.plan_id = new.id
+     and m.status = 'incomplete' and m.stripe_subscription_id is null
+     and (m.price_cents, m.interval, m.interval_count)
+         is distinct from (new.price_cents, new.interval, new.interval_count);
+  return null;
+end
+$$;
+
+create trigger membership_plans_sync_open_memberships
+  after update of price_cents, interval, interval_count on public.membership_plans
+  for each row
+  when ((new.price_cents, new.interval, new.interval_count)
+        is distinct from (old.price_cents, old.interval, old.interval_count))
+  execute function public.membership_plans_sync_open_memberships();
 
 -- ---------------------------------------------------------------------------
 -- customer_payment_methods — Stripe PaymentMethod references only (never
@@ -329,9 +420,9 @@ create policy memberships_select on public.memberships for select to authenticat
   using (public.is_shop_manager(shop_id));
 create policy memberships_update on public.memberships for update to authenticated
   using (public.is_shop_manager(shop_id)) with check (public.is_shop_manager(shop_id));
--- only never-billed rows can be removed; everything else is history
-create policy memberships_delete on public.memberships for delete to authenticated
-  using (public.is_shop_manager(shop_id) and status = 'incomplete' and stripe_subscription_id is null);
+-- no delete policy: memberships are history, and even a never-billed one may
+-- have a payable Checkout link (see the memberships header); membership_cancel
+-- abandons it instead.
 
 create policy customer_payment_methods_select on public.customer_payment_methods for select to authenticated
   using (public.is_shop_manager(shop_id));
@@ -395,6 +486,10 @@ $$;
 -- Out-of-order safe: a cancelled membership never revives and an
 -- active/past_due one never regresses to incomplete (those updates only
 -- refresh the period fields). Idempotent.
+-- Billing terms: p_price_cents / p_interval / p_interval_count (all three or
+-- none) and p_price_id are the subscription's actual Stripe price (its unit
+-- amount × quantity); they replace the membership's recorded terms. Omitted,
+-- the recorded terms stay (the plan's terms captured while unlinked).
 -- ---------------------------------------------------------------------------
 create function public.sync_stripe_subscription(
   p_shop_id               uuid,
@@ -403,7 +498,11 @@ create function public.sync_stripe_subscription(
   p_current_period_end    timestamptz default null,
   p_cancel_at_period_end  boolean default false,
   p_membership_id         uuid default null,
-  p_now                   timestamptz default now()
+  p_now                   timestamptz default now(),
+  p_price_id              text default null,
+  p_price_cents           bigint default null,
+  p_interval              public.membership_interval default null,
+  p_interval_count        integer default null
 ) returns public.memberships
 language plpgsql security definer
 set search_path = ''
@@ -414,6 +513,19 @@ declare
 begin
   if p_shop_id is null or p_subscription_id is null or p_status is null or p_now is null then
     raise exception 'shop, subscription id, status and now are required' using errcode = '22023';
+  end if;
+  if (p_price_cents is null) <> (p_interval is null) or (p_price_cents is null) <> (p_interval_count is null) then
+    raise exception 'price, interval and interval count are given together' using errcode = '22023';
+  end if;
+  if p_price_cents is not null
+     and (p_price_cents <= 0
+          or not ((p_interval = 'month' and p_interval_count between 1 and 36)
+                  or (p_interval = 'year' and p_interval_count between 1 and 3))) then
+    raise exception 'invalid billing terms: % every % %', p_price_cents, p_interval_count, p_interval
+      using errcode = '22023';
+  end if;
+  if p_price_id is not null and p_price_id !~ '^price_[A-Za-z0-9]+$' then
+    raise exception 'invalid Stripe price id' using errcode = '22023';
   end if;
   select * into v_m from public.memberships m
    where m.stripe_subscription_id = p_subscription_id for update;
@@ -443,7 +555,11 @@ begin
          current_period_end = coalesce(p_current_period_end, m.current_period_end),
          cancel_at_period_end = case when v_status = 'cancelled' then false else coalesce(p_cancel_at_period_end, false) end,
          started_at = case when v_status in ('active', 'past_due') then coalesce(m.started_at, p_now) else m.started_at end,
-         cancelled_at = case when v_status = 'cancelled' then coalesce(m.cancelled_at, p_now) else null end
+         cancelled_at = case when v_status = 'cancelled' then coalesce(m.cancelled_at, p_now) else null end,
+         price_cents = coalesce(p_price_cents, m.price_cents),
+         interval = coalesce(p_interval, m.interval),
+         interval_count = coalesce(p_interval_count, m.interval_count),
+         stripe_price_id = coalesce(p_price_id, m.stripe_price_id)
    where m.id = v_m.id
   returning * into v_m;
   return v_m;
@@ -600,7 +716,7 @@ $$;
 -- ---------------------------------------------------------------------------
 revoke all on public.membership_plans, public.memberships, public.customer_payment_methods,
               public.stripe_events from anon;
-revoke insert on public.memberships from authenticated;
+revoke insert, delete on public.memberships from authenticated;
 revoke insert, update, delete on public.customer_payment_methods from authenticated;
 revoke all on public.stripe_events from authenticated;
 
@@ -610,21 +726,25 @@ revoke execute on function
   public.membership_plans_drop_deleted_service(),
   public.memberships_client_guard(),
   public.memberships_status_machine(),
-  public.memberships_validate()
+  public.memberships_billing_terms(),
+  public.memberships_validate(),
+  public.membership_plans_sync_open_memberships()
 from public, anon, authenticated;
 
 revoke execute on function public.create_membership(uuid, uuid, uuid) from public, anon;
 grant execute on function public.create_membership(uuid, uuid, uuid) to authenticated, service_role;
 
 revoke execute on function
-  public.sync_stripe_subscription(uuid, text, public.membership_status, timestamptz, boolean, uuid, timestamptz),
+  public.sync_stripe_subscription(uuid, text, public.membership_status, timestamptz, boolean, uuid, timestamptz,
+                                  text, bigint, public.membership_interval, integer),
   public.upsert_customer_payment_method(uuid, uuid, text, text, text, integer, integer, boolean),
   public.remove_customer_payment_method(uuid, text),
   public.record_stripe_event(text, text, text, timestamptz),
   public.mark_stripe_event_processed(text, text, timestamptz)
 from public, anon, authenticated;
 grant execute on function
-  public.sync_stripe_subscription(uuid, text, public.membership_status, timestamptz, boolean, uuid, timestamptz),
+  public.sync_stripe_subscription(uuid, text, public.membership_status, timestamptz, boolean, uuid, timestamptz,
+                                  text, bigint, public.membership_interval, integer),
   public.upsert_customer_payment_method(uuid, uuid, text, text, text, integer, integer, boolean),
   public.remove_customer_payment_method(uuid, text),
   public.record_stripe_event(text, text, text, timestamptz),

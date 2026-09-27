@@ -37,14 +37,40 @@ create trigger notifications_05_prevent_shop_change before update on public.noti
 
 alter table public.notifications enable row level security;
 
--- Recipient only, and only while an active member of the shop.
+-- Which roles may read a notification kind. Every event kind (bookings,
+-- cancellations, quotes, payments, inbound texts, signed forms) carries
+-- customer names, money or message text that SPEC §3 reserves for owners,
+-- admins and managers; only 'general' notices are for every member, so they
+-- must never carry such data: anything about money — payments, refunds,
+-- card disputes (stripe-webhook) — is sent as 'payment_received'. Checked
+-- against the recipient's CURRENT role, so a manager demoted to technician
+-- immediately stops seeing (and receiving over Realtime) the manager-only
+-- notifications they were sent earlier, and notify_shop_staff never sends a
+-- manager-only kind to a technician.
+create function public.notification_kind_for_managers(p_kind public.notification_kind) returns boolean
+language sql immutable
+set search_path = ''
+as $$ select p_kind is distinct from 'general'::public.notification_kind $$;
+
+-- True when the caller is an active member of p_shop_id whose current role
+-- may read notifications of p_kind.
+create function public.can_read_notification(p_shop_id uuid, p_kind public.notification_kind) returns boolean
+language sql stable security definer
+set search_path = ''
+as $$
+  select case when public.notification_kind_for_managers(p_kind) then public.is_shop_manager(p_shop_id)
+              else public.is_shop_member(p_shop_id) end
+$$;
+
+-- Recipient only, only while an active member of the shop, and only while
+-- their current role may read the kind.
 create policy notifications_select on public.notifications for select to authenticated
-  using (user_id = auth.uid() and public.is_shop_member(shop_id));
+  using (user_id = auth.uid() and public.can_read_notification(shop_id, kind));
 create policy notifications_update on public.notifications for update to authenticated
-  using (user_id = auth.uid() and public.is_shop_member(shop_id))
-  with check (user_id = auth.uid() and public.is_shop_member(shop_id));
+  using (user_id = auth.uid() and public.can_read_notification(shop_id, kind))
+  with check (user_id = auth.uid() and public.can_read_notification(shop_id, kind));
 create policy notifications_delete on public.notifications for delete to authenticated
-  using (user_id = auth.uid() and public.is_shop_member(shop_id));
+  using (user_id = auth.uid() and public.can_read_notification(shop_id, kind));
 
 revoke all on public.notifications from anon;
 revoke insert, update, truncate, references, trigger on public.notifications from authenticated;
@@ -53,7 +79,8 @@ grant update (read_at) on public.notifications to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- notify_shop_staff — one notification per ACTIVE member of p_shop_id whose
--- role is in p_roles (null/empty = every role), optionally skipping the user
+-- role is in p_roles (null/empty = every role) and may read the kind
+-- (manager-only kinds never go to technicians), optionally skipping the user
 -- who caused the event. Returns the number of notifications created.
 -- ---------------------------------------------------------------------------
 create function public.notify_shop_staff(
@@ -90,6 +117,7 @@ begin
   where m.shop_id = p_shop_id
     and m.active
     and (p_roles is null or cardinality(p_roles) = 0 or m.role = any (p_roles))
+    and (not public.notification_kind_for_managers(p_kind) or m.role in ('owner', 'admin', 'manager'))
     and (p_exclude_user is null or m.user_id <> p_exclude_user);
   get diagnostics v_count = row_count;
   return v_count;
@@ -100,7 +128,7 @@ comment on function public.notify_shop_staff(uuid, public.shop_role[], public.no
   'Internal: notify active staff of a shop (by role). Not callable by API clients; used by service_role and definer code/triggers.';
 
 -- Convenience for the bell menu: mark all of the caller's notifications in a
--- shop as read. Returns how many changed.
+-- shop that they may read as read. Returns how many changed.
 create function public.mark_all_notifications_read(p_shop_id uuid) returns integer
 language plpgsql security definer
 set search_path = ''
@@ -113,7 +141,8 @@ begin
   end if;
   update public.notifications n
      set read_at = now()
-   where n.shop_id = p_shop_id and n.user_id = auth.uid() and n.read_at is null;
+   where n.shop_id = p_shop_id and n.user_id = auth.uid() and n.read_at is null
+     and public.can_read_notification(n.shop_id, n.kind);
   get diagnostics v_count = row_count;
   return v_count;
 end
@@ -125,6 +154,15 @@ from public, anon, authenticated;
 grant execute on function
   public.notify_shop_staff(uuid, public.shop_role[], public.notification_kind, text, text, uuid, uuid)
 to service_role;
+
+revoke execute on function
+  public.notification_kind_for_managers(public.notification_kind),
+  public.can_read_notification(uuid, public.notification_kind)
+from public, anon;
+grant execute on function
+  public.notification_kind_for_managers(public.notification_kind),
+  public.can_read_notification(uuid, public.notification_kind)
+to authenticated, service_role;
 
 revoke execute on function public.mark_all_notifications_read(uuid) from public, anon;
 grant execute on function public.mark_all_notifications_read(uuid) to authenticated, service_role;

@@ -102,9 +102,16 @@ enum InvoiceService {
         var customer: QuoteCustomerRef?
         /// Saved cards (manager+ only; empty otherwise).
         var savedCards: [SavedCard]
+        /// The customer's pay-link token (manager+ only; nil otherwise).
+        var linkToken: UUID?
     }
 
-    static func detail(shopID: UUID, invoiceID: UUID, includeSavedCards: Bool) async throws -> DetailData {
+    static func detail(
+        shopID: UUID,
+        invoiceID: UUID,
+        includeSavedCards: Bool,
+        includeLinkToken: Bool
+    ) async throws -> DetailData {
         let invoice = try await invoice(shopID: shopID, invoiceID: invoiceID)
         async let linesTask = lines(shopID: shopID, invoiceID: invoiceID)
         async let paymentsTask = PaymentService.payments(shopID: shopID, invoiceID: invoiceID)
@@ -115,7 +122,15 @@ enum InvoiceService {
             // A failure here must not hide the invoice itself.
             cards = (try? await savedCards(shopID: shopID, customerID: invoice.customerID)) ?? []
         }
-        return DetailData(invoice: invoice, lines: lines, payments: payments, customer: customer, savedCards: cards)
+        var token: UUID?
+        if includeLinkToken {
+            // A failure here must not hide the invoice itself.
+            token = try? await linkToken(invoiceID: invoiceID)
+        }
+        return DetailData(
+            invoice: invoice, lines: lines, payments: payments, customer: customer,
+            savedCards: cards, linkToken: token
+        )
     }
 
     static func invoice(shopID: UUID, invoiceID: UUID) async throws -> Invoice {
@@ -129,6 +144,15 @@ enum InvoiceService {
             .value
         guard let invoice = rows.first else { throw AppError.notFound("That invoice") }
         return invoice
+    }
+
+    /// The customer's /i/<token> pay-link credential (`invoice_link_token`):
+    /// owners/admins/managers only — technicians collect in the app instead.
+    static func linkToken(invoiceID: UUID) async throws -> UUID {
+        try await Supa.client
+            .rpc("invoice_link_token", params: ["p_invoice_id": invoiceID.uuidString])
+            .execute()
+            .value
     }
 
     static func lines(shopID: UUID, invoiceID: UUID) async throws -> [InvoiceLineItem] {
@@ -192,7 +216,8 @@ enum InvoiceService {
         case .open, .partiallyPaid, .paid:
             break
         }
-        guard let link = MoneyLinks.invoice(token: invoice.publicToken) else {
+        let token = try await linkToken(invoiceID: invoice.id)
+        guard let link = MoneyLinks.invoice(token: token) else {
             throw AppError.message("Pay links need WEB_APP_URL in the app configuration, so the message can't include the link.")
         }
         return try await MoneyDocumentMessage.send(

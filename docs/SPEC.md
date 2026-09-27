@@ -96,7 +96,7 @@ on customers, vehicles, services, membership_plans, resources.
 * `booking_settings` — shop_id pk: enabled, auto_confirm, lead_time_minutes, max_days_ahead, slot_interval_minutes, buffer_minutes, max_concurrent_jobs, require_deposit, deposit_type (`percent`|`fixed`), deposit_value, service_area_postal_codes text[], booking_message, cancellation_policy, allow_client_cancel_hours.
 
 ### 4.2 CRM
-* `customers` — first_name, last_name, company, email (citext), phone (E.164), address fields, lat/lng, notes, tags text[], lifecycle (`lead`|`customer`), source (`staff`|`online_booking`|`referral`|`google`|`facebook`|`instagram`|`walk_in`|`other`), sms_opt_in, email_opt_in, portal_user_id, stripe_customer_id, archived_at. Indexes for search (trigram on name/email/phone where available).
+* `customers` — first_name, last_name, company, email (citext), phone (E.164), address fields, lat/lng, notes, tags text[], lifecycle (`lead`|`customer`), source (`staff`|`online_booking`|`referral`|`google`|`facebook`|`instagram`|`walk_in`|`other`), sms_opt_in, email_opt_in, portal_user_id, stripe_customer_id, archived_at, phone_unverified (the phone came from the public booking form of a booker who did not prove the email; 0042). Indexes for search (trigram on name/email/phone where available).
 * `vehicles` — customer_id, year, make, model, trim, color, vin, license_plate, category_id, notes, archived_at. (VIN decode via NHTSA vPIC from clients — free, no key.)
 
 ### 4.3 Catalog
@@ -133,7 +133,7 @@ on customers, vehicles, services, membership_plans, resources.
 * `form_templates` — name, body (markdown), requires_signature, attach_to (`all_jobs|online_booking|manual`), active.
 * `form_submissions` — form_template_id, job_id, customer_id, body_snapshot, public_token, signer_name, signature_path, signed_at, signer_ip.
 * `time_entries` — member_id, job_id nullable, kind (`shift`|`job`), clock_in, clock_out, source (`app`|`web`|`manual`), notes. RPCs `clock_in(shop, job_id?)`, `clock_out(shop)`; at most one open entry per member per kind; no overlaps.
-* Storage buckets: `job-photos` (private), `signatures` (private), `shop-assets` (public read; logos/service images). Object path first segment = `shop_id`; storage RLS checks membership (and assignment for technicians where applicable).
+* Storage buckets: `job-photos` (private), `signatures` (private), `shop-assets` (public read; logos/service images). Object path first segment = `shop_id`; storage RLS checks membership (and assignment for technicians where applicable). Deleting a shop, job, inspection or form queues its files for the `storage-purge` function (rows never delete files themselves).
 
 ### 4.7 Communication
 * `message_templates` — key (`booking_request_received|booking_confirmed|appointment_reminder|on_the_way|job_started|job_completed|quote_sent|invoice_sent|payment_receipt|review_request|follow_up|membership_welcome|invite`), channel (`sms`|`email`), subject, body with `{{placeholders}}` (documented list), enabled, offset_minutes (for time-based ones). Generic default wording seeded per shop.
@@ -147,7 +147,7 @@ on customers, vehicles, services, membership_plans, resources.
 `dashboard_summary(shop)`, `report_revenue(shop, from, to, bucket)`, `report_sales_by_service(shop, from, to)`, `report_team(shop, from, to)` (hours, jobs, revenue, commission, labor cost), `report_customers(shop, from, to)` (new vs returning, top by lifetime value), `report_outstanding(shop)` (open balances, aging), `report_payments(shop, from, to)` (by method, tips, refunds, fees if known). All time bucketing in the shop's timezone.
 
 ### 4.9 Public & portal RPCs (SECURITY DEFINER, explicit `set search_path = ''`, grant to anon/authenticated as appropriate)
-* `public_shop_profile(slug)`, `public_booking_catalog(slug)`, `get_available_slots(...)`, `create_online_booking(slug, payload jsonb)` → validates slot/services/area/coupon server-side, upserts customer by email/phone within the shop, creates vehicle, job (`requested` or `scheduled` per auto_confirm), line items priced from the catalog, returns job public_token.
+* `public_shop_profile(slug)`, `public_booking_catalog(slug)`, `get_available_slots(...)`, `create_online_booking(slug, payload jsonb)` → validates slot/services/area/coupon server-side, upserts customer by email/phone within the shop (never onto a record whose unverified phone differs from the form's), creates vehicle, job (`requested` or `scheduled` per auto_confirm), line items priced from the catalog, returns job public_token.
 * `public_get_booking(token)`, `public_cancel_booking(token)` (respecting `allow_client_cancel_hours`).
 * `public_get_quote(token)` (marks viewed), `public_respond_quote(token, action, signer_name, selected_optional_item_ids)`.
 * `public_get_invoice(token)`.
@@ -168,6 +168,7 @@ Shared `_shared/` (cors, supabase admin client, auth → caller membership check
 | `stripe-webhook` | Connect webhook (signature verified, idempotent via `stripe_events`): checkout.session.completed, payment_intent.succeeded/payment_failed/canceled, charge.refunded, setup_intent.succeeded, customer.subscription.created/updated/deleted, invoice.paid/payment_failed, account.updated |
 | `messaging` | `send` (staff: free-form or template to customer, role-checked), `process_queue` (cron secret; sends via Twilio/Resend, updates status), `twilio_inbound` (X-Twilio-Signature verified; routes by To number to shop + by From to customer; handles STOP/START opt-out), `twilio_status` |
 | `invites` | `send_invite` (admin+; emails invite link) |
+| `storage-purge` | `purge` (pg_cron, cron secret): removes the stored files of deleted shops/jobs/inspections/forms queued in `storage_purge_requests` via the Storage API |
 
 Secrets (function env, never in repo): `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY`, `PLATFORM_FEE_BPS`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `RESEND_API_KEY`, `EMAIL_FROM`, `APP_BASE_URL`, `CRON_SECRET`.
 
@@ -205,4 +206,10 @@ Architecture mirrors good SwiftUI practice: Theme tokens only, services as stati
 | 0020–0029 | field ops: checklists, inspections, photos, forms, time entries, storage buckets/policies |
 | 0030–0039 | communication: templates, messages/queue, automations, campaigns, notifications |
 | 0040–0049 | reports, dashboard, search, portal, online booking RPCs, realtime publication |
-| 0090–0099 | cross-cutting hardening (grants audit, indexes) |
+| 0050–0059 | scheduling v2: recurring job series, calendar event kinds / time off / capacity v2, private booking links, calendar (iCal) feeds, geostamped clock-in |
+| 0060–0069 | money v2: Stripe Terminal locations, multi-job invoices + per-line vehicles, tip attribution + commissions, coupon restrictions, gift cards, fees, proposal options, quote self-scheduling, memberships v2 |
+| 0070–0079 | field ops v2: customer-facing job reports + remote inspection sign-off, required checklists, documents, customer merge |
+| 0080–0089 | comms & integrations v2: push notifications, document follow-ups, multi reminders + per-service maintenance reminders, CSV import/export, custom fields + lead forms, booking embed/pixels, SMS number provisioning |
+| 0090–0099 | cross-cutting hardening and integration fixes (grants audit, indexes, cross-surface contract additions) |
+
+Parity roadmap (from the Urable parity audit, 2026-09-27): P0 recurring jobs, push notifications, document follow-ups, multiple + per-service reminders, CSV import/export, Tap to Pay / Terminal (ships dark until Apple grants the entitlement); P1 multi-job invoicing, customer job reports, lead forms + custom fields, booking embed/QR/pixels, required checklists, tips + commissions, coupon restrictions, gift cards, self-serve SMS numbers (gated on Twilio ISV onboarding); P2 proposal options, quote self-scheduling, calendar events/capacity v2, day map + route hand-off, iCal feeds, customer merge, preset fees, VIN barcode scan, memberships v2, geostamped clock-in, documents, iOS realtime. Not built (partner agreements / compliance): QuickBooks sync, own processing, Carfax/Sirius XM, 3D visualizer, marketplace/store, voice calling, Android app, workflow builder, route optimization engine, Reserve with Google, card surcharging.

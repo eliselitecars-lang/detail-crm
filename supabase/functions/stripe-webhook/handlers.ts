@@ -1292,7 +1292,9 @@ async function onDisputeChanged(ctx: WebhookContext, event: Stripe.Dispute): Pro
     await rpc(ctx, "notify_shop_staff", {
       p_shop_id: shopId,
       p_roles: DISPUTE_ROLES,
-      p_kind: "general",
+      // a manager-only kind (0031): the alert carries the amount and reason,
+      // which a member demoted to technician must stop seeing at once
+      p_kind: "payment_received",
       p_title: title,
       p_body: line,
       p_job_id: payment.job_id,

@@ -76,7 +76,7 @@ insert into public.form_submissions (shop_id, form_template_id, job_id, title, b
           'Mallory', '2000-01-01Z', tests.fx('cust_a2'))
   returning tests.fx_set('sub_manual', id);
 select tests.ok((select title = 'Care instructions' and body_snapshot = 'Do not wash for 7 days.' and not requires_signature
-                   and public_token <> '00000000-0000-0000-0000-000000000009' and signer_name is null and signed_at is null
+                   and public.form_link_token(id) <> '00000000-0000-0000-0000-000000000009' and signer_name is null and signed_at is null
                    and customer_id = tests.fx('cust_a')
                    from public.form_submissions where id = tests.fx('sub_manual')),
                 'manual attach: content from the template, customer from the job, token and signing fields server-controlled');
@@ -251,11 +251,13 @@ select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.throws($$delete from public.form_submissions where id = tests.fx('sub_release')$$, '42501', 'signed forms cannot be deleted');
 insert into public.form_submissions (shop_id, form_template_id, job_id) values (tests.fx('shop_a'), tests.fx('tpl_online'), tests.fx('job_f'))
   returning tests.fx_set('sub_unsigned', id);
--- the job moves to another customer: unsigned forms follow, signed ones keep who signed
+-- a job carrying a form its customer signed keeps that customer (moves of
+-- jobs with only unsigned forms: 20_job_customer_records.sql)
 insert into public.vehicles (shop_id, customer_id, make) values (tests.fx('shop_a'), tests.fx('cust_a3'), 'Van') returning tests.fx_set('veh_a3', id);
-update public.jobs set customer_id = tests.fx('cust_a3'), vehicle_id = tests.fx('veh_a3') where id = tests.fx('job_f');
-select tests.eq((select customer_id from public.form_submissions where id = tests.fx('sub_unsigned')), tests.fx('cust_a3'),
-                'unsigned forms follow the job''s customer');
+select tests.throws_like($$update public.jobs set customer_id = tests.fx('cust_a3'), vehicle_id = tests.fx('veh_a3') where id = tests.fx('job_f')$$,
+                         '23514', '%form signed by its customer%', 'a job with a signed form keeps its customer');
+select tests.eq((select customer_id from public.form_submissions where id = tests.fx('sub_unsigned')), tests.fx('cust_a'),
+                'nothing moved: the unsigned form stays with the job''s customer');
 select tests.eq((select customer_id from public.form_submissions where id = tests.fx('sub_release')), tests.fx('cust_a'),
                 'signed forms keep the customer who signed');
 select tests.eq(tests.row_count($$delete from public.form_submissions where id = tests.fx('sub_unsigned')$$), 1::bigint,

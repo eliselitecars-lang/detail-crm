@@ -189,6 +189,37 @@ Deno.test("send: customer-level templates (follow_up, review_request, membership
   assert(queued.every((r) => r.role === "service_role"));
 });
 
+Deno.test("send: a marketing follow_up email goes out with one-click unsubscribe by its token", async () => {
+  // Regression: List-Unsubscribe was added only to campaign mail.
+  const { db, handler } = setup();
+  useTemplate(
+    db,
+    "follow_up",
+    "email",
+    "Time for a refresh? Book: {{booking_page_link}}",
+    "Come back soon",
+  );
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "email",
+        template_key: "follow_up",
+      }),
+    ),
+  );
+  assertEquals(out.status, "sent");
+  const row = message(db, out.message_id);
+  assert(typeof row.unsubscribe_token === "string" && row.unsubscribe_token !== row.id);
+  const email = db.http.callsTo("POST", RESEND_URL)[0]?.json as Record<string, unknown>;
+  assertEquals(email.headers, {
+    "List-Unsubscribe":
+      "<https://fake-project.supabase.co/functions/v1/messaging?action=unsubscribe&token=" +
+      `${row.unsubscribe_token}>`,
+    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+  });
+});
+
 /** Replaces (or adds) the shop's template for (key, channel). */
 function useTemplate(
   db: ReturnType<typeof setup>["db"],
@@ -794,6 +825,68 @@ Deno.test("send: a retried request returns the original message instead of a sec
   assertEquals(again, first);
   assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 1);
   assertEquals(db.table("messages").length, 1);
+});
+
+Deno.test("send: a retried marketing email is deduplicated despite its per-email unsubscribe link", async () => {
+  const { db, handler } = setup();
+  useTemplate(
+    db,
+    "follow_up",
+    "email",
+    "Come back! Unsubscribe: {{unsubscribe_link}}",
+    "We miss you",
+  );
+  const request = () =>
+    sendRequest("tok-manager", {
+      customer_id: CUSTOMER,
+      channel: "email",
+      template_key: "follow_up",
+    });
+  const first = await responseJson<SendResponse>(await handler(request()));
+  assertEquals(first.status, "sent");
+  const again = await responseJson<SendResponse>(await handler(request()));
+  assertEquals(again, first);
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 1);
+  assertEquals(db.table("messages").length, 1);
+});
+
+Deno.test("send: {{unsubscribe_link}} in a marketing email needs no job; elsewhere it does", async () => {
+  const { db, handler } = setup();
+  useTemplate(
+    db,
+    "follow_up",
+    "email",
+    "Come back! Unsubscribe: {{unsubscribe_link}}",
+    "We miss you",
+  );
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "email",
+        template_key: "follow_up",
+      }),
+    ),
+  );
+  assertEquals(out.status, "sent");
+  const row = message(db, out.message_id);
+  assertEquals(
+    row.body,
+    `Come back! Unsubscribe: https://app.example.com/u/${row.unsubscribe_token}`,
+  );
+  // Transactional templates never get an unsubscribe link (it would render blank).
+  useTemplate(db, "review_request", "email", "Review us! {{unsubscribe_link}}", "How did we do?");
+  await expectError(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "email",
+        template_key: "review_request",
+      }),
+    ),
+    422,
+    "unprocessable",
+  );
 });
 
 Deno.test("send: a double tap delivers once", async () => {

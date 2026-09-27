@@ -137,6 +137,8 @@ struct InvoiceManualPaymentSheet: View {
 
 struct InvoiceChargeSavedCardSheet: View {
     let invoice: Invoice
+    /// The customer's pay-link token (managers+; nil hides "Share pay link").
+    let linkToken: UUID?
     let cards: [SavedCard]
     /// May text the pay link when the bank asks for authentication.
     let canMessage: Bool
@@ -222,7 +224,7 @@ struct InvoiceChargeSavedCardSheet: View {
                 await textPayLink()
             }
         }
-        if let url = MoneyLinks.invoice(token: invoice.publicToken) {
+        if let linkToken, let url = MoneyLinks.invoice(token: linkToken) {
             ShareLink(item: url) {
                 Label("Share pay link", systemImage: "square.and.arrow.up")
             }

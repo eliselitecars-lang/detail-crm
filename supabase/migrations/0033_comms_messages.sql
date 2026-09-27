@@ -11,24 +11,45 @@
 --     email_opted_out_at mirror it on EVERY customer of the shop with that
 --     address, including customers created or re-addressed later, so a
 --     duplicate, a spouse's record or a deleted-and-recreated customer never
---     re-opens a number or inbox. sms_opted_out_at blocks ALL SMS;
+--     re-opens a number or inbox. Conversely a customer whose phone / email
+--     changes takes the NEW address's state: the previous address's opt-out
+--     stays with that address and does not block the new one
+--     (customers_comms_suppressed). sms_opted_out_at blocks ALL SMS;
 --     email_opted_out_at blocks all email.
 --   * Checked when queueing (queue_message, enqueue_customer_template,
 --     campaign audiences) and again when the sender claims a message
 --     (claim_queued_messages), so a STOP that arrives after queueing wins.
---   * Marketing (campaigns, 0035) additionally requires sms_opt_in /
+--   * Marketing — campaigns (0035) and the promotional follow_up template
+--     (comms_is_marketing_key) — additionally requires sms_opt_in /
 --     email_opt_in, re-checked at claim time: withdrawing consent after a
---     campaign was launched still stops its queued messages. Transactional
---     templates only need an address.
+--     message was queued still stops it. Every marketing SMS carries an
+--     opt-out instruction (comms_sms_with_optout) and every marketing email
+--     an unsubscribe link /u/<messages.unsubscribe_token>
+--     (comms_email_with_unsubscribe; List-Unsubscribe headers use the same
+--     token). The token is random per email and is never the message id, so
+--     only the recipient (and managers, who may record opt-outs anyway) can
+--     use it; transactional email has none. Every token is also recorded in
+--     comms_unsubscribe_tokens with the address it was sent to, which
+--     outlives the message, so the link keeps working after its customer
+--     (and with it the message) is deleted. Transactional templates only
+--     need an address.
 --   * Staff may record an opt-out (stamped with the server time) but never
 --     clear one: SMS opt-outs are cleared only by the customer texting
 --     START/UNSTOP (record_inbound_sms); email opt-outs only by service_role.
 --     Clearing an opt-out clears it for the address (every customer with it).
+--     Changing a customer's address never clears the previous address's
+--     opt-out; it only stops applying to that customer.
 --
 -- Queued messages follow their context until they are handed to the sender:
+--   * a message goes only to the customer's CURRENT address: changing a
+--     customer's phone / email withdraws what is still queued to the old one
+--     (and the claim / a retry cancels anything addressed elsewhere);
 --   * appointment messages (booking_*, appointment_reminder, on_the_way,
---     job_started) are withdrawn when the job is cancelled, marked no-show
---     or moved to another customer, and re-rendered when it is rescheduled;
+--     job_started) are withdrawn when the job is cancelled, marked no-show,
+--     moved to another customer or deleted, and re-rendered when it is
+--     rescheduled (one in flight then is re-rendered if it comes back for a
+--     retry); deleting a job withdraws every templated message still
+--     queued for it;
 --   * a cancelled campaign's messages are never (re)sent, even ones that
 --     were in flight and came back for a retry;
 --   * the claim never sends stale messages after a sender outage: job and
@@ -39,7 +60,8 @@
 -- Message lifecycle (outbound):
 --   queued ──claim──> sending ──result──> sent ──callback──> delivered
 --      ^                 │  └──────────────> failed
---      └──── retry ──────┘      (queued, or a retry, may instead become cancelled)
+--      └──── retry ──────┘      (queued, or a retry, may instead become cancelled;
+--                               a retried appointment message is re-rendered)
 -- Inbound rows are always status 'received' and are written only by
 -- service_role (record_inbound_sms).
 -- ============================================================================
@@ -52,9 +74,9 @@ alter table public.customers
   add column email_opted_out_at timestamptz;
 
 comment on column public.customers.sms_opted_out_at is
-  'Set when this number texts STOP (or staff record an opt-out); mirrors comms_suppressions for every customer with the number. Blocks every SMS. Cleared only by START/UNSTOP.';
+  'Set when this number texts STOP (or staff record an opt-out); mirrors comms_suppressions for every customer with the number. Blocks every SMS. Cleared by START/UNSTOP, or when the customer''s phone changes to a number that has not opted out.';
 comment on column public.customers.email_opted_out_at is
-  'Set when this address unsubscribes (or staff record an opt-out); mirrors comms_suppressions for every customer with the address. Blocks every email.';
+  'Set when this address unsubscribes (or staff record an opt-out); mirrors comms_suppressions for every customer with the address. Blocks every email. Cleared when the customer''s email changes to an address that has not opted out.';
 
 create function public.customers_comms_guard() returns trigger
 language plpgsql
@@ -86,9 +108,70 @@ $$;
 create trigger customers_30_comms_guard before insert or update on public.customers
   for each row execute function public.customers_comms_guard();
 
--- Inbound SMS are routed to a shop by its sending number: it must be unique.
-create unique index shops_sms_from_number_key on public.shops (sms_from_number)
-  where sms_from_number is not null;
+-- ---------------------------------------------------------------------------
+-- shop_sms_numbers — the PLATFORM's binding of a Twilio number to the shop
+-- it was provisioned for (supabase/setup/twilio.md). Written only by
+-- service_role / postgres (the operator); owners and admins may read their
+-- shop's rows. A number is bound to at most one shop (primary key).
+--
+-- shops.sms_from_number is typed in by the shop's owner/admin, so it must
+-- never be what decides who owns a number: a tenant could otherwise claim
+-- another shop's number first and lock the real shop out of it. It may only
+-- hold a number bound to that same shop (shops_sms_from_number_fk, checked
+-- with a readable error by shops_sms_from_number_bound), which also makes it
+-- unique across shops. Inbound texts are routed by this binding, never by
+-- sms_from_number: a shop that clears its sending number (e.g. to pause
+-- texting) still receives the replies and STOPs its customers send to the
+-- number it was assigned.
+-- Unbinding a number clears it from the shop (ON DELETE SET NULL).
+-- Moving a number: delete its row, insert it for the new shop.
+-- ---------------------------------------------------------------------------
+create table public.shop_sms_numbers (
+  phone_number  text primary key check (public.is_valid_e164(phone_number)),
+  shop_id       uuid not null references public.shops (id) on delete cascade,
+  created_at    timestamptz not null default now(),
+  constraint shop_sms_numbers_shop_number_key unique (shop_id, phone_number)
+);
+
+comment on table public.shop_sms_numbers is
+  'Platform binding of a Twilio number to its shop (service_role only). shops.sms_from_number may only name a number bound to that shop.';
+
+create trigger shop_sms_numbers_05_prevent_shop_change before update on public.shop_sms_numbers
+  for each row execute function public.prevent_shop_change();
+
+alter table public.shop_sms_numbers enable row level security;
+create policy shop_sms_numbers_select on public.shop_sms_numbers for select to authenticated
+  using (public.is_shop_admin(shop_id));
+revoke all on public.shop_sms_numbers from anon;
+revoke insert, update, delete, truncate, references, trigger on public.shop_sms_numbers from authenticated;
+
+-- Readable refusal before the foreign key below would reject the write.
+create function public.shops_sms_from_number_bound() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  -- (a malformed number is left to the E.164 check constraint)
+  if new.sms_from_number is not null and public.is_valid_e164(new.sms_from_number)
+     and (tg_op = 'INSERT' or new.sms_from_number is distinct from old.sms_from_number)
+     and not exists (select 1 from public.shop_sms_numbers n
+                      where n.phone_number = new.sms_from_number and n.shop_id = new.id) then
+    raise exception 'the number % is not provisioned for this shop', new.sms_from_number
+      using errcode = '23503',
+            hint = 'Only a number the platform assigned to this shop can be used for text messages; ask platform support.';
+  end if;
+  return new;
+end
+$$;
+
+create trigger shops_30_sms_from_number_bound before insert or update of sms_from_number on public.shops
+  for each row execute function public.shops_sms_from_number_bound();
+
+-- The index serves the foreign key below (and sender lookups by number).
+create index shops_sms_from_number_idx on public.shops (sms_from_number, id) where sms_from_number is not null;
+alter table public.shops
+  add constraint shops_sms_from_number_fk foreign key (id, sms_from_number)
+    references public.shop_sms_numbers (shop_id, phone_number) on delete set null (sms_from_number);
 
 -- ---------------------------------------------------------------------------
 -- messages
@@ -99,6 +182,10 @@ create table public.messages (
   customer_id          uuid,
   job_id               uuid,
   campaign_id          uuid,
+  -- the credential of this email's unsubscribe link (/u/<token>); set only
+  -- on marketing email (campaigns, comms_is_marketing_key templates), never
+  -- derived from the message id, which staff RPCs return to their callers
+  unsubscribe_token    uuid,
   direction            public.message_direction not null,
   channel              public.message_channel not null,
   to_address           text not null,
@@ -138,8 +225,12 @@ create table public.messages (
     char_length(body) <= case channel when 'sms' then 1600 else 50000 end
     and (direction = 'inbound' or char_length(btrim(body)) >= 1)),
   constraint messages_inbound_fields check (
-    direction = 'outbound' or (template_key is null and campaign_id is null and sent_by is null))
+    direction = 'outbound' or (template_key is null and campaign_id is null and sent_by is null)),
+  constraint messages_unsubscribe_token check (
+    unsubscribe_token is null or (direction = 'outbound' and channel = 'email'))
 );
+create unique index messages_unsubscribe_token_key on public.messages (unsubscribe_token)
+  where unsubscribe_token is not null;
 create index messages_queue_idx on public.messages (send_after, created_at)
   where status = 'queued' and direction = 'outbound';
 create index messages_sending_idx on public.messages (claimed_at) where status = 'sending';
@@ -328,9 +419,23 @@ begin
 end
 $$;
 
--- BEFORE INSERT / address change (runs after customers_30_comms_guard): a
--- customer created or re-addressed with a suppressed number / email starts
--- out opted out, whoever writes the row.
+-- BEFORE INSERT / address change (runs after customers_30_comms_guard): the
+-- opt-out stamps mirror comms_suppressions for the customer's CURRENT
+-- addresses, whoever writes the row.
+--   * INSERT: a customer created with a suppressed number / email starts out
+--     opted out (a stamp recorded on the new row is kept too).
+--   * phone / email changed to another address: the stamp that belonged to
+--     the previous address does not follow the customer; it is recomputed
+--     from comms_suppressions for the new address (the new address's
+--     opt-out time, or none — also when the address is removed). The
+--     previous address stays suppressed, so a later move back to it, or any
+--     other record with it, is opted out again. Kept as recorded: a stamp
+--     set in the same statement (staff recording an opt-out for the new
+--     address; customers_comms_optout_sync then suppresses it) and a stamp
+--     recorded while the customer had no address on the channel (the
+--     person's opt-out, which then applies to — and suppresses — the first
+--     address they give).
+-- A suppressed address always drops the channel's marketing opt-in.
 create function public.customers_comms_suppressed() returns trigger
 language plpgsql security definer
 set search_path = ''
@@ -338,19 +443,39 @@ as $$
 declare
   v_at timestamptz;
 begin
-  if new.phone is not null and (tg_op = 'INSERT' or new.phone is distinct from old.phone) then
-    select s.opted_out_at into v_at from public.comms_suppressions s
-     where s.shop_id = new.shop_id and s.channel = 'sms' and s.address = new.phone;
-    if found then
+  if tg_op = 'INSERT'
+     or public.comms_address_key('sms', new.phone) is distinct from public.comms_address_key('sms', old.phone) then
+    v_at := null;
+    if new.phone is not null then
+      select s.opted_out_at into v_at from public.comms_suppressions s
+       where s.shop_id = new.shop_id and s.channel = 'sms' and s.address = public.comms_address_key('sms', new.phone);
+    end if;
+    if tg_op = 'UPDATE' and old.phone is not null
+       and new.sms_opted_out_at is not distinct from old.sms_opted_out_at then
+      new.sms_opted_out_at := v_at;                       -- the previous number's stamp: recomputed
+    else
       new.sms_opted_out_at := coalesce(new.sms_opted_out_at, v_at);
+    end if;
+    if v_at is not null then
       new.sms_opt_in := false;
     end if;
   end if;
-  if new.email is not null and (tg_op = 'INSERT' or new.email::text is distinct from old.email::text) then
-    select s.opted_out_at into v_at from public.comms_suppressions s
-     where s.shop_id = new.shop_id and s.channel = 'email' and s.address = lower(new.email::text);
-    if found then
+  if tg_op = 'INSERT'
+     or public.comms_address_key('email', new.email::text)
+        is distinct from public.comms_address_key('email', old.email::text) then
+    v_at := null;
+    if new.email is not null then
+      select s.opted_out_at into v_at from public.comms_suppressions s
+       where s.shop_id = new.shop_id and s.channel = 'email'
+         and s.address = public.comms_address_key('email', new.email::text);
+    end if;
+    if tg_op = 'UPDATE' and old.email is not null
+       and new.email_opted_out_at is not distinct from old.email_opted_out_at then
+      new.email_opted_out_at := v_at;                     -- the previous address's stamp: recomputed
+    else
       new.email_opted_out_at := coalesce(new.email_opted_out_at, v_at);
+    end if;
+    if v_at is not null then
       new.email_opt_in := false;
     end if;
   end if;
@@ -361,35 +486,41 @@ $$;
 create trigger customers_31_comms_suppressed before insert or update of phone, email on public.customers
   for each row execute function public.customers_comms_suppressed();
 
--- AFTER an opt-out stamp changes on a customer (staff, STOP, unsubscribe,
--- the provider reporting an unsubscribed number): the address follows —
--- a new opt-out suppresses the address shop-wide, a cleared one (trusted
--- code only; see customers_comms_guard) clears it for every customer.
+-- AFTER an opt-out stamp or an address changes on a customer (staff, STOP,
+-- unsubscribe, the provider reporting an unsubscribed number): the address
+-- follows — a customer with an opt-out stamp suppresses its current address
+-- shop-wide (a new opt-out, or one kept from when the customer had no
+-- address on the channel); a stamp cleared WITHOUT an address change
+-- (trusted code only; see customers_comms_guard) clears the address for
+-- every customer. A stamp dropped because the address changed
+-- (customers_comms_suppressed) lifts nothing: the previous address keeps
+-- its opt-out.
 create function public.customers_comms_optout_sync() returns trigger
 language plpgsql security definer
 set search_path = ''
 as $$
+declare
+  v_sms_moved   boolean := tg_op = 'UPDATE'
+                           and public.comms_address_key('sms', new.phone)
+                               is distinct from public.comms_address_key('sms', old.phone);
+  v_email_moved boolean := tg_op = 'UPDATE'
+                           and public.comms_address_key('email', new.email::text)
+                               is distinct from public.comms_address_key('email', old.email::text);
 begin
-  if new.sms_opted_out_at is not null and (tg_op = 'INSERT' or old.sms_opted_out_at is null) then
-    if new.phone is not null then
+  if new.sms_opted_out_at is not null then
+    if new.phone is not null and (tg_op = 'INSERT' or old.sms_opted_out_at is null or v_sms_moved) then
       perform public.comms_suppress(new.shop_id, 'sms', new.phone, new.sms_opted_out_at);
     end if;
-  elsif tg_op = 'UPDATE' and old.sms_opted_out_at is not null and new.sms_opted_out_at is null then
+  elsif tg_op = 'UPDATE' and old.sms_opted_out_at is not null and not v_sms_moved then
     perform public.comms_unsuppress(new.shop_id, 'sms', new.phone);
-    if old.phone is distinct from new.phone then
-      perform public.comms_unsuppress(new.shop_id, 'sms', old.phone);
-    end if;
   end if;
 
-  if new.email_opted_out_at is not null and (tg_op = 'INSERT' or old.email_opted_out_at is null) then
-    if new.email is not null then
+  if new.email_opted_out_at is not null then
+    if new.email is not null and (tg_op = 'INSERT' or old.email_opted_out_at is null or v_email_moved) then
       perform public.comms_suppress(new.shop_id, 'email', new.email::text, new.email_opted_out_at);
     end if;
-  elsif tg_op = 'UPDATE' and old.email_opted_out_at is not null and new.email_opted_out_at is null then
+  elsif tg_op = 'UPDATE' and old.email_opted_out_at is not null and not v_email_moved then
     perform public.comms_unsuppress(new.shop_id, 'email', new.email::text);
-    if old.email::text is distinct from new.email::text then
-      perform public.comms_unsuppress(new.shop_id, 'email', old.email::text);
-    end if;
   end if;
   return null;
 end
@@ -400,14 +531,106 @@ create trigger customers_comms_optout_insert after insert on public.customers
   execute function public.customers_comms_optout_sync();
 create trigger customers_comms_optout_update after update on public.customers
   for each row when (old.sms_opted_out_at is distinct from new.sms_opted_out_at
-                     or old.email_opted_out_at is distinct from new.email_opted_out_at)
+                     or old.email_opted_out_at is distinct from new.email_opted_out_at
+                     or (new.sms_opted_out_at is not null and old.phone is distinct from new.phone)
+                     or (new.email_opted_out_at is not null and old.email::text is distinct from new.email::text))
   execute function public.customers_comms_optout_sync();
+
+-- AFTER a customer's phone / email changes: messages still queued to the
+-- previous address are withdrawn, never re-addressed — the old number or
+-- inbox may belong to someone else now, and the new one is only messaged by
+-- what is queued from here on (with the consent checks that apply then).
+-- Messages already handed to the sender are cancelled by the retry check
+-- (comms_withdraw_reason) if they come back.
+create function public.customers_comms_readdress() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  update public.messages m
+     set status = 'cancelled', error = 'the customer''s contact details changed before sending'
+   where m.shop_id = new.shop_id and m.customer_id = new.id
+     and m.direction = 'outbound' and m.status = 'queued'
+     and public.comms_address_key(m.channel, m.to_address)
+         is distinct from public.comms_address_key(m.channel, case m.channel when 'sms' then new.phone
+                                                                              else new.email::text end);
+  return null;
+end
+$$;
+
+create trigger customers_comms_readdress after update of phone, email on public.customers
+  for each row when (old.phone is distinct from new.phone or old.email::text is distinct from new.email::text)
+  execute function public.customers_comms_readdress();
+
+-- ---------------------------------------------------------------------------
+-- comms_unsubscribe_tokens — the credential of every marketing email's
+-- unsubscribe link (messages.unsubscribe_token) with the shop and the
+-- address the email went to, recorded when the email is queued
+-- (messages_record_unsubscribe_token) and kept while the shop exists.
+-- It outlives the message on purpose: deleting a customer deletes their
+-- messages (messages_customer_fk), yet the /u/<token> link and the one-click
+-- List-Unsubscribe POST in email already delivered must keep working
+-- (CAN-SPAM: at least 30 days after sending), and the opt-out they record
+-- belongs to the ADDRESS, so any other customer record with it (a
+-- duplicate, one created later) is opted out too. public_unsubscribe (0035)
+-- resolves tokens here. Like comms_suppressions, it keeps an address after
+-- its customer is gone only to honour that person's opt-out.
+-- Written only by definer code; no API role can read or write it.
+-- ---------------------------------------------------------------------------
+create table public.comms_unsubscribe_tokens (
+  id          uuid primary key default gen_random_uuid(),
+  shop_id     uuid not null references public.shops (id) on delete cascade,
+  token       uuid not null,
+  address     text not null,
+  -- the email it was issued for, while that message exists
+  message_id  uuid,
+  created_at  timestamptz not null default now(),
+  constraint comms_unsubscribe_tokens_shop_id_id_key unique (shop_id, id),
+  constraint comms_unsubscribe_tokens_token_key unique (token),
+  constraint comms_unsubscribe_tokens_address check (
+    address = public.comms_address_key('email', address) and public.is_valid_email(address)),
+  constraint comms_unsubscribe_tokens_message_fk foreign key (shop_id, message_id)
+    references public.messages (shop_id, id) on delete set null (message_id)
+);
+create index comms_unsubscribe_tokens_shop_message_idx on public.comms_unsubscribe_tokens (shop_id, message_id);
+
+comment on table public.comms_unsubscribe_tokens is
+  'Unsubscribe-link credentials of marketing email (token -> shop + address). Outlives the message so sent links keep working; definer code only.';
+
+alter table public.comms_unsubscribe_tokens enable row level security;
+-- No policies: only definer code (and service_role) touches it.
+revoke all on public.comms_unsubscribe_tokens from anon, authenticated;
+
+-- AFTER INSERT of a marketing email carrying a token (campaign emails, 0035;
+-- comms_is_marketing_key template emails, enqueue_customer_template): the
+-- token is recorded with the address it was sent to. Tokens are only ever
+-- issued at insert; one set on any other row is never an unsubscribe
+-- credential.
+create function public.messages_record_unsubscribe_token() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  if new.direction = 'outbound' and new.channel = 'email'
+     and (new.campaign_id is not null or public.comms_is_marketing_key(new.template_key)) then
+    insert into public.comms_unsubscribe_tokens (shop_id, token, address, message_id)
+    values (new.shop_id, new.unsubscribe_token, public.comms_address_key('email', new.to_address), new.id);
+  end if;
+  return null;
+end
+$$;
+
+create trigger messages_40_record_unsubscribe_token after insert on public.messages
+  for each row when (new.unsubscribe_token is not null)
+  execute function public.messages_record_unsubscribe_token();
 
 -- ---------------------------------------------------------------------------
 -- Template variables (internal builders + a checked wrapper)
 -- ---------------------------------------------------------------------------
 
--- Customer/shop-level variables (no job).
+-- Customer/shop-level variables (no job). Link variables are null when the
+-- link is not available: review_link without a review URL, booking_page_link
+-- while the shop's online booking is off (or app_base_url is unset).
 create function public.comms_customer_vars(p_shop_id uuid, p_customer_id uuid) returns jsonb
 language sql stable
 set search_path = ''
@@ -421,9 +644,12 @@ as $$
                               nullif(btrim(c.company), '')),
     'shop_name', s.name,
     'shop_phone', public.format_phone(s.phone),
-    'review_link', s.review_url,
-    'booking_page_link', public.app_url('/book/' || s.slug))
+    'review_link', nullif(btrim(s.review_url), ''),
+    -- only while the page has something to book (public_booking_catalog
+    -- refuses a shop whose online booking is off)
+    'booking_page_link', case when b.enabled then public.app_url('/book/' || s.slug) end)
   from public.shops s
+  left join public.booking_settings b on b.shop_id = s.id
   left join public.customers c on c.shop_id = s.id and c.id = p_customer_id
   where s.id = p_shop_id
 $$;
@@ -537,9 +763,162 @@ as $$
                                   'on_the_way', 'job_started'), false)
 $$;
 
--- Renders a template for a channel: body trimmed and capped (SMS 1600,
--- email 50000 characters); email subject rendered, else the shop name.
--- body is null when the template renders empty.
+-- Template keys that are marketing (promotional), not transactional: they
+-- need the channel's marketing opt-in (sms_opt_in / email_opt_in) like a
+-- campaign, re-checked at send time, and their SMS carry the opt-out line.
+create function public.comms_is_marketing_key(p_key public.message_template_key) returns boolean
+language sql immutable
+set search_path = ''
+as $$ select coalesce(p_key::text = 'follow_up', false) $$;
+
+-- A marketing SMS body (≤ 1600 characters) that tells the recipient how to
+-- opt out: kept as is when it already carries an opt-out INSTRUCTION
+-- ("Reply STOP", "Text STOP", "Txt STOP", "Send STOP" — merely using the
+-- word, as in "Stop by Saturday", does not count), else cut to make room
+-- for and ended with "Reply STOP to opt out.". Null for a blank body.
+create function public.comms_sms_with_optout(p_body text) returns text
+language sql immutable
+set search_path = ''
+as $$
+  select case
+    when nullif(btrim(p_body, E' \t\r\n'), '') is null then null
+    when left(p_body, 1600) ~* '\m(reply|text|txt|send)[[:space:]]+["''“‘]?stop\M' then left(p_body, 1600)
+    else left(p_body, 1600 - char_length(E'\nReply STOP to opt out.')) || E'\nReply STOP to opt out.'
+  end
+$$;
+
+-- A marketing email body (≤ 50000 characters) that carries its unsubscribe
+-- link: kept as is when the link already appears in it (the template used
+-- {{unsubscribe_link}}), else cut to make room for and ended with
+-- "To unsubscribe from these emails, visit: <link>". Unchanged when the
+-- body or link is null.
+create function public.comms_email_with_unsubscribe(p_body text, p_link text) returns text
+language sql immutable
+set search_path = ''
+as $$
+  select case
+    when p_body is null or nullif(btrim(p_link), '') is null then p_body
+    when strpos(left(p_body, 50000), p_link) > 0 then left(p_body, 50000)
+    else left(p_body, 50000 - char_length(E'\n\nTo unsubscribe from these emails, visit: ' || p_link))
+         || E'\n\nTo unsubscribe from these emails, visit: ' || p_link
+  end
+$$;
+
+-- Link placeholders a template text uses whose link is not available in
+-- p_vars (missing, null or blank), sorted and distinct. The link variables
+-- are exactly those that can be unavailable for a message (LINK_VARS in
+-- supabase/functions/messaging/send.ts):
+--   booking_link       the job's booking page
+--   booking_page_link  the shop's online booking page (only while online booking is on)
+--   quote_link         the job's quote (only once sent)
+--   invoice_link       the job's invoice (only once issued)
+--   review_link        the shop's review URL (only once set)
+-- ({{unsubscribe_link}} is not one of them: marketing email always has it,
+-- and it renders empty in every other message by design.)
+create function public.comms_unavailable_links(p_text text, p_vars jsonb) returns text[]
+language sql immutable
+set search_path = ''
+as $$
+  select coalesce(array_agg(distinct m.match[1] order by m.match[1]), '{}'::text[])
+    from regexp_matches(coalesce(p_text, ''),
+                        '\{\{[ \t]*(booking_link|booking_page_link|quote_link|invoice_link|review_link)[ \t]*\}\}',
+                        'g') as m(match)
+   where jsonb_typeof(case when jsonb_typeof(p_vars) = 'object' then p_vars end -> m.match[1])
+           is distinct from 'string'
+      or btrim(p_vars ->> m.match[1]) = ''
+$$;
+
+-- Placeholders a template text uses that would render blank, sorted and
+-- distinct: the unavailable link placeholders (comms_unavailable_links;
+-- only when p_links) and the optional VALUE placeholders with no value in
+-- p_vars (missing, null, a JSON object / array, or blank text). The optional
+-- values are those a shop, customer or job may not have, or that only a
+-- job provides:
+--   shop_phone     the shop's phone (create_shop's p_phone is optional)
+--   customer_name  the customer's full name (none for a record with only a phone / email)
+--   job_date, job_time, job_number, vehicle, services, amount, balance
+--                  job details (a job may be unscheduled, have no vehicle or
+--                  no line items; none of them exist for customer-level messages)
+-- (customer_first_name and shop_name always have a value; unsubscribe_link
+-- renders empty outside marketing email by design; invite_link is supplied
+-- by the invites sender; unknown names are left to render_template.)
+create function public.comms_unavailable_values(p_text text, p_vars jsonb, p_links boolean default true)
+returns text[]
+language sql immutable
+set search_path = ''
+as $$
+  select coalesce(array_agg(distinct x.name order by x.name), '{}'::text[])
+    from (
+      select l.name
+        from unnest(public.comms_unavailable_links(p_text, p_vars)) as l(name)
+       where coalesce(p_links, true)
+      union all
+      select m.match[1]
+        from regexp_matches(coalesce(p_text, ''),
+                            '\{\{[ \t]*(shop_phone|customer_name|job_date|job_time|job_number|vehicle|services|amount|balance)[ \t]*\}\}',
+                            'g') as m(match)
+       where coalesce(jsonb_typeof(case when jsonb_typeof(p_vars) = 'object' then p_vars end -> m.match[1]), 'null')
+               not in ('string', 'number', 'boolean')
+          or btrim((case when jsonb_typeof(p_vars) = 'object' then p_vars end) ->> m.match[1]) = ''
+    ) x
+$$;
+
+-- A template text without the lines that would render something blank
+-- (comms_unavailable_values): a line whose link is not available, or that
+-- uses an optional value this shop / customer / job does not have, is left
+-- out, so an automatic message never ends a sentence with a blank link
+-- ("View your invoice: ") or a blank value ("Questions? Call us at .",
+-- "Vehicle: "); the blank line that set an omitted paragraph apart goes
+-- with it. With p_links false, lines whose only gap is a link are kept (the
+-- staff preview shows those blank: the staff send refuses such a message).
+-- Unchanged when nothing it uses is missing; null for null.
+create function public.comms_omit_unavailable_values(p_text text, p_vars jsonb, p_links boolean default true)
+returns text
+language plpgsql immutable
+set search_path = ''
+as $$
+declare
+  v_out     text[] := '{}';
+  v_line    text;
+  v_omitted boolean := false;
+begin
+  if p_text is null or cardinality(public.comms_unavailable_values(p_text, p_vars, p_links)) = 0 then
+    return p_text;
+  end if;
+  foreach v_line in array string_to_array(p_text, E'\n') loop
+    if cardinality(public.comms_unavailable_values(v_line, p_vars, p_links)) > 0 then
+      v_omitted := true;
+      continue;
+    end if;
+    if btrim(v_line, E' \t\r') = '' then
+      continue when v_omitted and (cardinality(v_out) = 0 or btrim(v_out[cardinality(v_out)], E' \t\r') = '');
+    else
+      v_omitted := false;
+    end if;
+    v_out := v_out || v_line;
+  end loop;
+  return array_to_string(v_out, E'\n');
+end
+$$;
+
+-- The link a template key exists to deliver. Such a message is not sent at
+-- all while its template uses that link and it is not available (a quote
+-- that was never sent, an invoice still in draft, a shop without a review
+-- URL): without it the message has no point.
+create function public.comms_key_required_link(p_key public.message_template_key) returns text
+language sql immutable
+set search_path = ''
+as $$
+  select case p_key::text when 'quote_sent' then 'quote_link'
+                          when 'invoice_sent' then 'invoice_link'
+                          when 'review_request' then 'review_link' end
+$$;
+
+-- Renders a template for a channel: lines whose link is not available or
+-- whose optional value is missing are left out
+-- (comms_omit_unavailable_values), body trimmed and capped (SMS
+-- 1600, email 50000 characters); email subject rendered, else the shop
+-- name. body is null when the template renders empty.
 create function public.comms_render_parts(
   p_channel    public.message_channel,
   p_subject    text,
@@ -553,7 +932,8 @@ language plpgsql immutable
 set search_path = ''
 as $$
 begin
-  body := nullif(btrim(public.render_template(p_body, p_vars), E' \t\r\n'), '');
+  body := nullif(btrim(public.render_template(public.comms_omit_unavailable_values(p_body, p_vars), p_vars),
+                       E' \t\r\n'), '');
   if body is null then
     return;
   end if;
@@ -561,7 +941,9 @@ begin
     body := left(body, 1600);
   else
     body := left(body, 50000);
-    subject := coalesce(left(nullif(btrim(public.render_template(p_subject, p_vars)), ''), 500), p_shop_name);
+    subject := coalesce(left(nullif(btrim(public.render_template(
+                                 public.comms_omit_unavailable_values(p_subject, p_vars), p_vars)), ''), 500),
+                        p_shop_name);
   end if;
 end
 $$;
@@ -572,8 +954,19 @@ $$;
 -- message for (key, channel) and returns its id, or null (no-op) when the
 -- template is missing/disabled, the customer has no address for the channel,
 -- has opted out (or the address is suppressed), the shop has no SMS number,
--- the body renders empty, or it is an appointment message for a cancelled /
--- no-show job. p_extra_vars override/add variables (e.g. a receipt's amount).
+-- the body renders empty (lines whose link is not available or whose
+-- optional value is missing are left out: comms_render_parts), the wording uses the link the key exists to deliver
+-- and it is not available (comms_key_required_link: an unsent quote, an
+-- unissued invoice, no review URL), the wording uses an app link ({{booking_link}},
+-- {{quote_link}} …; comms_uses_app_links) while platform_config has no
+-- app_base_url, it is an appointment message for a cancelled /
+-- no-show job, or it is a marketing template (comms_is_marketing_key) and
+-- the customer has not opted in to marketing on the channel (or, for
+-- email, no app URL is configured to build its unsubscribe link). Marketing
+-- SMS get the opt-out line; marketing email gets a fresh unsubscribe token,
+-- {{unsubscribe_link}} and the unsubscribe footer unless the wording
+-- already places the link. p_extra_vars override/add variables (e.g. a
+-- receipt's amount) except unsubscribe_link.
 -- ---------------------------------------------------------------------------
 create function public.enqueue_customer_template(
   p_shop_id      uuid,
@@ -598,6 +991,9 @@ declare
   v_vars     jsonb;
   v_subject  text;
   v_body     text;
+  v_token    uuid;
+  v_unsub    text;
+  v_need     text;
   v_id       uuid;
 begin
   if p_shop_id is null or p_customer_id is null or p_key is null or p_channel is null then
@@ -626,6 +1022,11 @@ begin
   if not found or not v_tpl.enabled then
     return null;
   end if;
+  -- never queue a message whose customer link would render blank
+  if public.app_url('/') is null
+     and (public.comms_uses_app_links(v_tpl.body) or (p_channel = 'email' and public.comms_uses_app_links(v_tpl.subject))) then
+    return null;
+  end if;
   select * into v_shop from public.shops s where s.id = p_shop_id;
 
   if p_channel = 'sms' then
@@ -642,11 +1043,31 @@ begin
   if public.comms_is_suppressed(p_shop_id, p_channel, v_to) then
     return null;
   end if;
+  if public.comms_is_marketing_key(p_key)
+     and not (case p_channel when 'sms' then v_cust.sms_opt_in else v_cust.email_opt_in end) then
+    return null;
+  end if;
 
   v_vars := case when p_job_id is not null then public.comms_job_vars(p_job_id)
                  else public.comms_customer_vars(p_shop_id, p_customer_id) end;
   if jsonb_typeof(p_extra_vars) = 'object' then
     v_vars := v_vars || p_extra_vars;
+  end if;
+  v_need := public.comms_key_required_link(p_key);
+  if v_need = any (public.comms_unavailable_links(
+                     v_tpl.body || case when p_channel = 'email' then E'\n' || coalesce(v_tpl.subject, '') else '' end,
+                     v_vars)) then
+    return null;                            -- the message would be missing the link it exists to deliver
+  end if;
+  if p_channel = 'email' and public.comms_is_marketing_key(p_key) then
+    v_token := gen_random_uuid();
+    v_unsub := public.app_url('/u/' || v_token::text);
+    if v_unsub is null then
+      return null;                          -- no working unsubscribe link: never send marketing email without one
+    end if;
+    v_vars := v_vars || jsonb_build_object('unsubscribe_link', v_unsub);
+  else
+    v_vars := v_vars - 'unsubscribe_link';
   end if;
 
   select r.subject, r.body into v_subject, v_body
@@ -654,11 +1075,15 @@ begin
   if v_body is null then
     return null;
   end if;
+  if public.comms_is_marketing_key(p_key) then
+    v_body := case p_channel when 'sms' then public.comms_sms_with_optout(v_body)
+                             else public.comms_email_with_unsubscribe(v_body, v_unsub) end;
+  end if;
 
   insert into public.messages (shop_id, customer_id, job_id, direction, channel, to_address, subject, body,
-                               status, send_after, template_key, sent_by)
+                               status, send_after, template_key, sent_by, unsubscribe_token)
   values (p_shop_id, p_customer_id, p_job_id, 'outbound', p_channel, v_to, v_subject, v_body,
-          'queued', coalesce(p_send_after, now()), p_key, p_sent_by)
+          'queued', coalesce(p_send_after, now()), p_key, p_sent_by, v_token)
   returning id into v_id;
   return v_id;
 end
@@ -669,6 +1094,8 @@ $$;
 --   service_role: any key.  owner/admin/manager: any key for their shop's jobs.
 --   technician: only on_the_way / job_started / job_completed, only on jobs
 --   assigned to them, sent now.
+-- Raises 55000 when the template needs customer links (or an unsubscribe
+-- link) and app_base_url is not configured, instead of queueing nothing.
 -- Returns the queued message id or null (see enqueue_customer_template).
 -- ---------------------------------------------------------------------------
 create function public.enqueue_template_message(
@@ -710,13 +1137,28 @@ begin
     raise exception 'this appointment is %; its appointment messages can no longer be sent',
       replace(v_job.status::text, '_', '-') using errcode = '55000';
   end if;
+  if public.app_url('/') is null and exists (
+       select 1 from public.message_templates t
+        where t.shop_id = v_job.shop_id and t.key = p_key and t.channel = p_channel and t.enabled
+          and (public.comms_uses_app_links(t.body)
+               or (p_channel = 'email' and (public.comms_uses_app_links(t.subject)
+                                            or public.comms_is_marketing_key(p_key))))) then
+    raise exception 'customer links are not set up on this platform yet, so this message cannot be sent'
+      using errcode = '55000',
+            hint = 'The platform operator must set app_base_url (supabase/setup/cron.sql).';
+  end if;
   return public.enqueue_customer_template(v_job.shop_id, v_job.customer_id, p_key, p_channel, v_job.id,
                                           null, p_send_after, auth.uid());
 end
 $$;
 
 -- Preview what a template would send for a job (same access rules as
--- enqueue_template_message). Nothing is queued.
+-- enqueue_template_message). Nothing is queued. Links that are not available
+-- render blank here, so staff see what is missing (the messaging function's
+-- staff send refuses such a message: missing_link); only automatic sending
+-- leaves those lines out (comms_render_parts). Lines with a missing optional
+-- value (no shop phone, no vehicle …) are left out here too, as they are
+-- from every message queued (comms_omit_unavailable_values).
 create function public.preview_template_message(
   p_job_id   uuid,
   p_key      public.message_template_key,
@@ -754,10 +1196,34 @@ begin
   end if;
   select * into v_cust from public.customers c where c.id = v_job.customer_id and c.shop_id = v_job.shop_id;
   v_vars := public.comms_job_vars(v_job.id);
+  -- Technicians send these messages but may not act as the customer: the
+  -- job / quote / invoice tokens inside the link variables are customer
+  -- credentials (0042 hides jobs.public_token from them), so a technician's
+  -- preview shows a label where a link will go.
+  if v_role = 'technician' then
+    v_vars := v_vars || coalesce((select jsonb_object_agg(e.key, '[' || replace(e.key, '_', ' ') || ']')
+                                    from jsonb_each(v_vars) e
+                                   where e.key in ('booking_link', 'quote_link', 'invoice_link')
+                                     and jsonb_typeof(e.value) = 'string'), '{}'::jsonb);
+  end if;
+  -- a marketing email gets its own unsubscribe link when queued; the preview
+  -- shows where it goes (and the footer when the wording does not place it)
+  if p_channel = 'email' and public.comms_is_marketing_key(p_key) then
+    v_vars := v_vars || jsonb_build_object('unsubscribe_link', '[unsubscribe link]');
+  end if;
+  -- lines with a missing optional value are left out exactly as when the
+  -- message is queued; lines whose only gap is a link are kept (blank)
   return query select v_tpl.enabled,
                       case p_channel when 'sms' then v_cust.phone else v_cust.email::text end,
-                      public.render_template(v_tpl.subject, v_vars),
-                      btrim(public.render_template(v_tpl.body, v_vars), E' \t\r\n');
+                      public.render_template(public.comms_omit_unavailable_values(v_tpl.subject, v_vars, false), v_vars),
+                      case when p_channel = 'email' and public.comms_is_marketing_key(p_key)
+                           then public.comms_email_with_unsubscribe(
+                                  btrim(public.render_template(
+                                          public.comms_omit_unavailable_values(v_tpl.body, v_vars, false), v_vars),
+                                        E' \t\r\n'), '[unsubscribe link]')
+                           else btrim(public.render_template(
+                                        public.comms_omit_unavailable_values(v_tpl.body, v_vars, false), v_vars),
+                                      E' \t\r\n') end;
 end
 $$;
 
@@ -855,12 +1321,17 @@ $$;
 -- Checked by claim_queued_messages for every due message and by
 -- mark_message_result before a retry is re-queued. In order:
 --   * the customer opted out of the channel, or the address is suppressed;
---   * campaign messages: the campaign was cancelled, or the customer no
---     longer has the channel's marketing opt-in (sms_opt_in / email_opt_in);
---   * appointment messages (comms_is_appointment_key): the job was
---     cancelled, marked no-show or moved to another customer; a reminder
---     whose appointment already started (15 minutes of grace for reminders
---     set to the appointment time itself) or is under way / done;
+--   * the customer's current phone / email for the channel is no longer the
+--     address the message was queued to (or was removed);
+--   * campaign messages: the campaign was cancelled; campaign and marketing
+--     template messages (comms_is_marketing_key): the customer no longer
+--     has the channel's marketing opt-in (sms_opt_in / email_opt_in);
+--   * appointment messages (comms_is_appointment_key): the job was deleted
+--     (appointment messages always name their job, so one without a job
+--     lost it), cancelled, marked no-show or moved to another customer; a
+--     reminder whose appointment already started or is under way / done
+--     (15 minutes of grace only for a reminder that was due at the
+--     appointment time itself: offset 0, per its job_automation_log row);
 --   * staleness after a sender outage: on_the_way / job_started more than
 --     2 hours past their send time; other job messages (except quotes,
 --     invoices and receipts, which stay valid) and campaign messages more
@@ -877,6 +1348,7 @@ declare
   v_cust     public.customers;
   v_job      public.jobs;
   v_campaign text;
+  v_at_start boolean;
 begin
   if p_msg.id is null or p_msg.direction <> 'outbound' then
     return null;
@@ -890,6 +1362,12 @@ begin
      or public.comms_is_suppressed(p_msg.shop_id, p_msg.channel, p_msg.to_address) then
     return 'the recipient opted out before sending';
   end if;
+  if v_cust.id is not null
+     and public.comms_address_key(p_msg.channel, p_msg.to_address)
+         is distinct from public.comms_address_key(p_msg.channel, case p_msg.channel when 'sms' then v_cust.phone
+                                                                                     else v_cust.email::text end) then
+    return 'the customer''s contact details changed before sending';
+  end if;
 
   if p_msg.campaign_id is not null then
     execute 'select c.status::text from public.campaigns c where c.id = $1 and c.shop_id = $2'
@@ -897,12 +1375,17 @@ begin
     if v_campaign = 'cancelled' then
       return 'the campaign was cancelled';
     end if;
+  end if;
+  if p_msg.campaign_id is not null or public.comms_is_marketing_key(p_msg.template_key) then
     if v_cust.id is null
        or not (case p_msg.channel when 'sms' then v_cust.sms_opt_in else v_cust.email_opt_in end) then
       return 'the recipient withdrew marketing consent before sending';
     end if;
   end if;
 
+  if p_msg.job_id is null and public.comms_is_appointment_key(p_msg.template_key) then
+    return 'the appointment was deleted';
+  end if;
   if p_msg.job_id is not null then
     select * into v_job from public.jobs j where j.id = p_msg.job_id and j.shop_id = p_msg.shop_id;
     if v_job.id is not null and public.comms_is_appointment_key(p_msg.template_key) then
@@ -916,6 +1399,22 @@ begin
             and (v_job.status in ('in_progress', 'completed') or v_job.scheduled_start is null
                  or v_job.scheduled_start <= v_now - interval '15 minutes') then
         return 'the appointment has already started';
+      elsif p_msg.template_key = 'appointment_reminder' and v_job.scheduled_start <= v_now then
+        -- the 15 minutes of grace are only for a reminder that was due at the
+        -- start itself (offset 0): the automation log row it was queued
+        -- under is for this start and due at it (0034). Any earlier reminder
+        -- (1 hour, 24 hours, sent by hand …) is withdrawn once it started.
+        v_at_start := false;
+        if to_regclass('public.job_automation_log') is not null then
+          execute 'select exists (select 1 from public.job_automation_log l
+                                   where l.shop_id = $1 and l.job_id = $2 and l.key = ''appointment_reminder''
+                                     and $3 = any (l.message_ids) and l.scheduled_for = $4
+                                     and l.due_at >= l.scheduled_for)'
+            into v_at_start using p_msg.shop_id, p_msg.job_id, p_msg.id, v_job.scheduled_start;
+        end if;
+        if not v_at_start then
+          return 'the appointment has already started';
+        end if;
       end if;
     end if;
   end if;
@@ -936,7 +1435,8 @@ $$;
 
 -- Locks up to p_limit due queued messages (FOR UPDATE SKIP LOCKED, so
 -- concurrent workers never get the same row), marks them 'sending' and
--- returns what the sender needs. Due rows that may no longer be sent are
+-- returns what the sender needs (unsubscribe_token: marketing email only,
+-- for its List-Unsubscribe headers). Due rows that may no longer be sent are
 -- settled instead of returned: any comms_withdraw_reason (opted out /
 -- suppressed, cancelled campaign, withdrawn marketing consent, cancelled or
 -- no-show appointment, stale) → cancelled with that reason; SMS without a
@@ -957,7 +1457,8 @@ returns table (
   customer_id   uuid,
   job_id        uuid,
   campaign_id   uuid,
-  template_key  public.message_template_key
+  template_key  public.message_template_key,
+  unsubscribe_token uuid
 )
 language plpgsql security definer
 set search_path = ''
@@ -1006,10 +1507,10 @@ begin
      where m.id = i.id
     returning m.id, m.shop_id, m.channel, m.to_address, m.from_address, m.subject, m.body, m.attempts,
               m.status, m.send_after, m.created_at, i.shop_name, i.shop_email, m.customer_id, m.job_id,
-              m.campaign_id, m.template_key
+              m.campaign_id, m.template_key, m.unsubscribe_token
   )
   select u.id, u.shop_id, u.channel, u.to_address, u.from_address, u.subject, u.body, u.attempts,
-         u.shop_name, u.shop_email, u.customer_id, u.job_id, u.campaign_id, u.template_key
+         u.shop_name, u.shop_email, u.customer_id, u.job_id, u.campaign_id, u.template_key, u.unsubscribe_token
     from upd u
    where u.status = 'sending'
    order by u.send_after, u.created_at, u.id;
@@ -1026,7 +1527,11 @@ $$;
 --                                after 5 attempts the message fails instead,
 --                                and a message that may no longer be sent
 --                                (comms_withdraw_reason, e.g. its campaign
---                                was cancelled meanwhile) is cancelled.
+--                                was cancelled meanwhile) is cancelled; an
+--                                appointment message is re-rendered for the
+--                                job as it is now (messages_30_retry_rerender;
+--                                a reminder for a time the job moved away
+--                                from is cancelled, 0034).
 -- Replaying the same result is a no-op.
 create function public.mark_message_result(
   p_id            uuid,
@@ -1143,16 +1648,18 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- record_inbound_sms (service_role; Twilio inbound webhook, signature already
--- verified by the edge function). Routes by the To number to the shop and by
--- the From number to the most recently created matching customer of that
--- shop (active customers first). Handles carrier opt-out keywords for the
+-- verified by the edge function). Routes by the To number to the shop the
+-- platform bound it to (shop_sms_numbers — whether or not the shop currently
+-- sends from it, so replies and STOPs to a paused number are never lost)
+-- and by the From number to the most recently created matching customer of
+-- that shop (active customers first). Handles carrier opt-out keywords for the
 -- NUMBER (comms_suppressions + every customer of the shop with it, including
 -- customers created with it later):
 --   STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, OPTOUT, REVOKE → opt out
 --   START, UNSTOP                                                → opt back in
 -- Unknown senders are stored with customer_id null. Staff (owner/admin/
 -- manager) get an 'inbound_message' notification. Idempotent per provider
--- id (Twilio retries). Returns no row when no shop uses the To number.
+-- id (Twilio retries). Returns no row when the To number is bound to no shop.
 -- ---------------------------------------------------------------------------
 create function public.record_inbound_sms(
   p_to           text,
@@ -1180,7 +1687,9 @@ begin
   if not public.is_valid_e164(v_to) or not public.is_valid_e164(v_from) then
     raise exception 'to and from must be E.164 phone numbers' using errcode = '22023';
   end if;
-  select * into v_shop from public.shops s where s.sms_from_number = v_to;
+  select s.* into v_shop
+    from public.shop_sms_numbers n join public.shops s on s.id = n.shop_id
+   where n.phone_number = v_to;
   if not found then
     return;
   end if;
@@ -1317,26 +1826,122 @@ create trigger jobs_zz_comms_sync_queued after update on public.jobs
                      or old.scheduled_start is distinct from new.scheduled_start)
   execute function public.jobs_comms_sync_queued();
 
+-- BEFORE a job is deleted: templated messages still queued for it (booking
+-- confirmations, reminders, on-the-way, review requests, …) are withdrawn —
+-- they describe an appointment that no longer exists and would otherwise
+-- lose their job link (messages_job_fk sets job_id null) and every job
+-- check with it. Free-form staff messages stay queued: a person wrote them
+-- and they carry no rendered job details. Appointment messages that were in
+-- flight are cancelled if they come back for a retry (comms_withdraw_reason:
+-- an appointment message without a job). If the delete is refused later
+-- (e.g. the job has an invoice), the withdrawal rolls back with it.
+create function public.jobs_comms_withdraw_on_delete() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  -- the whole shop is being deleted (cascade): its messages go with it
+  if not exists (select 1 from public.shops s where s.id = old.shop_id) then
+    return old;
+  end if;
+  update public.messages m
+     set status = 'cancelled', error = 'the appointment was deleted'
+   where m.shop_id = old.shop_id and m.job_id = old.id and m.direction = 'outbound' and m.status = 'queued'
+     and m.template_key is not null;
+  return old;
+end
+$$;
+
+create trigger jobs_zz_comms_withdraw_on_delete before delete on public.jobs
+  for each row execute function public.jobs_comms_withdraw_on_delete();
+
+-- BEFORE a message comes back for a retry (sending → queued, only
+-- mark_message_result does this): an appointment message is re-rendered
+-- from its current template and job, exactly as jobs_comms_sync_queued
+-- re-renders queued ones. A message handed to the sender is not touched
+-- when its job is rescheduled, so without this a retry after a reschedule
+-- would go out with the previous date and time. Withdrawn if it now renders
+-- empty or its template is gone. (Reminders whose appointment moved to
+-- another time are withdrawn before this by messages_20_retry_reminder_time,
+-- 0034: the new time gets its own reminder.)
+create function public.messages_comms_retry_rerender() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_tpl  public.message_templates;
+  v_vars jsonb;
+  v_shop text;
+  v_subj text;
+  v_body text;
+begin
+  if new.status <> 'queued' or old.status <> 'sending' or new.direction <> 'outbound' or new.job_id is null
+     or not public.comms_is_appointment_key(new.template_key) then
+    return new;
+  end if;
+  select * into v_tpl from public.message_templates t
+   where t.shop_id = new.shop_id and t.key = new.template_key and t.channel = new.channel;
+  v_vars := public.comms_job_vars(new.job_id);
+  if v_tpl.id is not null and v_vars is not null then
+    select s.name into v_shop from public.shops s where s.id = new.shop_id;
+    select r.subject, r.body into v_subj, v_body
+      from public.comms_render_parts(new.channel, v_tpl.subject, v_tpl.body, v_vars, v_shop) r;
+  end if;
+  if v_body is null then
+    new.status := 'cancelled';
+    new.error := 'the appointment changed and the message no longer applies';
+    new.claimed_at := null;
+  else
+    new.body := v_body;
+    new.subject := v_subj;
+  end if;
+  return new;
+end
+$$;
+
+create trigger messages_30_retry_rerender before update of status on public.messages
+  for each row when (old.status = 'sending' and new.status = 'queued')
+  execute function public.messages_comms_retry_rerender();
+
 -- ---------------------------------------------------------------------------
 -- Grants
 -- ---------------------------------------------------------------------------
 revoke execute on function
+  public.shops_sms_from_number_bound(),
   public.customers_comms_guard(),
   public.customers_attach_inbound_messages(),
   public.customers_comms_suppressed(),
   public.customers_comms_optout_sync(),
-  public.jobs_comms_sync_queued()
+  public.customers_comms_readdress(),
+  public.jobs_comms_sync_queued(),
+  public.jobs_comms_withdraw_on_delete(),
+  public.messages_comms_retry_rerender(),
+  public.messages_record_unsubscribe_token()
 from public, anon, authenticated;
 
 -- pure helpers (no data access)
 revoke execute on function
   public.comms_address_key(public.message_channel, text),
   public.comms_is_appointment_key(public.message_template_key),
+  public.comms_is_marketing_key(public.message_template_key),
+  public.comms_sms_with_optout(text),
+  public.comms_email_with_unsubscribe(text, text),
+  public.comms_unavailable_links(text, jsonb),
+  public.comms_unavailable_values(text, jsonb, boolean),
+  public.comms_omit_unavailable_values(text, jsonb, boolean),
+  public.comms_key_required_link(public.message_template_key),
   public.comms_render_parts(public.message_channel, text, text, jsonb, text)
 from public, anon;
 grant execute on function
   public.comms_address_key(public.message_channel, text),
   public.comms_is_appointment_key(public.message_template_key),
+  public.comms_is_marketing_key(public.message_template_key),
+  public.comms_sms_with_optout(text),
+  public.comms_email_with_unsubscribe(text, text),
+  public.comms_unavailable_links(text, jsonb),
+  public.comms_unavailable_values(text, jsonb, boolean),
+  public.comms_omit_unavailable_values(text, jsonb, boolean),
+  public.comms_key_required_link(public.message_template_key),
   public.comms_render_parts(public.message_channel, text, text, jsonb, text)
 to authenticated, service_role;
 

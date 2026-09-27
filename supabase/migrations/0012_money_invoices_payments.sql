@@ -26,15 +26,19 @@
 -- invoice row first, so they serialize with payments (which lock it too).
 --
 -- In flight = a 'pending' payment started less than an hour ago
--- (public.payment_in_flight). Older pending rows are abandoned intents (a
--- dismissed PaymentSheet stays requires_payment_method forever and Stripe
--- sends no event): they stop blocking edits / voids / manual payments. If
+-- (public.payment_in_flight). A declined PaymentSheet attempt stays 'pending'
+-- (upsert_stripe_payment): the sheet can still confirm it with another card,
+-- so cash cannot cover the same balance meanwhile. Older pending rows are
+-- abandoned intents (a dismissed PaymentSheet stays requires_payment_method
+-- forever and Stripe sends no event; the stale-sheet sweep cancels it): they
+-- stop blocking edits / voids / manual payments. If
 -- one still completes later, the webhook records the money like any other
 -- late payment (see "void invoices" below).
 --
 -- Payments never land on a void invoice: money that arrives for one (a
 -- Checkout Session opened before the void, a stale intent) is re-routed when
--- it is recorded or becomes received — a job payment to the job's current
+-- it is recorded, becomes received, or is received again after a refund
+-- failed at Stripe — a job payment to the job's current
 -- invoice (or to the job, for the next create_invoice_from_job), anything
 -- else to the customer as an unapplied payment flagged in its note.
 -- ============================================================================
@@ -336,7 +340,7 @@ begin
     new.created_by := coalesce(auth.uid(), new.created_by);
   else
     new.number := old.number;
-    new.created_by := old.created_by;
+    new.created_by := public.audit_user_ref(new.created_by, old.created_by);
     new.public_token := old.public_token;
   end if;
   return new;
@@ -470,7 +474,7 @@ language plpgsql
 set search_path = ''
 as $$
 declare
-  v_inv   public.invoices;
+  v_inv   record;
   v_id    uuid;
   c_links constant text[] := array['service_id', 'vehicle_id', 'updated_at', 'total_cents'];
 begin
@@ -484,7 +488,9 @@ begin
     return new;
   end if;
   v_id := case when tg_op = 'DELETE' then old.invoice_id else new.invoice_id end;
-  select * into v_inv from public.invoices i
+  -- named columns: SECURITY INVOKER, and authenticated may not read
+  -- invoices.public_token (0015)
+  select i.id, i.shop_id, i.status, i.amount_paid_cents into v_inv from public.invoices i
    where i.id = v_id and i.shop_id = case when tg_op = 'DELETE' then old.shop_id else new.shop_id end
      for no key update;
   if not found then
@@ -571,8 +577,9 @@ create trigger invoice_line_items_validate after insert or update on public.invo
 --   * otherwise the customer comes from the job / membership
 -- Supplied values that contradict the parent are rejected.
 -- Money never lands on a void invoice (see header): when a payment is
--- recorded for one, moved onto one, or becomes received while still pointing
--- at one, a job payment goes back to its job (and so to the job's current
+-- recorded for one, moved onto one, or becomes received — or its net amount
+-- rises again (a failed Stripe refund) — while still pointing at one, a job
+-- payment goes back to its job (and so to the job's current
 -- invoice, if any); a payment for an invoice without a job — or for a job
 -- that has since changed customer — stays with the invoice's customer,
 -- unapplied, with a note saying so.
@@ -596,7 +603,14 @@ begin
      and (tg_op = 'INSERT'
           or new.invoice_id is distinct from old.invoice_id
           or (new.status in ('succeeded', 'partially_refunded', 'refunded')
-              and old.status not in ('succeeded', 'partially_refunded', 'refunded'))) then
+              and old.status not in ('succeeded', 'partially_refunded', 'refunded'))
+          -- received again: a refund that failed at Stripe (refund.failed
+          -- lowers refunded_cents, e.g. refunded -> succeeded) puts money
+          -- back on the payment
+          or public.payment_net_amount(new.status, new.amount_cents, new.tip_cents, new.refunded_cents)
+             + public.payment_net_tip(new.status, new.amount_cents, new.tip_cents, new.refunded_cents)
+             > public.payment_net_amount(old.status, old.amount_cents, old.tip_cents, old.refunded_cents)
+             + public.payment_net_tip(old.status, old.amount_cents, old.tip_cents, old.refunded_cents)) then
     select i.status, i.job_id, i.customer_id, i.number into v_status, v_job, v_cust, v_number
       from public.invoices i where i.id = new.invoice_id and i.shop_id = new.shop_id;
     if found and v_status = 'void' then
@@ -668,7 +682,7 @@ begin
   new.card_brand := lower(nullif(btrim(new.card_brand), ''));
   new.note := nullif(btrim(new.note), '');
   if tg_op = 'UPDATE' then
-    new.recorded_by := old.recorded_by;
+    new.recorded_by := public.audit_user_ref(new.recorded_by, old.recorded_by);
   end if;
   return new;
 end
@@ -749,7 +763,8 @@ create trigger jobs_15_customer_change before update on public.jobs
 -- job's discount is derived from the coupon (jobs_40_compute_totals then
 -- applies it). Removing or replacing the coupon releases its redemption and,
 -- unless a manual discount is set in the same write, removes its discount.
--- While a coupon is attached its discount cannot be edited by hand.
+-- While a coupon is attached its discount cannot be edited by hand. Once the
+-- job has a non-void invoice its coupon is frozen (the discount was billed).
 -- Trusted code manages coupons itself (create_online_booking redeems and
 -- sets the discount; ON DELETE SET NULL of a deleted coupon keeps the
 -- discount the job already received).
@@ -804,13 +819,22 @@ begin
 end
 $$;
 
--- SECURITY INVOKER so is_client_context() sees the caller.
+-- SECURITY INVOKER so is_client_context() sees the caller (only managers+
+-- reach the coupon logic: jobs_10_client_guard stops technicians, and
+-- managers+ read every invoice of their shop).
+-- The coupon of a job with a non-void invoice is frozen: the invoice copied
+-- its discount (create_invoice_from_job), so the redemption was billed and is
+-- never given back, and a coupon attached now would be used up without ever
+-- reaching the invoice. Void the invoice (or delete a draft) first. The job
+-- row is locked by this write, and create_invoice_from_job locks it too, so
+-- an invoice cannot appear between the check and the release / redemption.
 create function public.jobs_apply_coupon() returns trigger
 language plpgsql
 set search_path = ''
 as $$
 declare
-  v_c public.coupons;
+  v_c       public.coupons;
+  v_invoice bigint;
 begin
   if not public.is_client_context() then
     return new;
@@ -822,6 +846,16 @@ begin
         using errcode = '23514';
     end if;
     return new;
+  end if;
+  if tg_op = 'UPDATE' then
+    select i.number into v_invoice
+      from public.invoices i
+     where i.shop_id = old.shop_id and i.job_id = old.id and i.status <> 'void'
+     limit 1;
+    if found then
+      raise exception 'this job is billed on invoice #%; its coupon cannot change until that invoice is void', v_invoice
+        using errcode = '23514';
+    end if;
   end if;
   if tg_op = 'UPDATE' and old.coupon_id is not null then
     perform public.coupon_release_for_job(old.shop_id, old.coupon_id);
@@ -843,6 +877,77 @@ $$;
 
 create trigger jobs_35_apply_coupon before insert or update on public.jobs
   for each row execute function public.jobs_apply_coupon();
+
+-- Deleting a job gives its coupon's redemption back, in every context: every
+-- job that carries a coupon consumed one redemption (staff writes through
+-- jobs_apply_coupon, online bookings in create_online_booking), and a job
+-- deleted by mistake must not use up a limited coupon. Jobs with invoices or
+-- payments cannot be deleted (RESTRICT), so a billed redemption is never
+-- released. Runs as the owner (coupon writes are admin-only under RLS); the
+-- delete itself was already authorized by the jobs policies. When the whole
+-- shop is deleted the coupon may already be gone: nothing to update then.
+create function public.jobs_release_coupon_on_delete() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  update public.coupons c
+     set redemptions = greatest(c.redemptions - 1, 0)
+   where c.id = old.coupon_id and c.shop_id = old.shop_id;
+  return null;
+end
+$$;
+
+create trigger jobs_zz_release_coupon after delete on public.jobs
+  for each row when (old.coupon_id is not null)
+  execute function public.jobs_release_coupon_on_delete();
+
+-- ---------------------------------------------------------------------------
+-- shops: deleting a shop cascades through its memberships and payments, but
+-- the Stripe objects on its connected account live on. A subscription would
+-- keep charging the customer every period while the webhook, which can no
+-- longer find the shop or the membership, records nothing — and nobody can
+-- cancel it from the CRM any more. So, in every context (the owner's
+-- PostgREST DELETE, service_role, a direct database session), a shop cannot
+-- be deleted while:
+--   * any membership is not cancelled: an active / past_due one bills through
+--     its subscription, and an incomplete one may have a payable
+--     subscription-mode Checkout link (membership_checkout). Cancelling each
+--     one through membership_cancel stops the subscription or expires the
+--     links first;
+--   * a card payment is in flight (public.payment_in_flight): a PaymentSheet
+--     being confirmed would move money that is never recorded.
+-- (Invoice / deposit Checkout links have no row until paid; they expire
+-- within the hour and an orphaned one charges once at most.)
+-- The row lock on the shop is taken by the DELETE itself, and new
+-- memberships / payments need the shop row (FK key-share lock), so nothing
+-- can be added between this check and the cascade.
+-- ---------------------------------------------------------------------------
+create function public.shops_money_delete_guard() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_open bigint;
+begin
+  select count(*) into v_open
+    from public.memberships m
+   where m.shop_id = old.id and m.status <> 'cancelled';
+  if v_open > 0 then
+    raise exception 'this shop has % membership(s) that are not cancelled; cancel them first so their Stripe billing stops',
+      v_open using errcode = '55000';
+  end if;
+  if exists (select 1 from public.payments p
+             where p.shop_id = old.id and public.payment_in_flight(p.status, p.created_at)) then
+    raise exception 'a card payment is in progress for this shop; wait for it to finish before deleting the shop'
+      using errcode = '55000';
+  end if;
+  return old;
+end
+$$;
+
+create trigger shops_20_money_delete_guard before delete on public.shops
+  for each row execute function public.shops_money_delete_guard();
 
 -- ---------------------------------------------------------------------------
 -- RLS
@@ -895,7 +1000,9 @@ revoke execute on function
   public.payments_touch_invoice(),
   public.jobs_money_guard(),
   public.jobs_customer_change(),
-  public.jobs_apply_coupon()
+  public.jobs_apply_coupon(),
+  public.jobs_release_coupon_on_delete(),
+  public.shops_money_delete_guard()
 from public, anon, authenticated;
 
 -- Called from the SECURITY INVOKER jobs_apply_coupon trigger, so staff need

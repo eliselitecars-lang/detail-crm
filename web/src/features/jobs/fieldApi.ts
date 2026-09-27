@@ -594,7 +594,6 @@ export type FormSubmission = Pick<
   | 'title'
   | 'body_snapshot'
   | 'requires_signature'
-  | 'public_token'
   | 'signer_name'
   | 'signed_at'
   | 'created_at'
@@ -610,13 +609,25 @@ export function useForms(jobId: string) {
         await supabase
           .from('form_submissions')
           .select(
-            'id, title, body_snapshot, requires_signature, public_token, signer_name, signed_at, created_at, form_template_id',
+            'id, title, body_snapshot, requires_signature, signer_name, signed_at, created_at, form_template_id',
           )
           .eq('shop_id', shopId)
           .eq('job_id', jobId)
           .order('created_at'),
       ),
   });
+}
+
+/**
+ * The customer's /f/<token> link credential. Owners/admins/managers only
+ * (technicians collect signatures on their device); the token column itself
+ * is not readable by staff.
+ */
+export async function fetchFormLinkToken(submissionId: string): Promise<string> {
+  return unwrapRequired(
+    await supabase.rpc('form_link_token', { p_submission_id: submissionId }),
+    'form',
+  );
 }
 
 export type FormTemplate = Pick<

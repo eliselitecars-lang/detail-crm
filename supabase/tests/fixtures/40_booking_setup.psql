@@ -27,6 +27,8 @@ declare
 begin
   insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
   on conflict (key) do update set value = excluded.value;
+  -- the platform binds shop A's Twilio number before the shop uses it (0033)
+  insert into public.shop_sms_numbers (phone_number, shop_id) values ('+12055550100', v_a);
 
   update public.shops
      set tax_rate_bps = 1000, business_type = 'both', sms_from_number = '+12055550100', phone = '+12055550199',

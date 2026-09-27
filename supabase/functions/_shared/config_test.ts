@@ -20,6 +20,7 @@ const EXPECTED_VERIFY_JWT: Record<string, boolean> = {
   "stripe-webhook": false,
   "messaging": false,
   "invites": true,
+  "storage-purge": false,
 };
 
 interface FunctionConfig {

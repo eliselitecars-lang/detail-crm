@@ -103,14 +103,14 @@ select tests.throws($$update public.invoices set status = 'draft' where id = tes
 
 -- ------------------------------------------------------------ technicians
 select tests.authenticate_as(tests.fx('u_tech_a'));
-select tests.eq(tests.row_count($$select * from public.invoices$$), 0::bigint, 'collecting disabled: technicians see no invoices');
+select tests.eq(tests.row_count($$select 1 from public.invoices$$), 0::bigint, 'collecting disabled: technicians see no invoices');
 select tests.eq(tests.row_count($$select * from public.invoice_line_items$$), 0::bigint, 'collecting disabled: no invoice lines');
 select tests.throws($$select public.mark_invoice_sent(tests.fx('inv_a'))$$, '42501', 'collecting disabled: cannot send');
 select tests.as_superuser();
 update public.shops set techs_can_collect_payments = true where id = tests.fx('shop_a');
 insert into public.job_line_items (shop_id, job_id, name, unit_price_cents) values (tests.fx('shop_a'), tests.fx('job_a2'), 'Wash', 4000);
 select tests.authenticate_as(tests.fx('u_tech_a'));
-select tests.eq(tests.row_count($$select * from public.invoices where id = tests.fx('inv_a')$$), 1::bigint,
+select tests.eq(tests.row_count($$select 1 from public.invoices where id = tests.fx('inv_a')$$), 1::bigint,
                 'collecting enabled: technician reads the invoice of an assigned job');
 select tests.eq(tests.row_count($$select * from public.invoice_line_items where invoice_id = tests.fx('inv_a')$$), 2::bigint,
                 'and its lines');
@@ -123,12 +123,12 @@ select tests.throws($$select public.create_invoice(tests.fx('cust_a'))$$, '42501
 select tests.lives($$select public.mark_invoice_sent(tests.fx('inv_a'))$$, 'collecting technician sends the invoice link');
 select tests.eq((select sent_at from public.invoices where id = tests.fx('inv_a')), now(), 'sent_at stamped');
 select tests.authenticate_as(tests.fx('u_tech2_a'));
-select tests.eq(tests.row_count($$select * from public.invoices where id = tests.fx('inv_a')$$), 0::bigint,
+select tests.eq(tests.row_count($$select 1 from public.invoices where id = tests.fx('inv_a')$$), 0::bigint,
                 'another technician does not see it');
 select tests.lives($$select tests.fx_set('inv_a2', (public.create_invoice_from_job(tests.fx('job_a2'))).id)$$,
                    'collecting technician invoices their assigned job');
 select tests.eq((select created_by from public.invoices where id = tests.fx('inv_a2')), tests.fx('u_tech2_a'), 'created_by is the technician');
-select tests.eq(tests.row_count($$select * from public.invoices$$), 1::bigint, 'technician sees only invoices of assigned jobs');
+select tests.eq(tests.row_count($$select 1 from public.invoices$$), 1::bigint, 'technician sees only invoices of assigned jobs');
 select tests.authenticate_as(tests.fx('u_tech_b'));
 select tests.throws($$select public.mark_invoice_sent(tests.fx('inv_a'))$$, 'P0002', 'technician of B: not found');
 
@@ -243,7 +243,7 @@ select tests.eq((select count(*) from public.invoices where job_id = tests.fx('j
 
 -- ------------------------------------------------------------ isolation (manager of B)
 select tests.authenticate_as(tests.fx('u_manager_b'));
-select tests.eq(tests.row_count($$select * from public.invoices where shop_id = tests.fx('shop_a')$$), 0::bigint, 'B cannot read A''s invoices');
+select tests.eq(tests.row_count($$select 1 from public.invoices where shop_id = tests.fx('shop_a')$$), 0::bigint, 'B cannot read A''s invoices');
 select tests.eq(tests.row_count($$select * from public.invoice_line_items where shop_id = tests.fx('shop_a')$$), 0::bigint, 'nor lines');
 select tests.eq(tests.row_count($$update public.invoices set notes = 'x' where shop_id = tests.fx('shop_a')$$), 0::bigint, 'nor update');
 select tests.eq(tests.row_count($$delete from public.invoice_line_items where shop_id = tests.fx('shop_a')$$), 0::bigint, 'nor delete lines');

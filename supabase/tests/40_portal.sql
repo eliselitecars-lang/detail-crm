@@ -55,7 +55,10 @@ select tests.throws($$select public.portal_claim_customers()$$, '42501', 'anonym
 
 -- ------------------------------------------------------------ data for the overview
 select tests.as_superuser();
-update public.shops set logo_path = 'a/logo.png' where id = tests.fx('shop_a');
+-- the logo is an uploaded object of the shop's own shop-assets folder (0001)
+insert into storage.buckets (id, name, public) values ('shop-assets', 'shop-assets', true) on conflict (id) do nothing;
+insert into storage.objects (bucket_id, name) values ('shop-assets', tests.fx('shop_a') || '/logo.png');
+update public.shops set logo_path = tests.fx('shop_a') || '/logo.png' where id = tests.fx('shop_a');
 -- jobs: job_a scheduled (upcoming, fixture); a completed and a cancelled job in the past; job_a2 is Aaron's
 insert into public.jobs (shop_id, customer_id, vehicle_id, status, scheduled_start, scheduled_end, completed_at, internal_notes)
   values (tests.fx('shop_a'), tests.fx('cust_a'), tests.fx('veh_a'), 'completed', '2025-05-01 15:00Z', '2025-05-01 16:00Z',

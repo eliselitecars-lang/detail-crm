@@ -17,6 +17,7 @@ import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import type { JobDetail } from '../../api';
 import {
+  fetchFormLinkToken,
   useAttachForm,
   useDeleteForm,
   useFormTemplates,
@@ -47,7 +48,13 @@ export function FormsCard({ job }: { job: JobDetail }) {
   );
 
   const copyLink = async (form: FormSubmission) => {
-    const link = formLink(window.location.origin, form.public_token);
+    let link: string;
+    try {
+      link = formLink(window.location.origin, await fetchFormLinkToken(form.id));
+    } catch (error) {
+      toast.error(error);
+      return;
+    }
     try {
       await navigator.clipboard.writeText(link);
       toast.success('Form link copied', link);
@@ -98,14 +105,16 @@ export function FormsCard({ job }: { job: JobDetail }) {
                 <Badge>Void</Badge>
               ) : (
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    leadingIcon={<Copy className="size-4" aria-hidden="true" />}
-                    onClick={() => void copyLink(form)}
-                  >
-                    Copy link
-                  </Button>
+                  {canManage && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      leadingIcon={<Copy className="size-4" aria-hidden="true" />}
+                      onClick={() => void copyLink(form)}
+                    >
+                      Copy link
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="secondary"

@@ -32,13 +32,15 @@ create table public.services (
   online_bookable   boolean not null default false,
   active            boolean not null default true,
   sort              integer not null default 0,
-  image_path        text check (image_path is null or char_length(image_path) <= 1024),
+  image_path        text,
   archived_at       timestamptz,
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now(),
   constraint services_shop_id_id_key unique (shop_id, id),
   constraint services_category_fk foreign key (shop_id, category_id)
-    references public.service_categories (shop_id, id) on delete set null (category_id)
+    references public.service_categories (shop_id, id) on delete set null (category_id),
+  -- the image is an object of THIS shop's shop-assets folder (0001)
+  constraint services_image_path_check check (image_path is null or public.is_shop_asset_path(shop_id, image_path))
 );
 create index services_shop_category_idx on public.services (shop_id, category_id);
 create index services_shop_sort_idx on public.services (shop_id, sort, name);
@@ -47,6 +49,9 @@ create trigger services_10_prevent_shop_change before update on public.services
   for each row execute function public.prevent_shop_change();
 create trigger services_90_set_updated_at before update on public.services
   for each row execute function public.set_updated_at();
+-- upload the image first, then save its path
+create trigger services_image_object_exists after insert or update of image_path on public.services
+  for each row execute function public.require_shop_asset_object('image_path');
 
 -- ---------------------------------------------------------------------------
 -- service_prices — vehicle_category_id null = base price. One row per
@@ -262,7 +267,7 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- RLS — members read the catalog; managers+ edit it; coupons are a setting
--- (owner/admin edit).
+-- (managers+ read, owner/admin edit).
 -- ---------------------------------------------------------------------------
 alter table public.service_categories enable row level security;
 alter table public.services           enable row level security;
@@ -288,8 +293,11 @@ begin
 end
 $$;
 
+-- Coupon codes (incl. private, limited and inactive ones) are a shop setting
+-- (SPEC §3, §6): managers+ read them to attach to jobs; technicians have no
+-- operational need and must not be able to list or leak non-public codes.
 create policy coupons_select on public.coupons for select to authenticated
-  using (public.is_shop_member(shop_id));
+  using (public.is_shop_manager(shop_id));
 create policy coupons_insert on public.coupons for insert to authenticated
   with check (public.is_shop_admin(shop_id));
 create policy coupons_update on public.coupons for update to authenticated

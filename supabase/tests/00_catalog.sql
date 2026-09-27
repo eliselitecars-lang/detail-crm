@@ -119,9 +119,22 @@ select tests.eq(tests.row_count($$delete from public.service_addons where shop_i
 select tests.lives($$delete from public.services where id = tests.fx('pkg_a')$$, 'manager deletes a package');
 select tests.eq((select count(*) from public.package_items where package_id = tests.fx('pkg_a')), 0::bigint, 'package items cascade');
 
--- ------------------------------------------------------------ coupons (admin+ write)
+-- ------------------------------------------------------------ coupons (manager+ read, admin+ write)
+-- Coupon codes are a shop setting (SPEC §3 row 1, §6): technicians cannot
+-- list them (not even public, active ones), nor write them.
+select tests.authenticate_as(tests.fx('u_tech_a'));
+select tests.eq((select count(*) from public.coupons where shop_id = tests.fx('shop_a')), 0::bigint,
+                'technicians cannot list the shop''s coupon codes');
+select tests.eq(tests.row_count('select * from public.coupons'), 0::bigint, 'technician sees no coupons at all');
+select tests.throws($$insert into public.coupons (shop_id, code, kind, value) values (tests.fx('shop_a'), 'TECH', 'fixed', 500)$$, '42501',
+                    'technician cannot create coupons');
+select tests.eq(tests.row_count($$update public.coupons set value = 1 where id = tests.fx('coupon_a')$$), 0::bigint,
+                'technician cannot edit coupons');
+select tests.eq(tests.row_count($$delete from public.coupons where id = tests.fx('coupon_a')$$), 0::bigint,
+                'technician cannot delete coupons');
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(tests.row_count('select * from public.coupons'), 1::bigint, 'manager reads own coupons');
+select tests.eq((select id from public.coupons), tests.fx('coupon_a'), 'manager of A sees only A''s coupon (not B''s)');
 select tests.throws($$insert into public.coupons (shop_id, code, kind, value) values (tests.fx('shop_a'), 'MGR', 'fixed', 500)$$, '42501',
                     'manager cannot create coupons');
 select tests.authenticate_as(tests.fx('u_admin_a'));

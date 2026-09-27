@@ -58,7 +58,7 @@ create table public.shops (
   lng                         double precision check (lng is null or lng between -180 and 180),
   timezone                    text not null,
   currency                    text not null default 'usd' check (currency ~ '^[a-z]{3}$'),
-  logo_path                   text check (logo_path is null or char_length(logo_path) <= 1024),
+  logo_path                   text,
   brand_color                 text check (brand_color is null or public.is_valid_hex_color(brand_color)),
   business_type               public.business_type not null default 'fixed',
   tax_rate_bps                integer not null default 0 check (tax_rate_bps between 0 and 10000),
@@ -71,7 +71,9 @@ create table public.shops (
   created_by                  uuid references auth.users (id) on delete set null,
   created_at                  timestamptz not null default now(),
   updated_at                  timestamptz not null default now(),
-  constraint shops_lat_lng_pair check ((lat is null) = (lng is null))
+  constraint shops_lat_lng_pair check ((lat is null) = (lng is null)),
+  -- the logo is an object of THIS shop's shop-assets folder (0001)
+  constraint shops_logo_path_check check (logo_path is null or public.is_shop_asset_path(id, logo_path))
 );
 create index shops_created_by_idx on public.shops (created_by);
 
@@ -91,7 +93,7 @@ begin
     if new.id <> old.id then
       raise exception 'shops.id cannot be changed' using errcode = '42501';
     end if;
-    new.created_by := old.created_by;
+    new.created_by := public.audit_user_ref(new.created_by, old.created_by);
   end if;
   new.name := btrim(new.name);
   return new;
@@ -102,6 +104,9 @@ create trigger shops_10_before_write before insert or update on public.shops
   for each row execute function public.shops_before_write();
 create trigger shops_90_set_updated_at before update on public.shops
   for each row execute function public.set_updated_at();
+-- upload the logo first, then save its path
+create trigger shops_logo_object_exists after insert or update of logo_path on public.shops
+  for each row execute function public.require_shop_asset_object('logo_path');
 
 -- ---------------------------------------------------------------------------
 -- shop_members — staff membership. Exactly one owner per shop.
@@ -338,6 +343,38 @@ create unique index shop_invites_pending_email_key on public.shop_invites (shop_
 create index shop_invites_invited_by_idx on public.shop_invites (invited_by);
 create index shop_invites_accepted_by_idx on public.shop_invites (accepted_by);
 
+-- An invite carries its inviter's authority: once the inviter stops being an
+-- active owner/admin of the shop (deactivated, removed, demoted, or their
+-- account deleted) their pending invites are revoked, so a departing admin
+-- cannot leave themselves a way back in (accept_invite re-checks the inviter
+-- too, which also covers invites whose inviter account no longer exists).
+create function public.shop_members_revoke_inviter_invites() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  if not (old.active and old.role in ('owner', 'admin')) then
+    return null;
+  end if;
+  if tg_op = 'UPDATE' and new.active and new.role in ('owner', 'admin') then
+    return null;
+  end if;
+  -- the whole shop is being deleted: its invites go with it
+  if not exists (select 1 from public.shops s where s.id = old.shop_id) then
+    return null;
+  end if;
+  update public.shop_invites i
+     set revoked_at = now()
+   where i.shop_id = old.shop_id and i.invited_by = old.user_id
+     and i.accepted_at is null and i.revoked_at is null;
+  return null;
+end
+$$;
+
+create trigger shop_members_40_revoke_inviter_invites
+  after update of role, active or delete on public.shop_members
+  for each row execute function public.shop_members_revoke_inviter_invites();
+
 -- ---------------------------------------------------------------------------
 -- member_compensation
 -- ---------------------------------------------------------------------------
@@ -557,6 +594,11 @@ as $$
          case
            when i.accepted_at is not null then 'accepted'
            when i.revoked_at is not null then 'revoked'
+           -- accept_invite refuses invites whose inviter lost owner/admin rights
+           when not exists (
+             select 1 from public.shop_members m
+             where m.shop_id = i.shop_id and m.user_id = i.invited_by
+               and m.active and m.role in ('owner', 'admin')) then 'revoked'
            when i.expires_at <= now() then 'expired'
            else 'pending'
          end
@@ -603,6 +645,19 @@ begin
   end if;
   if lower(v_invite.email::text) <> lower(v_user.email) then
     raise exception 'this invite was sent to a different email address' using errcode = '42501';
+  end if;
+  -- The inviter must still be an active owner/admin of the shop (SPEC §3:
+  -- team membership is owner/admin-controlled; removing or demoting an admin
+  -- ends the authority behind the invites they sent). FOR SHARE: a
+  -- concurrent deactivation/demotion either commits first (the row no longer
+  -- qualifies) or waits until this acceptance is done.
+  perform 1 from public.shop_members m
+   where m.shop_id = v_invite.shop_id and m.user_id = v_invite.invited_by
+     and m.active and m.role in ('owner', 'admin')
+   for share;
+  if not found then
+    raise exception 'this invite was revoked: the person who sent it can no longer invite team members'
+      using errcode = '22023';
   end if;
 
   select * into v_member from public.shop_members m
@@ -787,6 +842,7 @@ revoke execute on function
   public.shop_members_client_guard(),
   public.shop_members_protect_owner(),
   public.shop_members_owner_invariant(),
+  public.shop_members_revoke_inviter_invites(),
   public.shops_require_owner(),
   public.shops_seed_tenancy(),
   public.next_document_number(uuid, public.document_kind)

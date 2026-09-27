@@ -19,6 +19,12 @@
 --     notes of their own OPEN entry; closed entries are read-only to them.
 --   * member_id uses the default NO ACTION FK: members with time history
 --     are deactivated, not deleted (deleting the whole shop still works).
+--   * Deactivating a member (an admin's change, leave_shop, or any other
+--     path that sets shop_members.active = false) clocks them out of every
+--     open entry at that moment: a former member can no longer call
+--     clock_out, and an open punch would otherwise keep adding worked time
+--     and labor cost to reports without end (and block their clock_in if
+--     they are re-invited later).
 -- ============================================================================
 
 create table public.time_entries (
@@ -219,6 +225,29 @@ end
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Deactivation closes open entries (see the header). AFTER UPDATE OF active
+-- on shop_members, every context. An entry whose clock-in lies ahead of the
+-- deactivation (a manager set a later time) closes as a zero-length entry.
+-- ---------------------------------------------------------------------------
+create function public.shop_members_close_time_entries() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  if old.active and not new.active then
+    update public.time_entries te
+       set clock_out = greatest(now(), te.clock_in)
+     where te.shop_id = new.shop_id and te.member_id = new.id and te.clock_out is null;
+  end if;
+  return null;
+end
+$$;
+
+create trigger shop_members_50_close_time_entries
+  after update of active on public.shop_members
+  for each row execute function public.shop_members_close_time_entries();
+
+-- ---------------------------------------------------------------------------
 -- RLS
 -- ---------------------------------------------------------------------------
 alter table public.time_entries enable row level security;
@@ -241,7 +270,10 @@ create policy time_entries_delete on public.time_entries for delete to authentic
 revoke all on public.time_entries from anon;
 revoke truncate, trigger, references on public.time_entries from authenticated;
 
-revoke execute on function public.time_entries_client_guard() from public, anon, authenticated;
+revoke execute on function
+  public.time_entries_client_guard(),
+  public.shop_members_close_time_entries()
+from public, anon, authenticated;
 
 revoke execute on function
   public.clock_in(uuid, uuid, public.time_entry_kind, public.time_entry_source, timestamptz, text),

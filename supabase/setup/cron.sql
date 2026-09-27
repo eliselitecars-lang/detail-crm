@@ -1,9 +1,19 @@
 -- ============================================================================
--- Detail CRM — one-time scheduler setup (pg_cron + pg_net + Vault)
+-- Detail CRM — one-time platform setup: web app URL (platform_config) and
+-- the scheduler (pg_cron + pg_net + Vault)
 --
 -- NOT a migration: it holds deploy-specific values, so it is run by hand,
 -- once per project (and again whenever the values change). It is idempotent:
--- secrets are upserted and every job is unscheduled before being scheduled.
+-- the app URL and secrets are upserted and every job is unscheduled before
+-- being scheduled.
+--
+-- App URL: public.set_app_base_url(<APP_BASE_URL>) stores the web app origin
+-- in platform_config.app_base_url. The database builds every customer link
+-- from it ({{booking_link}}, {{quote_link}}, {{invoice_link}},
+-- {{booking_page_link}}, unsubscribe links). Until it is set, messages whose
+-- wording carries such a link are not queued, enqueue_due_automations
+-- refuses to run, and email campaigns cannot launch. It must be the same
+-- origin as the APP_BASE_URL function secret.
 --
 -- Jobs:
 --   detail-crm-process-queue    every minute   POST messaging {"action":"process_queue"}
@@ -13,15 +23,20 @@
 --                                              the next process_queue run sends them)
 --   detail-crm-expire-quotes    daily 06:05    public.expire_quotes()
 --                               UTC            (quotes also expire lazily on public access)
+--   detail-crm-storage-purge    every 15 min   POST storage-purge {"action":"purge"}
+--                                              (removes the stored files of deleted shops,
+--                                              jobs, inspections and forms; migration 0025)
 --
 -- HOW TO RUN
 --   1. Deploy the functions and set the function secrets (see
 --      supabase/functions/README.md), including
 --        CRON_SECRET="$(openssl rand -hex 32)"      (at least 24 characters)
 --   2. Copy this file somewhere PRIVATE (never commit the edited copy) and
---      replace the two placeholders below:
---        <PROJECT_REF>  your Supabase project ref (Dashboard -> Project Settings)
---        <CRON_SECRET>  exactly the CRON_SECRET function secret from step 1
+--      replace the three placeholders below:
+--        <PROJECT_REF>   your Supabase project ref (Dashboard -> Project Settings)
+--        <CRON_SECRET>   exactly the CRON_SECRET function secret from step 1
+--        <APP_BASE_URL>  exactly the APP_BASE_URL function secret from step 1
+--                        (the web app origin, e.g. https://app.yourdomain.com)
 --   3. Run it in the Dashboard SQL editor (or psql as postgres).
 --   The script refuses to run while a placeholder is still present.
 --
@@ -42,19 +57,24 @@ create extension if not exists pg_net with schema extensions;
 create extension if not exists supabase_vault;
 
 -- ---------------------------------------------------------------------------
--- 1. Secrets (upsert into Vault)
+-- 1. App URL (platform_config) and secrets (upsert into Vault)
 -- ---------------------------------------------------------------------------
 do $setup$
 declare
-  -- >>> EDIT THESE TWO VALUES (in a private copy) <<<
+  -- >>> EDIT THESE THREE VALUES (in a private copy) <<<
   v_functions_url constant text := 'https://<PROJECT_REF>.supabase.co/functions/v1';
   v_cron_secret   constant text := '<CRON_SECRET>';
+  v_app_base_url  constant text := '<APP_BASE_URL>';
   -- >>> END OF EDITS <<<
   v_id uuid;
 begin
-  if v_functions_url like '%<PROJECT_REF>%' or v_cron_secret = '<CRON_SECRET>' then
-    raise exception 'cron.sql: replace <PROJECT_REF> and <CRON_SECRET> before running';
+  if v_functions_url like '%<PROJECT_REF>%' or v_cron_secret = '<CRON_SECRET>' or v_app_base_url = '<APP_BASE_URL>' then
+    raise exception 'cron.sql: replace <PROJECT_REF>, <CRON_SECRET> and <APP_BASE_URL> before running';
   end if;
+  if v_app_base_url !~ '^https://' then
+    raise exception 'cron.sql: APP_BASE_URL must be the https:// origin of the web app (same as the function secret)';
+  end if;
+  perform public.set_app_base_url(v_app_base_url);
   if v_functions_url !~ '^https://[^/[:space:]]+/functions/v1$' then
     raise exception 'cron.sql: the functions URL must look like https://<ref>.supabase.co/functions/v1';
   end if;
@@ -87,7 +107,7 @@ $setup$;
 select cron.unschedule(j.jobid)
   from cron.job j
  where j.jobname in ('detail-crm-process-queue', 'detail-crm-run-automations', 'detail-crm-expire-quotes',
-                     'detail-crm-sweep-payment-sheets');
+                     'detail-crm-sweep-payment-sheets', 'detail-crm-storage-purge');
 
 -- Send queued messages. The function drains up to 200 messages within ~45 s
 -- per call; overlapping runs are safe (claim_queued_messages skips locked rows).
@@ -143,9 +163,31 @@ select cron.schedule(
   $job$
 );
 
+-- Remove the stored files (customer photos, signature images, logos) of
+-- deleted shops, jobs, inspections and forms through the Storage API. Each
+-- run drains the queue for up to ~40 s; overlapping runs are safe
+-- (claim_storage_purge leases requests and skips locked ones).
+select cron.schedule(
+  'detail-crm-storage-purge',
+  '*/15 * * * *',
+  $job$
+  select net.http_post(
+    url := (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.name = 'detail_crm_functions_url') || '/storage-purge',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-cron-secret', (select s.decrypted_secret from vault.decrypted_secrets s
+                         where s.name = 'detail_crm_cron_secret')),
+    body := '{"action":"purge"}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $job$
+);
+
 -- ---------------------------------------------------------------------------
 -- Verify
 -- ---------------------------------------------------------------------------
+--   select value from public.platform_config where key = 'app_base_url';   -- = APP_BASE_URL
 --   select jobname, schedule, active from cron.job where jobname like 'detail-crm-%';
 --   select j.jobname, d.status, d.return_message, d.start_time
 --     from cron.job_run_details d join cron.job j using (jobid)

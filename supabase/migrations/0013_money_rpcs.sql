@@ -1,7 +1,8 @@
 -- ============================================================================
 -- 0013 — Money RPCs (SPEC §4.5): invoices (create_invoice_from_job,
 -- create_invoice, mark_invoice_sent, void_invoice), manual payments
--- (record_manual_payment, refund_manual_payment), Stripe webhook helpers
+-- (record_manual_payment, refund_manual_payment, apply_payment_to_invoice),
+-- Stripe webhook helpers
 -- (upsert_stripe_payment, apply_stripe_refund — service_role only) and
 -- job_payment_summary.
 --
@@ -11,7 +12,9 @@
 --   admin     = owner/admin (refunds, voids — SPEC §3)
 -- Callers who are not members of the document's shop get "not found"
 -- (P0002) so ids of other shops are not confirmed; members lacking the role
--- get 42501.
+-- get 42501. The invoice rows these RPCs return carry public_token = null:
+-- the token is the customer's credential, which owners/admins/managers read
+-- with invoice_link_token (0015) and collecting technicians never see.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -65,6 +68,7 @@ begin
      set status = case when i.status = 'draft' then 'open'::public.invoice_status else i.status end
    where i.id = v_inv.id
   returning * into v_inv;
+  v_inv.public_token := null;  -- the customer's credential: invoice_link_token (0015)
   return v_inv;
 end
 $$;
@@ -166,6 +170,7 @@ begin
   end loop;
 
   select * into v_inv from public.invoices i where i.id = v_inv.id;
+  v_inv.public_token := null;  -- the customer's credential: invoice_link_token (0015)
   return v_inv;
 end
 $$;
@@ -203,6 +208,7 @@ begin
   else
     update public.invoices i set sent_at = now() where i.id = v_inv.id returning * into v_inv;
   end if;
+  v_inv.public_token := null;  -- the customer's credential: invoice_link_token (0015)
   return v_inv;
 end
 $$;
@@ -264,6 +270,7 @@ begin
    where p.invoice_id = v_inv.id and p.shop_id = v_inv.shop_id and p.job_id is not null;
 
   select * into v_inv from public.invoices i where i.id = p_invoice_id;
+  v_inv.public_token := null;  -- the customer's credential: invoice_link_token (0015)
   return v_inv;
 end
 $$;
@@ -380,6 +387,129 @@ end
 $$;
 
 -- ---------------------------------------------------------------------------
+-- apply_payment_to_invoice(payment, invoice) — manager+. Puts received money
+-- that is not paying anything onto one of the same customer's issued
+-- invoices, so the customer never owes it twice:
+--   * an unapplied payment: no invoice, job or membership. Money received
+--     for a void invoice without a job, for a job / invoice / membership that
+--     was deleted, or for a document that moved to another customer is kept
+--     on the paying customer like this, with a note asking staff to apply it
+--     or refund it (payments_before_write, stripe-webhook);
+--   * an overpayment: a payment on another invoice that stays settled
+--     without it (its balance + the payment's net amount ≤ 0), e.g. a second
+--     payment link paid after the first one.
+-- The whole payment row moves, so its Stripe intent, refunds and tip stay
+-- together; its net amount (tips never count) must fit the target's balance
+-- less the card payments in flight on it (no new overpayment). The target
+-- must be open or partially paid. A job deposit still waiting for its job's
+-- invoice is not unapplied (create_invoice_from_job attaches it), and a
+-- membership payment belongs to its membership. A moved deposit becomes a
+-- plain payment (it now pays an invoice, not a job's deposit); the payment's
+-- job follows the target invoice. A line recording where it went is appended
+-- to the payment's note. Locks jobs, then invoices, then the payment (the
+-- order void_invoice and payments_before_write use).
+-- ---------------------------------------------------------------------------
+create function public.apply_payment_to_invoice(
+  p_payment_id  uuid,
+  p_invoice_id  uuid,
+  p_now         timestamptz default now()
+) returns public.payments
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_now        timestamptz := public.effective_now(p_now);
+  v_pay        public.payments;
+  v_inv        public.invoices;
+  v_src        public.invoices;
+  v_src_id     uuid;
+  v_net        bigint;
+  v_in_flight  bigint;
+  v_line       text;
+begin
+  select * into v_pay from public.payments p where p.id = p_payment_id;
+  if not found or not public.is_shop_member(v_pay.shop_id) then
+    raise exception 'payment not found' using errcode = 'P0002';
+  end if;
+  if not public.is_shop_manager(v_pay.shop_id) then
+    raise exception 'only owners, admins and managers can apply payments to invoices' using errcode = '42501';
+  end if;
+  select * into v_inv from public.invoices i where i.id = p_invoice_id and i.shop_id = v_pay.shop_id;
+  if not found then
+    raise exception 'invoice not found' using errcode = 'P0002';
+  end if;
+  v_src_id := v_pay.invoice_id;
+
+  perform 1 from public.jobs j
+   where j.shop_id = v_pay.shop_id and j.id in (v_inv.job_id, v_pay.job_id)
+   order by j.id for no key update;
+  perform 1 from public.invoices i
+   where i.shop_id = v_pay.shop_id and i.id in (v_inv.id, v_src_id)
+   order by i.id for update;
+  select * into v_pay from public.payments p where p.id = p_payment_id for update;
+  if v_pay.invoice_id is distinct from v_src_id then
+    raise exception 'the payment changed while it was being applied; try again' using errcode = '40001';
+  end if;
+  select * into v_inv from public.invoices i where i.id = p_invoice_id;
+
+  if v_pay.invoice_id = v_inv.id then
+    raise exception 'the payment is already applied to invoice #%', v_inv.number using errcode = '22023';
+  end if;
+  if v_pay.membership_id is not null then
+    raise exception 'membership payments belong to their membership' using errcode = '22023';
+  end if;
+  if v_pay.status not in ('succeeded', 'partially_refunded') then
+    raise exception 'only received payments can be applied (this one is %)', v_pay.status using errcode = '22023';
+  end if;
+  v_net := public.payment_net_amount(v_pay.status, v_pay.amount_cents, v_pay.tip_cents, v_pay.refunded_cents);
+  if v_net <= 0 then
+    raise exception 'nothing of this payment is left to apply (tips never count toward invoices)' using errcode = '22023';
+  end if;
+  if v_pay.invoice_id is null and v_pay.job_id is not null then
+    raise exception 'this payment belongs to job #%; it is applied when that job is invoiced',
+      (select j.number from public.jobs j where j.id = v_pay.job_id and j.shop_id = v_pay.shop_id)
+      using errcode = '22023';
+  end if;
+  if v_pay.invoice_id is not null then
+    select * into v_src from public.invoices i where i.id = v_pay.invoice_id;
+    if v_src.balance_cents + v_net > 0 then
+      raise exception 'invoice #% needs this payment; only an overpayment can move to another invoice', v_src.number
+        using errcode = '22023';
+    end if;
+  end if;
+  if v_inv.customer_id <> v_pay.customer_id then
+    raise exception 'invoice #% belongs to another customer', v_inv.number using errcode = '22023';
+  end if;
+  if v_inv.status not in ('open', 'partially_paid') then
+    raise exception 'invoice #% is % and cannot take payments', v_inv.number, v_inv.status using errcode = '22023';
+  end if;
+  select coalesce(sum(p.amount_cents), 0) into v_in_flight
+    from public.payments p
+   where p.invoice_id = v_inv.id and p.shop_id = v_inv.shop_id
+     and public.payment_in_flight(p.status, p.created_at, v_now);
+  if v_net > v_inv.balance_cents - v_in_flight then
+    if v_in_flight > 0 then
+      raise exception 'the payment (% cents) exceeds the balance due (% cents) less the card payments in progress (% cents)',
+        v_net, v_inv.balance_cents, v_in_flight using errcode = '22023';
+    end if;
+    raise exception 'the payment (% cents) exceeds the balance due on invoice #% (% cents)',
+      v_net, v_inv.number, v_inv.balance_cents using errcode = '22023';
+  end if;
+
+  v_line := format('Applied to invoice #%s', v_inv.number);
+  update public.payments p
+     set invoice_id = v_inv.id,
+         job_id = null,   -- payments_before_write takes the invoice's job
+         kind = case when p.kind = 'deposit' then 'payment'::public.payment_kind else p.kind end,
+         note = case when p.note is null then v_line
+                     else left(p.note, 1000 - char_length(v_line) - 1) || E'\n' || v_line end
+   where p.id = v_pay.id
+  returning * into v_pay;
+  return v_pay;
+end
+$$;
+
+-- ---------------------------------------------------------------------------
 -- upsert_stripe_payment (service_role; webhook / payments edge function).
 -- Creates or updates the payment row for a PaymentIntent. Idempotent and
 -- safe against out-of-order events:
@@ -388,7 +518,26 @@ $$;
 --   * money already received (succeeded / refunded states) is never
 --     downgraded; replays just fill missing charge/card details
 --   * cancelled is terminal except for succeeded (money moved wins)
+--   * a 'pending' report never reopens a row already recorded 'failed': it is
+--     a late delivery (charge_saved_card records 'pending' for a 'processing'
+--     intent after its Stripe call returns; the webhook's Checkout 'unpaid'
+--     path records 'pending' too) that can land after payment_failed, and
+--     reopening would count the decline as money in flight again, blocking
+--     manual payments, applying credit, voiding and line edits. A failed row
+--     moves on only to succeeded (money moved wins), failed or cancelled.
 --   * amount / tip follow the latest pending/failed state until success
+--   * a decline does not end an open PaymentSheet attempt: Stripe returns the
+--     intent to requires_payment_method and the sheet still on the device
+--     can confirm it with another card. So a 'failed' report for a pending
+--     attempt whose card is not on record yet (the customer picks it in the
+--     sheet) keeps it 'pending' — money in flight for every guard
+--     (public.payment_in_flight) — until it succeeds or is cancelled
+--     (superseded, cancel_open_payments, the stale-sheet sweep). Attempts
+--     that cannot be confirmed again are recorded 'failed' as reported: a
+--     saved-card charge (confirmed server-side only; its card is recorded
+--     up front), a Checkout Session (Stripe cancels its intent when the
+--     session expires), a membership invoice (Stripe Billing retries it),
+--     or a decline recorded without an earlier pending row.
 -- Refund states come only from apply_stripe_refund.
 -- ---------------------------------------------------------------------------
 create function public.upsert_stripe_payment(
@@ -463,6 +612,13 @@ begin
   v_status := case
     when v_received then v_pay.status
     when v_pay.status = 'cancelled' and p_status <> 'succeeded' then 'cancelled'
+    -- a late pending report never reopens a recorded decline (see header)
+    when v_pay.status = 'failed' and p_status = 'pending' then 'failed'
+    -- a declined PaymentSheet attempt stays open (see header)
+    when p_status = 'failed' and v_pay.status = 'pending'
+         and v_pay.kind <> 'membership'
+         and v_pay.stripe_checkout_session_id is null and p_checkout_session_id is null
+         and v_pay.card_last4 is null then 'pending'
     else p_status
   end;
 
@@ -615,6 +771,7 @@ revoke execute on function
   public.void_invoice(uuid, text),
   public.record_manual_payment(uuid, bigint, public.payment_method, bigint, text),
   public.refund_manual_payment(uuid, bigint),
+  public.apply_payment_to_invoice(uuid, uuid, timestamptz),
   public.job_payment_summary(uuid)
 from public, anon;
 grant execute on function
@@ -624,6 +781,7 @@ grant execute on function
   public.void_invoice(uuid, text),
   public.record_manual_payment(uuid, bigint, public.payment_method, bigint, text),
   public.refund_manual_payment(uuid, bigint),
+  public.apply_payment_to_invoice(uuid, uuid, timestamptz),
   public.job_payment_summary(uuid)
 to authenticated, service_role;
 

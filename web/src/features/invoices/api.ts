@@ -28,7 +28,12 @@ import type { Enums } from '@/features/quotes/shared/types';
 import type { ManualMethod } from '@/features/payments/paymentFormat';
 
 export type InvoiceStatus = Enums['invoice_status'];
-export type InvoiceRow = Row<'invoices'>;
+/**
+ * An invoice as staff read it: every column except public_token, the
+ * customer's /i link credential (not readable by staff; managers+ get it
+ * from `useInvoiceLinkToken`).
+ */
+export type InvoiceRow = Omit<Row<'invoices'>, 'public_token'>;
 export type InvoicePayment = Row<'payments'>;
 export type SavedCard = Pick<
   Row<'customer_payment_methods'>,
@@ -166,6 +171,9 @@ export function useInvoices(filters: InvoiceFilters) {
   });
 }
 
+const INVOICE_COLUMNS =
+  'id, shop_id, number, job_id, customer_id, status, issued_at, due_at, sent_at, paid_at, voided_at, void_reason, notes, terms, internal_notes, discount_kind, discount_value, tax_rate_bps, subtotal_cents, discount_cents, tax_cents, total_cents, amount_paid_cents, balance_cents, tip_cents, created_by, created_at, updated_at';
+
 export function useInvoice(invoiceId: string) {
   const { shopId } = useShop();
   return useQuery({
@@ -174,10 +182,28 @@ export function useInvoice(invoiceId: string) {
       unwrapRequired(
         await supabase
           .from('invoices')
-          .select('*')
+          .select(INVOICE_COLUMNS)
           .eq('shop_id', shopId)
           .eq('id', invoiceId)
           .maybeSingle(),
+        'invoice',
+      ),
+  });
+}
+
+/**
+ * The customer's /i/<token> pay-link credential (invoice_link_token):
+ * owners/admins/managers only — pass `enabled` false for everyone else.
+ */
+export function useInvoiceLinkToken(invoiceId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: [...invoiceKeys.detail(shopId, invoiceId), 'link-token'] as const,
+    enabled,
+    staleTime: Infinity,
+    queryFn: async (): Promise<string> =>
+      unwrapRequired(
+        await supabase.rpc('invoice_link_token', { p_invoice_id: invoiceId }),
         'invoice',
       ),
   });
@@ -295,7 +321,7 @@ export function useUpdateInvoice(invoiceId: string) {
           .update(patch)
           .eq('shop_id', shopId)
           .eq('id', invoiceId)
-          .select('*')
+          .select(INVOICE_COLUMNS)
           .maybeSingle(),
         'invoice',
       ),

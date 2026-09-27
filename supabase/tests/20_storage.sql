@@ -198,7 +198,8 @@ select tests.authenticate_as(tests.fx('u_tech_a'));
 select tests.throws($$insert into storage.objects (bucket_id, name, owner) values ('shop-assets', tests.fx('shop_a') || '/t.png', auth.uid())$$,
                     '42501', 'technicians cannot upload shop assets');
 select tests.as_anon();
-select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'shop-assets'$$), 2::bigint, 'shop assets are public');
+select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'shop-assets'$$), 0::bigint,
+                'anon cannot list shop assets (files are downloaded by public URL, which bypasses RLS)');
 select tests.throws($$insert into storage.objects (bucket_id, name) values ('shop-assets', tests.fx('shop_a') || '/anon.png')$$,
                     '42501', 'anon cannot upload shop assets');
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'shop-assets'$$), 0::bigint, 'anon cannot delete shop assets');
@@ -264,8 +265,15 @@ select tests.ok((select public.public_get_form(public.storage_path_uuid(name, 3)
                 'a technician must not reach the name of a customer on a job not assigned to them');
 
 select tests.authenticate_as(tests.fx('u_tech2_a'));  -- assigned to job_a2
-select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'signatures' and name like '%/forms/%'$$), 2::bigint,
-                'the assigned technician reads the signature uploads of their job''s forms (signed and pending)');
+select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'signatures' and name like '%/forms/%'$$), 1::bigint,
+                'the assigned technician reads the signature image of their job''s signed form');
+-- Regression: the pending upload's folder name is the unsigned form's token,
+-- which would let the technician sign the form as the customer (0023).
+select tests.ok(not exists (select 1 from storage.objects where bucket_id = 'signatures'
+                            and public.storage_path_uuid(name, 3) = tests.fx('tok_pending')),
+                'the assigned technician cannot harvest an unsigned form''s token from a pending upload');
+select tests.ok(not public.can_read_signature_object(tests.fx('shop_a') || '/forms/' || tests.fx('tok_pending') || '/sig.png'),
+                'can_read_signature_object: no pending uploads for technicians');
 select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'signatures'
                                   and name = tests.fx('shop_a') || '/device/job-a2.png'$$), 1::bigint,
                 'and signatures referenced by their job''s forms');

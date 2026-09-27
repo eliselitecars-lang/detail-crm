@@ -271,10 +271,10 @@ Deno.test("twilio_inbound: accepts a signature over the configured URL with conn
   await other.body?.cancel();
 });
 
-Deno.test("twilio_inbound: a number not provisioned for the shop never routes replies or STOPs", async () => {
-  // Another tenant typed SHOP's platform number into its own settings
-  // (SHOP has not configured it yet). Twilio still calls the webhook the
-  // platform provisioned for SHOP.
+Deno.test("twilio_inbound: a webhook not provisioned for the number's shop never routes replies or STOPs", async () => {
+  // SHOP_NUMBER is bound to SHOP (shop_sms_numbers). Another tenant typed it
+  // into its own settings and a webhook carries that tenant's shop_id: the
+  // tenant-editable sms_from_number never decides where a reply goes.
   const { db, handler, logs } = setup();
   db.seed(
     "shops",
@@ -294,8 +294,12 @@ Deno.test("twilio_inbound: a number not provisioned for the shop never routes re
       email_opted_out_at: null,
     },
   ]);
-  const provisioned = await handler(await signedForm("twilio_inbound", inboundParams("STOP")));
-  assertEquals([provisioned.status, await provisioned.text()], [200, EMPTY_TWIML]);
+  const otherShop = await handler(
+    await signedForm("twilio_inbound", inboundParams("STOP"), {
+      query: { action: "twilio_inbound", shop_id: OTHER_SHOP },
+    }),
+  );
+  assertEquals([otherShop.status, await otherShop.text()], [200, EMPTY_TWIML]);
   // A webhook without the platform binding is not routed either.
   const unbound = await handler(
     await signedForm("twilio_inbound", inboundParams("STOP"), {
@@ -314,6 +318,22 @@ Deno.test("twilio_inbound: a number not provisioned for the shop never routes re
     "number_not_provisioned",
     "number_not_provisioned",
   ]);
+});
+
+Deno.test("twilio_inbound: replies and STOP to the shop's bound number land while its sending number is cleared", async () => {
+  // Regression: inbound texts were routed by shops.sms_from_number, so a
+  // shop that paused texting (cleared it) silently lost every reply and
+  // STOP to the number still bound to it.
+  const { db, handler, logs } = setup();
+  db.seed("shops", db.table("shops").map((s) => ({ ...s, sms_from_number: null })));
+  const res = await handler(await signedForm("twilio_inbound", inboundParams("STOP")));
+  assertEquals([res.status, await res.text()], [200, EMPTY_TWIML]);
+  const inbound = db.table("messages").find((m) => m.direction === "inbound");
+  assertEquals([inbound?.shop_id, inbound?.customer_id], [SHOP, CUSTOMER]);
+  const customer = db.table("customers").find((c) => c.id === CUSTOMER);
+  assertEquals(typeof customer?.sms_opted_out_at, "string");
+  assertEquals(logs.events("inbound_sms_recorded")[0]?.opt_action, "opt_out");
+  assertEquals(logs.events("inbound_sms_ignored").length, 0);
 });
 
 Deno.test("twilio_status: Twilio 21610 (unsubscribed) records the customer's SMS opt-out", async () => {

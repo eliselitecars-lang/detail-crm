@@ -78,6 +78,53 @@ select tests.eq(tests.row_count($$update public.vehicles set color = 'Red' where
 select tests.throws($$update public.vehicles set customer_id = tests.fx('cust_b') where id = tests.fx('veh_a')$$, '23503',
                     'cannot re-point a vehicle to another shop''s customer');
 
+-- ------------------------------------------------------------ vehicle ownership keeps document history
+-- Every document requires its vehicle to belong to its customer, so a
+-- referenced vehicle cannot change customer (a sold car becomes a new
+-- vehicle record for the new owner).
+select tests.throws_like($$update public.vehicles set customer_id = tests.fx('cust_a2') where id = tests.fx('veh_a')$$, '23514',
+                         '%referenced by jobs%new vehicle for the new owner%',
+                         'a vehicle on a job cannot move to another customer');
+select tests.eq((select count(*) from public.jobs j join public.vehicles v on v.id = j.vehicle_id
+                  where j.shop_id = tests.fx('shop_a') and v.customer_id <> j.customer_id), 0::bigint,
+                'no job points at a vehicle owned by a different customer');
+select tests.eq((select customer_id from public.vehicles where id = tests.fx('veh_a')), tests.fx('cust_a'), 'vehicle keeps its owner');
+select tests.lives($$update public.vehicles set color = 'Blue', customer_id = tests.fx('cust_a') where id = tests.fx('veh_a')$$,
+                   'other edits of a referenced vehicle (same customer) still work');
+-- a line-item reference counts too
+insert into public.vehicles (shop_id, customer_id, make) values (tests.fx('shop_a'), tests.fx('cust_a'), 'Line Car')
+  returning tests.fx_set('veh_line', id);
+insert into public.job_line_items (shop_id, job_id, vehicle_id, name, unit_price_cents)
+  values (tests.fx('shop_a'), tests.fx('job_a'), tests.fx('veh_line'), 'Wax', 3000);
+select tests.throws_like($$update public.vehicles set customer_id = tests.fx('cust_a2') where id = tests.fx('veh_line')$$, '23514',
+                         '%referenced by job line items%', 'a vehicle on a job line cannot move to another customer');
+delete from public.job_line_items where vehicle_id = tests.fx('veh_line');
+-- tables added by later migrations are discovered from the catalog
+select tests.as_superuser();
+create table public.zz_vehicle_refs (
+  shop_id uuid not null, vehicle_id uuid not null,
+  foreign key (shop_id, vehicle_id) references public.vehicles (shop_id, id));
+insert into public.vehicles (shop_id, customer_id, make) values (tests.fx('shop_a'), tests.fx('cust_a'), 'Ref Car')
+  returning tests.fx_set('veh_ref', id);
+insert into public.zz_vehicle_refs values (tests.fx('shop_a'), tests.fx('veh_ref'));
+select tests.as_service();
+select tests.throws_like($$update public.vehicles set customer_id = tests.fx('cust_a2') where id = tests.fx('veh_ref')$$, '23514',
+                         '%referenced by zz vehicle refs%', 'any referencing table blocks the move, in every context');
+select tests.as_superuser();
+drop table public.zz_vehicle_refs;
+-- an unreferenced vehicle can still be corrected to the right customer
+select tests.authenticate_as(tests.fx('u_manager_a'));
+insert into public.vehicles (shop_id, customer_id, make) values (tests.fx('shop_a'), tests.fx('cust_a'), 'Wrong Owner')
+  returning tests.fx_set('veh_free', id);
+select tests.eq(tests.row_count($$update public.vehicles set customer_id = tests.fx('cust_a2') where id = tests.fx('veh_free')$$), 1::bigint,
+                'an unreferenced vehicle moves to another customer');
+select tests.eq((select customer_id from public.vehicles where id = tests.fx('veh_free')), tests.fx('cust_a2'), 'owner corrected');
+-- cross-shop: the owner of B cannot move A's vehicles at all
+select tests.authenticate_as(tests.fx('u_owner_b'));
+select tests.eq(tests.row_count($$update public.vehicles set customer_id = tests.fx('cust_a') where id = tests.fx('veh_free')$$), 0::bigint,
+                'owner of B cannot re-assign A''s vehicles');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+
 -- ------------------------------------------------------------ technicians
 select tests.authenticate_as(tests.fx('u_tech_a'));
 select tests.eq((select array_agg(id) from public.customers), array[tests.fx('cust_a')],

@@ -7,10 +7,12 @@
  * name as name+value with no delimiters, HMAC-SHA1 with the account auth
  * token, base64. Compare in constant time.
  */
+import { apiBaseFromEnv, DEFAULT_TWILIO_API_BASE } from "./api_base.ts";
 import { hmacBase64, timingSafeEqual, toBase64 } from "./crypto.ts";
 import { UpstreamError } from "./errors.ts";
 
-export const TWILIO_API_BASE = "https://api.twilio.com/2010-04-01";
+/** https://api.twilio.com/2010-04-01 unless TWILIO_API_BASE (local harness only) overrides it. */
+export const TWILIO_API_BASE = apiBaseFromEnv("TWILIO_API_BASE", DEFAULT_TWILIO_API_BASE);
 
 const E164 = /^\+[1-9]\d{6,14}$/;
 

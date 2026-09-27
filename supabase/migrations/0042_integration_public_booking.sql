@@ -20,14 +20,34 @@
 --     (PostgREST answers HTTP 429).
 --
 -- Customer matching (within the shop, non-archived customers only)
---   1. same email (case-insensitive) — the most recent such customer
+--   1. same email (case-insensitive) — the signed-in caller's linked record
+--      first, then one with the phone the form gives, then the most recent —
+--      skipping a record whose phone is UNVERIFIED (below) unless the form
+--      gives that same phone or the caller is the verified owner of the email
 --   2. else same phone, among customers WITHOUT an email (a phone shared by
 --      someone with a different email is a different person)
 --   3. else a new customer (source online_booking)
--- A matched customer is never overwritten. An anonymous (unverified)
+-- Unverified phones: a public form proves neither the email nor the phone.
+-- Whoever books first with an email creates its customer with THEIR phone,
+-- and every text about that customer's jobs (confirmation, reminders, each
+-- with the /booking link that reads and cancels the job) goes to that phone.
+-- If a later booking with the same email were attached to that record, a
+-- stranger who booked first with someone's email would receive that
+-- person's appointments, service address and booking links. So a customer
+-- created by a booking that did not prove the email (anonymous, or signed in
+-- as someone else) with a phone is marked phone_unverified; a later booking
+-- with a different phone (or none) gets its own customer instead, with
+-- exactly the details entered. The mark clears when anyone else sets the
+-- phone (staff, imports), and the verified owner of the email (signed in,
+-- confirmed, or linked) replaces an unverified phone with the one they give
+-- (or none) and that booking's SMS opt-in. (The record's SMS opt-out follows
+-- the new number, 0033 customers_comms_suppressed: a STOP from the old
+-- number keeps that number suppressed but does not block the owner's own.)
+-- Otherwise a matched customer is never overwritten. An anonymous (unverified)
 -- booking may only fill EMPTY names on it; contact details, opt-ins, the
--- address and the reused vehicle are filled (only where empty) solely when
--- the booking is trusted to be that customer: the customer was created by
+-- address (a mobile service address, only when the customer has no address
+-- fields on file at all) and the reused vehicle are filled (only where
+-- empty) solely when the booking is trusted to be that customer: the customer was created by
 -- this booking, or the caller is the signed-in client linked to it (or whose
 -- confirmed email is its email, which also links it). Otherwise a stranger
 -- could attach their own phone/email to someone else's record and receive
@@ -35,7 +55,9 @@
 -- A signed-in client may instead book one of their own saved vehicles
 -- (vehicle.id), which books for that vehicle's customer.
 -- A trusted booking reuses the customer's vehicle with the same make/model
--- (and compatible year), else creates one. An untrusted booking always
+-- (and compatible year), else creates one; a reused (or saved) vehicle's
+-- on-file category decides price, duration and the slot check, the form's
+-- category only fills a vehicle that has none. An untrusted booking always
 -- creates a new vehicle from the submitted fields only: reusing a matched
 -- customer's vehicle would show its on-file year/trim/color on the booking
 -- and form pages (whose tokens the anonymous caller holds) and attach a
@@ -46,9 +68,19 @@
 -- zone (never the database session's). A local time that does not exist or
 -- occurs twice there (daylight-saving changes) must carry an offset.
 --
--- Staff on the booking link: public_cancel_booking refuses technicians of
--- the job's shop (they may not cancel jobs, SPEC §4.4) unless they are the
--- signed-in client linked to the job's customer.
+-- The job token is the customer's credential. Whoever holds it can, without
+-- signing in, read the booking page (with the invoice link, paid total and
+-- balance) and cancel the appointment, i.e. act as the customer. So staff
+-- roles that may not do that must never see it: `authenticated` gets SELECT
+-- on every jobs column EXCEPT public_token (a technician reads their
+-- assigned jobs but not the token; SPEC §3 money row + §4.4 no cancelling),
+-- and owners/admins/managers fetch it with job_booking_token(job_id) to
+-- share the /booking link. Realtime honours the same column privileges.
+-- A migration that adds a jobs column must grant SELECT on it to
+-- authenticated (40_booking_token_privacy.sql checks the whole column set).
+-- Defence in depth: public_cancel_booking still refuses a signed-in
+-- technician of the job's shop (42501) unless they are the client linked to
+-- the job's customer.
 --
 -- Error codes: P0002 unknown shop/booking/vehicle; 55000 online booking off;
 -- 22023 invalid input (message says which field); 23P01 slot no longer
@@ -382,6 +414,35 @@ end
 $$;
 
 -- ---------------------------------------------------------------------------
+-- customers.phone_unverified — provenance of the phone on file (see the
+-- header, "Customer matching"). Set only by create_online_booking when a
+-- booking that did not prove the email (anonymous, or signed in as someone
+-- else) creates the customer with a phone. Cleared whenever the phone is set
+-- by anyone else (staff, imports, the verified email owner), or confirmed by
+-- the verified email owner.
+-- ---------------------------------------------------------------------------
+alter table public.customers
+  add column phone_unverified boolean not null default false;
+
+comment on column public.customers.phone_unverified is
+  'True when the phone came from the public booking form of a booker who did not prove this email (they created the record): it may be a stranger''s number. Later online bookings with this email reuse the record only with the same phone; the verified email owner replaces it. Cleared when anyone else sets the phone.';
+
+create function public.customers_phone_unverified_reset() returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if new.phone is distinct from old.phone and new.phone_unverified is not distinct from old.phone_unverified then
+    new.phone_unverified := false;
+  end if;
+  return new;
+end
+$$;
+
+create trigger customers_40_phone_unverified_reset before update of phone on public.customers
+  for each row execute function public.customers_phone_unverified_reset();
+
+-- ---------------------------------------------------------------------------
 -- create_online_booking(slug, payload, p_now) — see the header for the rules.
 -- Payload:
 --   customer   {first_name*, last_name, email*, phone, sms_opt_in, email_opt_in}
@@ -458,6 +519,8 @@ declare
   v_recent        integer;
   v_created       boolean := false;
   v_trusted       boolean;
+  v_fill_addr     boolean;
+  v_new_phone     boolean;
 begin
   -- ------------------------------------------------------------ shop
   select * into v_shop from public.shops s where s.slug = lower(btrim(p_slug));
@@ -631,21 +694,21 @@ begin
     raise exception 'too many online bookings for this contact today; please call the shop' using errcode = 'PT429';
   end if;
 
-  -- the exact slot must still be offered (same rules as get_available_slots)
-  select s.ends_at into v_end
-    from public.get_available_slots(v_shop.slug, v_all_ids, v_cat, (v_start at time zone v_shop.timezone)::date,
-                                    (v_start at time zone v_shop.timezone)::date, v_now) s
-   where s.starts_at = v_start;
-  if v_end is null then
-    raise exception 'that time is no longer available; please choose another time' using errcode = '23P01';
-  end if;
-
   -- ------------------------------------------------------------ customer
   if v_customer.id is null then
+    -- never a record whose phone came from someone else's unverified form
+    -- (unless this booker gives that same phone, or is the verified owner of
+    -- the email, whose booking replaces that phone below): the booking would
+    -- be texted, booking link included, to that stranger (see the header)
     select * into v_customer from public.customers c
      where c.shop_id = v_shop.id and c.archived_at is null and c.email is not null
        and lower(c.email::text) = v_email
-     order by coalesce(v_uid is not null and c.portal_user_id = v_uid, false) desc, c.created_at desc, c.id
+       and (not c.phone_unverified or c.phone is null or c.phone = v_phone
+            or coalesce(v_uid is not null
+                        and (c.portal_user_id = v_uid
+                             or (c.portal_user_id is null and v_portal_email = v_email)), false))
+     order by coalesce(v_uid is not null and c.portal_user_id = v_uid, false) desc,
+              coalesce(c.phone = v_phone, false) desc, c.created_at desc, c.id
      limit 1;
     if v_customer.id is null and v_phone is not null then
       select * into v_customer from public.customers c
@@ -654,8 +717,10 @@ begin
        limit 1;
     end if;
     if v_customer.id is null then
-      insert into public.customers (shop_id, first_name, last_name, email, phone, sms_opt_in, email_opt_in, source)
-      values (v_shop.id, v_first, v_last, v_email::extensions.citext, v_phone, v_sms_opt, v_email_opt, 'online_booking')
+      insert into public.customers (shop_id, first_name, last_name, email, phone, sms_opt_in, email_opt_in, source,
+                                    phone_unverified)
+      values (v_shop.id, v_first, v_last, v_email::extensions.citext, v_phone, v_sms_opt, v_email_opt, 'online_booking',
+              v_phone is not null and v_portal_email is distinct from v_email)
       returning * into v_customer;
       v_created := true;
     end if;
@@ -671,19 +736,35 @@ begin
                         and (v_customer.portal_user_id = v_uid
                              or (v_customer.portal_user_id is null and v_portal_email is not null
                                  and lower(v_customer.email::text) = v_portal_email)), false);
-  -- fill only what is missing; never overwrite, never opt anyone out
+  -- the verified owner of the email replaces a phone that came from an
+  -- unverified form (and that phone's opt-in): it may be a stranger's, and
+  -- every text about this customer would go to it
+  v_new_phone := v_trusted and not v_created and v_customer.phone_unverified;
+  v_fill_addr := v_trusted and v_loc_type = 'mobile'
+                 and v_customer.address_line1 is null and v_customer.address_line2 is null
+                 and v_customer.city is null and v_customer.region is null and v_customer.postal_code is null
+                 and v_customer.lat is null;
+  -- fill only what is missing; never overwrite (but for an unverified phone,
+  -- above), never opt anyone out
   update public.customers c
      set first_name = coalesce(nullif(btrim(c.first_name), ''), v_first),
          last_name = coalesce(nullif(btrim(c.last_name), ''), v_last),
          email = case when v_trusted then coalesce(c.email, v_email::extensions.citext) else c.email end,
-         phone = case when v_trusted then coalesce(c.phone, v_phone) else c.phone end,
-         sms_opt_in = c.sms_opt_in or (v_trusted and v_sms_opt),
+         phone = case when v_new_phone then v_phone
+                      when v_trusted then coalesce(c.phone, v_phone)
+                      else c.phone end,
+         phone_unverified = case when v_new_phone then false else c.phone_unverified end,
+         sms_opt_in = case when v_new_phone then coalesce(v_phone is not null and v_sms_opt, false)
+                           else c.sms_opt_in or (v_trusted and v_sms_opt) end,
          email_opt_in = c.email_opt_in or (v_trusted and v_email_opt),
-         address_line1 = case when v_trusted and c.address_line1 is null and v_loc_type = 'mobile' then v_line1 else c.address_line1 end,
-         address_line2 = case when v_trusted and c.address_line1 is null and v_loc_type = 'mobile' then v_line2 else c.address_line2 end,
-         city = case when v_trusted and c.address_line1 is null and v_loc_type = 'mobile' then v_city else c.city end,
-         region = case when v_trusted and c.address_line1 is null and v_loc_type = 'mobile' then v_region else c.region end,
-         postal_code = case when v_trusted and c.address_line1 is null and v_loc_type = 'mobile' then v_postal else c.postal_code end,
+         -- the service address becomes the customer's address only when they
+         -- have none on file at all: merging it into a partial address (a
+         -- city, ZIP or gate code staff entered) would overwrite or mix it
+         address_line1 = case when v_fill_addr then v_line1 else c.address_line1 end,
+         address_line2 = case when v_fill_addr then v_line2 else c.address_line2 end,
+         city = case when v_fill_addr then v_city else c.city end,
+         region = case when v_fill_addr then v_region else c.region end,
+         postal_code = case when v_fill_addr then v_postal else c.postal_code end,
          portal_user_id = case
            when c.portal_user_id is null and v_uid is not null and v_portal_email is not null
                 and lower(coalesce(c.email::text, case when v_trusted then v_email end)) = v_portal_email then v_uid
@@ -702,6 +783,9 @@ begin
          and (v_year is null or v.year is null or v.year = v_year)
        order by (v.year is not distinct from v_year) desc, v.created_at desc, v.id
        limit 1;
+      -- a reused vehicle is priced and scheduled for its on-file category
+      -- (like a saved-vehicle booking); the form's category only fills a gap
+      v_cat := coalesce(v_vehicle.category_id, v_cat);
     end if;
     if v_vehicle.id is null then
       insert into public.vehicles (shop_id, customer_id, year, make, model, trim, color, license_plate, vin, category_id)
@@ -724,8 +808,28 @@ begin
   end if;
 
   -- ------------------------------------------------------------ price (catalog only)
+  -- v_cat is final here: a reused vehicle's on-file category wins over the form's
   v_pricing := public.price_services_core(v_shop.id, v_customer.id, v_cat, v_all_ids, v_vehicle.id,
                                           v_uid is not null and v_customer.portal_user_id = v_uid);
+  if not (v_pricing ->> 'priced')::boolean then
+    raise exception 'one or more services are not offered for this vehicle type' using errcode = '22023';
+  end if;
+
+  -- ------------------------------------------------------------ slot (final category)
+  -- The exact slot must still be offered (same rules as get_available_slots),
+  -- checked for the category the job is actually priced and scheduled with:
+  -- a reused vehicle's on-file category may differ from the form's (its
+  -- durations too), so this runs only once the vehicle is settled. Still
+  -- under the advisory lock; any failure rolls the whole booking back.
+  select s.ends_at into v_end
+    from public.get_available_slots(v_shop.slug, v_all_ids, v_cat, (v_start at time zone v_shop.timezone)::date,
+                                    (v_start at time zone v_shop.timezone)::date, v_now) s
+   where s.starts_at = v_start;
+  if v_end is null then
+    raise exception 'that time is no longer available; please choose another time' using errcode = '23P01';
+  end if;
+
+  -- ------------------------------------------------------------ discount
   if v_coupon.id is not null then
     update public.coupons c
        set redemptions = c.redemptions + 1
@@ -818,7 +922,10 @@ begin
     into v_paid, v_dep_paid, v_pending
     from public.payments p
    where p.shop_id = v_job.shop_id and p.job_id = v_job.id;
-  v_dep_due := greatest(least(v_job.deposit_required_cents, v_job.total_cents) - v_paid, 0);
+  -- same rule as job_payment_summary (0013): the deposit is capped by what
+  -- is actually owed, i.e. the invoice total once there is one (a discount
+  -- or edited lines at invoicing can bring it below the job's total)
+  v_dep_due := greatest(least(v_job.deposit_required_cents, coalesce(v_inv.total_cents, v_job.total_cents)) - v_paid, 0);
 
   if v_job.scheduled_start is not null then
     v_deadline := v_job.scheduled_start - make_interval(hours => coalesce(v_bs.allow_client_cancel_hours, 0));
@@ -896,7 +1003,11 @@ begin
                'token', fs.public_token)
              order by fs.created_at, fs.id)
       from public.form_submissions fs
-      where fs.job_id = v_job.id and fs.shop_id = v_job.shop_id), '[]'::jsonb),
+      -- only the current customer's forms: a form signed before the job
+      -- moved to another customer stays the previous customer's document
+      -- (0023 moves and re-tokens only unsigned ones)
+      where fs.job_id = v_job.id and fs.shop_id = v_job.shop_id
+        and (fs.signed_at is null or fs.customer_id = v_job.customer_id)), '[]'::jsonb),
     'invoice', case when v_inv.id is not null and v_inv.status <> 'draft' then jsonb_build_object(
       'token', v_inv.public_token,
       'number', v_inv.number,
@@ -932,10 +1043,10 @@ $$;
 -- scheduled job, until allow_client_cancel_hours before its start (0 = up to
 -- the start time). Owner/admin/manager get a booking_cancelled notification.
 -- Deposits are not refunded automatically and a redeemed coupon stays
--- redeemed (the shop decides). Technicians can read their jobs' tokens but
--- may not cancel jobs (SPEC §4.4), so a signed-in active member of the
--- job's shop below manager is refused (42501) unless they are the client
--- linked to the job's customer.
+-- redeemed (the shop decides). Technicians may not cancel jobs (SPEC §4.4):
+-- they cannot read job tokens (column privileges below), and a signed-in
+-- active member of the job's shop below manager who presents one anyway is
+-- refused (42501) unless they are the client linked to the job's customer.
 -- ---------------------------------------------------------------------------
 create function public.public_cancel_booking(p_token uuid, p_reason text default null,
                                              p_now timestamptz default now())
@@ -999,8 +1110,58 @@ end
 $$;
 
 -- ---------------------------------------------------------------------------
+-- job_booking_token(job_id) — the /booking/<token> credential for staff who
+-- may act for the customer (owner/admin/manager). Technicians: 42501.
+-- Unknown job or another shop's job: P0002.
+-- ---------------------------------------------------------------------------
+create function public.job_booking_token(p_job_id uuid) returns uuid
+language plpgsql stable security definer
+set search_path = ''
+as $$
+declare
+  v_shop  uuid;
+  v_token uuid;
+begin
+  select j.shop_id, j.public_token into v_shop, v_token from public.jobs j where j.id = p_job_id;
+  if v_shop is null or not public.is_shop_member(v_shop) then
+    raise exception 'job not found' using errcode = 'P0002';
+  end if;
+  if not public.is_shop_manager(v_shop) then
+    raise exception 'only owners, admins and managers can share the booking link' using errcode = '42501';
+  end if;
+  return v_token;
+end
+$$;
+
+-- ---------------------------------------------------------------------------
+-- jobs.public_token column privilege (see the header): authenticated reads
+-- every jobs column except the token. service_role keeps full access (edge
+-- functions resolve tokens); anon has no table access (0006).
+-- ---------------------------------------------------------------------------
+revoke select on public.jobs from authenticated;
+do $$
+declare
+  v_cols text;
+begin
+  select string_agg(format('%I', a.attname), ', ' order by a.attnum)
+    into v_cols
+    from pg_catalog.pg_attribute a
+   where a.attrelid = 'public.jobs'::regclass
+     and a.attnum > 0
+     and not a.attisdropped
+     and a.attname <> 'public_token';
+  execute format('grant select (%s) on public.jobs to authenticated', v_cols);
+end
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Grants
 -- ---------------------------------------------------------------------------
+revoke execute on function public.job_booking_token(uuid) from public, anon, service_role;
+grant execute on function public.job_booking_token(uuid) to authenticated;
+
+revoke execute on function public.customers_phone_unverified_reset() from public, anon, authenticated;
+
 revoke execute on function
   public.coupon_unavailable_reason(public.coupons, timestamptz),
   public.booking_parse_start(text, text),

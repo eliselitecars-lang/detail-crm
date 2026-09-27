@@ -13,13 +13,27 @@
 -- (clear exactly the three signature columns, nothing else) to unlock it.
 -- Deleting the job still cascades (trusted RI context).
 --
+-- Vehicles: an inspection records the condition of one specific vehicle, so
+-- a vehicle that has inspections cannot be deleted (ON DELETE RESTRICT,
+-- 23503 naming inspections_vehicle_fk); archive it (vehicles.archived_at)
+-- instead, like a vehicle with membership history. SET NULL is not an
+-- option: at most one inspection of each kind exists per job and vehicle,
+-- the vehicle-less slot included (UNIQUE NULLS NOT DISTINCT), so clearing
+-- the vehicle of a multi-vehicle job's inspections would collide with each
+-- other or with the job's vehicle-less inspection, and the evidence would
+-- lose which car it describes. Deleting the job or the shop still cascades.
+--
 -- Files: job_photos.storage_path and inspection_marks.photo_path are object
 -- names in the job-photos bucket, "<shop_id>/<job_id>/<file>", of the row's
--- own job, and the object must exist. Deleting a row does not delete the
--- stored object (the app deletes it through the Storage API, which enforces
--- the storage policies in 0025). The photo of a mark on a signed inspection
--- and the signature image are locked in storage too (0025), so the evidence
--- the customer signed off on cannot be replaced or removed after signing.
+-- own job, and the object must exist. Deleting a photo or mark row does not
+-- delete the stored object (the app deletes it through the Storage API,
+-- which enforces the storage policies in 0025); deleting a job queues its
+-- photo folder, and deleting an inspection its signature image and its
+-- marks' photos, for the storage purge (0025). An inspection cannot be signed while a mark's photo
+-- is missing, and the photo of a mark on a signed inspection and the
+-- signature image are locked in storage (0025: no upload, overwrite, move or
+-- delete), so the evidence the customer signed off on cannot be replaced or
+-- removed after signing.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -45,7 +59,7 @@ create table public.inspections (
   constraint inspections_job_fk foreign key (shop_id, job_id)
     references public.jobs (shop_id, id) on delete cascade,
   constraint inspections_vehicle_fk foreign key (shop_id, vehicle_id)
-    references public.vehicles (shop_id, id) on delete set null (vehicle_id),
+    references public.vehicles (shop_id, id) on delete restrict,
   constraint inspections_signature_complete check (
     (customer_signature_path is null) = (signed_by_name is null)
     and (customer_signature_path is null) = (signed_at is null))
@@ -116,6 +130,13 @@ language plpgsql security definer
 set search_path = ''
 as $$
 begin
+  -- a job with an inspection keeps its customer (jobs_customer_records_guard,
+  -- 0023): hold the job row so a concurrent customer move either waits for
+  -- this insert (and then sees it) or commits first (and the vehicle check
+  -- below then reads the job's new customer)
+  if tg_op = 'INSERT' then
+    perform 1 from public.jobs j where j.id = new.job_id and j.shop_id = new.shop_id for share;
+  end if;
   if new.vehicle_id is not null
      and (tg_op = 'INSERT' or new.vehicle_id is distinct from old.vehicle_id)
      and not exists (
@@ -136,6 +157,18 @@ begin
     if not public.storage_object_exists('signatures', new.customer_signature_path) then
       raise exception 'upload the signature image before saving it' using errcode = '23514';
     end if;
+  end if;
+
+  -- the customer signs off on the photos too: every mark's photo must still
+  -- be there (a photo deleted before signing could otherwise be re-created
+  -- with different content at the signed path; 0025 also refuses uploads to
+  -- signed evidence paths)
+  if new.signed_at is not null and (tg_op = 'INSERT' or old.signed_at is null)
+     and exists (select 1 from public.inspection_marks m
+                 where m.inspection_id = new.id and m.shop_id = new.shop_id and m.photo_path is not null
+                   and not public.storage_object_exists('job-photos', m.photo_path)) then
+    raise exception 'a damage photo of this inspection is missing; attach it again or remove the mark before signing'
+      using errcode = '23514';
   end if;
   return null;
 end
@@ -271,7 +304,7 @@ begin
     end if;
     return new;
   end if;
-  new.uploaded_by := old.uploaded_by;
+  new.uploaded_by := public.audit_user_ref(new.uploaded_by, old.uploaded_by);
   if public.is_client_context()
      and (new.job_id <> old.job_id or new.storage_path <> old.storage_path) then
     raise exception 'a photo''s job and file cannot be changed; upload a new photo instead' using errcode = '42501';

@@ -82,9 +82,33 @@ select tests.throws_like($$update public.shop_members set role = 'admin' where i
                          '%own role%', 'owner cannot change own role');
 select tests.throws_like($$delete from public.shop_members where id = tests.fx('m_owner_a')$$, '42501',
                          '%owner membership%', 'owner cannot delete own owner row');
-select tests.lives($$delete from public.shop_members where id = tests.fx('m_tech2_a')$$, 'owner removes a member');
-select tests.eq((select count(*) from public.job_assignments where member_id = tests.fx('m_tech2_a')), 0::bigint,
-                'removing a member removes their assignments');
+-- Assignments are the historical attribution of work (and commission, see
+-- report_team): a member with assignments is deactivated, never deleted,
+-- so their past jobs are not re-attributed to the remaining assignees.
+select tests.as_superuser();
+update public.shop_members set active = true where id = tests.fx('m_tech2_a');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+insert into public.job_assignments (shop_id, job_id, member_id) values (tests.fx('shop_a'), tests.fx('job_a'), tests.fx('m_tech2_a'));
+update public.jobs set status = 'in_progress' where id = tests.fx('job_a');
+update public.jobs set status = 'completed' where id = tests.fx('job_a');
+select tests.authenticate_as(tests.fx('u_owner_a'));
+select tests.throws_like($$delete from public.shop_members where id = tests.fx('m_tech2_a')$$, '23503', '%job_assignments_member_fk%',
+                         'a member with job assignments cannot be deleted (deactivate instead)');
+select tests.as_service();
+select tests.throws($$delete from public.shop_members where id = tests.fx('m_tech2_a')$$, '23503',
+                    'not even trusted code can delete assignment history with the member');
+select tests.as_superuser();
+select tests.eq((select array_agg(member_id order by created_at, member_id) from public.job_assignments where job_id = tests.fx('job_a')),
+                (select array_agg(m order by m) from unnest(array[tests.fx('m_tech_a'), tests.fx('m_tech2_a')]) m),
+                'the completed job keeps both assignees after the failed delete');
+select tests.authenticate_as(tests.fx('u_owner_a'));
+select tests.lives($$update public.shop_members set active = false where id = tests.fx('m_tech2_a')$$, 'owner deactivates the member instead');
+select tests.eq((select count(*) from public.job_assignments where member_id = tests.fx('m_tech2_a')), 2::bigint,
+                'deactivation keeps the member''s assignment history');
+-- once their assignments are gone (e.g. mistaken ones removed) the member can be deleted
+select tests.lives($$delete from public.job_assignments where member_id = tests.fx('m_tech2_a')$$, 'owner removes the assignments');
+select tests.lives($$delete from public.shop_members where id = tests.fx('m_tech2_a')$$, 'owner removes a member without history');
+select tests.eq((select count(*) from public.shop_members where id = tests.fx('m_tech2_a')), 0::bigint, 'member removed');
 select tests.as_superuser();
 select tests.lives($$update public.shop_members set role = 'admin' where id = tests.fx('m_admin_a')$$);
 
@@ -131,7 +155,7 @@ select tests.eq(tests.row_count($$delete from public.shop_members where id = tes
                 'technicians cannot delete memberships directly (leave_shop is the way out)');
 select tests.lives($$select public.leave_shop(tests.fx('shop_a'))$$, 'technician leaves');
 select tests.ok(not public.is_shop_member(tests.fx('shop_a')), 'left member is no longer a member');
-select tests.eq(tests.row_count('select * from public.jobs'), 0::bigint, 'left member loses job access');
+select tests.eq(tests.row_count('select id from public.jobs'), 0::bigint, 'left member loses job access');
 select tests.eq(tests.row_count('select * from public.shops'), 0::bigint, 'left member loses shop access');
 select tests.throws($$select public.leave_shop(tests.fx('shop_a'))$$, 'P0002', 'cannot leave twice');
 select tests.throws($$select public.leave_shop(tests.fx('shop_b'))$$, 'P0002', 'cannot leave a shop you are not in');

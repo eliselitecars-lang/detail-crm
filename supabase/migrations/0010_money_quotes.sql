@@ -20,6 +20,9 @@
 -- sent / viewed quote returns to draft: it has not been sent to the new
 -- customer yet (mark_quote_sent again).
 --
+-- A job's quote (jobs.quote_id) is always a quote of the job's customer
+-- (jobs_quote_validate / quotes_validate): the job's messages link to it.
+--
 -- valid_until is a DATE: the quote is valid through the end of that day in
 -- the shop's time zone (public.quote_validity_end).
 -- ============================================================================
@@ -206,7 +209,7 @@ begin
     new.created_by := coalesce(auth.uid(), new.created_by);
   else
     new.number := old.number;
-    new.created_by := old.created_by;
+    new.created_by := public.audit_user_ref(new.created_by, old.created_by);
     -- a different customer never inherits the previous customer's link
     if new.customer_id is distinct from old.customer_id then
       new.public_token := gen_random_uuid();
@@ -349,9 +352,54 @@ begin
     raise exception 'line items reference vehicles of the previous customer; update them first'
       using errcode = '23514';
   end if;
+  -- a job's quote stays a quote of the job's customer (see jobs_quote_validate)
+  if tg_op = 'UPDATE' and new.customer_id is distinct from old.customer_id
+     and exists (select 1 from public.jobs j
+                 where j.quote_id = new.id and j.shop_id = new.shop_id and j.customer_id <> new.customer_id) then
+    raise exception 'quote #% is linked to job #% of its current customer; unlink it from the job first', new.number,
+      (select min(j.number) from public.jobs j
+        where j.quote_id = new.id and j.shop_id = new.shop_id and j.customer_id <> new.customer_id)
+      using errcode = '23514';
+  end if;
   return null;
 end
 $$;
+
+-- AFTER on jobs (all contexts; composite FKs have passed): a job's quote is a
+-- quote of the job's customer. The job's messages render {{quote_link}} from
+-- it, so a job linked to another customer's quote would send that customer's
+-- /q page (name, vehicle, prices, approval) to this one. A job cannot be
+-- linked to another customer's quote, and a job created from a quote cannot
+-- move to another customer while it stays linked (unlink it — quote_id =
+-- null — in the same write). The quote side is checked in quotes_validate.
+create function public.jobs_quote_validate() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+declare
+  v_number    bigint;
+  v_customer  uuid;
+begin
+  if new.quote_id is null
+     or (tg_op = 'UPDATE' and new.quote_id is not distinct from old.quote_id
+         and new.customer_id is not distinct from old.customer_id) then
+    return null;
+  end if;
+  select q.number, q.customer_id into v_number, v_customer
+    from public.quotes q where q.id = new.quote_id and q.shop_id = new.shop_id;
+  if found and v_customer <> new.customer_id then
+    if tg_op = 'UPDATE' and new.quote_id is not distinct from old.quote_id then
+      raise exception 'this job is linked to quote #% of its previous customer; unlink the quote to move the job to another customer',
+        v_number using errcode = '23514';
+    end if;
+    raise exception 'quote #% belongs to another customer', v_number using errcode = '23514';
+  end if;
+  return null;
+end
+$$;
+
+create trigger jobs_quote_validate after insert or update of quote_id, customer_id on public.jobs
+  for each row execute function public.jobs_quote_validate();
 
 create trigger quotes_05_prevent_shop_change before update on public.quotes
   for each row execute function public.prevent_shop_change();
@@ -636,6 +684,7 @@ revoke execute on function
   public.quotes_status_machine(),
   public.quotes_compute_totals(),
   public.quotes_validate(),
+  public.jobs_quote_validate(),
   public.quote_line_items_client_guard(),
   public.quote_line_items_before_write(),
   public.quote_line_items_validate(),

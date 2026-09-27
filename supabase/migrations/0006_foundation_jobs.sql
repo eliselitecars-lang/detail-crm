@@ -200,8 +200,11 @@ create table public.job_assignments (
   constraint job_assignments_job_member_key unique (shop_id, job_id, member_id),
   constraint job_assignments_job_fk foreign key (shop_id, job_id)
     references public.jobs (shop_id, id) on delete cascade,
+  -- NO ACTION (not cascade): assignments are the historical attribution of
+  -- work, revenue and commission (report_team). Members with assignments are
+  -- deactivated, not deleted; deleting the whole shop still works.
   constraint job_assignments_member_fk foreign key (shop_id, member_id)
-    references public.shop_members (shop_id, id) on delete cascade
+    references public.shop_members (shop_id, id)
 );
 create index job_assignments_shop_member_idx on public.job_assignments (shop_id, member_id);
 
@@ -300,7 +303,7 @@ begin
     new.created_by := coalesce(auth.uid(), new.created_by);
   else
     new.number := old.number;
-    new.created_by := old.created_by;
+    new.created_by := public.audit_user_ref(new.created_by, old.created_by);
   end if;
   return new;
 end

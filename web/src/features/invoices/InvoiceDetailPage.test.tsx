@@ -94,7 +94,7 @@ describe('InvoiceDetailPage', () => {
     expect(
       await within(dialog).findByText(/can’t be more than the balance due/),
     ).toBeInTheDocument();
-    expect(supabase.rpc).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalledWith('record_manual_payment', expect.anything());
 
     await user.clear(amount);
     await user.type(amount, '120.50');
@@ -109,6 +109,23 @@ describe('InvoiceDetailPage', () => {
         p_method: 'check',
         p_tip_cents: 1000,
       }),
+    );
+  });
+
+  it('managers copy the pay link fetched from invoice_link_token', async () => {
+    supabase.rpc.mockImplementation((...args: unknown[]) =>
+      createBuilder(
+        args[0] === 'invoice_link_token'
+          ? { data: '50000000-0000-4000-8000-000000000009' }
+          : { data: null },
+      ),
+    );
+    const { user } = setup({ role: 'manager' });
+    await user.click(await screen.findByRole('button', { name: 'Copy pay link' }));
+    expect(supabase.rpc).toHaveBeenCalledWith('invoice_link_token', { p_invoice_id: 'inv-1' });
+    expect(await screen.findByText('Pay link copied')).toBeInTheDocument();
+    await expect(navigator.clipboard.readText()).resolves.toContain(
+      '/i/50000000-0000-4000-8000-000000000009',
     );
   });
 
@@ -354,7 +371,9 @@ describe('InvoiceDetailPage', () => {
     setup({ role: 'technician' });
     await screen.findByRole('heading', { name: 'Invoice #2001', level: 1 });
     expect(screen.getByRole('button', { name: 'Record payment' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Copy pay link' })).toBeInTheDocument();
+    // the pay link is the customer's credential: technicians never fetch it
+    expect(screen.queryByRole('button', { name: 'Copy pay link' })).not.toBeInTheDocument();
+    expect(supabase.rpc).not.toHaveBeenCalledWith('invoice_link_token', expect.anything());
     expect(screen.queryByRole('button', { name: 'Charge card' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Resend|Send invoice/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'More invoice actions' })).not.toBeInTheDocument();

@@ -2541,7 +2541,7 @@ Deno.test("charge.dispute.created flags the payment and notifies owners/admins",
   assertEquals(rpcCalls(db, "notify_shop_staff"), [{
     p_shop_id: SHOP,
     p_roles: ["owner", "admin"],
-    p_kind: "general",
+    p_kind: "payment_received",
     p_title: "A card payment was disputed",
     p_body: row.note,
     p_job_id: JOB,

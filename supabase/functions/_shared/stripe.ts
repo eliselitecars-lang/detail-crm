@@ -5,6 +5,7 @@
  * Stripe ids, brand and last4.
  */
 import Stripe from "stripe";
+import { stripeHostOptions } from "./api_base.ts";
 import { sha256Hex } from "./crypto.ts";
 import { type Env, env as defaultEnv } from "./env.ts";
 import { HttpError } from "./errors.ts";
@@ -35,6 +36,9 @@ export function createStripe(secretKey: string, options: StripeFactoryOptions = 
     timeout: options.timeoutMs ?? 20_000,
     telemetry: false,
     appInfo: { name: "Detail CRM" },
+    // {} (the real api.stripe.com) unless STRIPE_API_BASE points the local
+    // harness at stripe-mock (_shared/api_base.ts).
+    ...stripeHostOptions(),
   });
 }
 

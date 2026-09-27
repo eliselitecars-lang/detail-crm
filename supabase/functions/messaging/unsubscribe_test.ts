@@ -10,6 +10,7 @@ const campaignEmail = () =>
     subject: "Fall special",
     status: "sent",
     campaign_id: "60000000-0000-4000-8000-000000000001",
+    unsubscribe_token: crypto.randomUUID(),
   });
 
 function oneClick(token: string): Request {
@@ -21,7 +22,7 @@ function oneClick(token: string): Request {
 Deno.test("unsubscribe: RFC 8058 one-click POST records the email opt-out", async () => {
   const msg = campaignEmail();
   const { db, handler } = setup({ messages: [msg] });
-  const res = await handler(oneClick(String(msg.id)));
+  const res = await handler(oneClick(String(msg.unsubscribe_token)));
   assertEquals(res.status, 200);
   assertEquals(await responseJson(res), { unsubscribed: true });
   const customer = db.table("customers").find((c) => c.id === CUSTOMER);
@@ -31,7 +32,7 @@ Deno.test("unsubscribe: RFC 8058 one-click POST records the email opt-out", asyn
   ]);
   assertEquals(db.requests.find((r) => r.target === "public_unsubscribe")?.role, "service_role");
   // Idempotent: a repeated POST (provider retry) succeeds again.
-  const again = await handler(oneClick(String(msg.id)));
+  const again = await handler(oneClick(String(msg.unsubscribe_token)));
   assertEquals(again.status, 200);
   await again.body?.cancel();
 });
@@ -40,12 +41,33 @@ Deno.test("unsubscribe: GET never unsubscribes; it redirects to the confirmation
   const msg = campaignEmail();
   const { db, handler } = setup({ messages: [msg] });
   const res = await handler(
-    emptyRequest("messaging", { query: { action: "unsubscribe", token: String(msg.id) } }),
+    emptyRequest("messaging", {
+      query: { action: "unsubscribe", token: String(msg.unsubscribe_token) },
+    }),
   );
   assertEquals(res.status, 303);
-  assertEquals(res.headers.get("location"), `https://app.example.com/u/${msg.id}`);
+  assertEquals(res.headers.get("location"), `https://app.example.com/u/${msg.unsubscribe_token}`);
   await res.body?.cancel();
   assertEquals(db.requests.some((r) => r.target === "public_unsubscribe"), false);
+  assertEquals(db.table("customers").find((c) => c.id === CUSTOMER)?.email_opted_out_at, null);
+});
+
+Deno.test("unsubscribe: a message id is not an unsubscribe token (transactional mail has none)", async () => {
+  // Regression: public_unsubscribe accepted any outbound email's id, which
+  // staff RPCs return to technicians.
+  const campaign = campaignEmail();
+  const transactional = queuedMessage({
+    channel: "email",
+    to_address: "dana@example.com",
+    subject: "Your vehicle is ready",
+    status: "sent",
+    template_key: "job_completed",
+  });
+  const { db, handler } = setup({ messages: [campaign, transactional] });
+  for (const id of [String(campaign.id), String(transactional.id)]) {
+    const res = await handler(oneClick(id));
+    assertEquals([res.status, (await responseJson<ErrorBody>(res)).code], [404, "not_found"]);
+  }
   assertEquals(db.table("customers").find((c) => c.id === CUSTOMER)?.email_opted_out_at, null);
 });
 

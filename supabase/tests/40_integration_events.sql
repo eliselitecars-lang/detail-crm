@@ -153,7 +153,7 @@ select tests.eq((select count(*) from public.notifications where kind = 'payment
                 2::bigint, 'owner and admin notified; the manager who recorded it is not');
 select tests.eq((select string_agg(channel::text, ',' order by channel) from public.messages where template_key = 'payment_receipt'),
                 'sms,email', 'receipt on both channels');
-select tests.ok((select body = 'Thank you, Alice! Shop A received your payment of $105.00. Remaining balance: $120.00.'
+select tests.ok((select body = E'Thank you, Alice! Shop A received your payment of $105.00.\nRemaining balance: $120.00.'
                    from public.messages where template_key = 'payment_receipt' and channel = 'sms'),
                 'receipt: this payment incl. tip; the invoice balance after it (22000 - 10000)');
 select tests.ok((select body like '%https://app.example.test/i/' || (select public_token from public.invoices where id = tests.fx('inv')) || '%'
@@ -180,7 +180,7 @@ select tests.eq((select count(*) from public.notifications where kind = 'payment
                    and body = 'Deposit for job #' || (select number from public.jobs where id = tests.fx('jr2')) || ' · card'),
                 3::bigint, 'webhook success notifies all managers+ once (replay and refund add nothing)');
 select tests.eq(pg_temp.msgs(tests.fx('jr2'), 'payment_receipt'), 'sms,email', 'one receipt per channel');
-select tests.ok((select body like '%payment of $50.00. Remaining balance: $0.00.' from public.messages
+select tests.ok((select body like E'%payment of $50.00.\nRemaining balance: $0.00.' from public.messages
                   where job_id = tests.fx('jr2') and template_key = 'payment_receipt' and channel = 'sms'),
                 'deposit receipt: job with no lines owes nothing more');
 -- a failed intent never notifies

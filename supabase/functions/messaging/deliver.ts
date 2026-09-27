@@ -9,8 +9,9 @@
  *          only if the platform provisioned that number for the shop, see
  *          sender.ts; StatusCallback = messaging?action=twilio_status) or
  *          email via Resend (from = EMAIL_FROM relabelled with the shop name,
- *          reply-to = shop email, idempotency key = message id; campaign
- *          mail carries RFC 8058 one-click List-Unsubscribe)
+ *          reply-to = shop email, idempotency key = message id; marketing
+ *          mail — campaigns and follow_up, the rows with an unsubscribe
+ *          token — carries RFC 8058 one-click List-Unsubscribe)
  *   mark   mark_message_result(sent | failed | queued=retry with backoff)
  *          (+ Twilio 21610 "unsubscribed" records the customer's SMS opt-out)
  *
@@ -71,6 +72,8 @@ export interface ClaimedMessage {
   job_id: string | null;
   campaign_id: string | null;
   template_key: string | null;
+  /** Marketing email only: the credential of its unsubscribe link (never the message id). */
+  unsubscribe_token: string | null;
 }
 
 export type SendOutcome =
@@ -107,25 +110,28 @@ export function twilioStatusCallbackUrl(svc: Services): string {
 }
 
 /**
- * Campaign emails' one-click unsubscribe endpoint (RFC 8058):
- * messaging?action=unsubscribe&token=<message id>. POST unsubscribes
- * (public_unsubscribe, 0035); GET redirects to the /u/<message id> page.
+ * Marketing emails' one-click unsubscribe endpoint (RFC 8058):
+ * messaging?action=unsubscribe&token=<unsubscribe token>. POST unsubscribes
+ * (public_unsubscribe, 0035); GET redirects to the /u/<token> page.
  */
-export function unsubscribeUrl(svc: Services, messageId: string): string | null {
+export function unsubscribeUrl(svc: Services, unsubscribeToken: string): string | null {
   try {
     return functionUrl(svc.env.functionsPublicUrl(), "messaging", {
       action: "unsubscribe",
-      token: messageId,
+      token: unsubscribeToken,
     });
   } catch {
     return null;
   }
 }
 
-/** List-Unsubscribe headers for a campaign email (none for transactional mail). */
+/**
+ * List-Unsubscribe headers for a marketing email (campaigns, follow_up: the
+ * rows the database gave an unsubscribe token); none for transactional mail.
+ */
 export function unsubscribeHeaders(svc: Services, msg: ClaimedMessage): Record<string, string> {
-  if (!msg.campaign_id) return {};
-  const url = unsubscribeUrl(svc, msg.id);
+  if (msg.channel !== "email" || !msg.unsubscribe_token) return {};
+  const url = unsubscribeUrl(svc, msg.unsubscribe_token);
   if (!url) return {};
   return {
     "List-Unsubscribe": `<${url}>`,
@@ -552,6 +558,7 @@ interface MessageRow {
   job_id: string | null;
   campaign_id: string | null;
   template_key: string | null;
+  unsubscribe_token: string | null;
   direction: string;
   channel: Channel;
   to_address: string;
@@ -564,8 +571,8 @@ interface MessageRow {
 }
 
 const MESSAGE_COLUMNS =
-  "id, shop_id, customer_id, job_id, campaign_id, template_key, direction, channel, to_address, " +
-  "from_address, subject, body, attempts, status, send_after";
+  "id, shop_id, customer_id, job_id, campaign_id, template_key, unsubscribe_token, direction, channel, " +
+  "to_address, from_address, subject, body, attempts, status, send_after";
 
 /**
  * send_after is stamped by the database clock (now()) while this check uses
@@ -679,6 +686,7 @@ export async function claimOne(
       job_id: msg.job_id,
       campaign_id: msg.campaign_id,
       template_key: msg.template_key,
+      unsubscribe_token: msg.unsubscribe_token ?? null,
     },
   };
 }

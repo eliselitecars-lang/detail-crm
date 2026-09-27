@@ -4,6 +4,8 @@
 -- STOP/START keywords, unknown senders, staff notifications).
 \ir fixtures/two_shops.psql
 
+-- the platform binds each shop's Twilio number (supabase/setup/twilio.md)
+insert into public.shop_sms_numbers (phone_number, shop_id) values ('+12055550100', tests.fx('shop_a'));
 update public.shops set sms_from_number = '+12055550100', email = 'hello@shop-a.test' where id = tests.fx('shop_a');
 update public.customers set email = 'bob@example.com', phone = '+13125550101' where id = tests.fx('cust_b');
 insert into public.customers (shop_id, first_name, phone, sms_opted_out_at)
@@ -214,11 +216,12 @@ select tests.ok(exists (select 1 from public.notifications where title = 'Alice 
                 'staff are told about the opt-in');
 
 -- routing to the other shop
+insert into public.shop_sms_numbers (phone_number, shop_id) values ('+13125550199', tests.fx('shop_b'));
 update public.shops set sms_from_number = '+13125550199' where id = tests.fx('shop_b');
 select tests.ok((select shop_id = tests.fx('shop_b') and customer_id = tests.fx('cust_b')
                    from public.record_inbound_sms('+13125550199', '+13125550101', 'hello', 'SMin8')), 'routed to shop B');
 select tests.eq((select count(*) from public.notifications where shop_id = tests.fx('shop_b')), 3::bigint,
                 'only shop B staff are notified');
-select tests.throws($$update public.shops set sms_from_number = '+13125550199' where id = tests.fx('shop_a')$$, '23505',
-                    'a sending number belongs to one shop');
+select tests.throws($$update public.shops set sms_from_number = '+13125550199' where id = tests.fx('shop_a')$$, '23503',
+                    'a sending number belongs to the one shop it is bound to');
 select tests.as_superuser();

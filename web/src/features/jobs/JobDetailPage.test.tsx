@@ -197,6 +197,51 @@ describe('JobDetailPage', () => {
     expect(screen.queryByRole('button', { name: 'Create invoice' })).not.toBeInTheDocument();
   });
 
+  it('shares a form link only with managers, fetched from form_link_token', async () => {
+    const FORM = {
+      id: 'form-1',
+      title: 'Liability waiver',
+      body_snapshot: 'I accept the risks.',
+      requires_signature: true,
+      signer_name: null,
+      signed_at: null,
+      created_at: '2026-09-20T15:00:00Z',
+      form_template_id: 'tpl-1',
+    };
+    setTableResult('form_submissions', { data: [FORM] });
+    const { user } = setup({
+      role: 'manager',
+      rpc: { form_link_token: '60000000-0000-4000-8000-000000000001' },
+    });
+    await user.click(await screen.findByRole('button', { name: 'Copy link' }));
+    expect(supabase.rpc).toHaveBeenCalledWith('form_link_token', { p_submission_id: 'form-1' });
+    expect(await screen.findByText('Form link copied')).toBeInTheDocument();
+    expect(builders.form_submissions?.[0]?.select).toHaveBeenCalledWith(
+      expect.not.stringContaining('public_token'),
+    );
+  });
+
+  it('lets technicians sign forms on their device but never share the customer’s link', async () => {
+    setTableResult('form_submissions', {
+      data: [
+        {
+          id: 'form-1',
+          title: 'Liability waiver',
+          body_snapshot: 'I accept the risks.',
+          requires_signature: true,
+          signer_name: null,
+          signed_at: null,
+          created_at: '2026-09-20T15:00:00Z',
+          form_template_id: 'tpl-1',
+        },
+      ],
+    });
+    setup({ role: 'technician' });
+    expect(await screen.findByRole('button', { name: 'Sign here' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument();
+    expect(supabase.rpc).not.toHaveBeenCalledWith('form_link_token', expect.anything());
+  });
+
   it('shows a not-found error without a retry loop', async () => {
     setTableResult('jobs', { data: null });
     renderRoute(<JobDetailPage />, {

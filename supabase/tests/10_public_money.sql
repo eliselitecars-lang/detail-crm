@@ -8,7 +8,16 @@ create function pg_temp.keys(p jsonb) returns text language sql as $$
 $$;
 
 select tests.as_superuser();
-update public.shops set tax_rate_bps = 1000, logo_path = 'shop-a/logo.png', brand_color = '#112233', email = 'hello@shop-a.test',
+-- the platform binds the shop's SMS number first (comms, 0033), when that range is applied
+do $$ begin
+  if to_regclass('public.shop_sms_numbers') is not null then
+    execute format('insert into public.shop_sms_numbers (phone_number, shop_id) values (%L, %L)', '+12055550199', tests.fx('shop_a'));
+  end if;
+end $$;
+-- the logo is an uploaded object of the shop's own shop-assets folder (0001)
+insert into storage.buckets (id, name, public) values ('shop-assets', 'shop-assets', true) on conflict (id) do nothing;
+insert into storage.objects (bucket_id, name) values ('shop-assets', tests.fx('shop_a') || '/logo.png');
+update public.shops set tax_rate_bps = 1000, logo_path = tests.fx('shop_a') || '/logo.png', brand_color = '#112233', email = 'hello@shop-a.test',
                         phone = '+12055550100', website = 'https://shop-a.test', address_line1 = '1 Main St', city = 'Birmingham',
                         region = 'AL', postal_code = '35203', review_url = 'https://g.page/shop-a', sms_from_number = '+12055550199'
  where id = tests.fx('shop_a');
@@ -64,9 +73,12 @@ select tests.eq((select pg_temp.keys(doc -> 'vehicle') from got), 'color,make,mo
 select tests.eq((select pg_temp.keys(doc -> 'line_items' -> 0) from got),
                 'description,discount_cents,id,name,optional,quantity,selected,taxable,total_cents,unit_price_cents,vehicle_label',
                 'line keys (id kept so optional lines can be chosen)');
-select tests.ok((select doc::text not like '%SECRET-INTERNAL-NOTE%' and doc::text not like '%' || tests.fx('shop_a') || '%'
-                        and doc::text not like '%' || tests.fx('cust_a') || '%' and doc::text not like '%' || tests.fx('q_token') || '%'
-                        and doc::text not like '%+12055550199%' and doc::text not like '%acct_%' from got),
+-- the shop id appears only as the public logo's storage folder (<shop_id>/..., SPEC §4.6)
+select tests.eq((select doc -> 'shop' ->> 'logo_path' from got), tests.fx('shop_a') || '/logo.png', 'logo object name');
+select tests.ok((select d::text not like '%SECRET-INTERNAL-NOTE%' and d::text not like '%' || tests.fx('shop_a') || '%'
+                        and d::text not like '%' || tests.fx('cust_a') || '%' and d::text not like '%' || tests.fx('q_token') || '%'
+                        and d::text not like '%+12055550199%' and d::text not like '%acct_%'
+                   from (select doc #- '{shop,logo_path}' as d from got) g),
                 'no internal notes, shop/customer ids, token, SMS number or Stripe account in the document');
 select tests.ok((select doc -> 'quote' ->> 'status' = 'viewed' and (doc -> 'quote' ->> 'can_respond')::boolean
                         and doc -> 'quote' ->> 'number' = '1001' and doc -> 'quote' ->> 'notes' = 'Includes hand wash'
@@ -140,9 +152,9 @@ select tests.eq(public.public_get_quote(tests.fx('q_token')) -> 'quote' ->> 'sta
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.fx_set('inv', (public.create_invoice_from_job(tests.fx('job_a'))).id);
 update public.invoices set internal_notes = 'SECRET-INVOICE-NOTE', notes = 'Thank you!' where id = tests.fx('inv');
-select tests.fx_set('inv_token', (select public_token from public.invoices where id = tests.fx('inv')));
+select tests.fx_set('inv_token', public.invoice_link_token(tests.fx('inv')));
 select tests.fx_set('inv_draft', (public.create_invoice(tests.fx('cust_a3'), '[{"name":"Polish","unit_price_cents":1000}]')).id);
-select tests.fx_set('inv_draft_token', (select public_token from public.invoices where id = tests.fx('inv_draft')));
+select tests.fx_set('inv_draft_token', public.invoice_link_token(tests.fx('inv_draft')));
 select public.record_manual_payment(tests.fx('inv'), 5000, 'cash', 700, 'SECRET-PAYMENT-NOTE');
 select tests.as_service();
 select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_pub1', 'succeeded', 10000, 0, p_invoice_id => tests.fx('inv'),
@@ -195,7 +207,7 @@ select tests.ok((select doc -> 'invoice' ->> 'status' = 'void' and not (doc -> '
 -- a shop without a connected Stripe account cannot take card payments online
 select tests.authenticate_as(tests.fx('u_manager_b'));
 select tests.fx_set('inv_b', (public.create_invoice_from_job(tests.fx('job_b'))).id);
-select tests.fx_set('inv_b_token', (select public_token from public.invoices where id = tests.fx('inv_b')));
+select tests.fx_set('inv_b_token', public.invoice_link_token(tests.fx('inv_b')));
 select tests.as_anon();
 select tests.ok((select (doc -> 'invoice' ->> 'payable')::boolean and not (doc -> 'invoice' ->> 'card_payments_enabled')::boolean
                         and doc -> 'shop' ->> 'name' = 'Shop B'

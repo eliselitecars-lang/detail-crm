@@ -29,7 +29,7 @@ supabase/functions/
     fetch_timeout.ts   withTimeout: per-request time cap (body included) for Twilio/Resend calls
     testing/           FakeFetch, FakeSupabase, request builders, test env, Stripe signer
   <function>/index.ts  one directory per deployed function (stripe-connect, payments,
-                       stripe-webhook, messaging, invites)
+                       stripe-webhook, messaging, invites, storage-purge)
 ```
 
 ## Writing a function
@@ -590,16 +590,34 @@ runs.)
 messages. `400 invalid_signature`; `500` on a database error (Twilio
 retries). Not called by apps.
 
-#### `unsubscribe` (PUBLIC, message token)
+#### `unsubscribe` (PUBLIC, unsubscribe token)
 
-`?action=unsubscribe&token=<message uuid>` (the `List-Unsubscribe` URL of
-campaign emails).
+`?action=unsubscribe&token=<unsubscribe token>` (the `List-Unsubscribe` URL of
+marketing emails: campaigns and `follow_up`). The token is the email's random
+`messages.unsubscribe_token`, never its message id; transactional email has
+none.
 
 - `GET`: `303` to `APP_BASE_URL/u/<token>`, which does **not** unsubscribe.
   The web page confirms, then calls the `public_unsubscribe` RPC.
 - `POST` (RFC 8058 one-click, any body up to 4 KiB): `200 {unsubscribed: true}`.
 - Errors: `400 validation_failed` (malformed token), `404 not_found`
   (unknown token), `413 payload_too_large`.
+
+### `storage-purge` (pg_cron only; `verify_jwt = false`)
+
+#### `purge` (pg_cron, `x-cron-secret`)
+
+Body `{limit?}`, where `limit` is 1-1000 (default 500) objects per batch.
+Removes the stored files of deleted shops, jobs, inspections and forms,
+which the database queues in `storage_purge_requests` (migration 0025):
+`claim_storage_purge` -> Storage API `remove` (service role, per bucket) ->
+`finish_storage_purge`, batch after batch until the queue is empty, 20
+batches ran or ~40 s passed. A failed removal is recorded on the request and
+retried after 15 minutes; objects a live row still references are never
+claimed.
+
+200: `{batches, claimed, removed, failed_requests, more}`.
+Errors: `401 unauthorized`, `500 internal_error` (database error).
 
 ### `invites` (owner/admin; `verify_jwt = true`)
 
@@ -681,7 +699,11 @@ supabase secrets list --project-ref <ref>
 
 Stripe keys must be the same mode (test/live); `Env` rejects mixed pairs.
 `CRON_SECRET` must be at least 24 characters and match the value used by the
-pg_cron jobs in `supabase/setup/`.
+pg_cron jobs in `supabase/setup/`. `APP_BASE_URL` must also be written to
+the database, where customer links in messages are built
+(`platform_config.app_base_url`): run `supabase/setup/cron.sql` with the same
+value (it calls `set_app_base_url`). Until then link-bearing messages are
+not queued and automations refuse to run.
 
 ## Deploy
 
@@ -692,14 +714,15 @@ supabase functions deploy payments
 supabase functions deploy stripe-webhook
 supabase functions deploy messaging
 supabase functions deploy invites
+supabase functions deploy storage-purge
 # or all at once (every [functions.*] entry must exist as a directory):
 supabase functions deploy
 ```
 
 `verify_jwt` comes from `config.toml`: `stripe-connect` and `invites` require
-a Supabase JWT at the gateway; `payments`, `stripe-webhook` and `messaging`
-have public/webhook/cron entry points and authenticate every request
-themselves.
+a Supabase JWT at the gateway; `payments`, `stripe-webhook`, `messaging` and
+`storage-purge` have public/webhook/cron entry points and authenticate every
+request themselves.
 
 Local: `supabase start`, then
 `supabase functions serve --env-file supabase/functions/.env.local`.

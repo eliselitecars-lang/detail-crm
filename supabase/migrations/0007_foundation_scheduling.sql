@@ -4,19 +4,98 @@
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
+-- wall_clock_instant — the instant at which the wall clock in p_tz first
+-- shows p_local, for business-hours boundaries and slot grid times: the
+-- first instant at which local time reaches or passes p_local.
+--
+-- * An ordinary local time converts as usual (`at time zone`).
+-- * A local time that happens twice (DST fall-back) resolves to its FIRST
+--   occurrence. Postgres' own reading is the later (standard-time) one, so a
+--   shop "closing at 01:30" on a night that goes 01:59 CDT -> 01:00 CST
+--   would stay open until 01:30 CST, although from 01:30 CDT on the clock
+--   shows a time after closing (and an opening at 01:30 would skip the first
+--   pass of the hour). The earlier reading uses the offset in force before
+--   the transition; like Postgres itself (DetermineTimeZoneOffset) this
+--   assumes UTC offsets under 24 hours and transitions at least a day apart,
+--   so the offset 24 hours before Postgres' reading is the "before" offset.
+-- * A local time inside a DST spring-forward gap never shows on the wall
+--   clock; plain `at time zone` resolves it with the pre-transition offset,
+--   i.e. up to a whole gap AFTER the jump, so a shop "closing at 02:30" on a
+--   night that goes 01:59 -> 03:00 would stay open until 03:30 on the new
+--   clock. Instead the gap time resolves to the transition itself (closing
+--   at 02:30 = closed from the jump on; opening at 02:30 = open from the
+--   jump on).
+--
+-- Postgres' two readings of a gap time bracket that transition: with the
+-- offset in force before it (local time = p_local + gap, after the jump) and
+-- with the offset after it (local time = p_local - gap, before the jump).
+-- Local time is monotonic between them and tzdata transitions fall on whole
+-- seconds, so a binary search over whole seconds finds the jump exactly
+-- (<= 17 steps even for a whole skipped day such as Pacific/Apia 2011-12-30).
+-- ---------------------------------------------------------------------------
+create function public.wall_clock_instant(p_local timestamp, p_tz text) returns timestamptz
+language plpgsql immutable strict parallel safe
+set search_path = ''
+as $$
+declare
+  v_guess timestamptz := p_local at time zone p_tz;
+  v_shift interval;
+  v_prior timestamptz;
+  v_early timestamptz;
+  v_lo    numeric;
+  v_hi    numeric;
+  v_mid   numeric;
+begin
+  v_shift := (v_guess at time zone p_tz) - p_local;
+  if v_shift = interval '0' then
+    -- the local time exists; if it also existed earlier with the offset in
+    -- force before a fall-back, that earlier instant is its first occurrence
+    -- (24 hours, not '1 day': the result must not depend on the session zone)
+    v_prior := v_guess - interval '24 hours';
+    v_early := (p_local - ((v_prior at time zone p_tz) - (v_prior at time zone 'UTC'))) at time zone 'UTC';
+    if v_early < v_guess and (v_early at time zone p_tz) = p_local then
+      return v_early;
+    end if;
+    return v_guess;
+  end if;
+  -- local(lo) < p_local <= local(hi); keep that invariant while narrowing
+  v_lo := floor(extract(epoch from least(v_guess, v_guess - v_shift)));
+  v_hi := ceil(extract(epoch from greatest(v_guess, v_guess - v_shift)));
+  while v_hi - v_lo > 1 loop
+    v_mid := floor((v_lo + v_hi) / 2);
+    if (pg_catalog.to_timestamp(v_mid::double precision) at time zone p_tz) >= p_local then
+      v_hi := v_mid;
+    else
+      v_lo := v_mid;
+    end if;
+  end loop;
+  return pg_catalog.to_timestamp(v_hi::double precision);
+end
+$$;
+
+comment on function public.wall_clock_instant(timestamp, text) is
+  'First instant a local wall time occurs in p_tz: an ambiguous (fall-back) time maps to its first occurrence, a nonexistent (spring-forward gap) time to the transition instant.';
+
+-- ---------------------------------------------------------------------------
 -- get_available_slots
 --
 -- Slots start on a wall-clock grid of slot_interval_minutes anchored at the
 -- opening time of each (merged) business-hours interval, in the shop's time
 -- zone (a stretch that is open around the clock is anchored at each local
 -- midnight instead). The grid never depends on the requested date range.
--- Local times that do not exist (DST spring-forward gap) are skipped;
--- ambiguous local times (fall-back) appear once. A slot must fit entirely
--- inside one open interval (adjacent intervals — including across midnight —
--- are merged), must not overlap a shop-wide blocked time, must start at or
--- after now + lead time, must start no later than max_days_ahead days after
--- today (shop-local dates), and at every instant of the slot fewer than
--- max_concurrent_jobs non-cancelled / non-no-show jobs (each widened by
+-- Local grid times that do not exist (DST spring-forward gap) are skipped;
+-- ambiguous local times (fall-back) appear once, at their first occurrence.
+-- Every local time — opening, closing, grid — means the first instant the
+-- wall clock shows it (wall_clock_instant): a closing time inside a
+-- fall-back's repeated hour closes at its first pass (the clock never shows
+-- a later time before closing), an opening there opens at its first pass,
+-- and an opening or closing time inside a spring-forward gap takes effect at
+-- the jump itself, since the wall clock never shows it. A slot must fit
+-- entirely inside one open interval (adjacent intervals — including across
+-- midnight — are merged), must not overlap a shop-wide blocked time, must
+-- start at or after now + lead time, must start no later than max_days_ahead
+-- days after today (shop-local dates), and at every instant of the slot fewer
+-- than max_concurrent_jobs non-cancelled / non-no-show jobs (each widened by
 -- buffer_minutes on both sides) may be running.
 --
 -- "Now" is public.effective_now(p_now) (0001): trusted callers (service_role,
@@ -35,6 +114,10 @@ create function public.get_available_slots(
 ) returns table (starts_at timestamptz, ends_at timestamptz)
 language plpgsql stable security definer
 set search_path = ''
+-- The planner cannot see how few rows the generate_series calls yield (it
+-- assumes 1000 each), so the estimate of this small query crosses
+-- jit_above_cost and JIT compilation would cost ~100x the query itself.
+set jit = off
 as $$
 #variable_conflict use_column
 declare
@@ -114,7 +197,7 @@ begin
   -- hold a slot starting in [v_from, v_to]. A stretch that reaches back to
   -- the scan start is open around the clock: its grid is anchored at each
   -- local midnight and it never closes.
-  v_scan_start := (v_from - 8)::timestamp at time zone v_tz;
+  v_scan_start := public.wall_clock_instant((v_from - 8)::timestamp, v_tz);
 
   return query
   with days as (
@@ -122,8 +205,11 @@ begin
     from generate_series(0, v_to - v_from + 16) as i
   ),
   raw_intervals as (
-    select ((dd.d + bh.opens_at)::timestamp at time zone v_tz)  as o,
-           ((dd.d + bh.closes_at)::timestamp at time zone v_tz) as c
+    -- an opening/closing time inside a spring-forward gap takes effect at
+    -- the jump (plain `at time zone` would put it a whole gap later); one in
+    -- a fall-back's repeated hour at its first pass (not Postgres' later one)
+    select public.wall_clock_instant(dd.d + bh.opens_at, v_tz)  as o,
+           public.wall_clock_instant(dd.d + bh.closes_at, v_tz) as c
     from days dd
     join public.business_hours bh
       on bh.shop_id = v_shop.id and bh.weekday = extract(dow from dd.d)::smallint
@@ -146,8 +232,8 @@ begin
   relevant as (
     select isl.o, isl.c, isl.o <= v_scan_start as around_the_clock
     from islands isl
-    where isl.c > (v_from::timestamp at time zone v_tz)
-      and isl.o < ((v_to + 1)::timestamp at time zone v_tz)
+    where isl.c > public.wall_clock_instant(v_from::timestamp, v_tz)
+      and isl.o < public.wall_clock_instant((v_to + 1)::timestamp, v_tz)
   ),
   local_starts as (
     -- a stretch with an opening time: grid anchored at that opening
@@ -166,7 +252,9 @@ begin
     where r.around_the_clock and lt < dd.d + interval '1 day'
   ),
   candidates as (
-    select distinct (ls.lt at time zone v_tz) as s, ls.island_close
+    -- an ambiguous (fall-back) grid time starts at its first occurrence,
+    -- like the opening/closing times that anchor and bound the grid
+    select distinct public.wall_clock_instant(ls.lt, v_tz) as s, ls.island_close
     from local_starts ls
     where ((ls.lt at time zone v_tz) at time zone v_tz) = ls.lt       -- skip nonexistent local times
   ),
@@ -325,6 +413,10 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Grants
 -- ---------------------------------------------------------------------------
+-- wall_clock_instant is an internal helper of the scheduling RPCs.
+revoke execute on function public.wall_clock_instant(timestamp, text) from public, anon, authenticated;
+grant execute on function public.wall_clock_instant(timestamp, text) to service_role;
+
 revoke execute on function public.get_available_slots(text, uuid[], uuid, date, date, timestamptz) from public;
 grant execute on function public.get_available_slots(text, uuid[], uuid, date, date, timestamptz)
   to anon, authenticated, service_role;

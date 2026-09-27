@@ -1,7 +1,8 @@
 -- 30 comms: notifications — notify_shop_staff (roles, active members,
--- exclusion, validation, not client-callable), recipient-only visibility,
--- read_at as the only writable column, dismiss, mark-all-read, composite
--- FKs and cross-shop isolation.
+-- manager-only kinds, exclusion, validation, not client-callable),
+-- recipient-only visibility, visibility by the recipient's CURRENT role
+-- (demotion / promotion), read_at as the only writable column, dismiss,
+-- mark-all-read, composite FKs and cross-shop isolation.
 \ir fixtures/two_shops.psql
 
 -- ------------------------------------------------------------ helper is not client-callable
@@ -93,3 +94,118 @@ insert into public.jobs (shop_id, customer_id, status) values (tests.fx('shop_b'
 select public.notify_shop_staff(tests.fx('shop_b'), array['owner']::public.shop_role[], 'new_booking', 'Temp', null, tests.fx('job_tmp'));
 delete from public.jobs where id = tests.fx('job_tmp');
 select tests.ok((select job_id is null from public.notifications where title = 'Temp'), 'deleting a job keeps its notifications');
+
+-- ------------------------------------------------------------ demoted recipients
+-- Regression: every event kind is sent to owners/admins/managers only, but
+-- the policies checked only "own + active member", so a manager demoted to
+-- technician kept reading payment amounts, customer names and inbound texts
+-- (and got them over Realtime). Visibility now follows the CURRENT role.
+select tests.as_superuser();
+delete from public.notifications where shop_id = tests.fx('shop_a');
+select tests.as_service();
+select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), array['owner', 'admin', 'manager']::public.shop_role[], 'payment_received',
+                                         'Payment received: $500.00 from Alice Anders', 'Job #1001 · card', tests.fx('job_a'), null),
+                3, 'owner, admin and manager notified');
+select public.notify_shop_staff(tests.fx('shop_a'), array['manager']::public.shop_role[], 'inbound_message',
+                                'New text from Alice Anders', 'Can you come earlier?');
+select public.notify_shop_staff(tests.fx('shop_a'), array['manager']::public.shop_role[], 'general', 'Team meeting at 8');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq(tests.row_count($$select 1 from public.notifications$$), 3::bigint, 'the manager reads all three');
+
+select tests.authenticate_as(tests.fx('u_owner_a'));
+update public.shop_members set role = 'technician' where id = tests.fx('m_manager_a');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq(public.shop_role_of(tests.fx('shop_a'))::text, 'technician', 'now a technician');
+select tests.eq(tests.row_count('select 1 from public.payments'), 0::bigint, 'technician: no payment rows');
+select tests.eq(tests.row_count($$select 1 from public.notifications where kind = 'payment_received'$$), 0::bigint,
+                'a technician must not keep reading manager-only payment notifications');
+select tests.eq(tests.row_count($$select 1 from public.notifications where kind = 'inbound_message'$$), 0::bigint,
+                'or customers'' texts');
+select tests.eq((select array_agg(title) from public.notifications), array['Team meeting at 8'],
+                'general notices stay visible');
+select tests.eq(tests.row_count($$update public.notifications set read_at = now() where kind <> 'general'$$), 0::bigint,
+                'hidden notifications cannot be marked read');
+select tests.eq(tests.row_count($$delete from public.notifications where kind <> 'general'$$), 0::bigint, 'or dismissed');
+select tests.eq(public.mark_all_notifications_read(tests.fx('shop_a')), 1, 'mark-all only touches what they can read');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.notifications where user_id = tests.fx('u_manager_a') and read_at is null), 2::bigint,
+                'the hidden ones were left alone');
+
+-- manager-only kinds are never sent to technicians, whatever roles are asked for
+select tests.as_service();
+select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), null, 'payment_received', 'Payment received: $10.00'), 2,
+                'null roles: owner + admin only (everyone else is a technician now)');
+select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), array['technician']::public.shop_role[], 'new_booking', 'New booking'), 0,
+                'asking for technicians sends a manager-only kind to nobody');
+select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), array['technician']::public.shop_role[], 'general', 'Techs'), 2,
+                'general notices still reach technicians');
+
+-- promoted back: the earlier notifications are readable again
+select tests.authenticate_as(tests.fx('u_owner_a'));
+update public.shop_members set role = 'manager' where id = tests.fx('m_manager_a');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq(tests.row_count($$select 1 from public.notifications where kind in ('payment_received', 'inbound_message')$$),
+                2::bigint, 'visible again once a manager');
+
+-- end to end: a real payment notifies the manager, who loses it on demotion
+-- (payment notifications come from the integration range, 0041; skipped when
+-- only the comms ranges are applied)
+select to_regclass('public.integration_events') is not null as has_integration \gset
+\if :has_integration
+select tests.authenticate_as(tests.fx('u_owner_a'));
+select tests.fx_set('inv', (public.create_invoice_from_job(tests.fx('job_a'))).id);
+select public.mark_invoice_sent(tests.fx('inv'));
+select public.record_manual_payment(tests.fx('inv'), 5000, 'cash', 0, null);
+select tests.as_service();
+select tests.eq((select count(*) from public.notifications where user_id = tests.fx('u_manager_a') and kind = 'payment_received'
+                   and title like 'Payment received: $50.00%'), 1::bigint, 'manager notified of the payment');
+select tests.authenticate_as(tests.fx('u_owner_a'));
+update public.shop_members set role = 'technician' where id = tests.fx('m_manager_a');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq((select count(*) from public.notifications where kind = 'payment_received'), 0::bigint,
+                'a technician must not keep reading payment notifications');
+\endif
+
+-- the other shop is unaffected
+select tests.authenticate_as(tests.fx('u_manager_b'));
+select tests.eq(tests.row_count($$select 1 from public.notifications where kind = 'payment_received'$$), 1::bigint,
+                'shop B''s manager still reads their payment notification');
+select tests.eq(tests.row_count($$select 1 from public.notifications where shop_id = tests.fx('shop_a')$$), 0::bigint,
+                'and nothing of shop A');
+
+-- ============================================================ card dispute alerts are manager-only
+-- Regression: stripe-webhook posted dispute alerts ("Stripe dispute
+-- (fraudulent, $1,234.00): lost.") as 'general', the one kind every member
+-- may read, so an owner/admin demoted to technician kept reading dispute
+-- amounts and reasons. They are now sent as 'payment_received' (exactly the
+-- call handlers.ts makes), which follows the reader's CURRENT role.
+select tests.ok(public.notification_kind_for_managers('payment_received'), 'payment_received is manager-only');
+select tests.ok(not public.notification_kind_for_managers('general'), 'general is the only kind for every member');
+select tests.as_service();
+select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), array['owner','admin']::public.shop_role[], 'payment_received',
+                  'Dispute lost: money taken back', 'Stripe dispute (fraudulent, $1,234.00): lost.', tests.fx('job_a')),
+                2, 'the owner and the admin are alerted');
+select tests.authenticate_as(tests.fx('u_admin_a'));
+select tests.eq(tests.row_count($$select 1 from public.notifications where body like '%$1,234.00%'$$), 1::bigint,
+                'the admin reads the dispute alert');
+select tests.authenticate_as(tests.fx('u_owner_a'));
+update public.shop_members set role = 'technician' where id = tests.fx('m_admin_a');
+select tests.authenticate_as(tests.fx('u_admin_a'));
+select tests.eq(tests.row_count($$select 1 from public.notifications where body like '%$1,234.00%'$$), 0::bigint,
+                'a member demoted to technician no longer reads dispute amounts in old notifications');
+select tests.eq(tests.row_count($$update public.notifications set read_at = now() where body like '%$1,234.00%'$$), 0::bigint,
+                'nor marks them read');
+select tests.eq(public.mark_all_notifications_read(tests.fx('shop_a')), 0, 'mark-all skips them too');
+select tests.authenticate_as(tests.fx('u_owner_a'));
+select tests.eq(tests.row_count($$select 1 from public.notifications where body like '%$1,234.00%'$$), 1::bigint,
+                'the owner still reads theirs');
+select tests.authenticate_as(tests.fx('u_tech_a'));
+select tests.eq(tests.row_count($$select 1 from public.notifications where body like '%$1,234.00%'$$), 0::bigint,
+                'technicians never see it');
+select tests.authenticate_as(tests.fx('u_owner_b'));
+select tests.eq(tests.row_count($$select 1 from public.notifications where body like '%$1,234.00%'$$), 0::bigint,
+                'nor does another shop');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.notifications where body like '%$1,234.00%'
+                   and user_id = tests.fx('u_admin_a') and read_at is null), 1::bigint,
+                'the demoted admin''s copy is kept (unread) should they be promoted again');

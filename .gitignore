@@ -26,3 +26,10 @@ ios/DetailCore/Package.resolved
 supabase/.temp/
 supabase/.branches/
 .pgdata/
+
+# Real-stack harness (scripts/stack/): runtime state, downloads, reports
+scripts/stack/.state/
+scripts/stack/.cache/
+supabase/functions/.stack-ca.pem
+web/playwright-report-stack/
+web/test-results-stack/
