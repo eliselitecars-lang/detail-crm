@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Supabase project values (Dashboard > Project Settings > API).
+	     The app shows a setup screen until these are real. Only these
+	     placeholders are committed: fill them in locally and never commit
+	     real keys. CI (ios.yml) builds for the simulator with the
+	     placeholders; any archive/TestFlight pipeline must write the real
+	     values into this file from repository secrets before building. -->
+	<key>SUPABASE_URL</key>
+	<string>YOUR_SUPABASE_URL</string>
+	<key>SUPABASE_ANON_KEY</key>
+	<string>YOUR_SUPABASE_ANON_KEY</string>
+	<!-- Web app base URL used for shareable links (booking pages, invites). -->
+	<key>WEB_APP_URL</key>
+	<string>YOUR_WEB_APP_URL</string>
+</dict>
+</plist>

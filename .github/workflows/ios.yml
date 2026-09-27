@@ -1,10 +1,133 @@
-# Placeholder so workflow_dispatch is available; the real pipeline lives on
-# the development branch until it is merged.
+# iOS verification: Linux-side sanity script, DetailCore unit tests, and a
+# full simulator build of the app (no signing). macOS minutes are expensive,
+# so this runs only when iOS code (or this pipeline) changes, or on demand.
 name: ios
+
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "ios/**"
+      - "scripts/swift_sanity.py"
+      - ".github/workflows/ios.yml"
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PROJECT: ios/DetailCRM/DetailCRM.xcodeproj
+  SCHEME: DetailCRM
+  SPM_DIR: ${{ github.workspace }}/.spm-cache
+  LOG_DIR: ${{ github.workspace }}/build-logs
+
 jobs:
-  placeholder:
-    runs-on: ubuntu-latest
+  build:
+    name: Sanity, DetailCore tests, simulator build
+    runs-on: macos-15
+    timeout-minutes: 45
     steps:
-      - run: echo "ios pipeline not merged yet"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode (newest 16.x, else newest installed)
+        run: |
+          set -euo pipefail
+          ls -d /Applications/Xcode*.app || true
+          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$XCODE" ]; then
+            XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1 || true)
+          fi
+          if [ -z "$XCODE" ]; then XCODE=/Applications/Xcode.app; fi
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          swift --version
+          echo "XCODE_VERSION=$(xcodebuild -version | head -1 | awk '{print $2}')" >> "$GITHUB_ENV"
+          mkdir -p "$LOG_DIR"
+
+      - name: Swift sanity (self-test + repo check)
+        run: |
+          set -euo pipefail
+          python3 scripts/swift_sanity.py --self-test
+          python3 scripts/swift_sanity.py
+
+      - name: DetailCore unit tests
+        working-directory: ios/DetailCore
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee "$LOG_DIR/swift-test.log"
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SPM_DIR }}
+          key: spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('ios/DetailCRM/**/Package.resolved', 'ios/DetailCRM/DetailCRM.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-
+
+      - name: Resolve package dependencies
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation 2>&1 | tee "$LOG_DIR/resolve.log"
+          RESOLVED="$PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+          if [ -f "$RESOLVED" ]; then
+            echo "Resolved package versions:"
+            python3 - "$RESOLVED" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          for pin in data.get("pins", []):
+              state = pin.get("state", {})
+              print(f"  {pin.get('identity')}: {state.get('version') or state.get('revision')}")
+          PY
+          fi
+
+      - name: Build for iOS Simulator (no signing)
+        run: |
+          set -o pipefail
+          FORMATTER="cat"
+          if command -v xcbeautify >/dev/null 2>&1; then
+            FORMATTER="xcbeautify --quieter --renderer github-actions"
+          fi
+          xcodebuild build \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            -derivedDataPath "$GITHUB_WORKSPACE/DerivedData" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" 2>&1 | tee "$LOG_DIR/xcodebuild.log" | $FORMATTER
+
+      - name: Summarize errors
+        if: failure()
+        run: |
+          echo "==== First 200 unique error lines per log ===="
+          for LOG in "$LOG_DIR/resolve.log" "$LOG_DIR/swift-test.log" "$LOG_DIR/xcodebuild.log"; do
+            [ -f "$LOG" ] || continue
+            echo "---- $(basename "$LOG") ----"
+            grep -E "(error:|fatal error|XCTAssert|failed \()" "$LOG" \
+              | sed -E "s#${GITHUB_WORKSPACE}/##g" \
+              | awk '!seen[$0]++' \
+              | head -200 || true
+          done
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          path: build-logs
+          if-no-files-found: ignore
+          retention-days: 7
