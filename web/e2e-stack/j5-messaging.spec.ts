@@ -87,7 +87,11 @@ test('J5: staff texts a customer, the reply arrives live, STOP opts out and late
     'the text reached the Twilio mock exactly once',
   );
   expect(sent[0]?.body).toMatchObject({ To: customerPhone, From: shopNumber, Body: outbound });
-  await expect(thread.getByText(outbound)).toBeVisible();
+  // Realtime can render the new bubble before the send response clears the
+  // composer, so the text is briefly in both: wait for the composer to clear
+  // (the product's onSuccess) and look for the text in the sent bubble only.
+  await expect(thread.getByRole('textbox', { name: 'Message' })).toHaveValue('');
+  await expect(thread.getByLabel(/^Sent text/).getByText(outbound)).toBeVisible();
   const row = await rest<Array<Record<string, unknown>>>(
     'GET',
     `messages?customer_id=eq.${customerId}&direction=eq.outbound&select=status,from_address,to_address,provider_message_id`,

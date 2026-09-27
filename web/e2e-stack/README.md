@@ -27,7 +27,8 @@ Rules:
 - Every test creates its own users and shop with unique names, so specs can run in parallel and repeatedly against one stack.
 - Tests wait on conditions (`expect.poll` and `eventually`), never on fixed sleeps. Before triggering a Realtime change, wait for the page's own channel with `support/realtime.ts` (`recordRealtime(page).waitForSubscription(table, mark)`), not for any "Subscribed" frame.
 - Every page a journey drives, including anonymous customer pages, is tracked with `trackApiFailures` / `trackPageErrors` and must end with none.
-- No `test.skip` / `test.fixme` for product defects: use `test.fail` so the defect is re-proven on every run.
+- No `test.skip` / `test.fixme` for product defects: use `test.fail` so the defect is re-proven on every run. Call `test.fail(true, '<defect>')` inside the body, right before the assertion that proves the defect (never `test.fail('title', …)`), so a failure in the setup above it still fails the run instead of counting as the expected failure.
+- A direct-API denial ("the technician/client/other shop gets no rows") needs a positive control: the rows must exist and an authorised user must read them with the identical query. Select a granted column (e.g. `select=shop_id`), never `select=*`: money tables have column-level grants, so `*` is refused (42501) for every role and would prove nothing about RLS.
 - Provider-mock logs are never cleared. Tests filter them by their own unique addresses.
 
 The service role is used only for platform or operator plumbing that the local stack cannot do on its own:

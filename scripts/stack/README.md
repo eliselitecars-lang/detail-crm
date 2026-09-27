@@ -91,7 +91,7 @@ Records every provider call (Authorization stripped) to memory and
 
 ## What `verify_stack.mjs` proves
 
-60 checks, each printed PASS/FAIL with evidence (`--json out.json` saves them):
+About 60 checks (60 PASS + 2 KNOWN on the current tree), each printed with evidence (`--json out.json` saves them):
 extensions (pg_cron, pg_net, vault; app extensions in `extensions`), the
 realtime publication, buckets, RLS on every table, no anon table grants;
 PostgREST exposure + grants of every `public_*` RPC for anon and denial of
@@ -135,12 +135,20 @@ plus `sql/test_helpers_stack.sql`, then runs every `supabase/tests/*.sql` in
   proves every ON DELETE SET NULL / write-once audit cascade against the real
   `auth.users`. The product's real path (GoTrue admin API as
   `supabase_auth_admin`) is proven by `verify_stack.mjs`.
+  A concurrent change to that test (uncommitted at the time of the audit,
+  2026-09-27) deletes as `tests.as_superuser()` instead and passes on the real
+  stack without the prelude — once it is committed, delete
+  `sql/prelude/00_audit_user_delete.sql` so the grant can never mask a
+  regression back to `service_role`.
 * Files listed in `known_sql_failures.txt` are reported `KNOWN` (not
   failures) unless `STACK_STRICT=1`, and `FIXED` once they pass. The list is
   currently empty.
 * It connects as `supabase_admin` (the real superuser) by default. With
   `--as postgres` (not a superuser on Supabase) `00_shim_helpers.sql` and the
-  dblink race tests fail by design (they need a superuser).
+  dblink race tests fail by design (they need a superuser). It ignores
+  `STACK_DB_URL` (the `postgres` URL in `stack.env`), so sourcing `stack.env`
+  cannot silently switch it to a non-superuser; `STACK_SQL_DB_URL` overrides
+  the full connection URL explicitly.
 
 ## Known issues / platform differences
 

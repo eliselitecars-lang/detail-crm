@@ -24,7 +24,11 @@
 # a password for non-superusers) fail by design; everything else passes.
 #   scripts/stack/test_db_stack.sh --verbose
 #
-# Env: STACK_DB_URL (default postgresql://postgres:postgres@127.0.0.1:54322/postgres),
+# Env: STACK_SQL_DB_URL  full connection URL override (default
+#                        postgresql://<--as role>:postgres@127.0.0.1:54322/postgres).
+#                        STACK_DB_URL (stack.env, the `postgres` role) is
+#                        deliberately IGNORED: `source scripts/stack/.state/stack.env`
+#                        must not silently switch the suite to a non-superuser.
 #      PSQL (default: psql on PATH, else /usr/lib/postgresql/*/bin/psql).
 set -uo pipefail
 
@@ -42,7 +46,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-DB_URL="${STACK_DB_URL:-postgresql://${ROLE}:postgres@127.0.0.1:54322/postgres}"
+DB_URL="${STACK_SQL_DB_URL:-postgresql://${ROLE}:postgres@127.0.0.1:54322/postgres}"
+if [[ -n "${STACK_SQL_DB_URL:-}" ]]; then
+  ROLE="$(sed -E 's|^[a-z]+://([^:@/]+).*|\1|' <<<"$STACK_SQL_DB_URL")"
+fi
 if [[ -z "${PSQL:-}" ]]; then
   if command -v psql >/dev/null 2>&1; then PSQL=psql
   else PSQL="$(ls -d /usr/lib/postgresql/*/bin/psql 2>/dev/null | sort -V | tail -n 1)"; fi

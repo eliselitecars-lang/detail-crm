@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import { createShop, signUpUser, uniqueSuffix, type StackUser } from './support/stackApi';
 import { stackEnv } from './support/stackEnv';
 import {
+  connectStripe,
   eventually,
   fn,
   loginViaUi,
@@ -9,6 +10,8 @@ import {
   providerLog,
   rest,
   rpcAs,
+  rpcOk,
+  stripeId,
   trackApiFailures,
   trackPageErrors,
   uniquePhone,
@@ -73,6 +76,17 @@ test('J2: invited technician works only their assigned job and is denied owner d
   };
   const assignedJob = await mkJob(2);
   const otherJob = await mkJob(3);
+  // A priced line so the assigned job can be invoiced later (positive control
+  // for the direct-API money denials at the end).
+  const line = await rest('POST', 'job_line_items', owner, {
+    shop_id: shop.id,
+    job_id: assignedJob.id,
+    name: 'J2 maintenance wash',
+    quantity: 1,
+    unit_price_cents: 5000,
+    taxable: false,
+  });
+  expect(line.status, line.text).toBe(201);
 
   // --- 1. Owner invites the technician from the Team page (invites function)
   await loginViaUi(page, owner);
@@ -271,6 +285,35 @@ test('J2: invited technician works only their assigned job and is denied owner d
     owner,
   );
   expect(bookingAfter.json[0]?.enabled).toBe(false);
+  // Positive control: an empty result only proves a denial if the rows exist.
+  // Give the shop an invoice on the technician's OWN assigned job
+  // (techs_can_collect_payments is off, so it must stay hidden — SPEC §3), a
+  // cash payment, a Stripe Connect account (real stripe-connect → stripe-mock)
+  // and a saved card (written only by the Stripe webhook = service role, so the
+  // harness inserts it the same way); the owner must read each one with the
+  // very query the technician is refused.
+  const invoice = await rpcOk<{ id: string; balance_cents: number }>(
+    'create_invoice_from_job',
+    { p_job_id: assignedJob.id },
+    owner,
+  );
+  expect(invoice.balance_cents).toBeGreaterThan(0);
+  await rpcOk(
+    'record_manual_payment',
+    { p_invoice_id: invoice.id, p_amount_cents: 1000, p_method: 'cash' },
+    owner,
+  );
+  await connectStripe(owner, shop.id);
+  const card = await rest('POST', 'customer_payment_methods', 'service', {
+    shop_id: shop.id,
+    customer_id: customerId,
+    stripe_payment_method_id: stripeId('pm'),
+    brand: 'visa',
+    last4: '4242',
+    exp_month: 12,
+    exp_year: 2031,
+  });
+  expect(card.status, card.text).toBe(201);
   for (const table of [
     'invoices',
     'payments',
@@ -278,10 +321,18 @@ test('J2: invited technician works only their assigned job and is denied owner d
     'shop_stripe_accounts',
     'shop_invites',
   ]) {
-    const r = await rest<unknown[]>('GET', `${table}?shop_id=eq.${shop.id}&select=*`, techUser);
-    // A denial is an empty 2xx or a 4xx — never a server error.
-    expect(r.status, `${table}: ${r.text}`).toBeLessThan(500);
-    expect(r.status === 200 ? r.json : [], `${table}: ${r.text}`).toEqual([]);
+    // select=shop_id (granted to every staff role), NOT select=*: money tables
+    // have column-level grants, so `*` answers 42501 to EVERY role, owner
+    // included — the technician would be "denied" by column privileges and the
+    // row-level policies this check is about would never run.
+    const q = `${table}?shop_id=eq.${shop.id}&select=shop_id`;
+    const visible = await rest<unknown[]>('GET', q, owner);
+    expect(visible.status, `owner ${table}: ${visible.text}`).toBe(200);
+    expect(visible.json.length, `owner sees ${table} rows (control)`).toBeGreaterThan(0);
+    const r = await rest<unknown[]>('GET', q, techUser);
+    // RLS hides the rows: an empty 200 where the owner's identical query is not.
+    expect(r.status, `${table}: ${r.text}`).toBe(200);
+    expect(r.json, `${table}: ${r.text}`).toEqual([]);
   }
   const report = await rpcAs(
     'report_revenue',
