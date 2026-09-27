@@ -338,6 +338,45 @@ export function subscriptionPeriodEnd(sub: Stripe.Subscription): number | null {
   return latest;
 }
 
+const PRICE_RE = /^price_[A-Za-z0-9]+$/;
+
+/** What a subscription bills: memberships.price_cents / interval / interval_count / stripe_price_id. */
+export interface SubscriptionTerms {
+  priceId: string;
+  amountCents: number;
+  interval: "month" | "year";
+  intervalCount: number;
+}
+
+/**
+ * The subscription's billing terms, recorded on the membership (0011) so the
+ * CRM shows what Stripe actually charges even after the plan's price
+ * changed. Only a single-item subscription with a whole-cent monthly / yearly
+ * price within Stripe's limits (the database's) maps; anything else (several
+ * items, metered or decimal prices, day/week intervals) is null and the
+ * recorded terms are left alone.
+ */
+export function subscriptionTerms(sub: Stripe.Subscription): SubscriptionTerms | null {
+  const items = sub.items?.data ?? [];
+  const item = items[0];
+  if (items.length !== 1 || !item) return null;
+  const price = item.price;
+  if (!price || typeof price.id !== "string" || !PRICE_RE.test(price.id)) return null;
+  const unit = price.unit_amount;
+  const quantity = item.quantity ?? 1;
+  const count = price.recurring?.interval_count ?? 1;
+  if (typeof unit !== "number" || !Number.isSafeInteger(unit) || unit <= 0) return null;
+  if (!Number.isSafeInteger(quantity) || quantity < 1) return null;
+  if (!Number.isSafeInteger(count) || count < 1) return null;
+  let interval: "month" | "year";
+  if (price.recurring?.interval === "month" && count <= 36) interval = "month";
+  else if (price.recurring?.interval === "year" && count <= 3) interval = "year";
+  else return null;
+  const amount = unit * quantity;
+  if (!Number.isSafeInteger(amount)) return null;
+  return { priceId: price.id, amountCents: amount, interval, intervalCount: count };
+}
+
 /** Whether the subscription is scheduled to end (at period end or a set date). */
 export function cancelsAtPeriodEnd(sub: Stripe.Subscription): boolean {
   if (sub.status === "canceled" || sub.status === "incomplete_expired") return false;

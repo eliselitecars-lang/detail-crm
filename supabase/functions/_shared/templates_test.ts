@@ -91,3 +91,20 @@ Deno.test("templates: escapeHtml and textToHtml", () => {
   );
   assertEquals(textToHtml("  \n "), "");
 });
+
+Deno.test("templates: textToHtml ends a link at quotes and angle brackets around it", () => {
+  const url = "https://app.example.com/i/0b3c9a5e-1111-4222-8333-944455556666";
+  const link = `<a href="${url}">${url}</a>`;
+  assertEquals(textToHtml(`Pay: <${url}>`), `<p>Pay: &lt;${link}&gt;</p>`);
+  assertEquals(textToHtml(`Pay: "${url}"`), `<p>Pay: &quot;${link}&quot;</p>`);
+  assertEquals(textToHtml(`Pay: '${url}'.`), `<p>Pay: &#39;${link}&#39;.</p>`);
+  assertEquals(
+    textToHtml(`A <${url}?a=1&b=2> and "${url}"`),
+    `<p>A &lt;<a href="${url}?a=1&amp;b=2">${url}?a=1&amp;b=2</a>&gt; and &quot;${link}&quot;</p>`,
+  );
+  // Markup around or inside the text stays escaped.
+  assertEquals(
+    textToHtml(`<b>x</b> ${url}"><script>`),
+    `<p>&lt;b&gt;x&lt;/b&gt; ${link}&quot;&gt;&lt;script&gt;</p>`,
+  );
+});

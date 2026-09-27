@@ -80,6 +80,8 @@ export interface FixtureOptions {
   depositPending?: boolean;
   /** Refunds on the connected account (GET /refunds lists them; POST adds). */
   refunds?: Row[];
+  /** The handler's clock (default: NOW). Stripe objects created get it too. */
+  now?: () => number;
 }
 
 export interface Fixture {
@@ -328,14 +330,15 @@ export function fixture(options: FixtureOptions = {}): Fixture {
   const intents = options.intents ?? {};
   const created: Record<string, Row> = {};
   const refunds = options.refunds ?? [];
-  installStripe(db, { sessions, intents, created, refunds }, options.subscriptions ?? {});
+  const now = options.now ?? (() => NOW);
+  installStripe(db, { sessions, intents, created, refunds, now }, options.subscriptions ?? {});
 
   const logs = memoryLogger();
   const handler = makeHandler({
     env: db.env(),
     fetch: db.http.fetch,
     logger: logs.logger,
-    now: () => NOW,
+    now,
   });
   const tokens: Record<Who, string | undefined> = {
     owner: "tok-owner",
@@ -381,11 +384,12 @@ interface StripeState {
   intents: Record<string, Row>;
   created: Record<string, Row>;
   refunds: Row[];
+  now: () => number;
 }
 
 function installStripe(
   db: FakeSupabase,
-  { sessions, intents, created, refunds }: StripeState,
+  { sessions, intents, created, refunds, now }: StripeState,
   subscriptions: Record<string, string>,
 ): void {
   const http = db.http;
@@ -536,6 +540,7 @@ function installStripe(
       object: "refund",
       status: "succeeded",
       amount: Number(call.form.get("amount")),
+      created: Math.floor(now() / 1000),
       payment_intent: call.form.get("payment_intent"),
       metadata: formMetadata(call.form),
     };

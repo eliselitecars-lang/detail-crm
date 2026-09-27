@@ -247,13 +247,20 @@ export function requestedAmount(requested: number | undefined, balance: number):
   return requested;
 }
 
-/** Tips: whole cents, 0 <= tip <= balance (zod enforces integer/non-negative). */
-export function boundedTip(tip: number | undefined, balance: number): number {
+/**
+ * Tips: whole cents (zod enforces integer/non-negative), at most the amount
+ * this attempt actually collects toward the balance. Bounding by the balance
+ * instead would let a 1-cent payment carry the whole balance as a fee-free
+ * "tip" that never lowers the balance (tips never do, SPEC §4.5), again and
+ * again; tied to the collected amount, every tip is matched by an equal
+ * payment down of the balance, so the tips on an invoice never exceed it.
+ */
+export function boundedTip(tip: number | undefined, collectedCents: number): number {
   const value = tip ?? 0;
-  if (value > balance) {
-    throw errors.unprocessable("The tip cannot be more than the balance due.", {
+  if (value > collectedCents) {
+    throw errors.unprocessable("The tip cannot be more than the amount being paid.", {
       reason: "tip_too_large",
-      balance_cents: balance,
+      max_tip_cents: collectedCents,
     });
   }
   return value;
@@ -531,14 +538,38 @@ export function isInvalidRequest(err: unknown): boolean {
     (err as { type?: unknown }).type === "StripeInvalidRequestError";
 }
 
+type SessionMatch = (session: Stripe.Checkout.Session) => boolean;
+
+const invoiceLinks = (shopId: string, invoiceId: string): SessionMatch => (session) =>
+  session.mode === "payment" && session.metadata?.shop_id === shopId &&
+  session.metadata?.invoice_id === invoiceId && session.metadata?.kind === "payment";
+
+const depositLinks = (shopId: string, jobId: string): SessionMatch => (session) =>
+  session.mode === "payment" && session.metadata?.shop_id === shopId &&
+  session.metadata?.job_id === jobId && session.metadata?.kind === "deposit";
+
 /** Metadata matchers for the sessions each action creates. */
 export const sessionFor = {
-  invoice: (shopId: string, invoiceId: string) => (session: Stripe.Checkout.Session) =>
+  invoice: invoiceLinks,
+  deposit: depositLinks,
+  /** Invoice pay links of the job's invoice(s) (invoice_checkout tags job_id). */
+  jobInvoices: (shopId: string, jobId: string): SessionMatch => (session) =>
     session.mode === "payment" && session.metadata?.shop_id === shopId &&
-    session.metadata?.invoice_id === invoiceId && session.metadata?.kind === "payment",
-  deposit: (shopId: string, jobId: string) => (session: Stripe.Checkout.Session) =>
-    session.mode === "payment" && session.metadata?.shop_id === shopId &&
-    session.metadata?.job_id === jobId && session.metadata?.kind === "deposit",
+    session.metadata?.job_id === jobId && session.metadata?.kind === "payment",
+  /**
+   * Every open instrument that pays toward the invoice: its own pay links
+   * and its job's deposit links. A deposit payment is attached to the job's
+   * invoice (payments_before_write), so a deposit link left open after the
+   * balance was collected would overpay the invoice by the deposit.
+   */
+  invoiceOrDeposit: (
+    shopId: string,
+    invoice: { id: string; job_id: string | null },
+  ): SessionMatch => {
+    const own = invoiceLinks(shopId, invoice.id);
+    const deposit = invoice.job_id ? depositLinks(shopId, invoice.job_id) : null;
+    return (session) => own(session) || (deposit !== null && deposit(session));
+  },
   membership: (shopId: string, membershipId: string) => (session: Stripe.Checkout.Session) =>
     session.mode === "subscription" && session.metadata?.shop_id === shopId &&
     session.metadata?.membership_id === membershipId,

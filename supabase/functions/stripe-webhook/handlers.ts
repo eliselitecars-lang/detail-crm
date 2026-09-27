@@ -22,11 +22,23 @@
  *  - Money whose linked job / invoice / membership was deleted while the
  *    payment was open is kept as the customer's unapplied payment (with a
  *    note), never failed forever on the foreign key.
- *  - A declined PaymentSheet attempt is still confirmable in Stripe, so it
- *    stays `pending` (settled by the payments function), not `failed`.
+ *  - Money for a job / invoice whose customer changed while the payment was
+ *    open (a deposit link opened for the previous customer) is kept as the
+ *    payer's unapplied payment (with a note), never failed forever on 23514.
+ *  - Declines and cancellations only update a payment row that already
+ *    exists; they never create one (a row is a money record that blocks
+ *    deleting the job / customer). A declined PaymentSheet attempt is still
+ *    confirmable in Stripe, so it stays `pending` (settled by the payments
+ *    function), not `failed`.
+ *  - Saved cards follow Stripe: a detached card (removed in the PaymentSheet
+ *    or the dashboard, or its Stripe customer deleted) is removed, and a card
+ *    is only saved while it is still attached.
+ *  - Disputes are flagged on the payment (note + staff notification). A lost
+ *    dispute cannot lower the payment yet (no DB primitive): it is flagged.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Logger } from "../_shared/log.ts";
+import { formatCents } from "../_shared/money.ts";
 import { onAccount, type Stripe } from "../_shared/stripe.ts";
 import {
   cancelsAtPeriodEnd,
@@ -54,6 +66,7 @@ import {
   stripeCustomerId,
   subscriptionId,
   subscriptionPeriodEnd,
+  subscriptionTerms,
 } from "./mapping.ts";
 
 export const HANDLED_EVENT_TYPES = [
@@ -66,6 +79,13 @@ export const HANDLED_EVENT_TYPES = [
   "refund.updated",
   "refund.failed",
   "setup_intent.succeeded",
+  "payment_method.detached",
+  "customer.deleted",
+  "charge.dispute.created",
+  "charge.dispute.updated",
+  "charge.dispute.closed",
+  "charge.dispute.funds_withdrawn",
+  "charge.dispute.funds_reinstated",
   "customer.subscription.created",
   "customer.subscription.updated",
   "customer.subscription.deleted",
@@ -153,6 +173,16 @@ export async function handleEvent(ctx: WebhookContext): Promise<Outcome> {
       return await onRefundChanged(ctx, object as Stripe.Refund);
     case "setup_intent.succeeded":
       return await onSetupIntentSucceeded(ctx, object as Stripe.SetupIntent);
+    case "payment_method.detached":
+      return await onPaymentMethodDetached(ctx, object as Stripe.PaymentMethod);
+    case "customer.deleted":
+      return await onCustomerDeleted(ctx, object as Stripe.Customer);
+    case "charge.dispute.created":
+    case "charge.dispute.updated":
+    case "charge.dispute.closed":
+    case "charge.dispute.funds_withdrawn":
+    case "charge.dispute.funds_reinstated":
+      return await onDisputeChanged(ctx, object as Stripe.Dispute);
     case "customer.subscription.created":
     case "customer.subscription.updated":
       return await onSubscriptionChanged(ctx, object as Stripe.Subscription, false);
@@ -189,7 +219,8 @@ function ignore(
   fields: Record<string, unknown> = {},
 ): Outcome {
   const suspicious = reason === "shop_mismatch" || reason === "account_mismatch" ||
-    reason === "subscription_conflict" || reason === "payment_method_conflict";
+    reason === "subscription_conflict" || reason === "payment_method_conflict" ||
+    reason === "payment_method_customer_mismatch";
   if (suspicious) ctx.log.warn("stripe_event_ignored", { reason, ...fields });
   else ctx.log.info("stripe_event_ignored", { reason, ...fields });
   return { result: "ignored", reason };
@@ -304,36 +335,41 @@ async function recordPayment(
         : null,
     });
 
-  let row: PaymentRow;
+  // A payment whose links cannot be written as they are is recovered at most
+  // once per cause, then retried once more; anything else fails the delivery.
+  let md = write.md;
+  let row: PaymentRow | null = null;
   const notes: string[] = [];
-  try {
-    row = await upsert(write.md);
-  } catch (err) {
-    // 23503: a record the metadata links to was deleted after the payment
-    // started (e.g. a booking deleted while its deposit link was still open).
-    // The insert can never succeed as is, so keep the money as an unapplied
-    // payment of the customer instead of failing on every redelivery.
-    if (!(err instanceof DbError && err.code === "23503")) throw err;
-    const relinked = await dropDeletedLinks(ctx, write);
-    if (!relinked) throw err; // nothing we link to is missing: a real failure, retry
-    if (!hasLinkage(relinked.md)) {
-      ctx.log.error("stripe_payment_unlinkable", {
+  const recovered = new Set<string>();
+  while (row === null) {
+    try {
+      row = await upsert(md);
+    } catch (err) {
+      const code = err instanceof DbError ? err.code : null;
+      if (code === null || recovered.has(code)) throw err;
+      recovered.add(code);
+      const relinked = code === "23503"
+        ? await dropDeletedLinks(ctx, write, md)
+        : code === "23514"
+        ? await leaveChangedParent(ctx, write, md)
+        : null;
+      if (!relinked) throw err; // nothing to recover from: a real failure, retry
+      if (!hasLinkage(relinked.md)) {
+        ctx.log.error("stripe_payment_unlinkable", {
+          payment_intent: write.paymentIntentId,
+          status: write.status,
+          total_cents: write.totalCents,
+          ...relinked.details,
+        });
+        return null;
+      }
+      ctx.log.warn("stripe_payment_relinked", {
         payment_intent: write.paymentIntentId,
-        status: write.status,
-        total_cents: write.totalCents,
-        deleted: relinked.deleted,
+        ...relinked.details,
       });
-      return null;
+      md = relinked.md;
+      notes.push(relinked.note);
     }
-    row = await upsert(relinked.md);
-    ctx.log.warn("stripe_payment_relinked", {
-      payment_intent: write.paymentIntentId,
-      payment_id: row.id,
-      deleted: relinked.deleted,
-    });
-    notes.push(
-      `Received for a deleted ${relinked.deleted.join(" / ")}: apply it to an invoice or refund it`,
-    );
   }
 
   const otherMethod = nonCardMethodType(write.charge);
@@ -343,7 +379,7 @@ async function recordPayment(
       payment_id: row.id,
       payment_method_type: otherMethod,
     });
-    notes.push(`Paid through Stripe with ${otherMethod.replaceAll("_", " ")}, not a card`);
+    notes.push(`Stripe payment method: ${otherMethod.replaceAll("_", " ")} (not a card)`);
   }
   if (notes.length > 0) await annotatePayment(ctx, row, notes.join(". "));
   return row;
@@ -356,29 +392,35 @@ const LINK_TABLES = [
   { key: "customerId", table: "customers", label: "customer" },
 ] as const;
 
+interface Relinked {
+  md: CrmMetadata;
+  /** Why the metadata linkage was changed (logged). */
+  details: Record<string, unknown>;
+  /** Staff-facing note stored on the payment. */
+  note: string;
+}
+
 /**
- * The payment's linkage without the records that no longer exist in the
- * shop (null when none is missing). A deleted membership turns a membership
- * payment into a plain payment (payments_membership_kind); a missing
- * customer falls back to the shop's customer for the paying Stripe customer.
+ * 23503: a record the metadata links to was deleted after the payment
+ * started (e.g. a booking deleted while its deposit link was still open).
+ * The insert can never succeed as is, so the money is kept as an unapplied
+ * payment of the customer instead of failing on every redelivery. Returns
+ * the linkage without the records that no longer exist in the shop (null
+ * when none is missing). A deleted membership turns a membership payment
+ * into a plain payment (payments_membership_kind); a missing customer falls
+ * back to the shop's customer for the paying Stripe customer.
  */
 async function dropDeletedLinks(
   ctx: WebhookContext,
   write: PaymentWrite,
-): Promise<{ md: CrmMetadata; deleted: string[] } | null> {
-  const md: CrmMetadata = { ...write.md };
+  current: CrmMetadata,
+): Promise<Relinked | null> {
+  const md: CrmMetadata = { ...current };
   const deleted: string[] = [];
   for (const { key, table, label } of LINK_TABLES) {
     const id = md[key];
     if (id === null) continue;
-    const { data, error } = await ctx.admin
-      .from(table)
-      .select("id")
-      .eq("id", id)
-      .eq("shop_id", write.shopId)
-      .maybeSingle<{ id: string }>();
-    if (error) throw new DbError(`${table} lookup`, error);
-    if (!data) {
+    if (!(await existsInShop(ctx, table, id, write.shopId))) {
       md[key] = null;
       deleted.push(label);
     }
@@ -388,7 +430,110 @@ async function dropDeletedLinks(
   if (md.customerId === null) {
     md.customerId = await customerByStripeId(ctx, write.shopId, write.stripeCustomer ?? null);
   }
-  return { md, deleted };
+  return {
+    md,
+    details: { deleted },
+    note: `Received for a deleted ${deleted.join(" / ")}: apply it to an invoice or refund it`,
+  };
+}
+
+async function existsInShop(
+  ctx: WebhookContext,
+  table: string,
+  id: string,
+  shopId: string,
+): Promise<boolean> {
+  const { data, error } = await ctx.admin
+    .from(table)
+    .select("id")
+    .eq("id", id)
+    .eq("shop_id", shopId)
+    .maybeSingle<{ id: string }>();
+  if (error) throw new DbError(`${table} lookup`, error);
+  return data !== null;
+}
+
+/**
+ * 23514 from payments_before_write (0012): the job / invoice the metadata
+ * names now belongs to another customer than the payer (staff changed the
+ * job's customer while a deposit Checkout opened for the previous one was
+ * still payable), or the invoice now belongs to another job. The payer's
+ * money is real and Stripe has it, so it is never failed forever: like the
+ * SQL does for money that arrives for a void invoice, it stays with the
+ * paying customer as an unapplied payment with a note. When the payer is no
+ * longer in the CRM (e.g. merged into the job's new customer and deleted),
+ * the payment goes to the job (and so to its current customer / invoice).
+ * Returns null when no such conflict exists (a real failure: retried).
+ */
+async function leaveChangedParent(
+  ctx: WebhookContext,
+  write: PaymentWrite,
+  current: CrmMetadata,
+): Promise<Relinked | null> {
+  const parent = await changedParent(ctx, write.shopId, current);
+  if (!parent) return null;
+  let payer = current.customerId;
+  if (payer !== null && !(await existsInShop(ctx, "customers", payer, write.shopId))) payer = null;
+  payer ??= await customerByStripeId(ctx, write.shopId, write.stripeCustomer ?? null);
+  if (payer !== null && payer !== parent.customerId) {
+    return {
+      md: { ...current, invoiceId: null, jobId: null, customerId: payer },
+      details: { changed: parent.label, payer_known: true },
+      note: `Received for a ${parent.label} that has since moved to another customer; ` +
+        "kept as this customer's unapplied payment: apply it to an invoice or refund it",
+    };
+  }
+  // The payer is gone (or IS the parent's customer): the parent decides.
+  return {
+    md: {
+      ...current,
+      customerId: null,
+      invoiceId: current.jobId !== null ? null : current.invoiceId,
+    },
+    details: { changed: parent.label, payer_known: false },
+    note: `Paid through a link opened for this ${parent.label}'s previous customer: ` +
+      "check who paid before applying it",
+  };
+}
+
+/**
+ * The job / invoice of the metadata whose current customer (or job) no longer
+ * matches it, with that current customer; null when nothing conflicts.
+ */
+async function changedParent(
+  ctx: WebhookContext,
+  shopId: string,
+  md: CrmMetadata,
+): Promise<{ label: "job" | "invoice"; customerId: string } | null> {
+  if (md.invoiceId !== null) {
+    const { data, error } = await ctx.admin
+      .from("invoices")
+      .select("id, job_id, customer_id")
+      .eq("id", md.invoiceId)
+      .eq("shop_id", shopId)
+      .maybeSingle<{ id: string; job_id: string | null; customer_id: string }>();
+    if (error) throw new DbError("invoices lookup", error);
+    if (
+      data &&
+      ((md.customerId !== null && md.customerId !== data.customer_id) ||
+        (md.jobId !== null && md.jobId !== data.job_id))
+    ) {
+      return { label: "invoice", customerId: data.customer_id };
+    }
+  }
+  if (md.jobId !== null && md.customerId !== null) {
+    const { data, error } = await ctx.admin
+      .from("jobs")
+      .select("id, customer_id")
+      .eq("id", md.jobId)
+      .eq("shop_id", shopId)
+      .maybeSingle<{ id: string; customer_id: string }>();
+    if (error) throw new DbError("jobs lookup", error);
+    if (data && data.customer_id !== md.customerId) {
+      return { label: "job", customerId: data.customer_id };
+    }
+  }
+  return null;
 }
 
 /** Adds a staff-facing note to a payment that has none yet (service role). */
@@ -424,6 +569,14 @@ async function syncRefund(
 /**
  * upsert_customer_payment_method (0011): the first card becomes the default.
  * Missing customer / card of another customer are permanent -> ignored.
+ *
+ * `cardOwner` is the Stripe customer the card is attached to (pm.customer).
+ * A card is only ever saved for the CRM customer whose stripe_customer_id IS
+ * that Stripe customer: the SQL helper does not check it, and the payment it
+ * came with may have been relinked to another customer (e.g. the payer was
+ * deleted and the deposit fell to the job's new customer). Saving it there
+ * would show the payer's card as someone else's and make charge_saved_card
+ * pick a card Stripe refuses for that customer.
  */
 async function saveCard(
   ctx: WebhookContext,
@@ -431,7 +584,19 @@ async function saveCard(
   customerId: string,
   pmId: string,
   card: CardDetails,
+  cardOwner: string,
 ): Promise<Outcome> {
+  const { data: target, error } = await ctx.admin
+    .from("customers")
+    .select("id, stripe_customer_id")
+    .eq("id", customerId)
+    .eq("shop_id", shopId)
+    .maybeSingle<{ id: string; stripe_customer_id: string | null }>();
+  if (error) throw new DbError("customers lookup", error);
+  if (!target) return ignore(ctx, "customer_not_found", { payment_method: pmId });
+  if (target.stripe_customer_id !== cardOwner) {
+    return ignore(ctx, "payment_method_customer_mismatch", { payment_method: pmId });
+  }
   try {
     await rpc(ctx, "upsert_customer_payment_method", {
       p_shop_id: shopId,
@@ -457,7 +622,11 @@ async function saveCard(
 
 /**
  * A card paid with `setup_future_usage` (e.g. a deposit that saves the card)
- * is attached to the Stripe customer: remember it for the payment's customer.
+ * is attached to the Stripe customer: remember it for the payment's customer,
+ * but only when that customer IS the card's Stripe customer (saveCard). A
+ * payment relinked away from its payer (leaveChangedParent / dropDeletedLinks
+ * falling back to the job's current customer) records the money there, never
+ * the payer's card.
  */
 async function saveCardFromIntent(
   ctx: WebhookContext,
@@ -470,7 +639,34 @@ async function saveCardFromIntent(
   const pmId = paymentMethodId(pi.payment_method);
   const card = chargeCard(charge);
   if (!pmId || !card || card.method !== "card" || !payment.customer_id) return;
-  await saveCard(ctx, shopId, payment.customer_id, pmId, card);
+  // A redelivery can arrive after the customer removed the card again.
+  const pm = await retrievePaymentMethod(ctx, pmId);
+  const cardOwner = stripeCustomerId(pm?.customer);
+  if (!cardOwner) {
+    ignore(ctx, "payment_method_detached", { payment_method: pmId });
+    return;
+  }
+  await saveCard(ctx, shopId, payment.customer_id, pmId, card, cardOwner);
+}
+
+/** Stripe's current payment method, or null when Stripe no longer has it. */
+async function retrievePaymentMethod(
+  ctx: WebhookContext,
+  pmId: string,
+): Promise<Stripe.PaymentMethod | null> {
+  try {
+    return await ctx.stripe.paymentMethods.retrieve(pmId, {}, onAccount(connectedAccount(ctx)));
+  } catch (err) {
+    if (isMissingResource(err)) return null;
+    throw err;
+  }
+}
+
+function isMissingResource(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { type?: unknown; code?: unknown; statusCode?: unknown };
+  return e.type === "StripeInvalidRequestError" &&
+    (e.code === "resource_missing" || e.statusCode === 404);
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +703,15 @@ async function onPaymentIntent(
     });
   }
 
+  // An attempt that received nothing (declined / cancelled) only updates the
+  // row of a payment we already track (a PaymentSheet or saved-card attempt).
+  // It never creates one: payment rows are money records (they keep the job
+  // and customer from being deleted and the job's customer from changing),
+  // and a declined public deposit or an abandoned intent moved no money.
+  if (recorded !== "succeeded" && !(await tracksIntent(ctx, shopId, piId))) {
+    return ignore(ctx, "no_money_received", { payment_intent: piId, status });
+  }
+
   const charge = status === "succeeded" ? await latestCharge(ctx, pi) : null;
   const payment = await recordPayment(ctx, {
     shopId,
@@ -527,6 +732,18 @@ async function onPaymentIntent(
     payment_intent: piId,
     payment_id: payment.id,
   });
+}
+
+/** Is there a payment row for this intent in the shop? */
+async function tracksIntent(ctx: WebhookContext, shopId: string, piId: string): Promise<boolean> {
+  const { data, error } = await ctx.admin
+    .from("payments")
+    .select("id")
+    .eq("stripe_payment_intent_id", piId)
+    .eq("shop_id", shopId)
+    .maybeSingle<{ id: string }>();
+  if (error) throw new DbError("payments lookup", error);
+  return data !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +795,9 @@ async function checkoutPayment(
   const total = intentTotal(pi, status);
   if (!Number.isSafeInteger(total) || total <= 0) return ignore(ctx, "zero_amount");
 
-  const charge = status === "succeeded" ? await latestCharge(ctx, pi) : null;
+  // An unpaid (clearing) session already has its charge for bank debits:
+  // read it too, so a non-card method is flagged while it is still pending.
+  const charge = await latestCharge(ctx, pi);
   const payment = await recordPayment(ctx, {
     shopId,
     paymentIntentId: piId,
@@ -660,15 +879,21 @@ async function saveSetupIntentCard(
   if (!pmId) return ignore(ctx, "no_payment_method");
   const pm = typeof si.payment_method === "object" && si.payment_method !== null
     ? si.payment_method
-    : await ctx.stripe.paymentMethods.retrieve(pmId, {}, onAccount(connectedAccount(ctx)));
+    : await retrievePaymentMethod(ctx, pmId);
   const card = paymentMethodCard(pm);
   if (!card) return ignore(ctx, "not_a_card", { payment_method: pmId });
+  // Only a card attached to a Stripe customer can be charged later; one
+  // removed before this (possibly late) event is processed is not saved.
+  const cardOwner = stripeCustomerId(pm?.customer);
+  if (!cardOwner) {
+    return ignore(ctx, "payment_method_detached", { payment_method: pmId });
+  }
 
   const md = readMetadata(metadata);
   noteProblems(ctx, md);
   const customerId = md.customerId ?? await customerByStripeId(ctx, shopId, si.customer);
   if (!customerId) return ignore(ctx, "unknown_customer", { payment_method: pmId });
-  return await saveCard(ctx, shopId, customerId, pmId, card);
+  return await saveCard(ctx, shopId, customerId, pmId, card, cardOwner);
 }
 
 /** Our customer for a Stripe customer id (customers.stripe_customer_id), in this shop. */
@@ -687,6 +912,67 @@ async function customerByStripeId(
     .maybeSingle<{ id: string }>();
   if (error) throw new DbError("customers lookup", error);
   return data?.id ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// payment_method.detached / customer.deleted
+// ---------------------------------------------------------------------------
+
+/**
+ * A saved card was removed in Stripe (the PaymentSheet's "remove card", the
+ * Express dashboard, the API). remove_customer_payment_method (0011) deletes
+ * it from the CRM and promotes the customer's newest remaining card to
+ * default, so charge_saved_card never picks a card Stripe will refuse.
+ * Detaching is final in Stripe, so the event alone is authoritative.
+ */
+async function onPaymentMethodDetached(
+  ctx: WebhookContext,
+  pm: Stripe.PaymentMethod,
+): Promise<Outcome> {
+  const shopId = await shopForAccount(ctx);
+  if (!shopId) return ignore(ctx, "unknown_account");
+  const pmId = paymentMethodId(pm.id);
+  if (!pmId) return ignore(ctx, "invalid_object");
+  const removed = await rpc<boolean>(ctx, "remove_customer_payment_method", {
+    p_shop_id: shopId,
+    p_stripe_payment_method_id: pmId,
+  });
+  if (!removed) return ignore(ctx, "card_not_saved", { payment_method: pmId });
+  return applied(ctx, "card_removed", { payment_method: pmId });
+}
+
+/**
+ * A Stripe customer was deleted: its cards can no longer be charged. Every
+ * card saved for the shop's customer mapped to it is re-read and removed
+ * unless Stripe shows it attached to another (live) customer.
+ */
+async function onCustomerDeleted(ctx: WebhookContext, cus: Stripe.Customer): Promise<Outcome> {
+  const shopId = await shopForAccount(ctx);
+  if (!shopId) return ignore(ctx, "unknown_account");
+  const cusId = stripeCustomerId(cus.id);
+  if (!cusId) return ignore(ctx, "invalid_object");
+  const customerId = await customerByStripeId(ctx, shopId, cusId);
+  if (!customerId) return ignore(ctx, "unknown_customer");
+  const { data, error } = await ctx.admin
+    .from("customer_payment_methods")
+    .select("stripe_payment_method_id")
+    .eq("shop_id", shopId)
+    .eq("customer_id", customerId)
+    .returns<{ stripe_payment_method_id: string }[]>();
+  if (error) throw new DbError("customer_payment_methods lookup", error);
+  let removed = 0;
+  for (const { stripe_payment_method_id: pmId } of data ?? []) {
+    const pm = await retrievePaymentMethod(ctx, pmId);
+    const owner = stripeCustomerId(pm?.customer);
+    if (owner && owner !== cusId) continue;
+    const done = await rpc<boolean>(ctx, "remove_customer_payment_method", {
+      p_shop_id: shopId,
+      p_stripe_payment_method_id: pmId,
+    });
+    if (done) removed++;
+  }
+  if (removed === 0) return ignore(ctx, "no_saved_cards", { customer_id: customerId });
+  return applied(ctx, "cards_removed", { customer_id: customerId, cards: removed });
 }
 
 // ---------------------------------------------------------------------------
@@ -891,6 +1177,168 @@ async function reverseRefund(
 }
 
 // ---------------------------------------------------------------------------
+// charge.dispute.*
+// ---------------------------------------------------------------------------
+
+const DISPUTE_NOTE_PREFIX = "Stripe dispute";
+const DISPUTE_ID_RE = /^(dp|du)_[A-Za-z0-9]+$/;
+/** Who can answer a dispute: the Express dashboard (login_link) is admin+. */
+const DISPUTE_ROLES = ["owner", "admin"];
+
+interface DisputePaymentRow {
+  id: string;
+  shop_id: string;
+  job_id: string | null;
+  note: string | null;
+}
+
+/** The staff-facing line for a dispute's current state (no personal data). */
+export function disputeNoteLine(dispute: {
+  amount: number;
+  currency: string;
+  status: string;
+  reason: string;
+  evidence_details?: { due_by?: number | null } | null;
+}): string {
+  const amount = Number.isSafeInteger(dispute.amount) && dispute.amount >= 0
+    ? formatCents(dispute.amount, dispute.currency || "usd")
+    : "an amount";
+  const reason = String(dispute.reason || "general").replaceAll("_", " ");
+  const dueBy = isoFromUnix(dispute.evidence_details?.due_by)?.slice(0, 10);
+  const head = `${DISPUTE_NOTE_PREFIX} (${reason}, ${amount}):`;
+  switch (dispute.status) {
+    case "warning_needs_response":
+    case "needs_response":
+      return `${head} open. Submit evidence in the Stripe dashboard` +
+        (dueBy ? ` by ${dueBy}.` : ".");
+    case "warning_under_review":
+    case "under_review":
+      return `${head} evidence submitted, under review by the card issuer.`;
+    case "won":
+      return `${head} won. The money stays with the shop.`;
+    case "warning_closed":
+      return `${head} inquiry closed without a chargeback.`;
+    case "lost":
+      return `${head} LOST. The card issuer took the money back from the shop's Stripe ` +
+        "balance, but this payment still counts as received here: correct the job's balance.";
+    default:
+      return `${head} ${String(dispute.status).replaceAll("_", " ")}.`;
+  }
+}
+
+/** The payment's note with its dispute line replaced (other notes kept). */
+export function withDisputeLine(note: string | null, line: string): string {
+  const rest = (note ?? "")
+    .split("\n")
+    .filter((l) => l.trim() !== "" && !l.startsWith(DISPUTE_NOTE_PREFIX))
+    .join("\n");
+  if (!rest) return line.slice(0, 1000);
+  const room = Math.max(0, 1000 - line.length - 1);
+  return `${rest.slice(0, room)}\n${line}`.slice(0, 1000);
+}
+
+const DISPUTE_ALERTS: Record<string, string> = {
+  warning_needs_response: "A card payment was disputed",
+  needs_response: "A card payment was disputed",
+  won: "Dispute won",
+  lost: "Dispute lost: money taken back",
+};
+
+/**
+ * A customer disputed a card payment. The dispute's CURRENT state is re-read
+ * (events can arrive out of order) and written as one line of the payment's
+ * note, so staff see that evidence is due, and owners/admins are notified
+ * when it opens and when it is decided. A lost dispute takes the money (and
+ * Stripe's fee) back without any refund, so the charge's refunded total does
+ * not move and nothing here can lower the payment: there is no DB primitive
+ * for a chargeback yet, so it is flagged (note, notification, error log).
+ */
+async function onDisputeChanged(ctx: WebhookContext, event: Stripe.Dispute): Promise<Outcome> {
+  const shopId = await shopForAccount(ctx);
+  if (!shopId) return ignore(ctx, "unknown_account");
+  if (typeof event.id !== "string" || !DISPUTE_ID_RE.test(event.id)) {
+    return ignore(ctx, "invalid_object");
+  }
+  const dispute = await ctx.stripe.disputes.retrieve(
+    event.id,
+    {},
+    onAccount(connectedAccount(ctx)),
+  );
+  const piId = paymentIntentId(dispute.payment_intent);
+  const chId = chargeId(dispute.charge);
+  const payment = await disputedPayment(ctx, shopId, piId, chId);
+  if (!payment) {
+    ctx.log.warn("stripe_dispute_unmatched", { dispute: dispute.id, payment_intent: piId });
+    return ignore(ctx, "payment_not_found", { dispute: dispute.id });
+  }
+
+  const line = disputeNoteLine(dispute);
+  const fields = {
+    dispute: dispute.id,
+    payment_id: payment.id,
+    dispute_status: dispute.status,
+    amount_cents: dispute.amount,
+  };
+  if (dispute.status === "lost") ctx.log.error("stripe_dispute_lost", fields);
+  else ctx.log.warn("stripe_dispute", fields);
+
+  const note = withDisputeLine(payment.note, line);
+  if (note === payment.note) return ignore(ctx, "dispute_unchanged", { dispute: dispute.id });
+
+  // Notify before writing the note: a failed note write retries and may
+  // notify twice, but a notification is never lost.
+  const title = DISPUTE_ALERTS[dispute.status];
+  if (title) {
+    await rpc(ctx, "notify_shop_staff", {
+      p_shop_id: shopId,
+      p_roles: DISPUTE_ROLES,
+      p_kind: "general",
+      p_title: title,
+      p_body: line,
+      p_job_id: payment.job_id,
+    });
+  }
+  let update = ctx.admin
+    .from("payments")
+    .update({ note })
+    .eq("id", payment.id)
+    .eq("shop_id", shopId);
+  update = payment.note === null ? update.is("note", null) : update.eq("note", payment.note);
+  const { data, error } = await update.select("id");
+  if (error) throw new DbError("payments dispute note", error);
+  if (!data || data.length === 0) {
+    throw new Error("payment note changed concurrently; the event will be retried");
+  }
+  return applied(ctx, `dispute_${dispute.status}`, fields);
+}
+
+async function disputedPayment(
+  ctx: WebhookContext,
+  shopId: string,
+  piId: string | null,
+  chId: string | null,
+): Promise<DisputePaymentRow | null> {
+  for (
+    const [column, value] of [
+      ["stripe_payment_intent_id", piId],
+      ["stripe_charge_id", chId],
+    ] as const
+  ) {
+    if (!value) continue;
+    const { data, error } = await ctx.admin
+      .from("payments")
+      .select("id, shop_id, job_id, note")
+      .eq(column, value)
+      .eq("shop_id", shopId)
+      .limit(1)
+      .maybeSingle<DisputePaymentRow>();
+    if (error) throw new DbError("payments lookup", error);
+    if (data) return data;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Subscriptions (memberships)
 // ---------------------------------------------------------------------------
 
@@ -916,6 +1364,8 @@ async function syncSubscription(
   const stamp = status === "cancelled"
     ? isoFromUnix(sub.ended_at ?? sub.canceled_at)
     : isoFromUnix(sub.start_date);
+  // What Stripe bills this member (the plan's price may have changed since).
+  const terms = subscriptionTerms(sub);
   let row: MembershipRow;
   try {
     row = await rpc<MembershipRow>(ctx, "sync_stripe_subscription", {
@@ -926,6 +1376,10 @@ async function syncSubscription(
       p_cancel_at_period_end: cancelsAtPeriodEnd(sub),
       p_membership_id: membershipHint,
       p_now: stamp ?? ctx.now().toISOString(),
+      p_price_id: terms?.priceId ?? null,
+      p_price_cents: terms?.amountCents ?? null,
+      p_interval: terms?.interval ?? null,
+      p_interval_count: terms?.intervalCount ?? null,
     });
   } catch (err) {
     // P0002: no membership for this subscription (not a CRM subscription, or

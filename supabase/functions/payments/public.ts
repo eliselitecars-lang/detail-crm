@@ -2,9 +2,15 @@
  * Public payment actions, authorized only by an unguessable link token:
  *   invoice_checkout          /i/<token>        pay the invoice balance (+ optional tip)
  *   booking_deposit_checkout  /booking/<token>  pay the booking deposit still due
+ *                                               (never more than the job's
+ *                                               invoice still owes)
  * Amounts come from the database; the client can only add a bounded tip.
  * Sessions live ~30–40 minutes (checkoutRequest) and a new one expires the
- * document's older open sessions, so a stale link cannot be paid twice.
+ * document's older open sessions, so a stale link cannot be paid twice. The
+ * invoice and its job's deposit are one balance (a deposit payment attaches
+ * to the job's invoice), so a new invoice link also expires the job's open
+ * deposit links and a new deposit link the job's open invoice links — before
+ * it is created, and 409 payment_in_progress when one was just paid.
  * Card attempts already open on the invoice / booking are settled first
  * (settle.ts), exactly as the staff paths do: an unconfirmed PaymentSheet is
  * superseded (cancelled), money that already landed is recorded (the rest is
@@ -86,6 +92,17 @@ export async function invoiceCheckout(
   chargeable(balance + tip, shop.currency);
   const customer = await loadCustomer(s.admin, shop.id, invoice.customer_id);
   const stripeCustomer = await ensureStripeCustomer(s, account, customer);
+  // The job's open deposit links would be paid on top of this balance.
+  if (invoice.job_id) {
+    await expireOpenSessions(
+      s,
+      account,
+      stripeCustomer,
+      sessionFor.deposit(shop.id, invoice.job_id),
+      undefined,
+      { refuseCompleted: true },
+    );
+  }
 
   const meta = metadata({
     shop_id: shop.id,
@@ -169,6 +186,31 @@ interface JobRow {
 
 const CLOSED_JOB_STATUSES = new Set(["cancelled", "no_show", "completed"]);
 
+/**
+ * `due` capped at the balance of the job's non-void invoice (draft or issued
+ * alike: payments_before_write attaches a job payment to either). With no
+ * invoice yet, the deposit is bounded by the job total, which the database
+ * already applied (least(deposit_required, total) - paid).
+ */
+async function capByJobInvoice(s: Services, job: JobRow, due: number): Promise<number> {
+  const { data, error } = await s.admin
+    .from("invoices")
+    .select(INVOICE_COLUMNS)
+    .eq("shop_id", job.shop_id)
+    .eq("job_id", job.id)
+    .neq("status", "void")
+    .maybeSingle();
+  if (error) throw dbFailure("job invoice lookup", error);
+  const invoice = data as InvoiceRow | null;
+  if (!invoice) return due;
+  if (invoice.status === "paid") return 0;
+  const balance = invoice.balance_cents;
+  if (typeof balance !== "number" || !Number.isSafeInteger(balance)) {
+    throw new Error("job invoice has no balance_cents");
+  }
+  return Math.min(due, balance);
+}
+
 export async function bookingDepositCheckout(
   s: Services,
   input: z.output<typeof bookingDepositCheckoutInput>,
@@ -197,7 +239,8 @@ export async function bookingDepositCheckout(
   }
 
   // Deposit still due, computed by the database exactly as the booking page
-  // shows it: least(deposit_required, total) - money already received.
+  // shows it: least(deposit_required, total) - money already received,
+  // then capped at what the job's invoice still owes (below).
   const summary = await s.admin.rpc("public_get_booking", { p_token: input.token });
   if (summary.error) {
     if (summary.error.code === "P0002") throw errors.notFound("Booking not found.");
@@ -206,10 +249,17 @@ export async function bookingDepositCheckout(
   const deposit =
     (summary.data as { deposit?: { due_cents?: unknown; payment_pending?: unknown } } | null)
       ?.deposit;
-  const due = deposit?.due_cents;
-  if (typeof due !== "number" || !Number.isSafeInteger(due)) {
+  const jobDue = deposit?.due_cents;
+  if (typeof jobDue !== "number" || !Number.isSafeInteger(jobDue)) {
     throw new Error("public_get_booking returned no deposit.due_cents");
   }
+  // The deposit is worked out from the JOB total, but the payment lands on
+  // the job's non-void invoice (payments_before_write), whose lines and
+  // discount stay editable until money arrives: it can owe less than the
+  // job's deposit share. Never charge more than that invoice still owes —
+  // every other way money enters (record_manual_payment, invoice_checkout)
+  // refuses to overpay it too.
+  const due = await capByJobInvoice(s, job, jobDue);
   if (due <= 0) {
     throw errors.conflict("No deposit is due for this booking.", { reason: "deposit_not_due" });
   }
@@ -221,6 +271,15 @@ export async function bookingDepositCheckout(
   chargeable(due, shop.currency);
   const customer = await loadCustomer(s.admin, shop.id, job.customer_id);
   const stripeCustomer = await ensureStripeCustomer(s, account, customer);
+  // An open pay link of the job's invoice already covers this deposit share.
+  await expireOpenSessions(
+    s,
+    account,
+    stripeCustomer,
+    sessionFor.jobInvoices(shop.id, job.id),
+    undefined,
+    { refuseCompleted: true },
+  );
 
   const meta = metadata({
     shop_id: shop.id,

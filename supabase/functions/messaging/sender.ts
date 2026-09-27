@@ -12,7 +12,14 @@
  *   A message comes in (HTTP POST):
  *     <FUNCTIONS_PUBLIC_URL>/messaging?action=twilio_inbound&shop_id=<SHOP UUID>#rc=3&rp=all
  *
- * (see supabase/setup/twilio.md). Before sending we look the `From` number
+ * (see supabase/setup/twilio.md). US numbers must also be in a Messaging
+ * Service with an approved A2P 10DLC campaign (carriers block unregistered
+ * 10DLC traffic, error 30034): ONE SERVICE PER SHOP, under the shop's own
+ * brand and campaign, never shared between shops (Twilio applies STOP per
+ * service, so a shared one would let a STOP to one shop block every shop and
+ * make 21610 record opt-outs in shops the customer never left; optout.ts).
+ * The service is set to "Defer to sender's webhook", so the number keeps
+ * this per-number SmsUrl. Before sending we look the `From` number
  * up in the account (IncomingPhoneNumbers) and require that its SmsUrl points
  * at this function with this message's shop_id; inbound webhooks carry the
  * same shop_id inside the signed URL and are only routed when it matches the

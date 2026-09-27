@@ -3,6 +3,7 @@
  */
 import type { ActionContext } from "../_shared/actions.ts";
 import type { Env } from "../_shared/env.ts";
+import { PROVIDER_TIMEOUT_MS, withTimeout } from "../_shared/fetch_timeout.ts";
 import { HttpError } from "../_shared/errors.ts";
 import type { Logger } from "../_shared/log.ts";
 import { adminClient, type SupabaseClient } from "../_shared/supabase.ts";
@@ -19,6 +20,12 @@ export interface Deps {
   queueTimeBudgetMs?: number;
   /** Messages delivered in parallel within a batch (default 5). */
   concurrency?: number;
+  /**
+   * Cap on one Twilio/Resend HTTP exchange, response body included
+   * (default PROVIDER_TIMEOUT_MS). A provider that accepts the connection and
+   * then stalls must fail that one attempt, not hang the whole claimed batch.
+   */
+  providerTimeoutMs?: number;
 }
 
 /** Per-request services every action receives. */
@@ -26,9 +33,10 @@ export interface Services {
   admin: SupabaseClient;
   env: Env;
   log: Logger;
+  /** For provider calls (Twilio, Resend): capped per request (withTimeout). */
   fetch: typeof fetch;
   now: () => Date;
-  /** Only for actions that act as the caller (userClient). */
+  /** Only for actions that act as the caller (userClient); deps.fetch has no time cap. */
   deps: Deps;
   /** Per-request memo of SMS sender provisioning checks (sender.ts). */
   senderChecks: Map<string, Promise<SenderCheck>>;
@@ -39,7 +47,11 @@ export function services(deps: Deps, ctx: ActionContext): Services {
     admin: adminClient({ env: deps.env, fetch: deps.fetch }),
     env: ctx.env,
     log: ctx.log,
-    fetch: deps.fetch ?? globalThis.fetch,
+    // Provider calls only (Twilio, Resend); the Supabase clients use deps.fetch.
+    fetch: withTimeout(
+      deps.fetch ?? globalThis.fetch,
+      deps.providerTimeoutMs ?? PROVIDER_TIMEOUT_MS,
+    ),
     now: deps.now ?? (() => new Date()),
     deps,
     senderChecks: new Map(),

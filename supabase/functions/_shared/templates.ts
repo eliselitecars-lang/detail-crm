@@ -97,21 +97,38 @@ export function escapeHtml(text: string): string {
 }
 
 /**
+ * A bare http(s) URL in PLAIN text: runs until whitespace, a quote or an
+ * angle bracket, and does not end in sentence punctuation. Matched against
+ * the raw text (never the escaped HTML), so `"<link>"`, `<link>` or
+ * `'<link>'` delimiters end the URL instead of leaking into it as
+ * `&quot;` / `&gt;` / `&#39;` entity fragments.
+ */
+const URL_IN_TEXT = /https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)]/g;
+
+/** One paragraph of plain text -> escaped HTML with its URLs linked. */
+function linkifyEscaped(paragraph: string): string {
+  let html = "";
+  let last = 0;
+  for (const match of paragraph.matchAll(URL_IN_TEXT)) {
+    const start = match.index ?? 0;
+    const url = escapeHtml(match[0]);
+    html += `${escapeHtml(paragraph.slice(last, start))}<a href="${url}">${url}</a>`;
+    last = start + match[0].length;
+  }
+  return html + escapeHtml(paragraph.slice(last));
+}
+
+/**
  * Plain-text message body → minimal, safe HTML for email: everything is
  * escaped, blank lines become paragraphs, single newlines become <br>, and
- * bare http(s) URLs become links.
+ * bare http(s) URLs become links (found in the text before escaping, then
+ * escaped for both the href and the label).
  */
 export function textToHtml(text: string): string {
   const normalized = text.replace(/\r\n?/g, "\n").trim();
   if (!normalized) return "";
   return normalized
     .split(/\n{2,}/)
-    .map((paragraph) => {
-      const escaped = escapeHtml(paragraph).replace(
-        /https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)]/g,
-        (url) => `<a href="${url}">${url}</a>`,
-      );
-      return `<p>${escaped.replace(/\n/g, "<br>")}</p>`;
-    })
+    .map((paragraph) => `<p>${linkifyEscaped(paragraph).replace(/\n/g, "<br>")}</p>`)
     .join("\n");
 }

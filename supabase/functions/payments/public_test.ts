@@ -277,6 +277,51 @@ Deno.test("booking_deposit_checkout: nothing due, closed bookings, unknown token
   assertEquals((await errorOf(await off.call(deposit)))[2], { reason: "charges_disabled" });
 });
 
+Deno.test("booking_deposit_checkout: never charges more than the job's invoice still owes", async () => {
+  // Job $120 with a $100 deposit; the invoice created from it was then
+  // discounted to $90 (allowed while nothing is paid). The deposit lands on
+  // that invoice, so only $90 may be collected.
+  for (const status of ["open", "draft"]) {
+    const f = fixture({ depositDue: 10_000, invoice: { status, balance_cents: 9_000 } });
+    const res = await f.call(deposit);
+    assertEquals(res.status, 200);
+    assertEquals((await res.json()).amount_cents, 9_000);
+    const form = f.stripe("POST", "/checkout/sessions")[0]?.form;
+    assertEquals(form?.get("line_items[0][price_data][unit_amount]"), "9000");
+    assertEquals(form?.get("payment_intent_data[metadata][kind]"), "deposit");
+  }
+  // The deposit share still below the invoice balance is charged as is.
+  const below = fixture({ depositDue: 2_000, invoice: { status: "open", balance_cents: 9_000 } });
+  assertEquals((await (await below.call(deposit)).json()).amount_cents, 2_000);
+});
+
+Deno.test("booking_deposit_checkout: nothing to charge once the job's invoice is paid", async () => {
+  // Job $300 / deposit $100; the invoice was cut to $80 and paid in full.
+  // The job-based deposit still reads $20 due, but the invoice owes nothing.
+  for (
+    const invoice of [
+      { status: "paid", balance_cents: 0 },
+      { status: "partially_paid", balance_cents: 0 },
+      { status: "open", balance_cents: -500 },
+    ]
+  ) {
+    const f = fixture({ depositDue: 2_000, invoice });
+    assertEquals(await errorOf(await f.call(deposit)), [409, "conflict", {
+      reason: "deposit_not_due",
+    }]);
+    assertEquals(f.stripe("POST", "/checkout/sessions").length, 0);
+  }
+});
+
+Deno.test("booking_deposit_checkout: a void invoice or no invoice leaves the deposit uncapped", async () => {
+  for (const invoice of [{ status: "void", balance_cents: 0 }, { job_id: null }]) {
+    const f = fixture({ depositDue: 5_000, invoice });
+    const res = await f.call(deposit);
+    assertEquals(res.status, 200);
+    assertEquals((await res.json()).amount_cents, 5_000);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // One live, short-lived session per invoice / booking
 // ---------------------------------------------------------------------------
@@ -314,13 +359,17 @@ Deno.test("invoice_checkout: sessions close within ~40 minutes and the expiry is
   assert(Number(deposit.stripe("POST", "/checkout/sessions")[0]?.form.get("expires_at")) > 0);
 });
 
-Deno.test("invoice_checkout: a new pay link expires the invoice's older open links only", async () => {
+Deno.test("invoice_checkout: a new pay link expires the invoice's older links and its job's deposit links only", async () => {
   const f = fixture({
     customer: { stripe_customer_id: "cus_1Saved" },
     sessions: [
       openSession("cs_1Phone", { invoice_id: INVOICE, kind: "payment" }),
       openSession("cs_test_1", { invoice_id: INVOICE, kind: "payment" }), // the one returned
       openSession("cs_1Deposit", { job_id: JOB, kind: "deposit" }),
+      openSession("cs_1OtherDeposit", {
+        job_id: "dddddddd-dddd-4ddd-8ddd-00000000000f",
+        kind: "deposit",
+      }),
       openSession("cs_1Other", {
         invoice_id: "eeeeeeee-eeee-4eee-8eee-00000000000f",
         kind: "payment",
@@ -338,7 +387,8 @@ Deno.test("invoice_checkout: a new pay link expires the invoice's older open lin
   assertEquals(f.sessions.map((x) => [x.id, x.status]), [
     ["cs_1Phone", "expired"],
     ["cs_test_1", "open"],
-    ["cs_1Deposit", "open"],
+    ["cs_1Deposit", "expired"],
+    ["cs_1OtherDeposit", "open"],
     ["cs_1Other", "open"],
     ["cs_1Foreign", "open"],
   ]);
@@ -351,43 +401,56 @@ Deno.test("invoice_checkout: a new pay link expires the invoice's older open lin
   assert(expire?.headers.get("idempotency-key")?.startsWith("dcrm:checkout_expire:"));
 });
 
-Deno.test("booking_deposit_checkout: a new deposit link expires the booking's older deposit links", async () => {
+Deno.test("booking_deposit_checkout: a new deposit link expires the booking's older deposit and invoice links", async () => {
   const f = fixture({
     customer: { stripe_customer_id: "cus_1Saved" },
     sessions: [
       openSession("cs_1OldDeposit", { job_id: JOB, kind: "deposit" }),
       openSession("cs_1Invoice", { invoice_id: INVOICE, job_id: JOB, kind: "payment" }),
+      openSession("cs_1OtherJobInvoice", {
+        invoice_id: "eeeeeeee-eeee-4eee-8eee-00000000000f",
+        job_id: "dddddddd-dddd-4ddd-8ddd-00000000000f",
+        kind: "payment",
+      }),
     ],
   });
   await (await f.call(deposit)).body?.cancel();
-  assertEquals(f.sessions.map((x) => x.status), ["expired", "open"]);
+  // The job's invoice link already covers the deposit share of the balance.
+  assertEquals(f.sessions.map((x) => x.status), ["expired", "expired", "open"]);
 });
 
-Deno.test("invoice_checkout: a replayed session that was expired since is replaced", async () => {
-  const f = fixture();
+// Stripe's idempotency layer replays the FIRST response under a key (the
+// creation-time body: open, with its url), never the session's current
+// state, so these replays look open and only the retrieve tells the truth.
+function replayOpen(f: ReturnType<typeof fixture>, id: string, current: string) {
+  f.sessions.push({
+    ...openSession(id, { invoice_id: INVOICE, kind: "payment" }),
+    status: current,
+  });
   f.db.http.once("POST", `${STRIPE}/checkout/sessions`, () =>
     jsonResponse({
-      id: "cs_1Expired",
+      id,
       object: "checkout.session",
-      status: "expired",
-      url: null,
-      expires_at: 1,
+      status: "open",
+      url: `https://checkout.stripe.com/c/pay/${id}`,
+      expires_at: 1_900_000_000,
     }));
+}
+
+Deno.test("invoice_checkout: a replayed session that was expired since is replaced", async () => {
+  const f = fixture({ customer: { stripe_customer_id: "cus_1Saved" } });
+  replayOpen(f, "cs_1Expired", "expired");
   const res = await f.call(checkout);
   assertEquals((await res.json()).url, "https://checkout.stripe.com/c/pay/cs_test_1");
   const keys = f.stripe("POST", "/checkout/sessions").map((c) => c.headers.get("idempotency-key"));
   assertEquals(keys.length, 2);
   assert(keys[0] !== keys[1]);
+  assertEquals(f.stripe("GET", "/checkout/sessions/cs_1Expired").length, 1);
 });
 
 Deno.test("invoice_checkout: a replayed session that was already paid is 409, never a second link", async () => {
-  const f = fixture();
-  f.db.http.once(
-    "POST",
-    `${STRIPE}/checkout/sessions`,
-    () =>
-      jsonResponse({ id: "cs_1Paid", object: "checkout.session", status: "complete", url: null }),
-  );
+  const f = fixture({ customer: { stripe_customer_id: "cus_1Saved" } });
+  replayOpen(f, "cs_1Paid", "complete");
   assertEquals((await errorOf(await f.call(checkout))).slice(0, 3), [
     409,
     "conflict",

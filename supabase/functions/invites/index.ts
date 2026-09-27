@@ -6,8 +6,24 @@
  *   send_invite    { shop_id, email, role }  -> invite_member RPC as the
  *                  caller (RLS/role checks apply), then emails
  *                  APP_BASE_URL/invite/<token> via Resend
- *   resend_invite  { invite_id }             -> re-emails a pending invite;
- *                  an expired one is re-issued (new token, 7 more days)
+ *   resend_invite  { invite_id }             -> re-emails a pending invite
+ *                  issued within REUSE_WINDOW_MS; an older (or expired) one
+ *                  is re-issued (new token, a full 7 days)
+ *
+ * Every invite email says the link lasts 7 days, so an email only ever
+ * carries a link with (almost) all of its INVITE_TTL_MS left: an invite is
+ * reused only while it is "fresh" (issued within REUSE_WINDOW_MS, judged by
+ * its expires_at), otherwise a new one is issued (invite_member revokes the
+ * email's pending invite before inserting the new one).
+ *
+ * Retries and double submits never invalidate a link already emailed: when
+ * a fresh pending invite for the same shop, email and role exists (an
+ * earlier or concurrent identical request) it is reused and re-emailed with
+ * the same link. A concurrent request that loses the race to insert (unique
+ * pending-invite index, 23505) reuses the winner's invite. Every invite
+ * email is keyed per invite and minute (inviteEmailKey), so a double submit
+ * also sends one email. A different role, or an invite older than the
+ * reuse window, issues a new link.
  *
  * The email uses the shop's `invite` email template when enabled (else the
  * default wording) and is sent from EMAIL_FROM relabelled with the shop
@@ -21,6 +37,7 @@ import { requireShopRole, requireUser, ROLES } from "../_shared/auth.ts";
 import { fromWithDisplayName } from "../_shared/email.ts";
 import type { Env } from "../_shared/env.ts";
 import { errors, HttpError } from "../_shared/errors.ts";
+import { PROVIDER_TIMEOUT_MS, withTimeout } from "../_shared/fetch_timeout.ts";
 import { createHandler } from "../_shared/http.ts";
 import { links } from "../_shared/links.ts";
 import type { Logger } from "../_shared/log.ts";
@@ -34,6 +51,8 @@ export interface Deps {
   fetch?: typeof fetch;
   logger?: Logger;
   now?: () => Date;
+  /** Cap on the Resend request (default PROVIDER_TIMEOUT_MS); a stall reports email_sent: false. */
+  providerTimeoutMs?: number;
 }
 
 /** Roles an invite may grant (ownership moves only via transfer_ownership). */
@@ -73,7 +92,7 @@ export interface InviteResponse {
   invite: { id: string; shop_id: string; email: string; role: InviteRole; expires_at: string };
   invite_url: string;
   email_sent: boolean;
-  /** resend_invite only: true when an expired invite was replaced by a new one. */
+  /** resend_invite only: true when the invite was replaced by a new one (expired or not fresh). */
   reissued?: boolean;
 }
 
@@ -169,6 +188,46 @@ export function buildInviteEmail(
   };
 }
 
+/**
+ * Resend idempotency key for an invite email: one per invite per minute, so a
+ * double submit / retry sends one email while a deliberate resend a minute
+ * later goes out again.
+ */
+export function inviteEmailKey(inviteId: string, at: Date): string {
+  return `invite-${inviteId}-resend-${Math.floor(at.getTime() / 60_000)}`;
+}
+
+/** Invite lifetime: shop_invites.expires_at default (0002), and what the email promises. */
+export const INVITE_TTL_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * How long after it was issued an invite is reused instead of re-issued:
+ * covers retries and double submits, and keeps "expires in 7 days" true.
+ */
+export const REUSE_WINDOW_MS = 15 * 60_000;
+
+/** Pending and issued within REUSE_WINDOW_MS (at least TTL - window left). */
+export function isFreshInvite(invite: Pick<InviteRow, "expires_at">, at: Date): boolean {
+  const left = Date.parse(invite.expires_at) - at.getTime();
+  return Number.isFinite(left) && left >= INVITE_TTL_MS - REUSE_WINDOW_MS;
+}
+
+/** The shop's pending, unexpired invite for this (lower-cased) email, if any (service role). */
+async function pendingInvite(
+  admin: SupabaseClient,
+  shopId: string,
+  address: string,
+  at: Date,
+): Promise<InviteRow | null> {
+  const { data, error } = await admin.from("shop_invites").select(INVITE_COLUMNS)
+    .eq("shop_id", shopId).eq("email", address.trim().toLowerCase())
+    .is("accepted_at", null).is("revoked_at", null)
+    .gt("expires_at", at.toISOString())
+    .order("created_at", { ascending: false }).limit(1);
+  if (error) throw dbFailure("shop_invites lookup", error);
+  return (Array.isArray(data) ? data[0] as InviteRow | undefined : undefined) ?? null;
+}
+
 export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response> {
   const now = deps.now ?? (() => new Date());
 
@@ -184,11 +243,18 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     const template = await inviteTemplate(admin, invite.shop_id);
     try {
       const message = buildInviteEmail(env, shop, template, invite, inviteUrl);
-      await sendEmail(env.resend().apiKey, {
-        ...message,
-        idempotencyKey,
-        tags: [{ name: "invite_id", value: invite.id }, { name: "shop_id", value: invite.shop_id }],
-      }, deps.fetch ?? globalThis.fetch);
+      await sendEmail(
+        env.resend().apiKey,
+        {
+          ...message,
+          idempotencyKey,
+          tags: [{ name: "invite_id", value: invite.id }, {
+            name: "shop_id",
+            value: invite.shop_id,
+          }],
+        },
+        withTimeout(deps.fetch ?? globalThis.fetch, deps.providerTimeoutMs ?? PROVIDER_TIMEOUT_MS),
+      );
       log.info("invite_emailed", { invite_id: invite.id, shop_id: invite.shop_id });
       return { inviteUrl, sent: true };
     } catch (err) {
@@ -221,6 +287,42 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     return invite;
   }
 
+  /**
+   * The invite to email for (shop, email, role): the existing pending, fresh
+   * (isFreshInvite) one with that role (reused: its link stays valid), else a
+   * new one from invite_member (which revokes an older pending invite). A
+   * concurrent identical request that inserted first makes invite_member
+   * fail on the one-pending-invite index (23505, which also means "already a
+   * member"); if a matching fresh pending invite now exists it is reused,
+   * otherwise the conflict stands.
+   */
+  async function issueInvite(
+    req: Request,
+    env: Env,
+    admin: SupabaseClient,
+    shopId: string,
+    address: string,
+    role: InviteRole,
+  ): Promise<{ invite: InviteRow; reused: boolean }> {
+    const existing = await pendingInvite(admin, shopId, address, now());
+    if (existing && existing.role === role && isFreshInvite(existing, now())) {
+      return { invite: existing, reused: true };
+    }
+    try {
+      return { invite: await createInvite(req, env, shopId, address, role), reused: false };
+    } catch (err) {
+      if (!(err instanceof HttpError) || err.code !== "conflict") throw err;
+      const winner = await pendingInvite(admin, shopId, address, now());
+      if (!winner || !isFreshInvite(winner, now())) throw err;
+      if (winner.role !== role) {
+        throw errors.conflict(
+          "This person was just invited with another role. Refresh and try again.",
+        );
+      }
+      return { invite: winner, reused: true };
+    }
+  }
+
   const respond = (
     invite: InviteRow,
     result: { inviteUrl: string; sent: boolean },
@@ -244,8 +346,22 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
       const caller = await requireUser(ctx.req, { admin });
       await requireShopRole(admin, caller, input.shop_id, ROLES.adminPlus);
       ctx.env.appBaseUrl(); // fail fast (server_misconfigured) before creating the invite
-      const invite = await createInvite(ctx.req, ctx.env, input.shop_id, input.email, input.role);
-      const result = await emailInvite(ctx.env, ctx.log, admin, invite, `invite-${invite.id}`);
+      const { invite, reused } = await issueInvite(
+        ctx.req,
+        ctx.env,
+        admin,
+        input.shop_id,
+        input.email,
+        input.role,
+      );
+      if (reused) ctx.log.info("invite_reused", { invite_id: invite.id, shop_id: invite.shop_id });
+      const result = await emailInvite(
+        ctx.env,
+        ctx.log,
+        admin,
+        invite,
+        inviteEmailKey(invite.id, now()),
+      );
       return respond(invite, result);
     }),
 
@@ -261,26 +377,35 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
       if (invite.accepted_at) throw errors.conflict("This invite was already accepted.");
       if (invite.revoked_at) throw errors.gone("This invite was revoked.");
 
-      if (Date.parse(invite.expires_at) <= now().getTime()) {
-        // Expired: issue a fresh invite (invite_member revokes the old one).
-        const fresh = await createInvite(
+      if (!isFreshInvite(invite, now())) {
+        // Expired, or issued too long ago for the email's "expires in 7
+        // days" to hold: issue a fresh invite (invite_member revokes the old
+        // one), or reuse the one a concurrent resend of this invite just
+        // issued.
+        const { invite: fresh } = await issueInvite(
           ctx.req,
           ctx.env,
+          admin,
           invite.shop_id,
           invite.email,
           invite.role,
         );
-        const result = await emailInvite(ctx.env, ctx.log, admin, fresh, `invite-${fresh.id}`);
+        const result = await emailInvite(
+          ctx.env,
+          ctx.log,
+          admin,
+          fresh,
+          inviteEmailKey(fresh.id, now()),
+        );
         return respond(fresh, result, true);
       }
       // Same link again; the per-minute key absorbs double clicks and retries.
-      const minute = Math.floor(now().getTime() / 60_000);
       const result = await emailInvite(
         ctx.env,
         ctx.log,
         admin,
         invite,
-        `invite-${invite.id}-resend-${minute}`,
+        inviteEmailKey(invite.id, now()),
       );
       return respond(invite, result, false);
     }),

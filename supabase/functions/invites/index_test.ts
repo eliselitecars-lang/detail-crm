@@ -4,7 +4,15 @@ import { jsonResponse } from "../_shared/testing/fake_fetch.ts";
 import { FakeRpcError, FakeSupabase, type Row } from "../_shared/testing/fake_supabase.ts";
 import { memoryLogger } from "../_shared/testing/logger.ts";
 import { jsonRequest, responseJson } from "../_shared/testing/requests.ts";
-import { formatPhone, type InviteResponse, makeHandler } from "./index.ts";
+import {
+  formatPhone,
+  INVITE_TTL_MS,
+  inviteEmailKey,
+  type InviteResponse,
+  isFreshInvite,
+  makeHandler,
+  REUSE_WINDOW_MS,
+} from "./index.ts";
 
 const SHOP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OTHER_SHOP = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -16,6 +24,9 @@ const OUTSIDER = "10000000-0000-4000-8000-000000000005";
 const RESEND_URL = "https://api.resend.com/emails";
 const NOW = new Date("2026-09-27T15:00:00.000Z");
 const APP = "https://app.example.com";
+const ISSUED_5_MIN_AGO = "2026-10-04T14:55:00.000Z";
+/** Issued 6 days 23 hours 50 minutes before NOW: expires 10 minutes from NOW. */
+const EXPIRING_SOON = "2026-09-27T15:10:00.000Z";
 
 function member(userId: string, role: string, shopId = SHOP): Row {
   return {
@@ -36,14 +47,17 @@ function invite(overrides: Row = {}): Row {
     role: "technician",
     token: crypto.randomUUID(),
     invited_by: OWNER,
-    expires_at: "2026-10-01T00:00:00.000Z",
+    // Issued 5 minutes before NOW: still within the reuse window.
+    expires_at: ISSUED_5_MIN_AGO,
     accepted_at: null,
     revoked_at: null,
     ...overrides,
   };
 }
 
-function setup(options: { invites?: Row[]; templates?: Row[] } = {}) {
+function setup(
+  options: { invites?: Row[]; templates?: Row[]; providerTimeoutMs?: number } = {},
+) {
   const db = new FakeSupabase({
     users: {
       "tok-owner": { id: OWNER, email: "owner@example.com" },
@@ -103,6 +117,7 @@ function setup(options: { invites?: Row[]; templates?: Row[] } = {}) {
     fetch: db.http.fetch,
     logger: logs.logger,
     now: () => NOW,
+    providerTimeoutMs: options.providerTimeoutMs,
   });
   return { db, handler, logs };
 }
@@ -161,7 +176,7 @@ Deno.test("send_invite: admin invites via the RPC as the caller and emails the l
       "This invitation expires in 7 days. If you were not expecting it, you can ignore this email.",
   );
   assert(String(email.html).includes(`<a href="${APP}/invite/${stored.token}">`));
-  assertEquals(call.headers.get("idempotency-key"), `invite-${stored.id}`);
+  assertEquals(call.headers.get("idempotency-key"), inviteEmailKey(String(stored.id), NOW));
 });
 
 Deno.test("send_invite: uses the shop's enabled invite template", async () => {
@@ -256,6 +271,106 @@ Deno.test("send_invite: an email failure keeps the invite and returns the link",
   assertEquals(logs.events("invite_email_failed").length, 1);
 });
 
+Deno.test("send_invite: a stalled Resend call times out instead of hanging the request", async () => {
+  const { db, handler, logs } = setup({ providerTimeoutMs: 20 });
+  db.http.on("POST", RESEND_URL, () => new Promise<Response>(() => {}));
+  const res = await handler(sendInvite("tok-owner", { email: "x@example.com", role: "manager" }));
+  assertEquals(res.status, 200);
+  const out = await responseJson<InviteResponse>(res);
+  assertEquals(out.email_sent, false);
+  assertEquals(db.table("shop_invites").length, 1);
+  assertEquals(logs.events("invite_email_failed").length, 1);
+});
+
+Deno.test("send_invite: a retried / double-submitted invite reuses the first link and emails once", async () => {
+  const { db, handler, logs } = setup();
+  const body = { email: "x@example.com", role: "manager" };
+  const first = await responseJson<InviteResponse>(await handler(sendInvite("tok-owner", body)));
+  const second = await responseJson<InviteResponse>(
+    await handler(sendInvite("tok-owner", { ...body, email: "X@Example.com" })),
+  );
+  assertEquals(second.invite.id, first.invite.id);
+  assertEquals(second.invite_url, first.invite_url);
+  assertEquals([first.email_sent, second.email_sent], [true, true]);
+  // The first link is still pending (not revoked), and it is the only invite.
+  const rows = db.table("shop_invites");
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0]?.revoked_at, null);
+  assertEquals(db.requests.filter((r) => r.target === "invite_member").length, 1);
+  // Both emails carry the same link and the same Resend key (Resend dedupes).
+  const calls = db.http.callsTo("POST", RESEND_URL);
+  assertEquals(calls.length, 2);
+  assertEquals(
+    calls.map((c) => c.headers.get("idempotency-key")),
+    [inviteEmailKey(first.invite.id, NOW), inviteEmailKey(first.invite.id, NOW)],
+  );
+  assertEquals(calls.map((c) => c.json), [calls[0]?.json, calls[0]?.json]);
+  assertEquals(logs.events("invite_reused").length, 1);
+});
+
+Deno.test("send_invite: an existing pending invite is reused; a new role or an expired one re-issues", async () => {
+  const pending = invite({ email: "x@example.com", role: "manager" });
+  const expired = invite({ email: "y@example.com", expires_at: "2026-09-20T00:00:00.000Z" });
+  const { db, handler } = setup({ invites: [pending, expired] });
+
+  const same = await responseJson<InviteResponse>(
+    await handler(sendInvite("tok-owner", { email: "x@example.com", role: "manager" })),
+  );
+  assertEquals(same.invite.id, pending.id);
+  assertEquals(same.invite_url, `${APP}/invite/${pending.token}`);
+  assertEquals(db.requests.some((r) => r.target === "invite_member"), false);
+
+  const promoted = await responseJson<InviteResponse>(
+    await handler(sendInvite("tok-owner", { email: "x@example.com", role: "admin" })),
+  );
+  assert(promoted.invite.id !== pending.id);
+  assertEquals(promoted.invite.role, "admin");
+  assertEquals(
+    db.table("shop_invites").find((r) => r.id === pending.id)?.revoked_at,
+    NOW.toISOString(),
+  );
+
+  const renewed = await responseJson<InviteResponse>(
+    await handler(sendInvite("tok-owner", { email: "y@example.com", role: "technician" })),
+  );
+  assert(renewed.invite.id !== expired.id);
+  assertEquals(db.requests.filter((r) => r.target === "invite_member").length, 2);
+});
+
+Deno.test("send_invite: losing the insert race to an identical request reuses the winner's invite", async () => {
+  const { db, handler } = setup();
+  const winner = invite({ email: "x@example.com", role: "manager" });
+  db.onRpc("invite_member", (_args, ctx) => {
+    // A concurrent identical request committed first: the one-pending-invite index refuses ours.
+    ctx.db.seed("shop_invites", [winner]);
+    throw new FakeRpcError("23505", "duplicate key value violates unique constraint");
+  });
+  const out = await responseJson<InviteResponse>(
+    await handler(sendInvite("tok-owner", { email: "x@example.com", role: "manager" })),
+  );
+  assertEquals(out.invite.id, winner.id);
+  assertEquals(out.invite_url, `${APP}/invite/${winner.token}`);
+  assertEquals(db.table("shop_invites")[0]?.revoked_at, null);
+  assertEquals(
+    db.http.callsTo("POST", RESEND_URL)[0]?.headers.get("idempotency-key"),
+    inviteEmailKey(String(winner.id), NOW),
+  );
+});
+
+Deno.test("send_invite: a race lost to a different role is a conflict, not a revoke", async () => {
+  const { db, handler } = setup();
+  db.onRpc("invite_member", (_args, ctx) => {
+    ctx.db.seed("shop_invites", [invite({ email: "x@example.com", role: "admin" })]);
+    throw new FakeRpcError("23505", "duplicate key value violates unique constraint");
+  });
+  await expectError(
+    await handler(sendInvite("tok-owner", { email: "x@example.com", role: "manager" })),
+    409,
+    "conflict",
+  );
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+});
+
 Deno.test("send_invite: a missing APP_BASE_URL fails before an invite is created", async () => {
   const db = new FakeSupabase({
     users: { "tok-owner": { id: OWNER } },
@@ -298,6 +413,7 @@ Deno.test("resend_invite: re-emails a pending invite with the same link", async 
     call?.headers.get("idempotency-key"),
     `invite-${pending.id}-resend-${Math.floor(NOW.getTime() / 60_000)}`,
   );
+  assertEquals(call?.headers.get("idempotency-key"), inviteEmailKey(String(pending.id), NOW));
   assertEquals(db.requests.some((r) => r.target === "invite_member"), false);
 });
 
@@ -314,6 +430,33 @@ Deno.test("resend_invite: an expired invite is re-issued with a new token", asyn
   assertEquals(rows.find((r) => r.id === expired.id)?.revoked_at, NOW.toISOString());
   const fresh = rows.find((r) => r.id === out.invite.id);
   assertEquals(out.invite_url, `${APP}/invite/${fresh?.token}`);
+});
+
+Deno.test("resend_invite: a concurrent re-issue of the same expired invite reuses the new link", async () => {
+  const expired = invite({ expires_at: "2026-09-20T00:00:00.000Z", role: "manager" });
+  const { db, handler } = setup({ invites: [expired] });
+  const winner = invite({ role: "manager", expires_at: "2026-10-04T15:00:00.000Z" });
+  db.onRpc("invite_member", (_args, ctx) => {
+    // The other click's invite_member committed first (revoked the expired row, inserted its own).
+    ctx.db.seed("shop_invites", [
+      ...ctx.db.table("shop_invites").map((r) =>
+        r.id === expired.id ? { ...r, revoked_at: NOW.toISOString() } : r
+      ),
+      winner,
+    ]);
+    throw new FakeRpcError("23505", "duplicate key value violates unique constraint");
+  });
+  const out = await responseJson<InviteResponse>(
+    await handler(resendInvite("tok-owner", String(expired.id))),
+  );
+  assertEquals(out.reissued, true);
+  assertEquals(out.invite.id, winner.id);
+  assertEquals(out.invite_url, `${APP}/invite/${winner.token}`);
+  assertEquals(db.table("shop_invites").find((r) => r.id === winner.id)?.revoked_at, null);
+  assertEquals(
+    db.http.callsTo("POST", RESEND_URL)[0]?.headers.get("idempotency-key"),
+    inviteEmailKey(String(winner.id), NOW),
+  );
 });
 
 Deno.test("resend_invite: accepted, revoked, unknown and foreign invites", async () => {
@@ -336,6 +479,67 @@ Deno.test("resend_invite: accepted, revoked, unknown and foreign invites", async
     "forbidden",
   );
   assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+});
+
+Deno.test("send_invite: an invite about to lapse is re-issued with a full 7 days, not re-sent", async () => {
+  const old = invite({ email: "x@example.com", role: "manager", expires_at: EXPIRING_SOON });
+  const { db, handler, logs } = setup({ invites: [old] });
+  const out = await responseJson<InviteResponse>(
+    await handler(sendInvite("tok-owner", { email: "x@example.com", role: "manager" })),
+  );
+  assert(out.invite.id !== old.id);
+  assertEquals(out.invite.expires_at, "2026-10-04T15:00:00.000Z");
+  const rows = db.table("shop_invites");
+  assertEquals(rows.find((r) => r.id === old.id)?.revoked_at, NOW.toISOString());
+  const fresh = rows.find((r) => r.id === out.invite.id);
+  assertEquals(out.invite_url, `${APP}/invite/${fresh?.token}`);
+  const email = db.http.callsTo("POST", RESEND_URL)[0]?.json as { text: string };
+  assert(email.text.includes(`${APP}/invite/${fresh?.token}`));
+  assert(!email.text.includes(String(old.token)));
+  assertEquals(logs.events("invite_reused").length, 0);
+});
+
+Deno.test("send_invite: a race lost to an old pending invite is not reused", async () => {
+  const { db, handler } = setup();
+  db.onRpc("invite_member", (_args, ctx) => {
+    ctx.db.seed("shop_invites", [
+      invite({ email: "x@example.com", role: "manager", expires_at: EXPIRING_SOON }),
+    ]);
+    throw new FakeRpcError("23505", "x@example.com is already a member of this shop");
+  });
+  await expectError(
+    await handler(sendInvite("tok-owner", { email: "x@example.com", role: "manager" })),
+    409,
+    "conflict",
+  );
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+});
+
+Deno.test("resend_invite: an invite past the reuse window is re-issued; the old link is revoked", async () => {
+  const old = invite({ role: "admin", expires_at: EXPIRING_SOON });
+  const { db, handler } = setup({ invites: [old] });
+  const out = await responseJson<InviteResponse>(
+    await handler(resendInvite("tok-owner", String(old.id))),
+  );
+  assertEquals(out.reissued, true);
+  assert(out.invite.id !== old.id);
+  assertEquals([out.invite.role, out.invite.expires_at], ["admin", "2026-10-04T15:00:00.000Z"]);
+  assertEquals(
+    db.table("shop_invites").find((r) => r.id === old.id)?.revoked_at,
+    NOW.toISOString(),
+  );
+  assertEquals(db.requests.filter((r) => r.target === "invite_member").length, 1);
+});
+
+Deno.test("isFreshInvite: only invites issued within the reuse window", () => {
+  const issuedAt = (msAgo: number) => ({
+    expires_at: new Date(NOW.getTime() - msAgo + INVITE_TTL_MS).toISOString(),
+  });
+  assertEquals(isFreshInvite(issuedAt(0), NOW), true);
+  assertEquals(isFreshInvite(issuedAt(REUSE_WINDOW_MS), NOW), true);
+  assertEquals(isFreshInvite(issuedAt(REUSE_WINDOW_MS + 1), NOW), false);
+  assertEquals(isFreshInvite({ expires_at: EXPIRING_SOON }, NOW), false);
+  assertEquals(isFreshInvite({ expires_at: "not a date" }, NOW), false);
 });
 
 Deno.test("formatPhone mirrors SQL format_phone", () => {

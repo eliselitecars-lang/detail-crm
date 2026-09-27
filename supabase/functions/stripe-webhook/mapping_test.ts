@@ -16,6 +16,7 @@ import {
   readMetadata,
   splitTip,
   subscriptionPeriodEnd,
+  subscriptionTerms,
 } from "./mapping.ts";
 
 const SHOP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -133,6 +134,50 @@ Deno.test("mapping: subscription period end is the latest item period", () => {
     subscriptionPeriodEnd({ items: { data: [] } } as unknown as Stripe.Subscription),
     null,
   );
+});
+
+Deno.test("mapping: subscriptionTerms is the single item's price × quantity", () => {
+  const sub = (item: Record<string, unknown>, more: Record<string, unknown>[] = []) =>
+    ({ items: { data: [item, ...more] } }) as unknown as Stripe.Subscription;
+  const item = (price: Record<string, unknown>, quantity: unknown = 1) => ({
+    quantity,
+    price: {
+      id: "price_1Gold",
+      unit_amount: 5000,
+      recurring: { interval: "month", interval_count: 1 },
+      ...price,
+    },
+  });
+  assertEquals(subscriptionTerms(sub(item({}))), {
+    priceId: "price_1Gold",
+    amountCents: 5000,
+    interval: "month",
+    intervalCount: 1,
+  });
+  assertEquals(subscriptionTerms(sub(item({}, 2)))?.amountCents, 10000);
+  assertEquals(
+    subscriptionTerms(sub(item({ recurring: { interval: "year", interval_count: 1 } })))?.interval,
+    "year",
+  );
+  // not representable: left alone (null)
+  assertEquals(subscriptionTerms(sub(item({}), [item({})])), null);
+  assertEquals(subscriptionTerms({ items: { data: [] } } as unknown as Stripe.Subscription), null);
+  assertEquals(subscriptionTerms(sub(item({ unit_amount: null }))), null);
+  assertEquals(subscriptionTerms(sub(item({ unit_amount: 12.5 }))), null);
+  assertEquals(
+    subscriptionTerms(sub(item({ recurring: { interval: "week", interval_count: 1 } }))),
+    null,
+  );
+  assertEquals(
+    subscriptionTerms(sub(item({ recurring: { interval: "year", interval_count: 4 } }))),
+    null,
+  );
+  assertEquals(
+    subscriptionTerms(sub(item({ recurring: { interval: "month", interval_count: 37 } }))),
+    null,
+  );
+  assertEquals(subscriptionTerms(sub(item({ id: "plan_legacy" }))), null);
+  assertEquals(subscriptionTerms(sub(item({}, 0))), null);
 });
 
 Deno.test("mapping: card details come only from brand/last4/expiry", () => {

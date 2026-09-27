@@ -6,6 +6,7 @@ import {
   classifyFailure,
   CONSENT_UNVERIFIED,
   CONSENT_WITHDRAWN,
+  MAX_EMPTY_CLAIMS,
   type QueueRunSummary,
 } from "./deliver.ts";
 import { NOT_PROVISIONED } from "./sender.ts";
@@ -67,6 +68,7 @@ Deno.test("process_queue: sends SMS via Twilio from the shop number with a statu
     retried: 0,
     cancelled: 0,
     unrecorded: 0,
+    released: 0,
     more: false,
   });
   const call = db.http.callsTo("POST", TWILIO_MESSAGES_URL)[0];
@@ -282,6 +284,48 @@ Deno.test("process_queue: an empty queue does one claim and sends nothing", asyn
   assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 0);
 });
 
+Deno.test("process_queue: rows the claim settles do not end the run while due rows remain", async () => {
+  const at = (minute: number) => `2026-09-27T13:${String(minute).padStart(2, "0")}:00.000Z`;
+  // A short batch: 2 of the 3 claimed rows are cancelled (opted out) by the claim.
+  const short = [
+    queuedMessage({ customer_id: OPTED_OUT_CUSTOMER, send_after: at(0) }),
+    queuedMessage({ customer_id: OPTED_OUT_CUSTOMER, send_after: at(1) }),
+    ...[2, 3, 4].map((m) => queuedMessage({ send_after: at(m) })),
+  ];
+  const first = setup({ messages: short });
+  const run = await responseJson<QueueRunSummary>(await first.handler(cron({ limit: 3 })));
+  assertEquals([run.batches, run.claimed, run.sent, run.more], [2, 3, 3, true]);
+
+  // A whole default batch (50) settled by the claim returns nothing at all.
+  const settled = Array.from(
+    { length: 60 },
+    (_, i) =>
+      queuedMessage({
+        customer_id: OPTED_OUT_CUSTOMER,
+        send_after: `2026-09-27T12:00:${String(i).padStart(2, "0")}.000Z`,
+      }),
+  );
+  const good = [0, 1, 2].map((m) => queuedMessage({ send_after: at(m) }));
+  const { db, handler } = setup({ messages: [...settled, ...good] });
+  const summary = await responseJson<QueueRunSummary>(await handler(cron()));
+  assertEquals([summary.claimed, summary.sent, summary.more], [3, 3, false]);
+  assertEquals(db.table("messages").filter((m) => m.status === "cancelled").length, 60);
+  assertEquals(db.table("messages").filter((m) => m.status === "queued").length, 0);
+  assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 3);
+});
+
+Deno.test("process_queue: rows another worker holds do not spin the run", async () => {
+  const { db, handler } = setup({ messages: [queuedMessage()] });
+  // The claim skips the locked row, which still reads as queued and due.
+  db.onRpc("claim_queued_messages", () => []);
+  const summary = await responseJson<QueueRunSummary>(await handler(cron()));
+  assertEquals([summary.claimed, summary.more], [0, true]);
+  assertEquals(
+    db.requests.filter((r) => r.target === "claim_queued_messages").length,
+    MAX_EMPTY_CLAIMS,
+  );
+});
+
 Deno.test("process_queue: rejects unexpected params and oversize limits", async () => {
   const { handler } = setup();
   for (const body of [{ limit: 0 }, { limit: 5000 }, { shop_id: "x" }]) {
@@ -491,4 +535,61 @@ Deno.test("process_queue: campaign consent that cannot be read is retried, never
   const row = message(db, String(blast.id));
   assertEquals([row.status, row.error], ["queued", CONSENT_UNVERIFIED]);
   assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 1);
+});
+
+Deno.test("process_queue: a stalled provider times out per request; unreached rows go back to the queue", async () => {
+  const messages = Array.from({ length: 20 }, (_, i) =>
+    queuedMessage({
+      channel: "email",
+      to_address: "dana@example.com",
+      subject: "Receipt",
+      send_after: `2026-09-27T14:${String(i).padStart(2, "0")}:00.000Z`,
+    }));
+  const { db, handler, logs } = setup({
+    messages,
+    deps: { providerTimeoutMs: 60, queueTimeBudgetMs: 150 },
+  });
+  // Resend accepts the connection and never answers (brownout).
+  db.http.on("POST", RESEND_URL, () => new Promise<Response>(() => {}));
+
+  const summary = await responseJson<QueueRunSummary>(await handler(cron()));
+  // The run ends (no hang) and nothing is left 'sending' for the sweep to fail.
+  assertEquals(db.table("messages").filter((m) => m.status === "sending").length, 0);
+  assertEquals(summary.claimed, 20);
+  assert(summary.retried > 0, "timed-out emails are retried (idempotency key = message id)");
+  assert(summary.released > 0, "rows no lane reached are released");
+  assertEquals(summary.retried + summary.released, 20);
+  assertEquals(summary.more, true);
+  const attempted = db.http.callsTo("POST", RESEND_URL).length;
+  assertEquals(attempted, summary.retried);
+  for (const m of db.table("messages")) {
+    const original = messages.find((o) => o.id === m.id);
+    assertEquals(m.status, "queued");
+    if (Number(m.attempts) === 0) {
+      // Released unattempted: exactly as before the claim.
+      assertEquals([m.send_after, m.claimed_at, m.error], [original?.send_after, null, null]);
+    } else {
+      assertEquals(m.attempts, 1);
+      assertMatch(String(m.error), /Resend/);
+    }
+  }
+  assertEquals(logs.events("message_released").length, summary.released);
+});
+
+Deno.test("process_queue: a stalled Twilio send fails only that text; the lookup stall retries", async () => {
+  const sms = queuedMessage();
+  const { db, handler } = setup({ messages: [sms], deps: { providerTimeoutMs: 30 } });
+  db.http.on("POST", TWILIO_MESSAGES_URL, () => new Promise<Response>(() => {}));
+  const summary = await responseJson<QueueRunSummary>(await handler(cron()));
+  assertEquals([summary.failed, summary.released], [1, 0]);
+  // Twilio has no idempotency keys: a request without an answer is never re-sent.
+  assertMatch(String(message(db, String(sms.id)).error), /may not have been sent/);
+
+  const second = queuedMessage();
+  const stalled = setup({ messages: [second], deps: { providerTimeoutMs: 30 } });
+  stalled.db.http.on("GET", TWILIO_NUMBERS_URL, () => new Promise<Response>(() => {}));
+  const out = await responseJson<QueueRunSummary>(await stalled.handler(cron()));
+  assertEquals(out.retried, 1);
+  assertEquals(message(stalled.db, String(second.id)).status, "queued");
+  assertEquals(stalled.db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 0);
 });

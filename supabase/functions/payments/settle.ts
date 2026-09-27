@@ -150,14 +150,11 @@ export async function stalePendingRows(s: Services): Promise<PendingCardRow[]> {
     .filter((row) => (row as PendingCardRow).stripe_payment_intent_id) as PendingCardRow[];
 }
 
-/** FNV-1a (32-bit): a cheap, stable hash for the sweep's rotation. */
-function fnv1a(text: string): number {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash;
+/** Newly stale rows (never swept yet) take up to this share of a batch. */
+const NEW_STALE_SHARE = Math.ceil(SWEEP_BATCH / 2);
+
+function byId(a: PendingCardRow, b: PendingCardRow): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
 /**
@@ -165,19 +162,31 @@ function fnv1a(text: string): number {
  * processing for days, other flows' intents, shops without an account,
  * Stripe errors) stay candidates, so a fixed "oldest first" batch would
  * re-check the same rows forever and never reach newer abandoned sheets.
- * Over SWEEP_BATCH candidates, each run takes a different pseudo-random
- * sample (ordered by a hash of the run's time slot and the row id): every
- * candidate is checked with probability >= SWEEP_BATCH / candidates on every
- * run, whatever the other tenants' rows do.
+ * Over SWEEP_BATCH candidates:
+ *   - rows that went stale in the last two runs (never swept yet: most
+ *     abandoned sheets) come first, newest first, up to NEW_STALE_SHARE;
+ *   - the rest of the batch walks round-robin over the other candidates
+ *     (ordered by id, the window advancing each SWEEP_SLOT_MS), so every
+ *     candidate is re-checked within ceil(candidates / slots) runs whatever
+ *     the other tenants' rows do.
  */
 export function sweepBatch(rows: PendingCardRow[], now: number): PendingCardRow[] {
   if (rows.length <= SWEEP_BATCH) return rows;
-  const slot = Math.floor(now / SWEEP_SLOT_MS);
-  return rows
-    .map((row) => ({ row, rank: fnv1a(`${slot}:${row.id}`) }))
-    .sort((a, b) => a.rank - b.rank || (a.row.id < b.row.id ? -1 : 1))
-    .slice(0, SWEEP_BATCH)
-    .map((entry) => entry.row);
+  const newSince = now - STALE_SHEET_MS - 2 * SWEEP_SLOT_MS;
+  const fresh = rows
+    .filter((row) => Date.parse(row.created_at) >= newSince)
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || byId(a, b))
+    .slice(0, NEW_STALE_SHARE);
+  const taken = new Set(fresh.map((row) => row.id));
+  const rest = rows.filter((row) => !taken.has(row.id)).sort(byId);
+  const room = Math.min(SWEEP_BATCH - fresh.length, rest.length);
+  const start = rest.length ? (Math.floor(now / SWEEP_SLOT_MS) * room) % rest.length : 0;
+  const rotated: PendingCardRow[] = [];
+  for (let i = 0; i < room; i++) {
+    const row = rest[(start + i) % rest.length];
+    if (row) rotated.push(row);
+  }
+  return [...fresh, ...rotated];
 }
 
 async function record(
@@ -256,6 +265,8 @@ export async function settlePending(
     return "cancelled";
   }
   if (intent.metadata?.shop_id && intent.metadata.shop_id !== row.shop_id) return idle;
+  // A declined attempt whose intent was closed since keeps its 'failed' record.
+  if (row.status === "failed" && intent.status === "canceled") return "unchanged";
   if (
     options.keepRequestKey && intent.metadata?.request_key === options.keepRequestKey &&
     UNCONFIRMED.has(intent.status)

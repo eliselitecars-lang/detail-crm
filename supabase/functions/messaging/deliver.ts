@@ -25,6 +25,12 @@
  *     a retry of an accepted email a no-op for 24 h); other 4xx -> failed.
  *   - Missing provider configuration -> retry (fix the secret; the DB gives
  *     up after 5 attempts).
+ *
+ * Every provider request is capped (Deps.providerTimeoutMs, lib.ts
+ * withTimeout); a timeout counts as "no HTTP answer" above (Twilio: failed,
+ * Resend and the sender lookup: retry). The run's time budget is checked
+ * before each message as well as before each claim: rows of a claimed batch
+ * that were not started in time are released back to 'queued' unattempted.
  */
 import { fromWithDisplayName } from "../_shared/email.ts";
 import { EnvError } from "../_shared/env.ts";
@@ -304,13 +310,16 @@ export interface QueueRunSummary {
   cancelled: number;
   /** Results that could not be recorded (rows left 'sending' for the sweep). */
   unrecorded: number;
+  /** Claimed rows handed back unattempted because the time budget ran out mid-batch. */
+  released: number;
   /** True when the run stopped at its limit/time budget with work possibly left. */
   more: boolean;
 }
 
 /**
- * Drains the queue in bounded batches until it is empty, `limit` messages
- * were claimed, or the time budget is spent (the next cron run continues;
+ * Drains the queue in bounded batches until it is empty (a claim returns
+ * nothing and no due message is left), `limit` messages were claimed, or
+ * the time budget is spent (the next cron run continues;
  * concurrent runs are safe because the claim skips locked rows).
  */
 export async function processQueue(
@@ -328,8 +337,10 @@ export async function processQueue(
     retried: 0,
     cancelled: 0,
     unrecorded: 0,
+    released: 0,
     more: false,
   };
+  let emptyClaims = 0;
 
   while (summary.claimed < options.limit) {
     if (Date.now() >= deadline) {
@@ -345,21 +356,99 @@ export async function processQueue(
     const results = await mapWithConcurrency(
       gate.messages,
       concurrency,
-      (item) =>
-        item.retry
-          ? recordOutcome(svc, item.msg, { status: "queued", error: item.retry })
-          : deliverClaimed(svc, item.msg),
+      async (item): Promise<DeliveryResult | "released"> => {
+        if (item.retry) {
+          return await recordOutcome(svc, item.msg, { status: "queued", error: item.retry });
+        }
+        // The budget is also checked per message, not only per claim: when
+        // provider calls are slow, a claimed row no lane reached in time is
+        // handed back untouched instead of being left 'sending' for the
+        // stuck-send sweep (which fails it for good).
+        if (Date.now() >= deadline && await releaseClaim(svc, item.msg)) return "released";
+        return await deliverClaimed(svc, item.msg);
+      },
     );
     for (const result of results) {
-      if (!result.recorded) summary.unrecorded += 1;
+      if (result === "released") summary.released += 1;
+      else if (!result.recorded) summary.unrecorded += 1;
       else if (result.outcome === "sent") summary.sent += 1;
       else if (result.status === "queued") summary.retried += 1;
       else summary.failed += 1;
     }
-    if (batch.length < want) break;
+    if (summary.released > 0) {
+      summary.more = true;
+      break;
+    }
+    if (batch.length < want) {
+      // The claim settles rows it will not send (withdrawn -> cancelled, SMS
+      // without a shop number -> failed) and returns only the rest, so a
+      // short or even empty batch does not mean the queue is drained: stop
+      // only when no due message is left, or after a few empty claims in a
+      // row (rows another worker holds locked stay 'queued' but are skipped).
+      if (!(await hasDueQueued(svc))) break;
+      emptyClaims = batch.length === 0 ? emptyClaims + 1 : 0;
+      if (emptyClaims >= MAX_EMPTY_CLAIMS) {
+        summary.more = true;
+        break;
+      }
+    } else {
+      emptyClaims = 0;
+    }
     if (summary.claimed >= options.limit) summary.more = true;
   }
   return summary;
+}
+
+/** Consecutive empty claims after which a run stops even though due rows remain. */
+export const MAX_EMPTY_CLAIMS = 3;
+
+/**
+ * Whether any outbound message is still queued and due. A failed lookup
+ * counts as "no" (the next cron run continues).
+ */
+async function hasDueQueued(svc: Services): Promise<boolean> {
+  const { data, error } = await svc.admin.from("messages").select("id")
+    .eq("status", "queued").eq("direction", "outbound")
+    .lte("send_after", svc.now().toISOString())
+    .limit(1);
+  if (error) {
+    svc.log.warn("message_queue_check_failed", { error: new DbError("messages lookup", error) });
+    return false;
+  }
+  return Array.isArray(data) && data.length > 0;
+}
+
+/**
+ * Hands a claimed but never-attempted message back to the queue exactly as
+ * the claim found it ('queued', the attempt the claim counted undone,
+ * send_after unchanged, so the next run picks it up first). Compare-and-set
+ * on (status 'sending', attempts), so it never touches a row something else
+ * has moved on. False when the row could not be released; the caller then
+ * attempts it after all rather than leave it to the stuck-send sweep.
+ */
+export async function releaseClaim(svc: Services, msg: ClaimedMessage): Promise<boolean> {
+  const { data, error } = await svc.admin.from("messages")
+    .update({ status: "queued", attempts: Math.max(0, msg.attempts - 1), claimed_at: null })
+    .eq("shop_id", msg.shop_id).eq("id", msg.id).eq("status", "sending")
+    .eq("attempts", msg.attempts)
+    .select("id");
+  if (error) {
+    svc.log.error("message_release_failed", {
+      message_id: msg.id,
+      error: new DbError("messages release", error),
+    });
+    return false;
+  }
+  const released = Array.isArray(data) && data.length === 1;
+  if (released) {
+    svc.log.info("message_released", {
+      message_id: msg.id,
+      shop_id: msg.shop_id,
+      channel: msg.channel,
+      reason: "time_budget",
+    });
+  }
+  return released;
 }
 
 // ---------------------------------------------------------------------------

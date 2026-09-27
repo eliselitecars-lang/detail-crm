@@ -7,7 +7,7 @@
 import { jsonResponse } from "../_shared/testing/fake_fetch.ts";
 import { FakeRpcError, FakeSupabase, type Row } from "../_shared/testing/fake_supabase.ts";
 import { memoryLogger } from "../_shared/testing/logger.ts";
-import { makeHandler } from "./index.ts";
+import { type Deps, makeHandler } from "./index.ts";
 
 export const SHOP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 export const OTHER_SHOP = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -41,6 +41,16 @@ export const CRON_SECRET = "fake-cron-secret-0123456789abcdef";
 export const NOW = new Date("2026-09-27T15:00:00.000Z");
 
 const TECH_KEYS = ["on_the_way", "job_started", "job_completed"];
+/** comms_is_appointment_key / comms_is_marketing_key (0033). */
+const APPOINTMENT_KEYS = [
+  "booking_request_received",
+  "booking_confirmed",
+  "appointment_reminder",
+  "on_the_way",
+  "job_started",
+];
+const MARKETING_KEYS = ["follow_up"];
+export const APP_BASE = "https://app.example.com";
 
 function member(id: string, userId: string, role: string, shopId = SHOP): Row {
   return { id, shop_id: shopId, user_id: userId, role, display_name: role, active: true };
@@ -80,8 +90,15 @@ function roleOf(db: FakeSupabase, userId: string | null, shopId: string): string
   return (row?.role as string | undefined) ?? null;
 }
 
+/** created_at for rows the fake RPCs insert: NOW + a counter, so insertion order is visible. */
+let insertSeq = 0;
+
 function insertMessage(db: FakeSupabase, row: Row): Row {
-  const full = queuedMessage(row);
+  insertSeq += 1;
+  const full = queuedMessage({
+    created_at: new Date(NOW.getTime() + insertSeq).toISOString(),
+    ...row,
+  });
   db.seed("messages", [...db.table("messages"), full]);
   return full;
 }
@@ -93,6 +110,33 @@ function updateMessage(db: FakeSupabase, id: string, patch: Row): Row {
   Object.assign(row, patch);
   db.seed("messages", rows);
   return row;
+}
+
+/** comms_customer_vars (0033): customer/shop variables, no job. */
+function customerVars(db: FakeSupabase, shopId: string, customerId: string): Row {
+  const shop = db.table("shops").find((s) => s.id === shopId);
+  const customer = db.table("customers").find((c) => c.id === customerId && c.shop_id === shopId);
+  return {
+    customer_first_name: customer ? (customer.first_name ?? "there") : null,
+    customer_name: customer?.first_name ?? null,
+    shop_name: shop?.name ?? null,
+    shop_phone: shop?.phone ?? null,
+    review_link: shop?.review_url ?? null,
+    booking_page_link: `${APP_BASE}/book/${shop?.slug}`,
+  };
+}
+
+/** comms_job_vars (0033): customer vars + the job's (null for an unknown job). */
+function jobVars(db: FakeSupabase, jobId: string): Row | null {
+  const job = db.table("jobs").find((j) => j.id === jobId);
+  if (!job) return null;
+  return {
+    ...customerVars(db, String(job.shop_id), String(job.customer_id)),
+    vehicle: job.vehicle ?? null,
+    booking_link: `${APP_BASE}/booking/${job.id}`,
+    quote_link: job.quote_token ? `${APP_BASE}/q/${job.quote_token}` : null,
+    invoice_link: job.invoice_token ? `${APP_BASE}/i/${job.invoice_token}` : null,
+  };
 }
 
 /** Emulates enqueue_customer_template's consent/address checks; returns the new id or null. */
@@ -107,6 +151,13 @@ function enqueueTemplate(
 ): string | null {
   const customer = db.table("customers").find((c) => c.id === customerId && c.shop_id === shopId);
   if (!customer) throw new FakeRpcError("P0002", "customer not found");
+  const job = jobId ? db.table("jobs").find((j) => j.id === jobId) : undefined;
+  if (
+    job && (job.status === "cancelled" || job.status === "no_show") &&
+    APPOINTMENT_KEYS.includes(key)
+  ) {
+    return null;
+  }
   const template = db.table("message_templates").find((t) =>
     t.shop_id === shopId && t.key === key && t.channel === channel
   );
@@ -115,6 +166,12 @@ function enqueueTemplate(
   if (channel === "sms") {
     if (!customer.phone || customer.sms_opted_out_at || !shop?.sms_from_number) return null;
   } else if (!customer.email || customer.email_opted_out_at) return null;
+  if (
+    MARKETING_KEYS.includes(key) &&
+    (channel === "sms" ? customer.sms_opt_in : customer.email_opt_in) !== true
+  ) {
+    return null;
+  }
   const row = insertMessage(db, {
     shop_id: shopId,
     customer_id: customerId,
@@ -143,6 +200,8 @@ export function setup(
     concurrency?: number;
     /** Numbers on the fake Twilio account (default: SHOP_NUMBER bound to SHOP). */
     twilioNumbers?: Row[];
+    /** Extra handler dependencies (timeouts, time budget). */
+    deps?: Pick<Deps, "providerTimeoutMs" | "queueTimeBudgetMs">;
   } = {},
 ): Fixture {
   const db = new FakeSupabase({
@@ -169,6 +228,8 @@ export function setup(
           email: "hello@shine.example",
           phone: "+12055550100",
           sms_from_number: SHOP_NUMBER,
+          slug: "shine",
+          review_url: "https://g.page/r/shine/review",
         },
         { id: OTHER_SHOP, name: "Other", email: null, phone: null, sms_from_number: null },
       ],
@@ -209,9 +270,15 @@ export function setup(
         },
       ],
       jobs: [
-        { id: JOB, shop_id: SHOP, customer_id: CUSTOMER },
-        { id: UNASSIGNED_JOB, shop_id: SHOP, customer_id: CUSTOMER },
-        { id: OPTED_OUT_JOB, shop_id: SHOP, customer_id: OPTED_OUT_CUSTOMER },
+        {
+          id: JOB,
+          shop_id: SHOP,
+          customer_id: CUSTOMER,
+          status: "scheduled",
+          vehicle: "2021 Tesla Model 3",
+        },
+        { id: UNASSIGNED_JOB, shop_id: SHOP, customer_id: CUSTOMER, status: "scheduled" },
+        { id: OPTED_OUT_JOB, shop_id: SHOP, customer_id: OPTED_OUT_CUSTOMER, status: "scheduled" },
       ],
       job_assignments: [
         {
@@ -363,11 +430,32 @@ export function setup(
     }
     const shop = ctx.db.table("shops").find((s) => s.sms_from_number === args.p_to);
     if (!shop) return [];
+    const existing = args.p_provider_id
+      ? ctx.db.table("messages").find((m) => m.provider_message_id === args.p_provider_id)
+      : undefined;
+    if (existing) {
+      // Twilio retry: idempotent per MessageSid, no keyword action.
+      return [{
+        message_id: existing.id,
+        shop_id: existing.shop_id,
+        customer_id: existing.customer_id,
+        opt_action: null,
+      }];
+    }
     const customer = ctx.db.table("customers").find((c) =>
       c.shop_id === shop.id && c.phone === args.p_from
     );
-    const word = String(args.p_body).trim().toUpperCase();
+    const word = String(args.p_body).trim().replace(/[\s\p{P}\p{S}]+$/u, "").toUpperCase();
     let action: string | null = null;
+    if (word === "START" || word === "UNSTOP") {
+      // 0033: START/UNSTOP opt back in (comms_unsuppress); YES is not handled there.
+      action = "opt_in";
+      const customers = ctx.db.table("customers");
+      for (const c of customers) {
+        if (c.shop_id === shop.id && c.phone === args.p_from) c.sms_opted_out_at = null;
+      }
+      ctx.db.seed("customers", customers);
+    }
     if (word === "STOP") {
       action = "opt_out";
       const customers = ctx.db.table("customers");
@@ -394,6 +482,23 @@ export function setup(
       customer_id: customer?.id ?? null,
       opt_action: action,
     }];
+  });
+
+  db.onRpc("comms_unsuppress", (args, ctx) => {
+    if (ctx.role !== "service_role") throw new FakeRpcError("42501", "permission denied");
+    const customers = ctx.db.table("customers");
+    let changed = false;
+    for (const c of customers) {
+      if (
+        c.shop_id === args.p_shop_id && args.p_channel === "sms" && c.phone === args.p_address &&
+        c.sms_opted_out_at
+      ) {
+        c.sms_opted_out_at = null;
+        changed = true;
+      }
+    }
+    ctx.db.seed("customers", customers);
+    return changed;
   });
 
   db.onRpc("queue_message", (args, ctx) => {
@@ -443,6 +548,12 @@ export function setup(
         throw new FakeRpcError("42501", "technicians are restricted");
       }
     }
+    if (
+      (job.status === "cancelled" || job.status === "no_show") &&
+      APPOINTMENT_KEYS.includes(String(args.p_key))
+    ) {
+      throw new FakeRpcError("55000", "this appointment is cancelled");
+    }
     return enqueueTemplate(
       ctx.db,
       String(job.shop_id),
@@ -465,6 +576,16 @@ export function setup(
       (args.p_job_id as string | undefined) ?? null,
       (args.p_sent_by as string | undefined) ?? null,
     );
+  });
+
+  db.onRpc("comms_customer_vars", (args, ctx) => {
+    if (ctx.role !== "service_role") throw new FakeRpcError("42501", "permission denied");
+    return customerVars(ctx.db, String(args.p_shop_id), String(args.p_customer_id));
+  });
+
+  db.onRpc("comms_job_vars", (args, ctx) => {
+    if (ctx.role !== "service_role") throw new FakeRpcError("42501", "permission denied");
+    return jobVars(ctx.db, String(args.p_job_id));
   });
 
   db.onRpc("public_unsubscribe", (args, ctx) => {
@@ -516,6 +637,7 @@ export function setup(
     logger: logs.logger,
     now: () => NOW,
     concurrency: options.concurrency ?? 3,
+    ...options.deps,
   });
   return { db, handler, logs };
 }

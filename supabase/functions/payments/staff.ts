@@ -37,6 +37,7 @@ import {
   ephemeralKey,
   expireOpenSessions,
   findAccount,
+  IDEMPOTENCY_WINDOW_MS,
   type InvoiceRow,
   loadAccount,
   loadCustomer,
@@ -152,9 +153,11 @@ async function recordStripePayment(
 }
 
 /**
- * Expires the invoice's open Checkout pay links before a staff attempt
- * charges it (one live payment instrument per invoice). 409 when one of them
- * was paid in the meantime.
+ * Expires the invoice's open Checkout pay links, and its job's open deposit
+ * links, before a staff attempt charges it (one live payment instrument per
+ * invoice: a deposit payment is attached to the job's invoice, so a deposit
+ * link paid after the balance was collected would overpay it). 409 when one
+ * of them was paid in the meantime.
  */
 async function supersedePayLinks(
   s: Services,
@@ -169,7 +172,7 @@ async function supersedePayLinks(
     s,
     account,
     customerId,
-    sessionFor.invoice(invoice.shop_id, invoice.id),
+    sessionFor.invoiceOrDeposit(invoice.shop_id, invoice),
     undefined,
     { refuseCompleted: true },
   );
@@ -209,7 +212,9 @@ export async function paymentSheet(
   const keyFor = async (invoice: InvoiceRow) => {
     const balance = assertPayable(invoice);
     const amount = requestedAmount(input.amount_cents, balance);
-    const tip = boundedTip(input.tip_cents, balance);
+    // Bounded by what this sheet collects, never the balance: a tip is
+    // fee-free and never lowers the balance.
+    const tip = boundedTip(input.tip_cents, amount);
     const total = chargeable(amount + tip, shop.currency);
     const parts = [invoice.id, amount, tip, balance, stripeCustomer ?? "no_customer", part];
     return {
@@ -350,8 +355,9 @@ async function freshIntent(
 /**
  * Releases an invoice: cancels its unconfirmed PaymentSheet intents (their
  * pending rows block void / pricing / line-item edits) and expires its open
- * Checkout sessions (so an old pay link cannot be paid after a void or
- * edit). Call it when a sheet is dismissed and before voiding or editing.
+ * Checkout sessions and its job's open deposit sessions (so an old pay or
+ * deposit link cannot be paid after a void or edit; the public pages open a
+ * fresh one for what is still due). Call it when a sheet is dismissed and before voiding or editing.
  * Payments already processing are reported, never cancelled.
  */
 export async function cancelOpenPayments(
@@ -377,7 +383,7 @@ export async function cancelOpenPayments(
       s,
       account,
       customer.stripe_customer_id,
-      sessionFor.invoice(invoice.shop_id, invoice.id),
+      sessionFor.invoiceOrDeposit(invoice.shop_id, invoice),
     )
     : [];
   return {
@@ -729,6 +735,11 @@ export async function refundKey(
   );
 }
 
+/** Refund metadata marking a request made without a nonce (and its amount). */
+function windowScope(requested: number | undefined): string {
+  return `window:${requested ?? "full"}`;
+}
+
 export async function refund(
   s: Services,
   req: Request,
@@ -811,11 +822,34 @@ export async function refund(
     payment_status: await record(total),
   });
 
-  // A retry of an attempt Stripe already took (response lost): hand back
-  // that refund. It is already part of charge.amount_refunded.
-  const earlier = refunds.find((r) => r.metadata?.request_key === key);
-  if (earlier && !DEAD_REFUND.has(earlier.status ?? "")) {
-    return await result(earlier, Math.min(alreadyRefunded, charged));
+  // An attempt Stripe already took. With a request_nonce it is a retry of
+  // the same attempt (response lost): hand back that refund, which is
+  // already part of charge.amount_refunded. Without a nonce a retry and a
+  // deliberate second refund of the same amount look alike (same key in the
+  // 10-minute bucket, or the same amount within IDEMPOTENCY_WINDOW_MS), so
+  // the request is refused with 409 possible_duplicate_refund instead of a
+  // success that refunded nothing: the caller sees the earlier refund and
+  // sends a fresh request_nonce if a second refund is really meant.
+  const scope = windowScope(input.amount_cents);
+  const earlier = refunds.find((r) =>
+    !DEAD_REFUND.has(r.status ?? "") &&
+    (r.metadata?.request_key === key ||
+      (!input.request_nonce && r.metadata?.payment_id === payment.id &&
+        r.metadata?.retry_scope === scope && typeof r.created === "number" &&
+        r.created * 1000 >= s.now - IDEMPOTENCY_WINDOW_MS))
+  );
+  if (earlier) {
+    const done = await result(earlier, Math.min(alreadyRefunded, charged));
+    if (input.request_nonce) return done;
+    throw errors.conflict(
+      "A refund of this amount was just made for this payment. Nothing new was refunded.",
+      {
+        reason: "possible_duplicate_refund",
+        refund_id: done.refund_id,
+        amount_cents: done.amount_cents,
+        refunded_cents_total: done.refunded_cents_total,
+      },
+    );
   }
 
   const refundable = charged - alreadyRefunded;
@@ -840,6 +874,7 @@ export async function refund(
         payment_id: payment.id,
         member_id: membership.id,
         request_key: key,
+        retry_scope: input.request_nonce ? null : scope,
       }),
     },
     onAccount(account.stripe_account_id, { idempotencyKey: key }),

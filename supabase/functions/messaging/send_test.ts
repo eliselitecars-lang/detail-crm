@@ -122,6 +122,251 @@ Deno.test("send: customer-level template without a job (manager) uses the servic
   await expectError(other, 404, "not_found");
 });
 
+Deno.test("send: job-only templates without a job are refused (placeholders would go out blank)", async () => {
+  const { db, handler } = setup();
+  for (
+    const key of [
+      "booking_request_received",
+      "booking_confirmed",
+      "appointment_reminder",
+      "on_the_way",
+      "job_started",
+      "job_completed",
+      "quote_sent",
+      "invoice_sent",
+      "payment_receipt",
+    ]
+  ) {
+    for (const channel of ["sms", "email"]) {
+      const err = await expectError(
+        await handler(
+          sendRequest("tok-manager", { customer_id: CUSTOMER, channel, template_key: key }),
+        ),
+        422,
+        "unprocessable",
+      );
+      assertEquals(err.details, { reason: "job_required" }, key);
+    }
+  }
+  assertEquals(db.requests.some((r) => r.target === "enqueue_customer_template"), false);
+  assertEquals(db.table("messages").length, 0);
+  assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 0);
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+
+  // The same template with its job goes out through the job path.
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        job_id: JOB,
+        channel: "email",
+        template_key: "job_completed",
+      }),
+    ),
+  );
+  assertEquals(out.status, "sent");
+});
+
+Deno.test("send: customer-level templates (follow_up, review_request, membership_welcome) need no job", async () => {
+  const { db, handler } = setup();
+  db.seed(
+    "message_templates",
+    db.table("message_templates").map((t) => ({ ...t, enabled: true })),
+  );
+  for (const key of ["follow_up", "review_request", "membership_welcome"]) {
+    const res = await handler(
+      sendRequest("tok-manager", { customer_id: CUSTOMER, channel: "email", template_key: key }),
+    );
+    const body = await responseJson<Record<string, unknown>>(res);
+    // Never refused for lacking a job (a template the fixture lacks is template_disabled).
+    assert(
+      (body.details as { reason?: string } | undefined)?.reason !== "job_required",
+      `${key}: ${JSON.stringify(body)}`,
+    );
+  }
+  const queued = db.requests.filter((r) => r.target === "enqueue_customer_template");
+  assertEquals(queued.length, 3);
+  assert(queued.every((r) => r.role === "service_role"));
+});
+
+/** Replaces (or adds) the shop's template for (key, channel). */
+function useTemplate(
+  db: ReturnType<typeof setup>["db"],
+  key: string,
+  channel: string,
+  body: string,
+  subject: string | null = null,
+) {
+  db.seed("message_templates", [
+    ...db.table("message_templates").filter((t) => !(t.key === key && t.channel === channel)),
+    { shop_id: SHOP, key, channel, subject, body, enabled: true },
+  ]);
+}
+
+Deno.test("send: follow_up that mentions the vehicle needs a job (its {{vehicle}} would be blank)", async () => {
+  const { db, handler } = setup();
+  // The seeded default wording (0032).
+  useTemplate(
+    db,
+    "follow_up",
+    "sms",
+    "Hi {{customer_first_name}}, it has been a while since your last visit to {{shop_name}}. " +
+      "Ready to keep your {{vehicle}} looking its best? Book here: {{booking_page_link}}",
+  );
+  useTemplate(
+    db,
+    "follow_up",
+    "email",
+    "Regular care keeps your {{vehicle}} protected. Book: {{booking_page_link}}",
+    "Time for your next visit? - {{shop_name}}",
+  );
+  for (const channel of ["sms", "email"]) {
+    const err = await expectError(
+      await handler(
+        sendRequest("tok-manager", { customer_id: CUSTOMER, channel, template_key: "follow_up" }),
+      ),
+      422,
+      "unprocessable",
+    );
+    assertEquals(err.details, { reason: "job_required", variables: ["vehicle"] }, channel);
+  }
+  assertEquals(db.requests.some((r) => r.target === "enqueue_customer_template"), false);
+  assertEquals(db.table("messages").length, 0);
+
+  // With the job whose vehicle it is, it goes out.
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", { job_id: JOB, channel: "sms", template_key: "follow_up" }),
+    ),
+  );
+  assertEquals(out.status, "sent");
+
+  // A shop that reworded it without job details may still send it without a job.
+  useTemplate(db, "follow_up", "sms", "Hi {{ customer_first_name }}, book: {{booking_page_link}}");
+  const reworded = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "sms",
+        template_key: "follow_up",
+      }),
+    ),
+  );
+  assertEquals(reworded.status, "sent");
+});
+
+Deno.test("send: a review request is refused while the shop has no review link", async () => {
+  const { db, handler } = setup();
+  useTemplate(
+    db,
+    "review_request",
+    "sms",
+    "Thanks for choosing {{shop_name}}! We would really appreciate a review: {{review_link}}",
+  );
+  for (const reviewUrl of [null, "   "]) {
+    db.seed("shops", db.table("shops").map((s) => ({ ...s, review_url: reviewUrl })));
+    for (const body of [{ customer_id: CUSTOMER }, { job_id: JOB }]) {
+      const err = await expectError(
+        await handler(
+          sendRequest("tok-manager", { ...body, channel: "sms", template_key: "review_request" }),
+        ),
+        422,
+        "unprocessable",
+      );
+      assertEquals(err.details, { reason: "missing_link", variables: ["review_link"] });
+      assertEquals(
+        err.error,
+        "Add the shop's review link in settings before sending this message.",
+      );
+    }
+  }
+  assertEquals(db.table("messages").length, 0);
+  assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 0);
+
+  db.seed(
+    "shops",
+    db.table("shops").map((s) => ({ ...s, review_url: "https://g.page/r/shine/review" })),
+  );
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "sms",
+        template_key: "review_request",
+      }),
+    ),
+  );
+  assertEquals(out.status, "sent");
+});
+
+Deno.test("send: a job link the job does not have yet is refused, not sent blank", async () => {
+  const { db, handler } = setup();
+  useTemplate(db, "invoice_sent", "email", "Pay online: {{invoice_link}}", "Invoice");
+  const err = await expectError(
+    await handler(
+      sendRequest("tok-manager", { job_id: JOB, channel: "email", template_key: "invoice_sent" }),
+    ),
+    422,
+    "unprocessable",
+  );
+  assertEquals(err.details, { reason: "missing_link", variables: ["invoice_link"] });
+
+  db.seed(
+    "jobs",
+    db.table("jobs").map((j) =>
+      j.id === JOB ? { ...j, invoice_token: "0b3c9a5e-1111-4222-8333-944455556666" } : j
+    ),
+  );
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", { job_id: JOB, channel: "email", template_key: "invoice_sent" }),
+    ),
+  );
+  assertEquals(out.status, "sent");
+});
+
+Deno.test("send: missing marketing consent and closed appointments get their own reasons", async () => {
+  const { db, handler } = setup();
+  db.seed(
+    "customers",
+    db.table("customers").map((c) => c.id === CUSTOMER ? { ...c, sms_opt_in: false } : c),
+  );
+  const consent = await expectError(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "sms",
+        template_key: "follow_up",
+      }),
+    ),
+    422,
+    "unprocessable",
+  );
+  assertEquals(consent.details, { reason: "no_marketing_consent" });
+  assertEquals(consent.error, "This customer has not agreed to receive marketing text messages.");
+  // Transactional templates only need an address.
+  const transactional = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", { job_id: JOB, channel: "sms", template_key: "on_the_way" }),
+    ),
+  );
+  assertEquals(transactional.status, "sent");
+
+  for (const status of ["cancelled", "no_show"]) {
+    db.seed("jobs", db.table("jobs").map((j) => j.id === JOB ? { ...j, status } : j));
+    for (const token of ["tok-manager", "tok-tech"]) {
+      const closed = await expectError(
+        await handler(
+          sendRequest(token, { job_id: JOB, channel: "sms", template_key: "on_the_way" }),
+        ),
+        422,
+        "unprocessable",
+      );
+      assertEquals(closed.details, { reason: "appointment_closed" }, `${status} ${token}`);
+    }
+  }
+});
+
 Deno.test("send: technician may send on_the_way for an assigned job", async () => {
   const { db, handler } = setup();
   const out = await responseJson<SendResponse>(
@@ -536,4 +781,66 @@ Deno.test("send: a derived shop never reaches another tenant's customer or job",
   assertEquals(db.requests.filter((r) => r.kind === "rest").length, before);
   assertEquals(db.table("messages").length, 0);
   assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 0);
+});
+
+Deno.test("send: a retried request returns the original message instead of a second copy", async () => {
+  const { db, handler } = setup();
+  const request = () =>
+    sendRequest("tok-manager", { customer_id: CUSTOMER, channel: "sms", body: "See you at 10!" });
+  const first = await responseJson<SendResponse>(await handler(request()));
+  assertEquals(first.status, "sent");
+  // The response was lost; the app retries the same send.
+  const again = await responseJson<SendResponse>(await handler(request()));
+  assertEquals(again, first);
+  assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 1);
+  assertEquals(db.table("messages").length, 1);
+});
+
+Deno.test("send: a double tap delivers once", async () => {
+  const { db, handler } = setup();
+  const tap = () =>
+    sendRequest("tok-tech", { job_id: JOB, channel: "sms", template_key: "on_the_way" });
+  const [a, b] = await Promise.all([handler(tap()), handler(tap())]);
+  const outs = [await responseJson<SendResponse>(a), await responseJson<SendResponse>(b)];
+  assertEquals(outs[0]?.message_id, outs[1]?.message_id);
+  assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 1);
+  assertEquals(db.table("messages").length, 1);
+});
+
+Deno.test("send: different content, another sender, a failed original or an old one send again", async () => {
+  const { db, handler } = setup();
+  const sms = (token: string, body: string) =>
+    sendRequest(token, { customer_id: CUSTOMER, channel: "sms", body });
+  await (await handler(sms("tok-manager", "See you at 10!"))).body?.cancel();
+  await (await handler(sms("tok-manager", "Actually 11"))).body?.cancel();
+  await (await handler(sms("tok-owner", "See you at 10!"))).body?.cancel();
+  assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 3);
+
+  // An identical message that failed is not a reason to withhold the retry.
+  db.http.on("POST", TWILIO_MESSAGES_URL, () => jsonResponse({ code: 21614, message: "x" }, 400));
+  const failed = await responseJson<SendResponse>(await handler(sms("tok-manager", "Call me")));
+  assertEquals(failed.status, "failed");
+  db.http.on("POST", TWILIO_MESSAGES_URL, () => jsonResponse({ sid: "SM" + "9".repeat(32) }, 201));
+  const resent = await responseJson<SendResponse>(await handler(sms("tok-manager", "Call me")));
+  assertEquals(resent.status, "sent");
+  assert(resent.message_id !== failed.message_id);
+
+  // Outside the window it is a new message.
+  const stale = queuedMessage({
+    status: "sent",
+    body: "Still coming?",
+    sent_by: "10000000-0000-4000-8000-000000000002",
+    created_at: "2026-09-27T14:50:00.000Z",
+  });
+  const recent = queuedMessage({
+    status: "sent",
+    body: "Ready soon",
+    sent_by: "10000000-0000-4000-8000-000000000002",
+    created_at: "2026-09-27T14:58:00.000Z",
+  });
+  db.seed("messages", [...db.table("messages"), stale, recent]);
+  const late = await responseJson<SendResponse>(await handler(sms("tok-manager", "Still coming?")));
+  assert(late.message_id !== stale.id);
+  const dup = await responseJson<SendResponse>(await handler(sms("tok-manager", "Ready soon")));
+  assertEquals([dup.message_id, dup.status], [recent.id, "sent"]);
 });

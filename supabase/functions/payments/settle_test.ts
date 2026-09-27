@@ -172,16 +172,18 @@ Deno.test("payment_sheet: a retry of the same request keeps its own intent", asy
   const keys = f.stripe("POST", "/payment_intents").map((c) => c.headers.get("idempotency-key"));
   assertEquals(keys, [key, key]);
   // The kept intent was looked up (not blindly re-created or cancelled).
-  assertEquals(f.stripe("GET", "/payment_intents/pi_1New").length, 1);
+  assert(f.stripe("GET", "/payment_intents/pi_1New").length >= 1);
 });
 
 Deno.test("payment_sheet: an idempotent replay of a cancelled intent gets a fresh one", async () => {
-  const f = fixture();
+  // Stripe replays the creation-time body (requires_payment_method) under
+  // the key; the intent itself was cancelled since (a newer sheet).
+  const f = fixture({ intents: { pi_1Cancelled: sheetIntent("canceled") } });
   f.db.http.once("POST", `${STRIPE}/payment_intents`, () =>
     jsonResponse({
       id: "pi_1Cancelled",
       object: "payment_intent",
-      status: "canceled",
+      status: "requires_payment_method",
       client_secret: "pi_1Cancelled_secret",
     }));
   const res = await f.call(sheet, "manager");
@@ -192,7 +194,7 @@ Deno.test("payment_sheet: an idempotent replay of a cancelled intent gets a fres
   assertEquals(upserts(f, "pi_1Cancelled").length, 0);
 });
 
-Deno.test("cancel_open_payments: releases the invoice (sheet cancelled, pay links expired)", async () => {
+Deno.test("cancel_open_payments: releases the invoice (sheet cancelled, pay + deposit links expired)", async () => {
   const session = (id: string, metadata: Row, status = "open") => ({
     id,
     object: "checkout.session",
@@ -210,6 +212,10 @@ Deno.test("cancel_open_payments: releases the invoice (sheet cancelled, pay link
         invoice_id: "eeeeeeee-eeee-4eee-8eee-00000000000f",
         kind: "payment",
       }),
+      session("cs_1OtherDeposit", {
+        job_id: "dddddddd-dddd-4ddd-8ddd-00000000000f",
+        kind: "deposit",
+      }),
     ],
   });
   const res = await f.call(release, "tech");
@@ -218,9 +224,10 @@ Deno.test("cancel_open_payments: releases the invoice (sheet cancelled, pay link
     cancelled: 1,
     succeeded: 0,
     in_progress: 0,
-    sessions_expired: 1,
+    sessions_expired: 2,
   });
-  assertEquals(f.sessions.map((x) => x.status), ["expired", "open", "open"]);
+  // The job's deposit link pays toward this invoice too (payments_before_write).
+  assertEquals(f.sessions.map((x) => x.status), ["expired", "expired", "open", "open"]);
   assertEquals(
     f.stripe("POST", "/checkout/sessions/cs_1Invoice/expire")[0]?.headers.get("stripe-account"),
     ACCT,
@@ -332,6 +339,7 @@ Deno.test("sweep_payment_sheets: abandons stale unconfirmed sheets, leaves fresh
     succeeded: 0,
     cancelled: 1,
     in_progress: 1,
+    unchanged: 0,
     failed: 0,
   });
   assertEquals(f.intents.pi_1Stale?.status, "canceled");

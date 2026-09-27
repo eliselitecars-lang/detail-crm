@@ -11,8 +11,12 @@
  *         -> public_unsubscribe(token): the customer's email opt-out
  *            (idempotent); 200 {unsubscribed: true}, 404 for an unknown token
  *   GET   (a mail client opening the link in a browser) -> 303 to the
- *         /u/<token> page, which asks for confirmation. A GET never
+ *         web /u/<token> page, which asks for confirmation. A GET never
  *         unsubscribes (link scanners and prefetchers follow GETs).
+ *
+ * The /u/:token page belongs to the web app (see supabase/setup/twilio.md,
+ * "Campaign email unsubscribe"); this function cannot render it, because
+ * Supabase serves text/html answers to GETs on *.supabase.co as text/plain.
  */
 import { errors, HttpError } from "../_shared/errors.ts";
 import { publicToken } from "../_shared/schemas.ts";

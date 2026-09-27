@@ -19,7 +19,8 @@ import {
   stripeEvent,
   TEST_ENV,
 } from "../_shared/testing/mod.ts";
-import { refundStatus } from "./handlers.ts";
+import { adminClient } from "../_shared/supabase.ts";
+import { disputeNoteLine, refundStatus, withDisputeLine } from "./handlers.ts";
 import { makeHandler, type WebhookResponse } from "./index.ts";
 
 const SHOP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -74,16 +75,62 @@ function installMoneyRpcs(db: FakeSupabase): void {
     return mutate(db, "payments", (rows) => {
       let row = rows.find((r) => r.stripe_payment_intent_id === a.p_payment_intent_id);
       if (!row) {
+        // payments_before_write (0012) runs BEFORE the foreign keys are
+        // checked: linkage is derived from the parents that exist, and a
+        // supplied value contradicting one is 23514.
+        let customer = a.p_customer_id as string | null;
+        let job = a.p_job_id as string | null;
+        let invoiceId = a.p_invoice_id as string | null;
+        if (!invoiceId && job) {
+          invoiceId = (db.table("invoices").find((i) =>
+            i.job_id === job && i.shop_id === a.p_shop_id && i.status !== "void"
+          )?.id as string | undefined) ?? null;
+        }
+        const invoice = db.table("invoices").find((i) =>
+          i.id === invoiceId && i.shop_id === a.p_shop_id
+        );
+        const jobRow = db.table("jobs").find((j) => j.id === job && j.shop_id === a.p_shop_id);
+        if (invoiceId) {
+          if (!invoice) {
+            // a missing invoice skips the derivation; its foreign key fails below
+          } else if (job && job !== invoice.job_id) {
+            throw new FakeRpcError("23514", "payment job does not match the invoice's job");
+          } else if (customer && customer !== invoice.customer_id) {
+            throw new FakeRpcError(
+              "23514",
+              "payment customer does not match the invoice's customer",
+            );
+          } else {
+            customer = invoice.customer_id as string;
+            job = invoice.job_id as string;
+          }
+        } else if (jobRow) {
+          if (customer && customer !== jobRow.customer_id) {
+            throw new FakeRpcError("23514", "payment customer does not match the job's customer");
+          }
+          customer = jobRow.customer_id as string;
+        }
+        const membership = db.table("memberships").find((m) =>
+          m.id === a.p_membership_id && m.shop_id === a.p_shop_id
+        );
+        if (membership) {
+          if (customer && customer !== membership.customer_id) {
+            throw new FakeRpcError(
+              "23514",
+              "payment customer does not match the membership's customer",
+            );
+          }
+          customer = membership.customer_id as string;
+        }
         // payments_*_fk (0012): every linked record must exist in the shop
         for (
-          const [arg, table] of [
-            ["p_invoice_id", "invoices"],
-            ["p_job_id", "jobs"],
-            ["p_customer_id", "customers"],
-            ["p_membership_id", "memberships"],
+          const [id, table] of [
+            [invoiceId, "invoices"],
+            [job, "jobs"],
+            [customer, "customers"],
+            [a.p_membership_id, "memberships"],
           ] as const
         ) {
-          const id = a[arg];
           if (id && !db.table(table).some((r) => r.id === id && r.shop_id === a.p_shop_id)) {
             throw new FakeRpcError(
               "23503",
@@ -94,30 +141,11 @@ function installMoneyRpcs(db: FakeSupabase): void {
         if (a.p_membership_id ? a.p_kind !== "membership" : a.p_kind === "membership") {
           throw new FakeRpcError("23514", "payments_membership_kind");
         }
-        // payments_before_write: linkage derived from the parents
-        let customer = a.p_customer_id as string | null;
-        let job = a.p_job_id as string | null;
-        const jobRow = db.table("jobs").find((j) => j.id === job && j.shop_id === a.p_shop_id);
-        if (jobRow) customer = jobRow.customer_id as string;
-        const invoice = db.table("invoices").find((i) =>
-          i.id === a.p_invoice_id && i.shop_id === a.p_shop_id
-        );
-        if (invoice) {
-          if (customer && customer !== invoice.customer_id) {
-            throw new FakeRpcError("23514", "payment customer does not match the invoice's");
-          }
-          customer = invoice.customer_id as string;
-          job = invoice.job_id as string;
-        }
-        const membership = db.table("memberships").find((m) =>
-          m.id === a.p_membership_id && m.shop_id === a.p_shop_id
-        );
-        if (membership) customer = membership.customer_id as string;
         if (!customer) throw new FakeRpcError("23502", "customer_id is required");
         row = {
           id: crypto.randomUUID(),
           shop_id: a.p_shop_id,
-          invoice_id: a.p_invoice_id ?? null,
+          invoice_id: invoiceId,
           job_id: job,
           customer_id: customer,
           membership_id: a.p_membership_id ?? null,
@@ -223,6 +251,34 @@ function installMoneyRpcs(db: FakeSupabase): void {
     });
   });
 
+  // remove_customer_payment_method (0011): the newest remaining card of the
+  // customer becomes the default when the default is removed.
+  db.onRpc("remove_customer_payment_method", (a, { role }) => {
+    assertEquals(role, "service_role");
+    return mutate(db, "customer_payment_methods", (rows) => {
+      const i = rows.findIndex((r) =>
+        r.shop_id === a.p_shop_id && r.stripe_payment_method_id === a.p_stripe_payment_method_id
+      );
+      if (i < 0) return false;
+      const [removed] = rows.splice(i, 1);
+      if (removed?.is_default) {
+        const next = rows.filter((r) =>
+          r.shop_id === a.p_shop_id && r.customer_id === removed.customer_id
+        ).at(-1);
+        if (next) next.is_default = true;
+      }
+      return true;
+    });
+  });
+
+  db.onRpc("notify_shop_staff", (a, { role }) => {
+    assertEquals(role, "service_role");
+    if (a.p_job_id && !db.table("jobs").some((j) => j.id === a.p_job_id)) {
+      throw new FakeRpcError("P0002", "job not found in this shop");
+    }
+    return 1;
+  });
+
   db.onRpc("sync_stripe_subscription", (a) =>
     mutate(db, "memberships", (rows) => {
       let row = rows.find((m) => m.stripe_subscription_id === a.p_subscription_id);
@@ -303,6 +359,7 @@ class FakeStripe {
         "subscriptions",
         "invoices",
         "accounts",
+        "disputes",
       ]
     ) {
       db.http.on("GET", `${STRIPE}/${resource}/:id`, byId(resource));
@@ -427,6 +484,18 @@ function intent(overrides: Record<string, unknown> = {}): Record<string, unknown
   };
 }
 
+/** A card saved on (attached to) the shop customer's Stripe customer. */
+function paymentMethod(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "pm_1Card",
+    object: "payment_method",
+    type: "card",
+    customer: "cus_1Customer",
+    card: { brand: "visa", last4: "4242", exp_month: 12, exp_year: 2030 },
+    ...overrides,
+  };
+}
+
 function subscription(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: "sub_1Member",
@@ -515,6 +584,39 @@ function payment(db: FakeSupabase, pi = "pi_1Invoice"): Row {
   const row = db.table("payments").find((p) => p.stripe_payment_intent_id === pi);
   assertExists(row, `payment for ${pi}`);
   return row;
+}
+
+/** A pending attempt recorded by the payments function (sheet / saved card). */
+function trackAttempt(db: FakeSupabase, pi: string, overrides: Row = {}): Row {
+  const row: Row = {
+    id: crypto.randomUUID(),
+    shop_id: SHOP,
+    invoice_id: INVOICE,
+    job_id: JOB,
+    customer_id: CUSTOMER,
+    membership_id: null,
+    kind: "payment",
+    method: "card",
+    status: "pending",
+    amount_cents: 10_000,
+    tip_cents: 1_000,
+    refunded_cents: 0,
+    stripe_payment_intent_id: pi,
+    stripe_charge_id: null,
+    stripe_checkout_session_id: null,
+    card_brand: null,
+    card_last4: null,
+    note: null,
+    paid_at: null,
+    ...overrides,
+  };
+  db.seed("payments", [...db.table("payments"), row]);
+  return row;
+}
+
+/** Calls a faked RPC directly, as the service role. */
+async function adminRpc(db: FakeSupabase, fn: string, args: Record<string, unknown>) {
+  return await adminClient({ env: db.env(), fetch: db.http.fetch }).rpc(fn, args);
 }
 
 function ledger(db: FakeSupabase, id: string): Row | undefined {
@@ -654,7 +756,7 @@ Deno.test("payment_intent.succeeded with setup_future_usage saves the card (firs
       tip_cents: "0",
     },
   });
-  stripe.put(pi).put(charge());
+  stripe.put(pi).put(charge()).put(paymentMethod());
   await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
   assertEquals(payment(db).kind, "deposit");
   assertEquals(db.table("customer_payment_methods").map(({ id: _id, ...r }) => r), [{
@@ -669,8 +771,10 @@ Deno.test("payment_intent.succeeded with setup_future_usage saves the card (firs
   }]);
 });
 
-Deno.test("payment_intent.payment_failed / canceled record failed / cancelled payments", async () => {
+Deno.test("payment_intent.payment_failed / canceled update a tracked attempt to failed / cancelled", async () => {
   const { db, handler } = setup();
+  trackAttempt(db, "pi_1Failed");
+  trackAttempt(db, "pi_1Canceled");
   const failed = intent({
     id: "pi_1Failed",
     status: "requires_payment_method",
@@ -695,6 +799,55 @@ Deno.test("payment_intent.payment_failed / canceled record failed / cancelled pa
   assertEquals(db.http.callsTo("GET", `${STRIPE}/charges/:id`).length, 0);
 });
 
+Deno.test("payment_intent.payment_failed / canceled never create a payment row (nothing was received)", async () => {
+  // A declined public booking deposit (Checkout) or an abandoned intent: a
+  // payments row would be a money record that blocks deleting the booking and
+  // its customer (ON DELETE RESTRICT) and changing the job's customer.
+  const { db, stripe, logs, handler } = setup();
+  const deposit = {
+    shop_id: SHOP,
+    job_id: JOB,
+    customer_id: CUSTOMER,
+    kind: "deposit",
+    tip_cents: "0",
+    source: "booking_deposit_checkout",
+  };
+  const attempts: [string, Record<string, unknown>][] = [
+    ["payment_intent.payment_failed", {
+      id: "pi_1Declined",
+      status: "requires_payment_method",
+      last_payment_error: { type: "card_error", code: "card_declined" },
+    }],
+    ["payment_intent.canceled", { id: "pi_1Abandoned", status: "canceled" }],
+    // a declined PaymentSheet intent nobody recorded is not tracked either
+    ["payment_intent.payment_failed", {
+      id: "pi_1UntrackedSheet",
+      status: "requires_payment_method",
+      metadata: { ...(intent().metadata as Row), source: "payment_sheet" },
+    }],
+  ];
+  for (const [type, pi] of attempts) {
+    const res = await ok(
+      await deliver(
+        handler,
+        event(type, intent({ amount_received: 0, latest_charge: null, metadata: deposit, ...pi })),
+      ),
+    );
+    assertEquals(res.result, "ignored");
+  }
+  assertEquals(db.table("payments"), []);
+  assertEquals(rpcCalls(db, "upsert_stripe_payment").length, 0);
+  assertEquals(
+    logs.events("stripe_event_ignored").filter((e) => e.reason === "no_money_received").length,
+    3,
+  );
+  // The customer then pays with another card: recorded as usual.
+  const paid = intent({ id: "pi_1Declined", metadata: deposit });
+  stripe.put(paid).put(charge({ payment_intent: "pi_1Declined" }));
+  await ok(await deliver(handler, event("payment_intent.succeeded", paid)));
+  assertEquals(payment(db, "pi_1Declined").status, "succeeded");
+});
+
 Deno.test("payment_intent.payment_failed: a declined PaymentSheet intent stays open (pending) until settled", async () => {
   const { db, logs, handler } = setup();
   const sheetMetadata = {
@@ -714,6 +867,8 @@ Deno.test("payment_intent.payment_failed: a declined PaymentSheet intent stays o
     },
   });
   // payment_sheet recorded the attempt as pending when it created the intent
+  trackAttempt(db, "pi_1Sheet");
+  trackAttempt(db, "pi_1SavedCard");
   const first = await ok(await deliver(handler, event("payment_intent.payment_failed", declined)));
   assertEquals(first.result, "applied");
   // Still confirmable with another card: pending, so payment_sheet supersession,
@@ -752,6 +907,7 @@ Deno.test("payment_intent.payment_failed: a declined PaymentSheet intent stays o
 Deno.test("payment_intent.payment_failed: a declined sheet later confirmed with another card is recorded", async () => {
   const { db, stripe, handler } = setup();
   const metadata = { ...(intent().metadata as Record<string, string>), source: "payment_sheet" };
+  trackAttempt(db, "pi_1Invoice");
   await ok(
     await deliver(
       handler,
@@ -1270,7 +1426,7 @@ Deno.test("out of order: an updated snapshot delivered after deletion never revi
 Deno.test("checkout.session.completed (payment): paid -> succeeded with the session id; card saved", async () => {
   const { db, stripe, handler } = setup();
   const pi = intent({ setup_future_usage: "off_session" });
-  stripe.put(pi).put(charge());
+  stripe.put(pi).put(charge()).put(paymentMethod());
   const session = {
     id: "cs_test_1Invoice",
     object: "checkout.session",
@@ -1486,6 +1642,41 @@ Deno.test("non-card Stripe methods are flagged on the row (stored as card, the o
   assertEquals(payment(cardDb.db).note, null);
 });
 
+Deno.test("non-card Stripe methods: a clearing (unpaid) Checkout bank debit is flagged while pending", async () => {
+  const { db, stripe, logs, handler } = setup();
+  const pi = intent({
+    status: "processing",
+    amount_received: 0,
+    payment_method_types: ["card", "us_bank_account"],
+  });
+  const clearing = charge({
+    status: "pending",
+    payment_method_details: { type: "us_bank_account", us_bank_account: { last4: "6789" } },
+  });
+  stripe.put(pi).put(clearing);
+  await ok(
+    await deliver(
+      handler,
+      event("checkout.session.completed", {
+        id: "cs_1Ach",
+        object: "checkout.session",
+        mode: "payment",
+        payment_status: "unpaid",
+        payment_intent: "pi_1Invoice",
+        metadata: pi.metadata,
+      }),
+    ),
+  );
+  const row = payment(db);
+  assertEquals([row.status, row.method, row.card_last4], ["pending", "card", null]);
+  assert(String(row.note).includes("us bank account (not a card)"), String(row.note));
+  assertEquals(logs.events("stripe_non_card_payment").length, 1);
+  // The later success keeps the note (never overwritten) and records the money.
+  stripe.put(intent()).put(charge({ payment_method_details: clearing.payment_method_details }));
+  await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
+  assertEquals([payment(db).status, payment(db).note], ["succeeded", row.note]);
+});
+
 Deno.test("checkout.session.completed (setup): the card is saved; the first card is default", async () => {
   const { db, stripe, handler } = setup();
   stripe.put({
@@ -1563,6 +1754,32 @@ Deno.test("checkout.session.completed (subscription): links the subscription to 
   assertEquals(rpcCalls(db, "sync_stripe_subscription")[0]?.p_membership_id, MEMBERSHIP);
 });
 
+Deno.test("customer.subscription.updated: records the price Stripe bills, not the plan's", async () => {
+  const { db, stripe, handler } = setup();
+  const billed = subscription({
+    items: {
+      object: "list",
+      data: [{
+        id: "si_1",
+        quantity: 1,
+        current_period_end: 1_791_600_000,
+        price: {
+          id: "price_1Old",
+          unit_amount: 5000,
+          recurring: { interval: "month", interval_count: 1 },
+        },
+      }],
+    },
+  });
+  stripe.put(billed);
+  await ok(await deliver(handler, event("customer.subscription.updated", billed)));
+  const call = rpcCalls(db, "sync_stripe_subscription")[0];
+  assertEquals(
+    [call?.p_price_id, call?.p_price_cents, call?.p_interval, call?.p_interval_count],
+    ["price_1Old", 5000, "month", 1],
+  );
+});
+
 // ---------------------------------------------------------------------------
 // setup_intent.succeeded
 // ---------------------------------------------------------------------------
@@ -1574,6 +1791,7 @@ Deno.test("setup_intent.succeeded saves the card; later cards are not default", 
       id: pm,
       object: "payment_method",
       type: "card",
+      customer: "cus_1Customer",
       card: { brand: "visa", last4, exp_month: 1, exp_year: 2029 },
     });
     await ok(
@@ -1608,6 +1826,7 @@ Deno.test("setup_intent.succeeded maps the Stripe customer when metadata has no 
     id: "pm_1Mapped",
     object: "payment_method",
     type: "card",
+    customer: "cus_1Customer",
     card: { brand: "visa", last4: "9999", exp_month: 5, exp_year: 2030 },
   });
   const si = {
@@ -1653,6 +1872,7 @@ Deno.test("setup_intent.succeeded: a non-card method or a foreign customer id is
     id: "pm_1Card2",
     object: "payment_method",
     type: "card",
+    customer: "cus_1Customer",
     card: { brand: "visa", last4: "1234", exp_month: 1, exp_year: 2030 },
   });
   // customer_id of another shop: the SQL helper refuses it (P0002) -> ignored, not retried
@@ -1949,4 +2169,482 @@ Deno.test("account.updated for an account that is not the event's, or unknown, i
     db.table("shop_stripe_accounts").find((r) => r.shop_id === OTHER_SHOP)?.charges_enabled,
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// A job whose customer changed while its deposit link was open
+// ---------------------------------------------------------------------------
+
+const NEW_CUSTOMER = "33333333-3333-4333-8333-333333333333";
+
+/**
+ * The deposit Checkout was opened for CUSTOMER (metadata), then staff moved
+ * the job to NEW_CUSTOMER (allowed: no invoice / payment yet). The fake's
+ * payments_before_write raises 23514 exactly like 0012 does.
+ */
+function customerChangedSetup(options: { invoiceFor?: string; payerDeleted?: boolean } = {}) {
+  const ctx = setup();
+  const { db, stripe } = ctx;
+  db.seed("jobs", [{ id: JOB, shop_id: SHOP, customer_id: NEW_CUSTOMER }]);
+  db.seed(
+    "invoices",
+    options.invoiceFor
+      ? [{ id: INVOICE, shop_id: SHOP, job_id: JOB, customer_id: options.invoiceFor }]
+      : [],
+  );
+  db.seed("customers", [
+    ...(options.payerDeleted
+      ? []
+      : [{ id: CUSTOMER, shop_id: SHOP, stripe_customer_id: "cus_1Customer" }]),
+    { id: NEW_CUSTOMER, shop_id: SHOP, stripe_customer_id: null },
+    { id: OTHER_CUSTOMER, shop_id: OTHER_SHOP, stripe_customer_id: "cus_1Other" },
+  ]);
+  const pi = intent({
+    id: "pi_1Deposit",
+    amount: 5_000,
+    amount_received: 5_000,
+    latest_charge: "ch_1Deposit",
+    setup_future_usage: "off_session",
+    metadata: {
+      shop_id: SHOP,
+      job_id: JOB,
+      customer_id: CUSTOMER,
+      kind: "deposit",
+      tip_cents: "0",
+      source: "booking_deposit_checkout",
+    },
+  });
+  stripe.put(pi).put(paymentMethod()).put(
+    charge({ id: "ch_1Deposit", amount: 5_000, amount_captured: 5_000, payment_intent: pi.id }),
+  );
+  return { ...ctx, pi };
+}
+
+Deno.test("customer changed: the fake raises 23514 like payments_before_write (0012)", async () => {
+  const { db } = customerChangedSetup();
+  const { error } = await adminRpc(db, "upsert_stripe_payment", {
+    p_shop_id: SHOP,
+    p_payment_intent_id: "pi_1Probe",
+    p_status: "succeeded",
+    p_amount_cents: 5_000,
+    p_kind: "deposit",
+    p_method: "card",
+    p_job_id: JOB,
+    p_customer_id: CUSTOMER,
+  });
+  assertEquals(error?.code, "23514");
+});
+
+Deno.test("customer changed: a deposit paid through the old customer's link is recorded, not failed forever", async () => {
+  const { db, logs, handler, pi } = customerChangedSetup();
+  const session = depositSession(pi);
+  const res = await ok(await deliver(handler, event("checkout.session.completed", session)));
+  assertEquals(res.result, "applied");
+  const row = payment(db, "pi_1Deposit");
+  // Kept with the payer (whose card paid), unapplied, like 0012 does for
+  // money that arrives for a void invoice of a job that changed customer.
+  assertEquals(
+    [row.status, row.kind, row.customer_id, row.job_id, row.invoice_id, row.amount_cents],
+    ["succeeded", "deposit", CUSTOMER, null, null, 5_000],
+  );
+  assert(String(row.note).includes("moved to another customer"), String(row.note));
+  assertEquals(logs.events("stripe_payment_relinked")[0]?.changed, "job");
+  // the payer's card is saved for the payer
+  assertEquals(db.table("customer_payment_methods")[0]?.customer_id, CUSTOMER);
+
+  // The intent event and Stripe's redelivery of the session find the row.
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  await ok(await deliver(handler, event("checkout.session.completed", session)));
+  assertEquals(db.table("payments").length, 1);
+  assertEquals(payment(db, "pi_1Deposit").note, row.note);
+});
+
+Deno.test("customer changed: an invoice created for the new customer in between (invoice branch 23514)", async () => {
+  const { db, handler, pi } = customerChangedSetup({ invoiceFor: NEW_CUSTOMER });
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  const row = payment(db, "pi_1Deposit");
+  assertEquals([row.customer_id, row.job_id, row.invoice_id], [CUSTOMER, null, null]);
+  assert(String(row.note).includes("moved to another customer"), String(row.note));
+});
+
+Deno.test("customer changed: a refund arriving first records the deposit too", async () => {
+  const { db, stripe, handler, pi } = customerChangedSetup();
+  const refunded = charge({
+    id: "ch_1Deposit",
+    amount: 5_000,
+    amount_captured: 5_000,
+    amount_refunded: 5_000,
+    refunded: true,
+    payment_intent: pi.id,
+  });
+  stripe.put(refunded);
+  const res = await ok(await deliver(handler, event("charge.refunded", refunded)));
+  assertEquals(res.result, "applied");
+  assertEquals(
+    [payment(db, "pi_1Deposit").status, payment(db, "pi_1Deposit").customer_id],
+    ["refunded", CUSTOMER],
+  );
+});
+
+Deno.test("customer changed: a payer no longer in the CRM leaves the deposit on the job", async () => {
+  // e.g. the duplicate customer the public form created was merged into the
+  // job's new customer and deleted; the Stripe customer maps to nobody.
+  const { db, handler, pi } = customerChangedSetup({ payerDeleted: true });
+  await ok(await deliver(handler, event("checkout.session.completed", depositSession(pi))));
+  const row = payment(db, "pi_1Deposit");
+  assertEquals([row.status, row.customer_id, row.job_id], ["succeeded", NEW_CUSTOMER, JOB]);
+  assert(String(row.note).includes("check who paid"), String(row.note));
+});
+
+Deno.test("customer changed: a deleted payer's saved card is never stored as the job's new customer's", async () => {
+  // The deposit link was opened for CUSTOMER (cus_1Customer, setup_future_usage),
+  // the job moved to NEW_CUSTOMER and CUSTOMER was deleted before paying. The
+  // money falls to the job (and so to NEW_CUSTOMER), but pm_1Card belongs to
+  // cus_1Customer: it must not become NEW_CUSTOMER's card on file.
+  const { db, logs, handler, pi } = customerChangedSetup({ payerDeleted: true });
+  const res = await ok(
+    await deliver(handler, event("checkout.session.completed", depositSession(pi))),
+  );
+  assertEquals(res.result, "applied");
+  assertEquals(payment(db, "pi_1Deposit").customer_id, NEW_CUSTOMER);
+  assertEquals(db.table("customer_payment_methods"), []);
+  assertEquals(rpcCalls(db, "upsert_customer_payment_method").length, 0);
+  assertEquals(mismatches(logs), 1);
+  // the intent event (same card) does not save it either
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  assertEquals(db.table("customer_payment_methods"), []);
+  assertEquals(mismatches(logs), 2);
+});
+
+Deno.test("customer changed: the new customer's own Stripe customer and default card are kept", async () => {
+  const { db, handler, pi } = customerChangedSetup({ payerDeleted: true });
+  db.seed(
+    "customers",
+    db.table("customers").map((c) =>
+      c.id === NEW_CUSTOMER ? { ...c, stripe_customer_id: "cus_1NewCustomer" } : c
+    ),
+  );
+  db.seed("customer_payment_methods", [{
+    id: crypto.randomUUID(),
+    shop_id: SHOP,
+    customer_id: NEW_CUSTOMER,
+    stripe_payment_method_id: "pm_1NewOwn",
+    brand: "mastercard",
+    last4: "4444",
+    exp_month: 1,
+    exp_year: 2031,
+    is_default: true,
+  }]);
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  assertEquals(payment(db, "pi_1Deposit").customer_id, NEW_CUSTOMER);
+  assertEquals(
+    db.table("customer_payment_methods").map((r) => [
+      r.customer_id,
+      r.stripe_payment_method_id,
+      r.is_default,
+    ]),
+    [[NEW_CUSTOMER, "pm_1NewOwn", true]],
+  );
+});
+
+Deno.test("card save: a setup intent whose card is attached to another Stripe customer is ignored", async () => {
+  const { db, stripe, logs, handler } = setup();
+  stripe.put(paymentMethod({ id: "pm_1Elsewhere", customer: "cus_1Somebody" }));
+  const res = await ok(
+    await deliver(
+      handler,
+      event("setup_intent.succeeded", {
+        id: "seti_1Elsewhere",
+        object: "setup_intent",
+        status: "succeeded",
+        customer: "cus_1Somebody",
+        payment_method: "pm_1Elsewhere",
+        metadata: { shop_id: SHOP, customer_id: CUSTOMER },
+      }),
+    ),
+  );
+  assertEquals(res.result, "ignored");
+  assertEquals(mismatches(logs), 1);
+  assertEquals(db.table("customer_payment_methods"), []);
+});
+
+function mismatches(logs: ReturnType<typeof memoryLogger>): number {
+  return logs.events("stripe_event_ignored").filter((e) =>
+    e.reason === "payment_method_customer_mismatch"
+  ).length;
+}
+
+Deno.test("customer changed: a 23514 without a changed parent is still retried (500)", async () => {
+  const { db, stripe, handler } = setup();
+  stripe.put(intent()).put(charge());
+  db.onRpc("upsert_stripe_payment", () => {
+    throw new FakeRpcError("23514", "violates check constraint");
+  });
+  const res = await deliver(handler, event("payment_intent.succeeded", intent()));
+  assertEquals(res.status, 500);
+  assertEquals((await res.json() as ErrorBody).code, "internal_error");
+  assertEquals(rpcCalls(db, "upsert_stripe_payment").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// payment_method.detached / customer.deleted
+// ---------------------------------------------------------------------------
+
+function saveCards(db: FakeSupabase, cards: [pm: string, isDefault: boolean][]): void {
+  db.seed(
+    "customer_payment_methods",
+    cards.map(([pm, isDefault]) => ({
+      id: crypto.randomUUID(),
+      shop_id: SHOP,
+      customer_id: CUSTOMER,
+      stripe_payment_method_id: pm,
+      brand: "visa",
+      last4: "4242",
+      exp_month: 12,
+      exp_year: 2030,
+      is_default: isDefault,
+    })),
+  );
+}
+
+Deno.test("payment_method.detached removes the saved card; the newest remaining card becomes default", async () => {
+  const { db, handler } = setup();
+  saveCards(db, [["pm_1Card", true], ["pm_1Older", false], ["pm_1Newer", false]]);
+  const detached = paymentMethod({ customer: null });
+  const res = await ok(await deliver(handler, event("payment_method.detached", detached)));
+  assertEquals(res.result, "applied");
+  assertEquals(rpcCalls(db, "remove_customer_payment_method"), [{
+    p_shop_id: SHOP,
+    p_stripe_payment_method_id: "pm_1Card",
+  }]);
+  assertEquals(
+    db.table("customer_payment_methods").map((r) => [r.stripe_payment_method_id, r.is_default]),
+    [["pm_1Older", false], ["pm_1Newer", true]],
+  );
+  // a card the CRM never saved (or a replay) is acknowledged
+  const again = await ok(await deliver(handler, event("payment_method.detached", detached)));
+  assertEquals(again.result, "ignored");
+  // another account's event only ever touches that account's shop
+  await ok(
+    await deliver(
+      handler,
+      event("payment_method.detached", paymentMethod({ id: "pm_1Older", customer: null }), {
+        account: OTHER_ACCT,
+      }),
+    ),
+  );
+  assertEquals(rpcCalls(db, "remove_customer_payment_method").at(-1)?.p_shop_id, OTHER_SHOP);
+  assertEquals(db.table("customer_payment_methods").length, 2);
+  // unknown connected account: nothing is called
+  const stranger = await ok(
+    await deliver(handler, event("payment_method.detached", detached, { account: STRANGER_ACCT })),
+  );
+  assertEquals(stranger.result, "ignored");
+  assertEquals(rpcCalls(db, "remove_customer_payment_method").length, 3);
+});
+
+Deno.test("payment_method.detached: a late setup_intent.succeeded never re-saves the removed card", async () => {
+  const { db, stripe, handler } = setup();
+  const si = {
+    id: "seti_1Late",
+    object: "setup_intent",
+    status: "succeeded",
+    customer: "cus_1Customer",
+    payment_method: "pm_1Card",
+    metadata: { shop_id: SHOP, customer_id: CUSTOMER },
+  };
+  // Stripe already shows the card detached when the (retried) event is processed.
+  stripe.put(paymentMethod({ customer: null }));
+  const res = await ok(await deliver(handler, event("setup_intent.succeeded", si)));
+  assertEquals(res.result, "ignored");
+  assertEquals(db.table("customer_payment_methods"), []);
+  assertEquals(rpcCalls(db, "upsert_customer_payment_method").length, 0);
+});
+
+Deno.test("payment_method.detached: a late deposit success records the money but not the removed card", async () => {
+  const { db, stripe, handler } = setup();
+  const pi = intent({ setup_future_usage: "off_session" });
+  stripe.put(pi).put(charge()).put(paymentMethod({ customer: null }));
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  assertEquals(payment(db).status, "succeeded");
+  assertEquals(db.table("customer_payment_methods"), []);
+  // a payment method Stripe no longer has at all is treated the same way
+  const { db: db2, stripe: stripe2, handler: handler2 } = setup();
+  stripe2.put(pi).put(charge());
+  await ok(await deliver(handler2, event("payment_intent.succeeded", pi)));
+  assertEquals([payment(db2).status, db2.table("customer_payment_methods")], ["succeeded", []]);
+});
+
+Deno.test("customer.deleted removes the cards of that Stripe customer, keeping cards attached elsewhere", async () => {
+  const { db, stripe, handler } = setup();
+  saveCards(db, [["pm_1Card", true], ["pm_1Moved", false]]);
+  stripe.put(paymentMethod({ customer: null })).put(
+    paymentMethod({ id: "pm_1Moved", customer: "cus_1Replacement" }),
+  );
+  const res = await ok(
+    await deliver(
+      handler,
+      event("customer.deleted", { id: "cus_1Customer", object: "customer", deleted: true }),
+    ),
+  );
+  assertEquals(res.result, "applied");
+  assertEquals(
+    db.table("customer_payment_methods").map((r) => [r.stripe_payment_method_id, r.is_default]),
+    [["pm_1Moved", true]],
+  );
+  // a Stripe customer the shop does not know is acknowledged
+  const unknown = await ok(
+    await deliver(handler, event("customer.deleted", { id: "cus_1Nobody", object: "customer" })),
+  );
+  assertEquals(unknown.result, "ignored");
+});
+
+// ---------------------------------------------------------------------------
+// charge.dispute.*
+// ---------------------------------------------------------------------------
+
+const DUE_BY = Date.UTC(2026, 9, 12, 23, 59, 59) / 1000;
+
+function dispute(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "dp_1Dispute",
+    object: "dispute",
+    amount: 11_000,
+    currency: "usd",
+    charge: "ch_1Charge",
+    payment_intent: "pi_1Invoice",
+    reason: "product_not_received",
+    status: "needs_response",
+    evidence_details: { due_by: DUE_BY },
+    ...overrides,
+  };
+}
+
+async function paidInvoice(ctx: ReturnType<typeof setup>): Promise<void> {
+  ctx.stripe.put(intent()).put(charge());
+  await ok(await deliver(ctx.handler, event("payment_intent.succeeded", intent())));
+}
+
+Deno.test("charge.dispute.created flags the payment and notifies owners/admins", async () => {
+  const ctx = setup();
+  const { db, stripe, logs, handler } = ctx;
+  await paidInvoice(ctx);
+  stripe.put(dispute());
+  const res = await ok(await deliver(handler, event("charge.dispute.created", dispute())));
+  assertEquals(res.result, "applied");
+  const row = payment(db);
+  assertEquals(
+    row.note,
+    "Stripe dispute (product not received, $110.00): open. Submit evidence in the Stripe " +
+      "dashboard by 2026-10-12.",
+  );
+  assertEquals(rpcCalls(db, "notify_shop_staff"), [{
+    p_shop_id: SHOP,
+    p_roles: ["owner", "admin"],
+    p_kind: "general",
+    p_title: "A card payment was disputed",
+    p_body: row.note,
+    p_job_id: JOB,
+  }]);
+  assertEquals(logs.events("stripe_dispute")[0]?.dispute_status, "needs_response");
+  // the dispute was read on the shop's connected account
+  assertEquals(
+    db.http.callsTo("GET", `${STRIPE}/disputes/:id`)[0]?.headers.get("stripe-account"),
+    ACCT,
+  );
+  // a replay / an update without a state change notifies nobody again
+  const same = await ok(await deliver(handler, event("charge.dispute.updated", dispute())));
+  assertEquals(same.result, "ignored");
+  assertEquals(rpcCalls(db, "notify_shop_staff").length, 1);
+  // the money itself is unchanged while the dispute is open
+  assertEquals([payment(db).status, payment(db).refunded_cents], ["succeeded", 0]);
+});
+
+Deno.test("charge.dispute.closed (lost) replaces the flag, logs an error and notifies again", async () => {
+  const ctx = setup();
+  const { db, stripe, logs, handler } = ctx;
+  await paidInvoice(ctx);
+  stripe.put(dispute());
+  await ok(await deliver(handler, event("charge.dispute.created", dispute())));
+  stripe.put(dispute({ status: "under_review" }));
+  await ok(await deliver(handler, event("charge.dispute.updated", dispute())));
+  assert(String(payment(db).note).includes("under review"));
+  assertEquals(rpcCalls(db, "notify_shop_staff").length, 1); // no alert for "under review"
+
+  stripe.put(dispute({ status: "lost" }));
+  const res = await ok(await deliver(handler, event("charge.dispute.closed", dispute())));
+  assertEquals(res.result, "applied");
+  const note = String(payment(db).note);
+  assert(note.startsWith("Stripe dispute (product not received, $110.00): LOST."), note);
+  assertEquals(note.split("\n").length, 1); // one dispute line, replaced in place
+  assertEquals(rpcCalls(db, "notify_shop_staff").at(-1)?.p_title, "Dispute lost: money taken back");
+  assertEquals(logs.events("stripe_dispute_lost").length, 1);
+  // funds_withdrawn for the same lost dispute changes nothing more
+  await ok(await deliver(handler, event("charge.dispute.funds_withdrawn", dispute())));
+  assertEquals(rpcCalls(db, "notify_shop_staff").length, 2);
+});
+
+Deno.test("charge.dispute.*: out of order, a late 'created' after the close applies the current state", async () => {
+  const ctx = setup();
+  const { db, stripe, handler } = ctx;
+  await paidInvoice(ctx);
+  stripe.put(dispute({ status: "won" }));
+  await ok(await deliver(handler, event("charge.dispute.closed", dispute({ status: "won" }))));
+  await ok(await deliver(handler, event("charge.dispute.created", dispute())));
+  assert(String(payment(db).note).includes("won."), String(payment(db).note));
+  assertEquals(rpcCalls(db, "notify_shop_staff").map((c) => c.p_title), ["Dispute won"]);
+});
+
+Deno.test("charge.dispute.*: other notes on the payment are kept; a charge-only dispute is matched", async () => {
+  const ctx = setup();
+  const { db, stripe, handler } = ctx;
+  await paidInvoice(ctx);
+  db.seed("payments", db.table("payments").map((r) => ({ ...r, note: "Paid at the door" })));
+  const byCharge = dispute({ payment_intent: null });
+  stripe.put(byCharge);
+  await ok(await deliver(handler, event("charge.dispute.created", byCharge)));
+  const lines = String(payment(db).note).split("\n");
+  assertEquals(lines[0], "Paid at the door");
+  assert(lines[1]?.startsWith("Stripe dispute"), lines[1]);
+});
+
+Deno.test("charge.dispute.*: unknown payments and accounts are acknowledged without writes", async () => {
+  const { db, stripe, logs, handler } = setup();
+  stripe.put(dispute({ payment_intent: "pi_1Unknown", charge: "ch_1Unknown" }));
+  const unknown = await ok(
+    await deliver(
+      handler,
+      event("charge.dispute.created", dispute({ payment_intent: "pi_1Unknown" })),
+    ),
+  );
+  assertEquals(unknown.result, "ignored");
+  assertEquals(logs.events("stripe_dispute_unmatched").length, 1);
+  const stranger = await ok(
+    await deliver(handler, event("charge.dispute.created", dispute(), { account: STRANGER_ACCT })),
+  );
+  assertEquals(stranger.result, "ignored");
+  assertEquals(rpcCalls(db, "notify_shop_staff").length, 0);
+  assertEquals(db.table("payments"), []);
+});
+
+Deno.test("disputeNoteLine / withDisputeLine: bounded, replace in place, no personal data", () => {
+  const line = disputeNoteLine({
+    amount: 5_000,
+    currency: "usd",
+    status: "warning_needs_response",
+    reason: "fraudulent",
+    evidence_details: { due_by: null },
+  });
+  assertEquals(
+    line,
+    "Stripe dispute (fraudulent, $50.00): open. Submit evidence in the Stripe dashboard.",
+  );
+  assertEquals(withDisputeLine(null, line), line);
+  assertEquals(
+    withDisputeLine(`a\n${line}`, "Stripe dispute (x): won."),
+    "a\nStripe dispute (x): won.",
+  );
+  const long = withDisputeLine("n".repeat(2_000), line);
+  assertEquals(long.length, 1_000);
+  assert(long.endsWith(line));
 });

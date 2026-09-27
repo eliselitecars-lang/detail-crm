@@ -89,8 +89,13 @@ Deno.test("payment_sheet: partial amounts are validated against the balance", as
   }
   assertEquals((await errorOf(await f.call({ ...sheet, tip_cents: 20_000 }, "owner")))[2], {
     reason: "tip_too_large",
-    balance_cents: 12_345,
+    max_tip_cents: 12_345,
   });
+  // The tip is bounded by the amount this sheet collects, not the balance.
+  assertEquals(
+    (await errorOf(await f.call({ ...sheet, amount_cents: 5_000, tip_cents: 5_001 }, "owner")))[2],
+    { reason: "tip_too_large", max_tip_cents: 5_000 },
+  );
   assertEquals(
     (await errorOf(await f.call({ ...sheet, total_cents: 1 }, "owner")))[1],
     "validation_failed",
@@ -424,7 +429,7 @@ Deno.test("refund: admin refunds the remaining amount on the connected account",
   });
 });
 
-Deno.test("refund: partial refunds key on the cumulative total and respect Stripe's refunded amount", async () => {
+Deno.test("refund: partial refunds key on the attempt, never the cumulative total, and respect Stripe's refunded amount", async () => {
   const f = fixture();
   f.db.http.on("GET", `${STRIPE}/payment_intents/:id`, (_req, { params }) =>
     jsonResponse({
@@ -439,16 +444,24 @@ Deno.test("refund: partial refunds key on the cumulative total and respect Strip
       },
     }));
   const first = await f.call({ ...refundBody, amount_cents: 3_000 }, "owner");
-  assertEquals((await first.json()).refunded_cents_total, 5_000);
-  const again = await f.call({ ...refundBody, amount_cents: 3_000 }, "owner");
-  await again.body?.cancel();
+  const made = await first.json();
+  assertEquals(made.refunded_cents_total, 5_000);
+  // The same request again without a nonce (double-click, or a deliberate
+  // second refund of the same amount): nothing new is refunded and the
+  // caller is told so (409), never a success that refunded nothing.
+  const again = await errorOf(await f.call({ ...refundBody, amount_cents: 3_000 }, "owner"));
+  assertEquals(again.slice(0, 2), [409, "conflict"]);
+  assertEquals(
+    (again[2] as { reason: string; refund_id: string }).reason,
+    "possible_duplicate_refund",
+  );
+  assertEquals((again[2] as { refund_id: string }).refund_id, made.refund_id);
   const other = await f.call({ ...refundBody, amount_cents: 4_000 }, "owner");
   await other.body?.cancel();
   const calls = f.stripe("POST", "/refunds");
+  assertEquals(calls.length, 2);
   assertEquals(calls[0]?.form.get("refund_application_fee"), "true");
-  // Same cumulative target -> same key (a retry cannot refund twice).
-  assertEquals(calls[0]?.headers.get("idempotency-key"), calls[1]?.headers.get("idempotency-key"));
-  assert(calls[0]?.headers.get("idempotency-key") !== calls[2]?.headers.get("idempotency-key"));
+  assert(calls[0]?.headers.get("idempotency-key") !== calls[1]?.headers.get("idempotency-key"));
   assertEquals(await errorOf(await f.call({ ...refundBody, amount_cents: 8_501 }, "owner")), [
     422,
     "unprocessable",

@@ -9,6 +9,11 @@
  * for STOP (0033): every customer of the shop with that number gets
  * sms_opted_out_at (kept if already set) and sms_opt_in = false, and SMS
  * still queued to the number are cancelled. Service role, shop-scoped.
+ *
+ * Recording it in the sending shop is only right because each shop's
+ * numbers sit in the shop's own Messaging Service (Twilio scopes opt-outs
+ * per service; supabase/setup/twilio.md). Never share a service between
+ * shops: a STOP to one shop would then surface here as 21610 in the others.
  */
 import { DbError, type Services } from "./lib.ts";
 
