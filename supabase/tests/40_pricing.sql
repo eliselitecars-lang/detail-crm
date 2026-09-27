@@ -22,8 +22,8 @@ insert into public.vehicles (shop_id, customer_id, year, make, model, category_i
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.fx_set('dummy', gen_random_uuid());
 create temp table r as
-  select public.price_services(tests.fx('shop_a'), null, tests.fx('cat_car_a'),
-                               array[tests.fx('svc_a'), tests.fx('addon_pet'), tests.fx('svc_a')]) as p;
+  select public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a'), tests.fx('addon_pet'), tests.fx('svc_a')],
+                               tests.fx('cat_car_a')) as p;
 select tests.eq(jsonb_array_length((select p from r) -> 'lines'), 2, 'duplicate ids are priced once');
 select tests.eq((select p -> 'lines' -> 0 ->> 'service_id' from r)::uuid, tests.fx('svc_a'), 'input order is kept');
 select tests.eq((select (pg_temp.line(p, tests.fx('svc_a')) ->> 'unit_price_cents')::bigint from r), 20000::bigint,
@@ -38,28 +38,28 @@ select tests.eq((select p ->> 'suggested_discount_kind' from r), 'none', 'no cus
 select tests.eq((select p -> 'memberships' from r), '[]'::jsonb, 'no memberships');
 drop table r;
 
-select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, tests.fx('cat_truck_a'), array[tests.fx('svc_a')]),
+select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a')], tests.fx('cat_truck_a')),
                               tests.fx('svc_a')) ->> 'unit_price_cents')::bigint, 25000::bigint, 'category price wins');
-select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, tests.fx('cat_truck_a'), array[tests.fx('svc_a')]),
+select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a')], tests.fx('cat_truck_a')),
                               tests.fx('svc_a')) ->> 'duration_minutes')::int, 180, 'category duration override');
-select tests.eq((public.price_services(tests.fx('shop_a'), null, tests.fx('cat_car_a'), array[tests.fx('svc_van')]) ->> 'priced')::boolean,
+select tests.eq((public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_van')], tests.fx('cat_car_a')) ->> 'priced')::boolean,
                 false, 'no price for this category: not priced');
-select tests.ok((public.price_services(tests.fx('shop_a'), null, tests.fx('cat_car_a'), array[tests.fx('svc_van')]) -> 'totals')
+select tests.ok((public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_van')], tests.fx('cat_car_a')) -> 'totals')
                 = 'null'::jsonb, 'unpriced: no totals');
-select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, tests.fx('cat_van_a'), array[tests.fx('svc_van')]),
+select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_van')], tests.fx('cat_van_a')),
                               tests.fx('svc_van')) ->> 'unit_price_cents')::bigint, 9000::bigint, 'category-only price');
-select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, null, array[tests.fx('svc_hidden')]),
+select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_hidden')], null),
                               tests.fx('svc_hidden')) ->> 'unit_price_cents')::bigint, 1000::bigint,
                 'staff may price services that are not bookable online');
-select tests.throws_like($$select public.price_services(tests.fx('shop_a'), null, null, array[tests.fx('svc_inactive')])$$,
+select tests.throws_like($$select public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_inactive')], null)$$,
                          '22023', '%not available%', 'inactive services cannot be priced');
-select tests.throws_like($$select public.price_services(tests.fx('shop_a'), null, null, '{}')$$, '22023', '%at least one%', 'no services');
+select tests.throws_like($$select public.price_services(tests.fx('shop_a'), null, '{}', null)$$, '22023', '%at least one%', 'no services');
 select tests.throws($$select public.price_services(tests.fx('shop_a'), null, null, null)$$, '22023', 'null services');
 
 -- vehicle supplies the customer and category
-select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, null, array[tests.fx('svc_a')], tests.fx('veh_truck')),
+select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a')], null, tests.fx('veh_truck')),
                               tests.fx('svc_a')) ->> 'catalog_price_cents')::bigint, 25000::bigint, 'the vehicle''s category is used');
-select tests.throws_like($$select public.price_services(tests.fx('shop_a'), tests.fx('cust_a2'), null, array[tests.fx('svc_a')], tests.fx('veh_a'))$$,
+select tests.throws_like($$select public.price_services(tests.fx('shop_a'), tests.fx('cust_a2'), array[tests.fx('svc_a')], null, tests.fx('veh_a'))$$,
                          '22023', '%does not belong%', 'vehicle of another customer');
 
 -- ------------------------------------------------------------ memberships
@@ -71,8 +71,8 @@ insert into public.memberships (shop_id, plan_id, customer_id, vehicle_id, statu
 
 select tests.authenticate_as(tests.fx('u_manager_a'));
 create temp table r as
-  select public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), tests.fx('cat_car_a'),
-                               array[tests.fx('svc_a'), tests.fx('svc_wash')], tests.fx('veh_a')) as p;
+  select public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), array[tests.fx('svc_a'), tests.fx('svc_wash')],
+                               tests.fx('cat_car_a'), tests.fx('veh_a')) as p;
 select tests.eq((select pg_temp.line(p, tests.fx('svc_wash')) from r),
                 jsonb_build_object('service_id', tests.fx('svc_wash'), 'name', 'Exterior Wash', 'kind', 'service', 'taxable', true,
                                    'duration_minutes', 60, 'catalog_price_cents', 5000, 'unit_price_cents', 0,
@@ -89,7 +89,7 @@ select tests.eq((select jsonb_array_length(p -> 'memberships') from r), 1, 'only
 drop table r;
 
 create temp table r as
-  select public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), null, array[tests.fx('svc_a'), tests.fx('svc_wash')],
+  select public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), array[tests.fx('svc_a'), tests.fx('svc_wash')], null,
                                tests.fx('veh_truck')) as p;
 select tests.eq((select (pg_temp.line(p, tests.fx('svc_a')) ->> 'unit_price_cents')::bigint from r), 0::bigint,
                 'vehicle-scoped plan includes Full Detail for its vehicle');
@@ -102,12 +102,12 @@ drop table r;
 select tests.as_superuser();
 update public.memberships set status = 'past_due' where id = tests.fx('mem_gold');
 select tests.authenticate_as(tests.fx('u_manager_a'));
-select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), null, array[tests.fx('svc_wash')]),
+select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), array[tests.fx('svc_wash')], null),
                               tests.fx('svc_wash')) ->> 'unit_price_cents')::bigint, 5000::bigint, 'past_due memberships do not apply');
 select tests.as_superuser();
 update public.memberships set status = 'cancelled' where id = tests.fx('mem_gold');
 select tests.authenticate_as(tests.fx('u_owner_a'));
-select tests.eq((public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), null, array[tests.fx('svc_wash')]) ->> 'suggested_discount_kind'),
+select tests.eq((public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), array[tests.fx('svc_wash')], null) ->> 'suggested_discount_kind'),
                 'none', 'cancelled memberships do not apply (owner may price too)');
 
 -- the internal variant can skip memberships
@@ -118,28 +118,28 @@ select tests.eq((pg_temp.line(public.price_services_core(tests.fx('shop_a'), tes
 
 -- ------------------------------------------------------------ roles & isolation
 select tests.authenticate_as(tests.fx('u_admin_a'));
-select tests.lives($$select public.price_services(tests.fx('shop_a'), null, null, array[tests.fx('svc_a')])$$, 'admins may price');
+select tests.lives($$select public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a')], null)$$, 'admins may price');
 select tests.authenticate_as(tests.fx('u_tech_a'));
-select tests.throws_like($$select public.price_services(tests.fx('shop_a'), null, null, array[tests.fx('svc_a')])$$, '42501',
+select tests.throws_like($$select public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a')], null)$$, '42501',
                          '%owners, admins and managers%', 'technicians cannot price (memberships are manager+ data)');
 select tests.authenticate_as(tests.fx('u_outsider'));
-select tests.throws_like($$select public.price_services(tests.fx('shop_a'), null, null, array[tests.fx('svc_a')])$$, '42501',
+select tests.throws_like($$select public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a')], null)$$, '42501',
                          '%not a member%', 'non-members cannot price');
 select tests.authenticate_as(tests.fx('u_manager_b'));
-select tests.throws($$select public.price_services(tests.fx('shop_a'), null, null, array[tests.fx('svc_a')])$$, '42501',
+select tests.throws($$select public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a')], null)$$, '42501',
                     'managers of another shop cannot price shop A');
-select tests.throws_like($$select public.price_services(tests.fx('shop_b'), null, null, array[tests.fx('svc_a')])$$, '22023',
+select tests.throws_like($$select public.price_services(tests.fx('shop_b'), null, array[tests.fx('svc_a')], null)$$, '22023',
                          '%not available%', 'another shop''s service cannot be priced');
-select tests.throws($$select public.price_services(tests.fx('shop_b'), tests.fx('cust_a'), null, array[tests.fx('svc_b')])$$, 'P0002',
+select tests.throws($$select public.price_services(tests.fx('shop_b'), tests.fx('cust_a'), array[tests.fx('svc_b')], null)$$, 'P0002',
                     'another shop''s customer is not found');
-select tests.throws($$select public.price_services(tests.fx('shop_b'), null, null, array[tests.fx('svc_b')], tests.fx('veh_a'))$$, 'P0002',
+select tests.throws($$select public.price_services(tests.fx('shop_b'), null, array[tests.fx('svc_b')], null, tests.fx('veh_a'))$$, 'P0002',
                     'another shop''s vehicle is not found');
-select tests.throws_like($$select public.price_services(tests.fx('shop_b'), null, tests.fx('cat_car_a'), array[tests.fx('svc_b')])$$, '22023',
+select tests.throws_like($$select public.price_services(tests.fx('shop_b'), null, array[tests.fx('svc_b')], tests.fx('cat_car_a'))$$, '22023',
                          '%category%', 'another shop''s vehicle category is rejected');
-select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_b'), tests.fx('cust_b'), null, array[tests.fx('svc_b')]),
+select tests.eq((pg_temp.line(public.price_services(tests.fx('shop_b'), tests.fx('cust_b'), array[tests.fx('svc_b')], null),
                               tests.fx('svc_b')) ->> 'unit_price_cents')::bigint, 5000::bigint, 'shop B prices its own catalog');
 select tests.as_anon();
-select tests.throws($$select public.price_services(tests.fx('shop_a'), null, null, array[tests.fx('svc_a')])$$, '42501',
+select tests.throws($$select public.price_services(tests.fx('shop_a'), null, array[tests.fx('svc_a')], null)$$, '42501',
                     'anon cannot call price_services');
 select tests.throws($$select public.price_services_core(tests.fx('shop_a'), null, null, array[tests.fx('svc_a')], null, false)$$, '42501',
                     'anon cannot call the internal variant');

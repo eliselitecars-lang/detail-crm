@@ -81,7 +81,7 @@ create function pg_temp.local_slots(p_slug text, p_service uuid, p_day date, p_n
 returns text[] language sql as $$
   select coalesce(array_agg(to_char(s.starts_at at time zone p_tz, 'HH24:MI') || '-' ||
                             to_char(s.ends_at at time zone p_tz, 'HH24:MI') order by s.starts_at), '{}')
-  from public.get_available_slots(p_slug, array[p_service], null, p_day, p_day, p_now) s
+  from public.get_available_slots(p_slug, array[p_service], p_day, p_day, null, p_now) s
 $$;
 grant execute on function pg_temp.local_slots(text, uuid, date, timestamptz, text) to anon, authenticated, service_role;
 -- UTC 'HH24:MI-HH24:MI' of each slot starting in [p_from, p_to] (unambiguous on fall-back nights)
@@ -89,7 +89,7 @@ create function pg_temp.utc_slots(p_slug text, p_service uuid, p_from date, p_to
 returns text[] language sql as $$
   select coalesce(array_agg(to_char(s.starts_at at time zone 'UTC', 'HH24:MI') || '-' ||
                             to_char(s.ends_at at time zone 'UTC', 'HH24:MI') order by s.starts_at), '{}')
-  from public.get_available_slots(p_slug, array[p_service], null, p_from, p_to, p_now) s
+  from public.get_available_slots(p_slug, array[p_service], p_from, p_to, null, p_now) s
 $$;
 grant execute on function pg_temp.utc_slots(text, uuid, date, date, timestamptz) to anon, authenticated, service_role;
 
@@ -113,7 +113,7 @@ select tests.eq(pg_temp.local_slots('shop-a', tests.fx('half_a'), '2025-03-02', 
                 'ordinary Sunday: open until 02:30');
 -- the reported repro: nothing may end after the jump (08:00Z)
 select tests.eq((select array_agg(to_char(starts_at at time zone 'America/Chicago', 'HH24:MI TZ') order by starts_at)
-                   from public.get_available_slots('shop-a', array[tests.fx('half_a')], null, '2025-03-09', '2025-03-09', '2025-03-01 00:00Z')
+                   from public.get_available_slots('shop-a', array[tests.fx('half_a')], '2025-03-09', '2025-03-09', null, '2025-03-01 00:00Z')
                   where ends_at > '2025-03-09 08:00Z'),
                 null::text[],
                 'spring-forward: no slot may end after the wall clock has passed the 02:30 closing');
@@ -158,12 +158,12 @@ insert into public.services (shop_id, name, duration_minutes, online_bookable) v
 insert into public.service_prices (shop_id, service_id, price_cents) values (tests.fx('shop_a'), tests.fx('two_a'), 9000);
 
 -- control: an ordinary Sunday closes at 01:30 CDT (06:30Z)
-select tests.eq((select max(ends_at) from public.get_available_slots('shop-a', array[tests.fx('two_a')], null,
-                   '2025-10-25', '2025-10-26', '2025-10-01Z')), '2025-10-26 06:30Z'::timestamptz,
+select tests.eq((select max(ends_at) from public.get_available_slots('shop-a', array[tests.fx('two_a')], '2025-10-25',
+                   '2025-10-26', null, '2025-10-01Z')), '2025-10-26 06:30Z'::timestamptz,
                 'ordinary night: nothing ends after the 01:30 closing');
 -- the reported repro: 06:30Z-07:00Z the wall clock reads 01:30-01:59 CDT (after closing)
 select tests.eq((select array_agg(to_char(starts_at at time zone 'UTC', 'HH24:MI') || '-' || to_char(ends_at at time zone 'UTC', 'HH24:MI') order by starts_at)
-                   from public.get_available_slots('shop-a', array[tests.fx('two_a')], null, '2025-11-01', '2025-11-02', '2025-10-01Z')
+                   from public.get_available_slots('shop-a', array[tests.fx('two_a')], '2025-11-01', '2025-11-02', null, '2025-10-01Z')
                   where starts_at < '2025-11-02 07:00Z' and ends_at > '2025-11-02 06:30Z'),
                 null::text[],
                 'fall-back night: no slot may run while the clock shows 01:30-01:59 CDT (after closing)');
@@ -231,11 +231,11 @@ select tests.eq(pg_temp.utc_slots('shop-b', tests.fx('half_b'), '2025-04-06', '2
 -- unaffected by shop B's hours and time zone, and vice versa
 select tests.eq(pg_temp.local_slots('shop-a', tests.fx('half_a'), '2025-03-02', '2025-02-20 00:00Z', 'America/Chicago'),
                 array['00:00-00:30', '00:30-01:00', '01:00-01:30'], 'shop A keeps its own hours and time zone');
-select tests.throws_like($$select * from public.get_available_slots('shop-b', array[tests.fx('half_a')], null, '2025-10-05', '2025-10-05', '2025-09-20 00:00Z')$$,
+select tests.throws_like($$select * from public.get_available_slots('shop-b', array[tests.fx('half_a')], '2025-10-05', '2025-10-05', null, '2025-09-20 00:00Z')$$,
                          '22023', '%not available%', 'shop A''s service cannot be booked through shop B');
 
 -- the helper runs inside the SECURITY DEFINER RPC, so API callers need no
 -- EXECUTE on it (anon always gets the server clock, hence a future date)
 select tests.as_anon();
-select tests.lives($$select * from public.get_available_slots('shop-b', array[tests.fx('half_b')], null, current_date + 7, current_date + 7, null)$$,
+select tests.lives($$select * from public.get_available_slots('shop-b', array[tests.fx('half_b')], current_date + 7, current_date + 7, null, null)$$,
                    'anon can list slots although it cannot call wall_clock_instant directly');

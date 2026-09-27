@@ -9,6 +9,10 @@
 --     original object is gone, and an inspection cannot be signed while a
 --     mark's photo is missing.
 \ir fixtures/two_shops.psql
+-- The purge queue is global (the worker drains every shop's requests): start
+-- from an empty queue. On a shared database (the local stack) this is part
+-- of the file's own transaction and rolled back with it.
+delete from public.storage_purge_requests;
 
 -- =================================================================== #1 shop-assets listing
 select tests.authenticate_as(tests.fx('u_owner_b'));
@@ -55,6 +59,7 @@ select tests.authenticate_as(tests.fx('u_tech2_a'));
 select tests.eq(tests.row_count(format($$select 1 from storage.objects where bucket_id = 'job-photos' and name like '%s/%s/%%'$$,
                                        tests.fx('shop_a'), tests.fx('job_a'))), 0::bigint,
                 'other technicians do not see the deleted job''s photos');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count(format($$delete from storage.objects where bucket_id = 'job-photos' and name = '%s/%s/before.jpg'$$,
                                        tests.fx('shop_a'), tests.fx('job_a'))), 0::bigint,
                 'nor delete them');
@@ -62,6 +67,7 @@ select tests.authenticate_as(tests.fx('u_manager_b'));
 select tests.eq(tests.row_count(format($$select 1 from storage.objects where bucket_id = 'job-photos' and name like '%s/%%'$$,
                                        tests.fx('shop_a'))), 0::bigint,
                 'another shop''s manager sees none of them');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count(format($$delete from storage.objects where bucket_id = 'job-photos' and name = '%s/%s/before.jpg'$$,
                                        tests.fx('shop_a'), tests.fx('job_a'))), 0::bigint,
                 'nor deletes them');
@@ -69,6 +75,7 @@ select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(tests.row_count(format($$select 1 from storage.objects where bucket_id = 'job-photos' and name like '%s/%s/%%'$$,
                                        tests.fx('shop_a'), tests.fx('job_a'))), 1::bigint,
                 'managers still list the deleted job''s folder');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count(format($$delete from storage.objects where bucket_id = 'job-photos' and name = '%s/%s/before.jpg'$$,
                                        tests.fx('shop_a'), tests.fx('job_a'))), 1::bigint,
                 'the manager can remove the deleted job''s photo from storage');
@@ -83,6 +90,7 @@ insert into public.inspections (id, shop_id, job_id, vehicle_id, kind)
 insert into public.inspection_marks (shop_id, inspection_id, view, x, y, damage, photo_path)
   values (tests.fx('shop_a'), tests.fx('ins'), 'front', 0.5, 0.5, 'scratch',
           tests.fx('shop_a') || '/' || tests.fx('job_a2') || '/scratch.jpg');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'job-photos'
    and name = tests.fx('shop_a') || '/' || tests.fx('job_a2') || '/scratch.jpg'$$), 1::bigint, 'unsigned: uploader may delete');
 insert into storage.objects (bucket_id, name, owner, owner_id)
@@ -99,7 +107,9 @@ select tests.lives($$update public.inspections set customer_signature_path = tes
 -- the stored objects vanish outside the API policies (e.g. a service-role
 -- cleanup racing the signature): nobody may put new content at those paths
 select tests.as_superuser();
+select set_config('storage.allow_delete_query', 'true', true);
 delete from storage.objects where bucket_id = 'job-photos' and name = tests.fx('shop_a') || '/' || tests.fx('job_a2') || '/scratch.jpg';
+select set_config('storage.allow_delete_query', 'true', true);
 delete from storage.objects where bucket_id = 'signatures' and name = tests.fx('shop_a') || '/device/sig.png';
 select tests.authenticate_as(tests.fx('u_tech2_a'));
 select tests.throws($$insert into storage.objects (bucket_id, name, owner)
@@ -225,6 +235,7 @@ select tests.eq((select count(*) from public.claim_storage_purge(1000, '2026-01-
                 'claimed requests are leased: a second worker gets nothing');
 
 -- the worker removes the objects through the Storage API (service role)
+select set_config('storage.allow_delete_query', 'true', true);
 delete from storage.objects o using claimed c where o.bucket_id = c.bucket_id and o.name = c.object_name;
 select tests.eq(public.finish_storage_purge((select array_agg(distinct request_id) from claimed), null, '2026-01-01 00:01+00'),
                 6, 'the worker reports success');

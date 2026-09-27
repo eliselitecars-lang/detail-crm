@@ -35,7 +35,9 @@
 --                SELECT policy (listing/search, and the read-back of an
 --                upsert) is limited to members of the shop, so nobody can
 --                enumerate other shops' ids or unpublished file names;
---                owner/admin upload, overwrite and delete.
+--                owner/admin upload, overwrite and delete; managers too
+--                under <shop_id>/services/ (service images: the catalog is
+--                manager-editable). Logos and anything else stay admin-only.
 -- Signed evidence is immutable for everyone through the API: a job photo
 -- pinned to a mark of a signed inspection, the signature image of a signed
 -- inspection and the signature image of a signed form cannot be uploaded
@@ -239,16 +241,26 @@ create policy field_ops_shop_assets_select on storage.objects for select to auth
 create policy field_ops_shop_assets_insert on storage.objects for insert to authenticated
   with check (bucket_id = 'shop-assets'
               and public.is_safe_storage_path(name)
-              and public.is_shop_admin(public.storage_path_uuid(name, 1)));
+              and (public.is_shop_admin(public.storage_path_uuid(name, 1))
+                   or (split_part(name, '/', 2) = 'services' and split_part(name, '/', 3) <> ''
+                       and public.is_shop_manager(public.storage_path_uuid(name, 1)))));
 
 create policy field_ops_shop_assets_update on storage.objects for update to authenticated
-  using (bucket_id = 'shop-assets' and public.is_shop_admin(public.storage_path_uuid(name, 1)))
+  using (bucket_id = 'shop-assets'
+         and (public.is_shop_admin(public.storage_path_uuid(name, 1))
+              or (split_part(name, '/', 2) = 'services' and split_part(name, '/', 3) <> ''
+                  and public.is_shop_manager(public.storage_path_uuid(name, 1)))))
   with check (bucket_id = 'shop-assets'
               and public.is_safe_storage_path(name)
-              and public.is_shop_admin(public.storage_path_uuid(name, 1)));
+              and (public.is_shop_admin(public.storage_path_uuid(name, 1))
+                   or (split_part(name, '/', 2) = 'services' and split_part(name, '/', 3) <> ''
+                       and public.is_shop_manager(public.storage_path_uuid(name, 1)))));
 
 create policy field_ops_shop_assets_delete on storage.objects for delete to authenticated
-  using (bucket_id = 'shop-assets' and public.is_shop_admin(public.storage_path_uuid(name, 1)));
+  using (bucket_id = 'shop-assets'
+         and (public.is_shop_admin(public.storage_path_uuid(name, 1))
+              or (split_part(name, '/', 2) = 'services' and split_part(name, '/', 3) <> ''
+                  and public.is_shop_manager(public.storage_path_uuid(name, 1)))));
 
 -- ---------------------------------------------------------------------------
 -- Purge queue: files of deleted jobs and shops (see the header).

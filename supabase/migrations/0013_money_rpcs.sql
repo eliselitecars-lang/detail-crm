@@ -538,6 +538,9 @@ $$;
 --     up front), a Checkout Session (Stripe cancels its intent when the
 --     session expires), a membership invoice (Stripe Billing retries it),
 --     or a decline recorded without an earlier pending row.
+--   * links that no longer exist in the shop are dropped on insert (a
+--     deleted invoice / job / membership / customer named by old Stripe
+--     metadata); when nothing is left the call fails with P0002
 -- Refund states come only from apply_stripe_refund.
 -- ---------------------------------------------------------------------------
 create function public.upsert_stripe_payment(
@@ -587,6 +590,34 @@ begin
   if not found then
     if p_customer_id is null and p_invoice_id is null and p_job_id is null and p_membership_id is null then
       raise exception 'a payment needs an invoice, job, membership or customer' using errcode = '22023';
+    end if;
+    -- Stale links (the Stripe metadata names an invoice / job / membership /
+    -- customer deleted since, or one of another shop) are dropped rather than
+    -- failing the composite FK, so the money is still recorded against what
+    -- remains. The payments trigger derives the customer from the rest.
+    if p_invoice_id is not null
+       and not exists (select 1 from public.invoices i where i.id = p_invoice_id and i.shop_id = p_shop_id) then
+      p_invoice_id := null;
+    end if;
+    if p_job_id is not null
+       and not exists (select 1 from public.jobs j where j.id = p_job_id and j.shop_id = p_shop_id) then
+      p_job_id := null;
+    end if;
+    if p_membership_id is not null
+       and not exists (select 1 from public.memberships m where m.id = p_membership_id and m.shop_id = p_shop_id) then
+      p_membership_id := null;
+      -- a membership charge whose membership is gone is an ordinary payment
+      if p_kind = 'membership' then
+        p_kind := 'payment';
+      end if;
+    end if;
+    if p_customer_id is not null
+       and not exists (select 1 from public.customers c where c.id = p_customer_id and c.shop_id = p_shop_id) then
+      p_customer_id := null;
+    end if;
+    if p_customer_id is null and p_invoice_id is null and p_job_id is null and p_membership_id is null then
+      raise exception 'none of the payment''s invoice, job, membership or customer exists in this shop'
+        using errcode = 'P0002';
     end if;
     insert into public.payments (shop_id, invoice_id, job_id, customer_id, membership_id, kind, method, status,
                                  amount_cents, tip_cents, stripe_payment_intent_id, stripe_charge_id,
@@ -758,6 +789,9 @@ begin
     coalesce(v_inv.balance_cents, v_total - v_paid);
 end
 $$;
+
+-- (contract tags for scripts/gen_types.py: output columns that may be null)
+comment on function public.job_payment_summary(uuid) is '@nullable: invoice_id, invoice_number, invoice_status';
 
 -- ---------------------------------------------------------------------------
 -- Grants

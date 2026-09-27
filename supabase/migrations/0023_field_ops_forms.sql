@@ -136,6 +136,10 @@ create index form_submissions_shop_signature_path_idx on public.form_submissions
 comment on column public.form_submissions.signature_path is
   'Object name in the signatures bucket (<shop_id>/...). Set only by the signing RPCs.';
 comment on column public.form_submissions.signed_by is 'auth user who signed (portal user or staff); null for anonymous signers.';
+comment on column public.form_submissions.title is
+  'Snapshot of the template name, copied on insert (form_submissions_before_insert). @insert-optional';
+comment on column public.form_submissions.body_snapshot is
+  'Snapshot of the template body, copied on insert (form_submissions_before_insert). @insert-optional';
 
 -- Direct inserts (managers+): everything but the job and template is filled
 -- by the server. SECURITY INVOKER: the template and job are read with the
@@ -420,7 +424,7 @@ declare
 begin
   select fs.id into v_id from public.form_submissions fs where fs.public_token = p_token;
   if v_id is null then
-    raise exception 'form not found' using errcode = 'P0002';
+    raise exception 'form not found' using errcode = 'PT404';
   end if;
   return public.form_submission_public_json(v_id);
 end
@@ -438,14 +442,14 @@ declare
 begin
   select * into v_sub from public.form_submissions fs where fs.public_token = p_token;
   if not found then
-    raise exception 'form not found' using errcode = 'P0002';
+    raise exception 'form not found' using errcode = 'PT404';
   end if;
   -- lock the job, then look the token up again: a customer move committed
   -- meanwhile re-tokenized the form, and this link is no longer its link
   perform 1 from public.jobs j where j.id = v_sub.job_id and j.shop_id = v_sub.shop_id for share;
   select * into v_sub from public.form_submissions fs where fs.public_token = p_token;
   if not found then
-    raise exception 'form not found' using errcode = 'P0002';
+    raise exception 'form not found' using errcode = 'PT404';
   end if;
   -- staff below manager sign on device (sign_form_submission), never as the
   -- customer through the customer's link

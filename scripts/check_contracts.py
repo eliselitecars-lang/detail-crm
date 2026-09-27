@@ -14,7 +14,10 @@ actually use it:
     exactly one foreign key unless a `!hint` picks one), filters (`.eq`,
     `.in`, `.or(...)`, `.order`, ...), `.insert/.update/.upsert` object
     keys and `onConflict` columns; `.rpc('<fn>', { args })` — the function,
-    its argument names and a matching overload; `.storage.from('<bucket>')`;
+    its argument names and a matching overload (also through a local TS
+    wrapper such as `rpc(ctx, '<fn>', { args })` whose body forwards its
+    parameters to `.rpc(fn, args)`, and for a name assigned just before the
+    call: `op = '<fn>'; ... .rpc(op, ...)`); `.storage.from('<bucket>')`;
     `functions.invoke('<name>')` targets an existing edge function;
   * iOS (ios/DetailCRM): the same chains in Swift (`.eq("col", value:)`,
     `.select(Model.selectColumns)`, `params: Params(p_x: ...)` or
@@ -144,6 +147,8 @@ class Report:
     dynamic: list[str] = field(default_factory=list)
     counts: dict = field(default_factory=dict)
     checked_enums: list = field(default_factory=list)
+    # RPC name -> repo-relative files that call it (docs/SCHEMA.md "Called by")
+    rpc_callers: dict = field(default_factory=dict)
 
     def error(self, where: str, msg: str) -> None:
         self.errors.append(f"{where}: {msg}")
@@ -1124,6 +1129,7 @@ class Checker:
         if not overloads:
             self.r.error(where, f"RPC '{name}' does not exist")
             return
+        self.r.rpc_callers.setdefault(name, set()).add(where.rsplit(":", 1)[0])
         allowed = ("anon", "authenticated") if surface in ("web", "ios") else API_ROLES
         if not any(set(allowed) & o["exec"] for o in overloads):
             self.r.error(where, f"RPC '{name}' is not executable by {' or '.join(allowed)}")
@@ -1179,6 +1185,87 @@ class SourceScanner:
         self.sf = sf
         self.toks = sf.toks
         self.role = APP_ROLE if sf.surface in ("web", "ios") else None
+        # local RPC wrappers: name -> (index of the function-name param, index
+        # of the args param or None, token span of the body)
+        self.rpc_wrappers: dict[str, tuple[int, int | None, tuple[int, int]]] = (
+            self._find_rpc_wrappers() if sf.lang == "ts" else {})
+
+    # ---- local RPC wrappers ------------------------------------------------
+    def _skip_generic(self, i: int) -> int:
+        """Index just past a `<...>` type-argument list starting at toks[i] (or i)."""
+        toks = self.toks
+        if i >= len(toks) or toks[i].val != "<":
+            return i
+        depth = 0
+        for j in range(i, min(len(toks), i + 200)):
+            if toks[j].val == "<":
+                depth += 1
+            elif toks[j].val == ">":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            elif toks[j].val in (";", "{", "}"):
+                break
+        return i
+
+    def _find_rpc_wrappers(self) -> dict:
+        """TS helpers such as `async function rpc<T>(ctx, fn: string, args) {
+        ... x.rpc(fn, args) ... }` (or `const rpc = async (ctx, fn, args) => {`):
+        their call sites `rpc(ctx, "name", { ... })` are checked like `.rpc()`."""
+        toks, out = self.toks, {}
+        n = len(toks)
+        for i, t in enumerate(toks):
+            name, open_i = None, None
+            if t.kind == "id" and t.val == "function" and i + 1 < n and toks[i + 1].kind == "id":
+                name = toks[i + 1].val
+                open_i = self._skip_generic(i + 2)
+            elif (t.kind == "id" and t.val in ("const", "let") and i + 3 < n and toks[i + 1].kind == "id"
+                  and toks[i + 2].val == "="):
+                name = toks[i + 1].val
+                j = i + 3
+                if toks[j].kind == "id" and toks[j].val == "async":
+                    j += 1
+                open_i = self._skip_generic(j)
+            if name is None or open_i is None or open_i >= n or toks[open_i].val != "(":
+                continue
+            close = match_close(toks, open_i)
+            params = [next((x.val for x in a if x.kind == "id"), None) for a in split_args(toks, open_i, close)]
+            body = next((j for j in range(close + 1, min(n, close + 40)) if toks[j].val == "{"), None)
+            if body is None or (t.val != "function" and not any(toks[j].val == "=>" for j in range(close, body))):
+                continue
+            end = match_close(toks, body)
+            for j in range(body, end):
+                if not (toks[j].val == "." and j + 2 < end and toks[j + 1].val == "rpc" and toks[j + 2].val == "("):
+                    continue
+                cargs = split_args(toks, j + 2, match_close(toks, j + 2))
+                if not cargs or len(cargs[0]) != 1 or cargs[0][0].kind != "id" or cargs[0][0].val not in params:
+                    continue
+                a_idx = None
+                if len(cargs) > 1 and len(cargs[1]) == 1 and cargs[1][0].val in params:
+                    a_idx = params.index(cargs[1][0].val)
+                out[name] = (params.index(cargs[0][0].val), a_idx, (body, end))
+                break
+        return out
+
+    def _in_wrapper_body(self, idx: int) -> bool:
+        return any(s <= idx < e for _f, _a, (s, e) in self.rpc_wrappers.values())
+
+    def _assigned_literal(self, name: str, before: int) -> tuple[str, bool] | None:
+        """`NAME = "literal"` closest before token `before` in the same function
+        (e.g. `operation = "x"; ... .rpc(operation, {...})`)."""
+        toks = self.toks
+        for j in range(before - 1, max(0, before - 400), -1):
+            t = toks[j]
+            if t.kind == "id" and t.val == "function":
+                return None
+            if (t.kind == "id" and t.val == name and j + 2 < before and toks[j + 1].val == "="
+                    and not (j > 0 and toks[j - 1].val == ".")):
+                end = j + 2
+                while end < before and toks[end].val not in (";", ")", ",") and toks[end].line == toks[j + 2].line:
+                    end += 1
+                val = self.eval_str(toks[j + 2:end])
+                return val if val and val[1] else None
+        return None
 
     # ---- expression helpers ------------------------------------------------
     def eval_str(self, arg: list[Tok], owner: str | None = None) -> tuple[str, bool] | None:
@@ -1392,6 +1479,12 @@ class SourceScanner:
                     self.handle_rpc(i)
                 if meth == "invoke" and i >= 1 and toks[i - 1].kind == "id" and toks[i - 1].val == "functions":
                     self.handle_invoke(i)
+            # call of a local RPC wrapper: NAME( / NAME<T>(
+            if t.kind == "id" and t.val in self.rpc_wrappers and i + 1 < n and toks[i + 1].val in ("(", "<") \
+                    and not (i > 0 and toks[i - 1].val in (".", "function")) \
+                    and not (i > 0 and toks[i - 1].kind == "id" and toks[i - 1].val in ("const", "let", "var")):
+                i = self.handle_wrapper_call(i)
+                continue
             # continuation of a bound query builder: NAME.method(
             if t.kind == "id" and t.val in bindings and bindings[t.val] is not None and i + 3 < n \
                     and toks[i + 1].val == "." and toks[i + 2].kind == "id" and toks[i + 2].val in CHAIN_METHODS \
@@ -1569,10 +1662,8 @@ class SourceScanner:
         where = self.sf.where(toks[dot_i + 1].line)
         if not args:
             return
-        val = self.eval_str(args[0])
-        if val is None or not val[1]:
-            self.k.r.skip(where, "RPC name chosen at run time")
-            return
+        if len(args[0]) == 1 and args[0][0].kind == "id" and self._in_wrapper_body(dot_i):
+            return  # a local RPC wrapper: its call sites are checked instead (handle_wrapper_call)
         params = None
         for a in args[1:]:
             lab, expr = arg_label(a) if self.sf.lang == "swift" else (None, a)
@@ -1580,6 +1671,29 @@ class SourceScanner:
                 continue
             params = expr
             break
+        self.check_rpc_call(where, args[0], params, dot_i)
+
+    def handle_wrapper_call(self, i: int) -> int:
+        """`rpc(ctx, "name", { ... })` / `rpc<T>(...)` of a local RPC wrapper."""
+        fn_idx, a_idx, _span = self.rpc_wrappers[self.toks[i].val]
+        open_i = self._skip_generic(i + 1)
+        if open_i >= len(self.toks) or self.toks[open_i].val != "(":
+            return i + 1
+        args, close = self.call_args(open_i)
+        where = self.sf.where(self.toks[i].line)
+        if fn_idx >= len(args):
+            return close
+        params = args[a_idx] if a_idx is not None and a_idx < len(args) else None
+        self.check_rpc_call(where, args[fn_idx], params, i)
+        return open_i + 1
+
+    def check_rpc_call(self, where: str, name_arg: list[Tok], params: list[Tok] | None, at: int) -> None:
+        val = self.eval_str(name_arg)
+        if (val is None or not val[1]) and self.sf.lang == "ts" and len(name_arg) == 1 and name_arg[0].kind == "id":
+            val = self._assigned_literal(name_arg[0].val, at)
+        if val is None or not val[1]:
+            self.k.r.skip(where, "RPC name chosen at run time")
+            return
         if params is None:
             self.k.check_rpc(where, val[0], [], False, self.sf.surface)
             return
@@ -1740,6 +1854,12 @@ def run_checks(schema: Schema, repo: Path, files: list[SourceFile] | None = None
     return report
 
 
+def app_rpc_callers(meta: dict, repo: Path) -> dict[str, list[str]]:
+    """RPC name -> sorted repo-relative web / iOS / edge-function files that
+    call it (statically named calls only), for docs/SCHEMA.md."""
+    return {k: sorted(v) for k, v in run_checks(Schema(meta), repo).rpc_callers.items()}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=str(DEFAULT_REPO))
@@ -1765,10 +1885,12 @@ def main() -> int:
         print(f"check_contracts: cannot load the schema: {exc}", file=sys.stderr)
         return 2
 
+    report = run_checks(Schema(meta), repo)
     failed = False
     if not args.no_freshness:
         try:
-            out = gen_types.render(meta, applied, repo)
+            out = gen_types.render(meta, applied, repo,
+                                   app_callers={k: sorted(v) for k, v in report.rpc_callers.items()})
         except (gen_types.GenError, RuntimeError) as exc:
             print(f"check_contracts: {exc}", file=sys.stderr)
             return 2
@@ -1778,7 +1900,6 @@ def main() -> int:
             print("ERROR generated contract files are stale (run `python3 scripts/gen_types.py`): "
                   + ", ".join(stale))
 
-    report = run_checks(Schema(meta), repo)
     for e in report.errors:
         print(f"ERROR {e}")
     if args.verbose:
@@ -1936,6 +2057,33 @@ def self_test() -> int:
     expect("edge functions may call service_role-only RPCs",
            not has(run({"supabase/functions/y/index.ts": "await admin.rpc('purge_all', { p_limit: 5 });\n"}),
                    "not executable"))
+
+    # --- local RPC wrappers and names assigned just before the call ----------------
+    wrap = run({"supabase/functions/w/handlers.ts":
+                "async function rpc<T>(ctx: Ctx, fn: string, args: Record<string, unknown>): Promise<T> {\n"
+                "  const { data, error } = await ctx.admin.rpc(fn, args);\n"
+                "  if (error) throw error;\n  return data as T;\n}\n"
+                "const call = async (fn: string) => {\n  return await admin.rpc(fn);\n};\n"
+                "export async function a(ctx: Ctx) {\n"
+                "  await rpc<Row>(ctx, 'create_job', { p_shop_id: 's', p_customer_id: 'c' });\n"
+                "  await rpc(ctx, 'purge_all', { p_limitt: 5 });\n"
+                "  await rpc(ctx, 'no_such_rpc', {});\n"
+                "  await call('purge_all');\n"
+                "  let operation: string;\n"
+                "  if (x) {\n    operation = 'create_job';\n"
+                "    await admin.rpc(operation, { p_shop_id: 's', p_customer_id: 'c', p_note: 'n' });\n"
+                "  } else {\n    operation = 'public_quote';\n    await admin.rpc(operation, { p_token: 't' });\n  }\n"
+                "}\n"})
+    expect("wrapper call sites are checked (typed and untyped)",
+           has(wrap, "handlers.ts:11: RPC 'purge_all' has no argument 'p_limitt'")
+           and has(wrap, "handlers.ts:12: RPC 'no_such_rpc' does not exist"), "; ".join(wrap.errors))
+    expect("an assigned RPC name is resolved at the call",
+           has(wrap, "handlers.ts:17: RPC 'create_job' has no argument 'p_note'")
+           and not has(wrap, "public_quote"), "; ".join(wrap.errors))
+    expect("wrapper bodies are not reported as run-time names", not wrap.dynamic, "; ".join(wrap.dynamic))
+    expect("wrapper and assigned calls counted", wrap.counts.get("rpcs", 0) == 6, str(wrap.counts))
+    expect("callers recorded per RPC", wrap.rpc_callers.get("create_job") == {"supabase/functions/w/handlers.ts"}
+           and "no_such_rpc" not in wrap.rpc_callers, str(wrap.rpc_callers))
 
     # --- privileges on app surfaces ----------------------------------------------
     priv = run({"web/src/features/j.ts":

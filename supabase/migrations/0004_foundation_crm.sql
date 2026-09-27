@@ -37,12 +37,19 @@ create table public.customers (
                         lower(coalesce(first_name, '') || ' ' || coalesce(last_name, '') || ' ' ||
                               coalesce(company, '') || ' ' || coalesce(email::text, '') || ' ' ||
                               coalesce(phone, ''))) stored,
+  -- server-maintained list order: last name, else company, else first name,
+  -- then first name (so company-only customers sort by company)
+  sort_name           text generated always as (
+                        lower(coalesce(nullif(btrim(last_name), ''), nullif(btrim(company), ''),
+                                       nullif(btrim(first_name), ''), '') || ' ' ||
+                              coalesce(btrim(first_name), ''))) stored,
   constraint customers_shop_id_id_key unique (shop_id, id),
   constraint customers_has_name check (
     coalesce(nullif(btrim(first_name), ''), nullif(btrim(last_name), ''), nullif(btrim(company), '')) is not null),
   constraint customers_lat_lng_pair check ((lat is null) = (lng is null))
 );
 create index customers_shop_name_idx on public.customers (shop_id, last_name, first_name);
+create index customers_shop_sort_name_idx on public.customers (shop_id, sort_name, id);
 create index customers_shop_email_idx on public.customers (shop_id, email);
 create index customers_shop_phone_idx on public.customers (shop_id, phone);
 create index customers_portal_user_idx on public.customers (portal_user_id);

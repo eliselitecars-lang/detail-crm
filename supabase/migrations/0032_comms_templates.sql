@@ -346,6 +346,8 @@ revoke execute on function
   public.shops_seed_comms()
 from public, anon, authenticated;
 
+-- (contract tags for scripts/gen_types.py: output columns that may be null)
+comment on function public.default_message_templates() is '@nullable: subject, offset_minutes';
 revoke execute on function public.default_message_templates() from public, anon;
 grant execute on function public.default_message_templates() to authenticated, service_role;
 

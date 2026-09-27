@@ -57,11 +57,14 @@ select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'p
 select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_bad2', 'succeeded', 100, 0, 'payment', 'card',
                       p_invoice_id => tests.fx('inv1'), p_customer_id => tests.fx('cust_a2'))$$, '23514',
                     'a customer that is not the void invoice''s customer is rejected');
-select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_b'), 'pi_bad3', 'succeeded', 100, 0, 'payment', 'card',
-                      p_invoice_id => tests.fx('inv1'), p_customer_id => tests.fx('cust_b'))$$, '23503',
-                    'another shop cannot attach money to A''s (void) invoice');
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_b'), 'pi_bad3', 'succeeded', 100, 0, 'payment', 'card',
+                      p_invoice_id => tests.fx('inv1'), p_customer_id => tests.fx('cust_b'))$$,
+                   'money for shop B naming A''s invoice is still recorded ...');
 select tests.as_superuser();
-select tests.eq((select count(*) from public.payments where stripe_payment_intent_id in ('pi_bad1', 'pi_bad2', 'pi_bad3')), 0::bigint,
+select tests.eq((select concat_ws('/', shop_id = tests.fx('shop_b'), invoice_id is null, job_id is null, customer_id = tests.fx('cust_b'))
+                   from public.payments where stripe_payment_intent_id = 'pi_bad3'),
+                't/t/t/t', '... in shop B, for its customer, never attached to A''s invoice (the stale link is dropped)');
+select tests.eq((select count(*) from public.payments where stripe_payment_intent_id in ('pi_bad1', 'pi_bad2')), 0::bigint,
                 'rejected payments were not recorded');
 
 -- ============================================================ void job invoice, no replacement yet: money waits on the job
@@ -241,3 +244,38 @@ select tests.eq(pg_temp.link('pi_staleadhoc'), concat_ws('/', 'succeeded', '-', 
 select tests.eq(pg_temp.bal(tests.fx('adhoc2')), 'void/9000/0/9000', 'the void invoice still holds no money');
 select tests.ok((select note like 'Received for void invoice #%' from public.payments where stripe_payment_intent_id = 'pi_staleadhoc'),
                 'flagged for staff');
+
+-- ============================================================ stale links from Stripe metadata are dropped
+-- A Checkout Session / intent created for a job, invoice or membership that
+-- was deleted before the money arrived still records the money: the missing
+-- links are dropped (never a 23503 that makes Stripe retry forever).
+select tests.as_superuser();
+insert into public.jobs (shop_id, customer_id, status) values (tests.fx('shop_a'), tests.fx('cust_a2'), 'requested')
+  returning tests.fx_set('job_gone', id);
+delete from public.jobs where id = tests.fx('job_gone');
+select tests.as_service();
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_gonejob', 'succeeded', 2500, 0, 'deposit', 'card',
+                      p_job_id => tests.fx('job_gone'), p_customer_id => tests.fx('cust_a2'))$$,
+                   'a deposit for a deleted job is recorded');
+select tests.eq(pg_temp.link('pi_gonejob'), concat_ws('/', 'succeeded', '-', '-', tests.fx('cust_a2')),
+                'for the customer, without the deleted job');
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_gonemem', 'succeeded', 900, 0, 'membership', 'card',
+                      p_membership_id => gen_random_uuid(), p_customer_id => tests.fx('cust_a2'))$$,
+                   'a charge for a deleted membership is recorded');
+select tests.eq((select concat_ws('/', kind, membership_id is null, customer_id = tests.fx('cust_a2'))
+                   from public.payments where stripe_payment_intent_id = 'pi_gonemem'), 'payment/t/t',
+                'as an ordinary payment of the customer');
+select tests.lives($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_goneinv', 'succeeded', 700, 0, 'payment', 'card',
+                      p_invoice_id => gen_random_uuid(), p_job_id => tests.fx('job_a'))$$,
+                   'a payment naming a deleted invoice but a live job is recorded');
+select tests.eq((select job_id = tests.fx('job_a') and customer_id = tests.fx('cust_a')
+                   from public.payments where stripe_payment_intent_id = 'pi_goneinv'), true,
+                'on the job (and the job''s customer)');
+select tests.throws_like($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_gonenothing', 'succeeded', 700, 0, 'payment', 'card',
+                           p_job_id => tests.fx('job_gone'))$$, 'P0002', '%exists in this shop%',
+                         'nothing left to attach the money to: P0002 (the webhook records the error)');
+select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_b'), 'pi_crossjob', 'succeeded', 700, 0, 'payment', 'card',
+                      p_job_id => tests.fx('job_a'))$$, 'P0002', 'another shop''s job alone is never attached');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.payments where stripe_payment_intent_id in ('pi_gonenothing', 'pi_crossjob')), 0::bigint,
+                'nothing recorded for them');

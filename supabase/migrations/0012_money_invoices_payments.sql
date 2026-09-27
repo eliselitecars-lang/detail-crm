@@ -101,6 +101,8 @@ create index invoices_shop_job_idx on public.invoices (shop_id, job_id);
 create index invoices_shop_customer_idx on public.invoices (shop_id, customer_id);
 create index invoices_shop_status_idx on public.invoices (shop_id, status, due_at);
 create index invoices_created_by_idx on public.invoices (created_by);
+comment on column public.invoices.number is 'Human invoice number per shop, assigned by invoices_integrity. @insert-optional';
+comment on column public.invoices.tax_rate_bps is 'Defaults to the shop''s tax rate when omitted (invoices_integrity). @insert-optional';
 
 -- ---------------------------------------------------------------------------
 -- invoice_line_items
@@ -152,6 +154,11 @@ create table public.payments (
   amount_cents                bigint not null check (amount_cents >= 0),
   tip_cents                   bigint not null default 0 check (tip_cents >= 0),
   refunded_cents              bigint not null default 0 check (refunded_cents >= 0),
+  -- money taken back by a lost card dispute (chargeback), maintained by the
+  -- webhook through apply_stripe_dispute (0093). Informational: it does not
+  -- change the net amount, invoice balances or reports' revenue — staff
+  -- decide whether to bill the customer again (SPEC §4.5).
+  disputed_cents              bigint not null default 0,
   stripe_payment_intent_id    text unique check (stripe_payment_intent_id is null
                                                  or stripe_payment_intent_id ~ '^pi_[A-Za-z0-9]+$'),
   stripe_charge_id            text check (stripe_charge_id is null or stripe_charge_id ~ '^(ch|py)_[A-Za-z0-9]+$'),
@@ -176,6 +183,7 @@ create table public.payments (
     references public.memberships (shop_id, id) on delete restrict,
   constraint payments_positive check (amount_cents + tip_cents > 0),
   constraint payments_refund_bound check (refunded_cents <= amount_cents + tip_cents),
+  constraint payments_disputed_bound check (disputed_cents >= 0 and disputed_cents <= amount_cents + tip_cents),
   constraint payments_refund_status check (
     case status
       when 'refunded' then refunded_cents = amount_cents + tip_cents
@@ -359,6 +367,7 @@ declare
   v_tip       bigint;
   v_last_paid timestamptz;
   v_due_days  integer;
+  v_tz        text;
 begin
   if tg_op = 'UPDATE' then
     if old.status = 'void' and new.status <> 'void' then
@@ -402,8 +411,14 @@ begin
       new.issued_at := now();
     end if;
     if new.due_at is null then
-      select s.invoice_due_days into v_due_days from public.shops s where s.id = new.shop_id;
-      new.due_at := new.issued_at + make_interval(days => coalesce(v_due_days, 0));
+      -- due at the END of the local due date (issue date + due days in the
+      -- shop's timezone): 0 days = due on receipt, overdue from the next
+      -- local midnight, so report_outstanding's days_past_due reads 1 on the
+      -- first overdue day
+      select s.invoice_due_days, s.timezone into v_due_days, v_tz from public.shops s where s.id = new.shop_id;
+      v_tz := coalesce(v_tz, 'UTC');
+      new.due_at := (((new.issued_at at time zone v_tz)::date + coalesce(v_due_days, 0))::timestamp
+                     + time '23:59:59') at time zone v_tz;
     end if;
     new.status := case
       when new.balance_cents <= 0 then 'paid'
@@ -694,6 +709,10 @@ language plpgsql security definer
 set search_path = ''
 as $$
 begin
+  if tg_op = 'DELETE' and old.invoice_id is not null
+     and old.invoice_id::text = current_setting('detail_crm.deleting_invoice', true) then
+    return null;   -- a dead attempt removed with its invoice (payments_delete_dead_for_parent)
+  end if;
   if tg_op in ('UPDATE', 'DELETE') and old.invoice_id is not null then
     update public.invoices set updated_at = now() where id = old.invoice_id and shop_id = old.shop_id;
   end if;
@@ -717,7 +736,9 @@ create trigger payments_touch_invoice after insert or update or delete on public
 
 -- ---------------------------------------------------------------------------
 -- jobs: a job with money on it keeps its customer (0006 cannot know about
--- invoices/payments).
+-- invoices/payments). Only real money counts: received payments (even when
+-- refunded since — the history stays with its customer) and payments in
+-- flight. A failed / cancelled / abandoned attempt does not pin the customer.
 -- ---------------------------------------------------------------------------
 create function public.jobs_money_guard() returns trigger
 language plpgsql security definer
@@ -727,7 +748,10 @@ begin
   if new.customer_id is distinct from old.customer_id
      and (exists (select 1 from public.invoices i
                   where i.job_id = new.id and i.shop_id = new.shop_id and i.status <> 'void')
-          or exists (select 1 from public.payments p where p.job_id = new.id and p.shop_id = new.shop_id)) then
+          or exists (select 1 from public.payments p
+                     where p.job_id = new.id and p.shop_id = new.shop_id
+                       and (p.status in ('succeeded', 'partially_refunded', 'refunded')
+                            or public.payment_in_flight(p.status, p.created_at)))) then
     raise exception 'this job has an invoice or payments; its customer cannot change' using errcode = '23514';
   end if;
   return null;
@@ -903,6 +927,49 @@ create trigger jobs_zz_release_coupon after delete on public.jobs
   execute function public.jobs_release_coupon_on_delete();
 
 -- ---------------------------------------------------------------------------
+-- Dead payment attempts never block deletes. payments RESTRICTs the deletion
+-- of its job / invoice / customer so money records survive, but a failed or
+-- cancelled attempt that never moved money (refunded_cents = 0, no paid_at)
+-- is not a money record: it is removed with its parent (these triggers run
+-- as the owner — authorization for the parent's delete was already checked
+-- by its own policies). RESTRICT then protects only real or in-flight money.
+-- A pending payment (in flight or abandoned) is kept: the sweep / webhook
+-- resolves it first.
+-- ---------------------------------------------------------------------------
+create function public.payments_delete_dead_for_parent() returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  if tg_table_name = 'invoices' then
+    -- the invoice row itself is being deleted: payments_touch_invoice must
+    -- not update it (a BEFORE DELETE trigger may not modify its own row)
+    perform set_config('detail_crm.deleting_invoice', old.id::text, true);
+    delete from public.payments p
+     where p.shop_id = old.shop_id and p.invoice_id = old.id
+       and p.status in ('failed', 'cancelled') and p.refunded_cents = 0 and p.paid_at is null;
+    perform set_config('detail_crm.deleting_invoice', '', true);
+  elsif tg_table_name = 'jobs' then
+    delete from public.payments p
+     where p.shop_id = old.shop_id and p.job_id = old.id
+       and p.status in ('failed', 'cancelled') and p.refunded_cents = 0 and p.paid_at is null;
+  elsif tg_table_name = 'customers' then
+    delete from public.payments p
+     where p.shop_id = old.shop_id and p.customer_id = old.id
+       and p.status in ('failed', 'cancelled') and p.refunded_cents = 0 and p.paid_at is null;
+  end if;
+  return old;
+end
+$$;
+
+create trigger jobs_07_delete_dead_payments before delete on public.jobs
+  for each row execute function public.payments_delete_dead_for_parent();
+create trigger invoices_07_delete_dead_payments before delete on public.invoices
+  for each row execute function public.payments_delete_dead_for_parent();
+create trigger customers_07_delete_dead_payments before delete on public.customers
+  for each row execute function public.payments_delete_dead_for_parent();
+
+-- ---------------------------------------------------------------------------
 -- shops: deleting a shop cascades through its memberships and payments, but
 -- the Stripe objects on its connected account live on. A subscription would
 -- keep charging the customer every period while the webhook, which can no
@@ -1002,6 +1069,7 @@ revoke execute on function
   public.jobs_customer_change(),
   public.jobs_apply_coupon(),
   public.jobs_release_coupon_on_delete(),
+  public.payments_delete_dead_for_parent(),
   public.shops_money_delete_guard()
 from public, anon, authenticated;
 

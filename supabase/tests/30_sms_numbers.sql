@@ -164,3 +164,20 @@ select tests.ok(not exists (select 1 from public.comms_suppressions where shop_i
 -- a number bound to shop B never lands in shop A, whatever shop A's settings say
 select tests.ok((select shop_id = tests.fx('shop_b') from public.record_inbound_sms('+12055550188', '+12055550101', 'STOP', 'SMp3')),
                 'a text to shop B''s bound number reaches shop B');
+
+-- ------------------------------------------------------------ YES opts back in (like START / UNSTOP)
+select tests.as_service();
+select tests.ok(exists (select 1 from public.comms_suppressions where shop_id = tests.fx('shop_a') and channel = 'sms'
+                         and address = '+12055550101'), 'shop A still has the STOP on record');
+select tests.eq((select opt_action from public.record_inbound_sms('+12055550133', '+12055550101', ' yes! ', 'SMyes1')), 'opt_in',
+                'replying YES is an opt-in keyword (case and trailing punctuation ignored)');
+select tests.ok(not exists (select 1 from public.comms_suppressions where shop_id = tests.fx('shop_a') and channel = 'sms'
+                             and address = '+12055550101'), 'the number is re-subscribed in shop A');
+select tests.ok((select sms_opted_out_at is null from public.customers where id = tests.fx('cust_a')),
+                'and its customer can be texted again');
+select tests.ok(public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'on_the_way', 'sms', tests.fx('job_a'))
+                  is not null, 'appointment texts go out again');
+select tests.ok(exists (select 1 from public.comms_suppressions where shop_id = tests.fx('shop_b') and address = '+12055550101'),
+                'shop B''s opt-out is unaffected by a YES to shop A');
+select tests.eq((select opt_action from public.record_inbound_sms('+12055550133', '+12055550101', 'Yes please, Tuesday works', 'SMyes2')),
+                null::text, 'YES inside a sentence is an ordinary reply');

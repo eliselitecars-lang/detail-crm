@@ -153,6 +153,10 @@ create index jobs_shop_range_idx on public.jobs using gist (shop_id, tstzrange(s
 
 comment on column public.jobs.quote_id is 'FK to quotes(shop_id, id) is added by the money migrations.';
 comment on column public.jobs.subtotal_cents is 'Server-maintained from job_line_items (SPEC §4.5); client writes are ignored.';
+-- '@insert-optional': a BEFORE INSERT trigger always fills the column, so
+-- scripts/gen_types.py makes it optional in the generated Insert type.
+comment on column public.jobs.number is 'Human job number per shop, assigned by jobs_integrity. @insert-optional';
+comment on column public.jobs.tax_rate_bps is 'Defaults to the shop''s tax rate when omitted (jobs_integrity). @insert-optional';
 
 -- ---------------------------------------------------------------------------
 -- job_line_items

@@ -25,12 +25,12 @@ update public.vehicles set category_id = tests.fx('cat_truck_a') where id = test
 create temp table slot as
   select to_char(min(s.starts_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as first_car,
          to_char(max(s.starts_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as last_car
-  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
-         (now() at time zone 'America/Chicago')::date + 3, (now() at time zone 'America/Chicago')::date + 3) s;
+  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], (now() at time zone 'America/Chicago')::date + 3,
+         (now() at time zone 'America/Chicago')::date + 3, tests.fx('cat_car_a')) s;
 create temp table slot_b as
   select to_char(min(s.starts_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as first_b
-  from public.get_available_slots('shop-b', array[tests.fx('svc_b')], tests.fx('cat_car_b'),
-         (now() at time zone 'America/Chicago')::date + 3, (now() at time zone 'America/Chicago')::date + 3) s;
+  from public.get_available_slots('shop-b', array[tests.fx('svc_b')], (now() at time zone 'America/Chicago')::date + 3,
+         (now() at time zone 'America/Chicago')::date + 3, tests.fx('cat_car_b')) s;
 grant select on slot, slot_b to anon, authenticated;
 
 -- Alice's contact + a Honda Civic typed into the form with the given category
@@ -47,8 +47,8 @@ grant execute on function pg_temp.civic(uuid, text, jsonb) to anon, authenticate
 
 -- sanity: the last Car start of the day is too late for the truck's 180 minutes
 select tests.ok((select not exists (
-                   select 1 from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_truck_a'),
-                          (now() at time zone 'America/Chicago')::date + 3, (now() at time zone 'America/Chicago')::date + 3) s
+                   select 1 from public.get_available_slots('shop-a', array[tests.fx('svc_a')], (now() at time zone 'America/Chicago')::date + 3,
+                          (now() at time zone 'America/Chicago')::date + 3, tests.fx('cat_truck_a')) s
                     where s.starts_at = last_car::timestamptz) from slot),
                 'setup: the last Car slot is not offered for a truck');
 

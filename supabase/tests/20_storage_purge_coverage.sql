@@ -7,6 +7,10 @@
 --   * re-tokenizing an unsigned form (job moved to another customer) queues
 --     the old token's public upload folder.
 \ir fixtures/two_shops.psql
+-- The purge queue is global (the worker drains every shop's requests): start
+-- from an empty queue. On a shared database (the local stack) this is part
+-- of the file's own transaction and rolled back with it.
+delete from public.storage_purge_requests;
 
 -- =================================================================== canonical folders
 select tests.eq(public.storage_path_uuid(tests.fx('shop_a')::text || '/x.jpg', 1), tests.fx('shop_a'),

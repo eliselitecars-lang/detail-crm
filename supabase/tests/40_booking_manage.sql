@@ -69,8 +69,8 @@ select tests.ok((select (d #>> '{cancellation,allowed}')::boolean = false from g
 drop table g;
 
 select tests.as_anon();
-select tests.throws($$select public.public_get_booking(gen_random_uuid())$$, 'P0002', 'unknown token');
-select tests.throws($$select public.public_get_booking(null)$$, 'P0002', 'null token');
+select tests.throws($$select public.public_get_booking(gen_random_uuid())$$, 'PT404', 'unknown token');
+select tests.throws($$select public.public_get_booking(null)$$, 'PT404', 'null token');
 select tests.eq(public.public_get_booking(tests.fx('tok_a')) #>> '{booking,notes}',
                 'Gate code 1234', 'staff-created jobs have booking pages too (customer-visible notes)');
 select tests.ok(public.public_get_booking(tests.fx('tok_a'))::text not like '%Customer is picky%', 'but never internal notes');
@@ -110,7 +110,7 @@ select tests.eq((public.public_get_booking(tests.fx('tok')) #>> '{invoice,token}
 select tests.as_service();
 select tests.throws_like($$select public.public_cancel_booking(tests.fx('tok'), 'plans changed', '2025-06-08 16:00Z')$$, '22023',
                          '%closed 24 hours before%', 'inside the 24-hour window: refused');
-select tests.throws($$select public.public_cancel_booking(gen_random_uuid())$$, 'P0002', 'unknown token');
+select tests.throws($$select public.public_cancel_booking(gen_random_uuid())$$, 'PT404', 'unknown token');
 select tests.throws_like($$select public.public_cancel_booking(tests.fx('tok'), repeat('x', 1001), '2025-06-01 12:00Z')$$, '22023',
                          '%too long%', 'reason length');
 create temp table c as select public.public_cancel_booking(tests.fx('tok'), '  plans changed  ', '2025-06-08 14:00Z') as d;
@@ -124,13 +124,18 @@ select tests.eq((select count(*) from public.notifications
                   where job_id = tests.fx('job') and kind = 'booking_cancelled' and title = 'Booking cancelled by Nina New'
                     and body = 'Job #' || (select number from public.jobs where id = tests.fx('job')) || ' · Monday, June 9 at 10:00 AM · plans changed'),
                 3::bigint, 'owner/admin/manager notified once each');
+select tests.eq((select count(*) from public.notifications
+                  where kind = 'booking_cancelled' and job_id = tests.fx('job')
+                    and customer_id = (select customer_id from public.jobs where id = tests.fx('job'))
+                    and quote_id is null and invoice_id is null), 3::bigint,
+                'the cancellation deep-links the job and its customer');
 select tests.eq((select count(*) from public.notifications where shop_id = tests.fx('shop_b')), 0::bigint, 'nothing in shop B');
 select tests.as_service();
 select tests.throws_like($$select public.public_cancel_booking(tests.fx('tok'), null, '2025-06-01 12:00Z')$$, '22023',
                          '%can no longer be cancelled online (it is cancelled)%', 'a cancelled booking cannot be cancelled again');
 select tests.as_superuser();
 select tests.eq((select count(*) from public.notifications where kind = 'booking_cancelled'), 3::bigint, 'still one set of notifications');
-select tests.ok(exists (select 1 from public.get_available_slots('shop-a', array[tests.fx('svc_a')], null, '2025-06-09', '2025-06-09',
+select tests.ok(exists (select 1 from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-09', '2025-06-09', null,
                                                                  '2025-06-01 12:00Z') s where s.starts_at = '2025-06-09 15:00Z'),
                 'the cancelled slot is free again');
 

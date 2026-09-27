@@ -311,5 +311,7 @@ revoke all on public.service_categories, public.services, public.service_prices,
 revoke execute on function public.catalog_links_validate(), public.services_kind_guard(),
                            public.coupons_client_guard()
   from public, anon, authenticated;
+-- (contract tags for scripts/gen_types.py: output columns that may be null)
+comment on function public.service_price_for(uuid, uuid) is '@nullable: price_cents';
 revoke execute on function public.service_price_for(uuid, uuid) from public, anon;
 grant execute on function public.service_price_for(uuid, uuid) to authenticated, service_role;

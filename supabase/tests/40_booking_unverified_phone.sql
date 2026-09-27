@@ -165,9 +165,9 @@ select tests.ok((select (pg_temp.cust(r)).id = tests.fx('cust_a') and (pg_temp.c
 -- API callers book on the server clock: a real slot three days out
 create temp table live as
   select to_char(min(s.starts_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as starts_at
-  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
+  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], (now() at time zone 'America/Chicago')::date + 3,
                                   (now() at time zone 'America/Chicago')::date + 3,
-                                  (now() at time zone 'America/Chicago')::date + 3) s;
+                                  tests.fx('cat_car_a')) s;
 grant select on live to anon, authenticated;
 create function pg_temp.live_book(p_customer jsonb, p_extra jsonb default '{}') returns jsonb language sql as $$
   select public.create_online_booking('shop-a', pg_temp.booking(jsonb_build_object('customer', p_customer,

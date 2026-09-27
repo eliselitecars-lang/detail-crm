@@ -188,7 +188,7 @@ declare
 begin
   select * into v_q from public.quotes q where q.public_token = p_token for update;
   if not found or v_q.status = 'draft' then
-    raise exception 'quote not found' using errcode = 'P0002';
+    raise exception 'quote not found' using errcode = 'PT404';
   end if;
   select s.timezone into v_tz from public.shops s where s.id = v_q.shop_id;
   if v_q.status in ('sent', 'viewed') and v_q.valid_until is not null
@@ -227,7 +227,7 @@ declare
 begin
   select * into v_q from public.quotes q where q.public_token = p_token for update;
   if not found or v_q.status = 'draft' then
-    raise exception 'quote not found' using errcode = 'P0002';
+    raise exception 'quote not found' using errcode = 'PT404';
   end if;
   if v_action is null or v_action not in ('approve', 'decline') then
     raise exception 'action must be approve or decline' using errcode = '22023';
@@ -279,7 +279,7 @@ declare
 begin
   select * into v_inv from public.invoices i where i.public_token = p_token;
   if not found or v_inv.status = 'draft' then
-    raise exception 'invoice not found' using errcode = 'P0002';
+    raise exception 'invoice not found' using errcode = 'PT404';
   end if;
   return public.money_public_invoice_json(v_inv.id);
 end

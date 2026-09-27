@@ -45,7 +45,7 @@ transaction never commits); force them with `set constraints <name> immediate`.
 | `30_` | communication (templates, messages, automations, campaigns, notifications) |
 | `40_` | integration flows (online booking, portal, public RPCs) |
 | `45_` | reports |
-| `90_` | cross-cutting hardening |
+| `90_` | cross-cutting hardening and integration (0090–0099) |
 
 ## Helpers (schema `tests`, defined in `supabase/shim/30_test_helpers.sql`)
 
@@ -63,9 +63,13 @@ transaction never commits); force them with `set constraints <name> immediate`.
 Useful SQLSTATEs: `42501` insufficient privilege / RLS `WITH CHECK` violation /
 RPC permission denial; `23514` check or business-rule violation; `23503`
 foreign key (e.g. composite-FK cross-shop injection); `23505` unique;
-`23P01` exclusion; `22023` invalid argument; `P0002` not found; `55000`
-feature not enabled (e.g. online booking off); `428C9` writing a generated
-column.
+`23P01` exclusion; `22023` invalid argument; `P0002` not found (staff and
+internal RPCs); `PT404` not found in a public (anon) RPC — every `public_*`
+function, `get_available_slots` and `create_online_booking` raise it for an
+unknown slug / token / document so PostgREST answers HTTP 404 instead of 500
+(see the 0042 header); `55000` feature not enabled (e.g. online booking off);
+`428C9` writing a generated column; `40001` a compare-and-set lost a race
+(e.g. `set_stripe_refund_total`).
 
 **RLS semantics to remember:** `SELECT`/`UPDATE`/`DELETE` on rows you cannot
 see silently affect 0 rows (assert with `tests.row_count(...) = 0`), while
@@ -75,7 +79,7 @@ see silently affect 0 rows (assert with `tests.row_count(...) = 0`), while
 
 | Helper | Effect (transaction-local) |
 |---|---|
-| `tests.create_user(email, confirmed default true, meta jsonb default '{}') → uuid` | inserts `auth.users` (profile is created by the app trigger); `meta` becomes `raw_user_meta_data` |
+| `tests.create_user(email, confirmed default true, meta jsonb default '{}') → uuid` | inserts `auth.users` with every column GoTrue's admin API sets (explicit `id`, `aud`/`role` `authenticated`, `instance_id` 00000000-…, provider metadata), so it also works on a real Supabase database; the profile is created by the app trigger; `meta` becomes `raw_user_meta_data` |
 | `tests.user_id(email) → uuid` | look up a user |
 | `tests.authenticate_as(user_id)` | `role authenticated` + `request.jwt.claims` {sub, email, role, aud, is_anonymous, app/user_metadata} — `auth.uid()`, `auth.email()`, `auth.jwt()` behave as on Supabase |
 | `tests.as_anon()` | `role anon`, claims `{"role":"anon"}` |
@@ -108,6 +112,32 @@ vehicles, jobs, line items and assignments — see the header of that file for
 every key. Files under `fixtures/` are not run as tests.
 
 ## Conventions
+
+### Portable on a real / shared database
+
+The same files also run against a real local Supabase stack
+(`scripts/stack/test_db_stack.sh`), whose database is shared and already
+holds data. So a file must pass on a non-empty database, and twice in a row:
+
+* never assume a global table is empty — scope counts to the file's own
+  shops / ids (`where shop_id in (tests.fx('shop_a'), tests.fx('shop_b'))`,
+  `where id like 'evt_sec%'`), or reset the shared state explicitly inside
+  the file's own transaction (it is rolled back): `two_shops.psql` deletes
+  `platform_config.app_base_url`, the storage purge tests empty the global
+  purge queue first;
+* seed global rows with upserts: `insert into public.platform_config … on
+  conflict (key) do update set value = excluded.value`;
+* real Storage refuses direct `delete from storage.objects` unless
+  `storage.allow_delete_query` is on, as the Storage API sets it: run
+  `select set_config('storage.allow_delete_query', 'true', true);` right
+  before each direct delete (transaction-local; harmless on the shim);
+* auth accounts are deleted as the superuser (`tests.as_superuser()`), like
+  the GoTrue admin API (`supabase_auth_admin`) — `service_role` has no
+  privileges on `auth.users`, on Supabase or in the shim;
+* assertions that need a superuser connection (the dblink race files, the
+  shim's own superuser check) are gated:
+  `select rolsuper as is_superuser from pg_roles where rolname = current_user \gset`
+  then `\if :is_superuser … \else \echo SKIP (needs superuser) … \endif`.
 
 * Cover the happy path, the denial path for every role, and cross-shop
   isolation for every table and RPC you add; prove composite FKs reject

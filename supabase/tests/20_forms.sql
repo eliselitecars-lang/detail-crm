@@ -133,7 +133,7 @@ select tests.eq(public.public_get_form(tests.fx('tok_f')) ->> 'signature_upload_
 select tests.ok(public.public_get_form(tests.fx('tok_f'))::text not like '%internal%'
                 and public.public_get_form(tests.fx('tok_f'))::text not like '%alice@example.com%',
                 'no internal notes or customer contact details');
-select tests.throws($$select public.public_get_form(gen_random_uuid())$$, 'P0002', 'unknown token');
+select tests.throws($$select public.public_get_form(gen_random_uuid())$$, 'PT404', 'unknown token');
 select tests.throws($$select * from public.form_submissions$$, '42501', 'anon has no direct table access');
 select tests.throws($$select public.sign_form_submission(tests.fx('sub_f'), 'Alice', null)$$, '42501',
                     'anon cannot use the staff signing RPC');
@@ -165,7 +165,7 @@ select tests.throws_like($$select public.public_sign_form(tests.fx('tok_f'), 'Al
                          '22023', '%upload the signature%', 'the image must be uploaded first');
 select tests.throws($$select public.public_sign_form(tests.fx('tok_f'), 'Alice', tests.fx('shop_a') || '/forms/' || tests.fx('tok_f') || '/../x/sig.png')$$,
                     '22023', 'unsafe paths are rejected');
-select tests.throws($$select public.public_sign_form(gen_random_uuid(), 'Alice', 'x')$$, 'P0002', 'wrong token');
+select tests.throws($$select public.public_sign_form(gen_random_uuid(), 'Alice', 'x')$$, 'PT404', 'wrong token');
 
 select tests.eq(public.public_sign_form(tests.fx('tok_f'), '  Alice Anders ', tests.fx('shop_a') || '/forms/' || tests.fx('tok_f') || '/sig.png')
                   #>> '{form,status}', 'signed', 'anon signs with a valid token and uploaded signature');

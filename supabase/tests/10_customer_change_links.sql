@@ -39,11 +39,11 @@ select tests.ok((select public_token <> tests.fx('q_tok_alice') and status = 'dr
                 'new token; back to draft with the sent/viewed stamps cleared');
 
 select tests.as_anon();
-select tests.throws($$select public.public_get_quote(tests.fx('q_tok_alice'))$$, 'P0002',
+select tests.throws($$select public.public_get_quote(tests.fx('q_tok_alice'))$$, 'PT404',
                     'the link already delivered to Alice no longer shows Aaron''s quote');
-select tests.throws($$select public.public_respond_quote(tests.fx('q_tok_alice'), 'approve', 'Alice')$$, 'P0002',
+select tests.throws($$select public.public_respond_quote(tests.fx('q_tok_alice'), 'approve', 'Alice')$$, 'PT404',
                     'Alice cannot approve Aaron''s quote');
-select tests.throws($$select public.public_respond_quote(tests.fx('q_tok_alice'), 'decline')$$, 'P0002',
+select tests.throws($$select public.public_respond_quote(tests.fx('q_tok_alice'), 'decline')$$, 'PT404',
                     'Alice cannot decline Aaron''s quote');
 select tests.as_superuser();
 select tests.eq((select status::text from public.quotes where id = tests.fx('q')), 'draft', 'nothing changed through the old link');
@@ -117,9 +117,9 @@ select tests.eq((select public_token from public.jobs where id = tests.fx('job_a
 
 \if :has_booking
 select tests.as_anon();
-select tests.throws($$select public.public_get_booking(tests.fx('job_tok_alice'))$$, 'P0002',
+select tests.throws($$select public.public_get_booking(tests.fx('job_tok_alice'))$$, 'PT404',
                     'the booking link already delivered to Alice no longer shows Aaron''s service address');
-select tests.throws($$select public.public_cancel_booking(tests.fx('job_tok_alice'), 'not mine', '2025-05-01 12:00Z')$$, 'P0002',
+select tests.throws($$select public.public_cancel_booking(tests.fx('job_tok_alice'), 'not mine', '2025-05-01 12:00Z')$$, 'PT404',
                     'Alice cannot cancel Aaron''s booking');
 select tests.eq(public.public_get_booking(tests.fx('job_tok_aaron'), '2025-05-01 12:00Z') #>> '{booking,service_address,address_line1}',
                 '9 Aaron Way', 'Aaron''s new link shows his booking');
@@ -157,8 +157,8 @@ select tests.ok((select bool_and(public_token not in (tests.fx('form_tok_unsigne
                    from public.form_submissions where job_id = tests.fx('job_f')),
                 'the unsigned forms follow the new customer under new tokens');
 select tests.as_anon();
-select tests.throws($$select public.public_get_form(tests.fx('form_tok_unsigned'))$$, 'P0002',
+select tests.throws($$select public.public_get_form(tests.fx('form_tok_unsigned'))$$, 'PT404',
                     'the form link already delivered to Alice no longer shows Aaron''s job');
-select tests.throws($$select public.public_sign_form(tests.fx('form_tok_signed'), 'Alice Anders', null)$$, 'P0002',
+select tests.throws($$select public.public_sign_form(tests.fx('form_tok_signed'), 'Alice Anders', null)$$, 'PT404',
                     'Alice cannot sign Aaron''s form');
 \endif

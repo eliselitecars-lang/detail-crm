@@ -35,7 +35,7 @@
 --     need an address.
 --   * Staff may record an opt-out (stamped with the server time) but never
 --     clear one: SMS opt-outs are cleared only by the customer texting
---     START/UNSTOP (record_inbound_sms); email opt-outs only by service_role.
+--     START/UNSTOP/YES (record_inbound_sms); email opt-outs only by service_role.
 --     Clearing an opt-out clears it for the address (every customer with it).
 --     Changing a customer's address never clears the previous address's
 --     opt-out; it only stops applying to that customer.
@@ -64,6 +64,14 @@
 --                               a retried appointment message is re-rendered)
 -- Inbound rows are always status 'received' and are written only by
 -- service_role (record_inbound_sms).
+--
+-- Idempotent sends: the staff entry points (queue_message,
+-- enqueue_template_message, enqueue_customer_template and 0090's
+-- enqueue_document_message) take an optional p_request_nonce — one random
+-- value per compose, reused when the client retries. A nonce already used by
+-- the same sender in the shop returns that message instead of queueing a
+-- second one (messages_request_nonce_key makes a concurrent retry lose the
+-- race and read the winner's row).
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -74,7 +82,7 @@ alter table public.customers
   add column email_opted_out_at timestamptz;
 
 comment on column public.customers.sms_opted_out_at is
-  'Set when this number texts STOP (or staff record an opt-out); mirrors comms_suppressions for every customer with the number. Blocks every SMS. Cleared by START/UNSTOP, or when the customer''s phone changes to a number that has not opted out.';
+  'Set when this number texts STOP (or staff record an opt-out); mirrors comms_suppressions for every customer with the number. Blocks every SMS. Cleared by START/UNSTOP/YES, or when the customer''s phone changes to a number that has not opted out.';
 comment on column public.customers.email_opted_out_at is
   'Set when this address unsubscribes (or staff record an opt-out); mirrors comms_suppressions for every customer with the address. Blocks every email. Cleared when the customer''s email changes to an address that has not opted out.';
 
@@ -203,6 +211,8 @@ create table public.messages (
   claimed_at           timestamptz,
   sent_at              timestamptz,
   delivered_at         timestamptz,
+  -- the client's idempotency key for a staff send (see the header)
+  request_nonce        text check (request_nonce is null or request_nonce ~ '^[A-Za-z0-9_-]{8,64}$'),
   created_at           timestamptz not null default now(),
   updated_at           timestamptz not null default now(),
   constraint messages_shop_id_id_key unique (shop_id, id),
@@ -245,6 +255,8 @@ create index messages_orphans_idx on public.messages (shop_id, from_address)
   where direction = 'inbound' and customer_id is null;
 create index messages_to_queued_idx on public.messages (shop_id, to_address) where status = 'queued';
 create index messages_sent_by_idx on public.messages (sent_by);
+create unique index messages_request_nonce_key on public.messages (shop_id, sent_by, request_nonce)
+  where request_nonce is not null;
 
 comment on table public.messages is
   'Outbound send queue + two-way history. Written only by comms RPCs / service_role; staff may only set read_at.';
@@ -966,17 +978,19 @@ $$;
 -- SMS get the opt-out line; marketing email gets a fresh unsubscribe token,
 -- {{unsubscribe_link}} and the unsubscribe footer unless the wording
 -- already places the link. p_extra_vars override/add variables (e.g. a
--- receipt's amount) except unsubscribe_link.
+-- receipt's amount) except unsubscribe_link. p_request_nonce (see the
+-- header): a nonce p_sent_by already used in the shop returns that message.
 -- ---------------------------------------------------------------------------
 create function public.enqueue_customer_template(
-  p_shop_id      uuid,
-  p_customer_id  uuid,
-  p_key          public.message_template_key,
-  p_channel      public.message_channel default 'sms',
-  p_job_id       uuid default null,
-  p_extra_vars   jsonb default null,
-  p_send_after   timestamptz default null,
-  p_sent_by      uuid default null
+  p_shop_id        uuid,
+  p_customer_id    uuid,
+  p_key            public.message_template_key,
+  p_channel        public.message_channel default 'sms',
+  p_job_id         uuid default null,
+  p_extra_vars     jsonb default null,
+  p_send_after     timestamptz default null,
+  p_sent_by        uuid default null,
+  p_request_nonce  text default null
 ) returns uuid
 language plpgsql security definer
 set search_path = ''
@@ -995,9 +1009,20 @@ declare
   v_unsub    text;
   v_need     text;
   v_id       uuid;
+  v_conname  text;
 begin
   if p_shop_id is null or p_customer_id is null or p_key is null or p_channel is null then
     raise exception 'shop, customer, key and channel are required' using errcode = '22023';
+  end if;
+  if p_request_nonce is not null then
+    if not public.comms_valid_request_nonce(p_request_nonce) then
+      raise exception 'request_nonce must be 8-64 letters, digits, - or _' using errcode = '22023';
+    end if;
+    select m.id into v_id from public.messages m
+     where m.shop_id = p_shop_id and m.sent_by is not distinct from p_sent_by and m.request_nonce = p_request_nonce;
+    if found then
+      return v_id;                          -- a retry of a send that already queued
+    end if;
   end if;
   select * into v_cust from public.customers c where c.id = p_customer_id and c.shop_id = p_shop_id;
   if not found then
@@ -1080,14 +1105,38 @@ begin
                              else public.comms_email_with_unsubscribe(v_body, v_unsub) end;
   end if;
 
-  insert into public.messages (shop_id, customer_id, job_id, direction, channel, to_address, subject, body,
-                               status, send_after, template_key, sent_by, unsubscribe_token)
-  values (p_shop_id, p_customer_id, p_job_id, 'outbound', p_channel, v_to, v_subject, v_body,
-          'queued', coalesce(p_send_after, now()), p_key, p_sent_by, v_token)
-  returning id into v_id;
+  if p_request_nonce is null then
+    insert into public.messages (shop_id, customer_id, job_id, direction, channel, to_address, subject, body,
+                                 status, send_after, template_key, sent_by, unsubscribe_token)
+    values (p_shop_id, p_customer_id, p_job_id, 'outbound', p_channel, v_to, v_subject, v_body,
+            'queued', coalesce(p_send_after, now()), p_key, p_sent_by, v_token)
+    returning id into v_id;
+    return v_id;
+  end if;
+  begin
+    insert into public.messages (shop_id, customer_id, job_id, direction, channel, to_address, subject, body,
+                                 status, send_after, template_key, sent_by, unsubscribe_token, request_nonce)
+    values (p_shop_id, p_customer_id, p_job_id, 'outbound', p_channel, v_to, v_subject, v_body,
+            'queued', coalesce(p_send_after, now()), p_key, p_sent_by, v_token, p_request_nonce)
+    returning id into v_id;
+  exception when unique_violation then
+    get stacked diagnostics v_conname = constraint_name;
+    if v_conname is distinct from 'messages_request_nonce_key' then
+      raise;
+    end if;
+    -- a concurrent retry with the same nonce won the race
+    select m.id into v_id from public.messages m
+     where m.shop_id = p_shop_id and m.sent_by is not distinct from p_sent_by and m.request_nonce = p_request_nonce;
+  end;
   return v_id;
 end
 $$;
+
+-- Shape of a client idempotency key (messages.request_nonce).
+create function public.comms_valid_request_nonce(p_nonce text) returns boolean
+language sql immutable
+set search_path = ''
+as $$ select p_nonce is not null and p_nonce ~ '^[A-Za-z0-9_-]{8,64}$' $$;
 
 -- ---------------------------------------------------------------------------
 -- enqueue_template_message — checked entry point for a job's template.
@@ -1099,10 +1148,11 @@ $$;
 -- Returns the queued message id or null (see enqueue_customer_template).
 -- ---------------------------------------------------------------------------
 create function public.enqueue_template_message(
-  p_job_id      uuid,
-  p_key         public.message_template_key,
-  p_send_after  timestamptz default null,
-  p_channel     public.message_channel default 'sms'
+  p_job_id         uuid,
+  p_key            public.message_template_key,
+  p_send_after     timestamptz default null,
+  p_channel        public.message_channel default 'sms',
+  p_request_nonce  text default null
 ) returns uuid
 language plpgsql security definer
 set search_path = ''
@@ -1110,6 +1160,7 @@ as $$
 declare
   v_job  public.jobs;
   v_role public.shop_role;
+  v_id   uuid;
 begin
   select * into v_job from public.jobs j where j.id = p_job_id;
   if not found then
@@ -1133,6 +1184,17 @@ begin
       end if;
     end if;
   end if;
+  -- a retry of a send that already queued returns it, whatever changed since
+  if p_request_nonce is not null then
+    if not public.comms_valid_request_nonce(p_request_nonce) then
+      raise exception 'request_nonce must be 8-64 letters, digits, - or _' using errcode = '22023';
+    end if;
+    select m.id into v_id from public.messages m
+     where m.shop_id = v_job.shop_id and m.sent_by is not distinct from auth.uid() and m.request_nonce = p_request_nonce;
+    if found then
+      return v_id;
+    end if;
+  end if;
   if v_job.status in ('cancelled', 'no_show') and public.comms_is_appointment_key(p_key) then
     raise exception 'this appointment is %; its appointment messages can no longer be sent',
       replace(v_job.status::text, '_', '-') using errcode = '55000';
@@ -1148,7 +1210,7 @@ begin
             hint = 'The platform operator must set app_base_url (supabase/setup/cron.sql).';
   end if;
   return public.enqueue_customer_template(v_job.shop_id, v_job.customer_id, p_key, p_channel, v_job.id,
-                                          null, p_send_after, auth.uid());
+                                          null, p_send_after, auth.uid(), p_request_nonce);
 end
 $$;
 
@@ -1230,15 +1292,17 @@ $$;
 -- ---------------------------------------------------------------------------
 -- queue_message — staff free-form message to a customer (owner/admin/
 -- manager). Raises when it cannot be delivered (no address, opted out, SMS
--- not configured) so the sender gets feedback.
+-- not configured) so the sender gets feedback. p_request_nonce (see the
+-- header): a retry returns the message the first call queued.
 -- ---------------------------------------------------------------------------
 create function public.queue_message(
-  p_shop_id      uuid,
-  p_customer_id  uuid,
-  p_channel      public.message_channel,
-  p_subject      text,
-  p_body         text,
-  p_job_id       uuid default null
+  p_shop_id        uuid,
+  p_customer_id    uuid,
+  p_channel        public.message_channel,
+  p_subject        text,
+  p_body           text,
+  p_job_id         uuid default null,
+  p_request_nonce  text default null
 ) returns public.messages
 language plpgsql security definer
 set search_path = ''
@@ -1251,9 +1315,20 @@ declare
   v_subject  text;
   v_to       text;
   v_msg      public.messages;
+  v_conname  text;
 begin
   if not public.is_shop_manager(p_shop_id) then
     raise exception 'only owners, admins and managers can message customers' using errcode = '42501';
+  end if;
+  if p_request_nonce is not null then
+    if not public.comms_valid_request_nonce(p_request_nonce) then
+      raise exception 'request_nonce must be 8-64 letters, digits, - or _' using errcode = '22023';
+    end if;
+    select * into v_msg from public.messages m
+     where m.shop_id = p_shop_id and m.sent_by = auth.uid() and m.request_nonce = p_request_nonce;
+    if found then
+      return v_msg;                         -- a retry of a send that already queued
+    end if;
   end if;
   if p_channel is null then
     raise exception 'choose sms or email' using errcode = '22023';
@@ -1304,11 +1379,21 @@ begin
     v_subject := coalesce(left(nullif(btrim(p_subject), ''), 500), 'Message from ' || v_shop.name);
   end if;
 
-  insert into public.messages (shop_id, customer_id, job_id, direction, channel, to_address, subject, body,
-                               status, send_after, sent_by)
-  values (p_shop_id, p_customer_id, p_job_id, 'outbound', p_channel, v_to, v_subject, v_body,
-          'queued', now(), auth.uid())
-  returning * into v_msg;
+  begin
+    insert into public.messages (shop_id, customer_id, job_id, direction, channel, to_address, subject, body,
+                                 status, send_after, sent_by, request_nonce)
+    values (p_shop_id, p_customer_id, p_job_id, 'outbound', p_channel, v_to, v_subject, v_body,
+            'queued', now(), auth.uid(), p_request_nonce)
+    returning * into v_msg;
+  exception when unique_violation then
+    get stacked diagnostics v_conname = constraint_name;
+    if v_conname is distinct from 'messages_request_nonce_key' then
+      raise;
+    end if;
+    -- a concurrent retry with the same nonce won the race
+    select * into v_msg from public.messages m
+     where m.shop_id = p_shop_id and m.sent_by = auth.uid() and m.request_nonce = p_request_nonce;
+  end;
   return v_msg;
 end
 $$;
@@ -1656,7 +1741,7 @@ $$;
 -- NUMBER (comms_suppressions + every customer of the shop with it, including
 -- customers created with it later):
 --   STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, OPTOUT, REVOKE → opt out
---   START, UNSTOP                                                → opt back in
+--   START, UNSTOP, YES                                           → opt back in
 -- Unknown senders are stored with customer_id null. Staff (owner/admin/
 -- manager) get an 'inbound_message' notification. Idempotent per provider
 -- id (Twilio retries). Returns no row when the To number is bound to no shop.
@@ -1712,7 +1797,7 @@ begin
     v_action := 'opt_out';
     -- the number is suppressed even when no customer has it yet
     perform public.comms_suppress(v_shop.id, 'sms', v_from, now());
-  elsif v_kw in ('START', 'UNSTOP') then
+  elsif v_kw in ('START', 'UNSTOP', 'YES') then
     v_action := 'opt_in';
     perform public.comms_unsuppress(v_shop.id, 'sms', v_from);
   end if;
@@ -1739,7 +1824,8 @@ begin
       when 'opt_in'  then v_who || ' opted back in to text messages'
       else 'New text from ' || v_who
     end,
-    nullif(left(v_body, 280), ''));
+    nullif(left(v_body, 280), ''),
+    p_customer_id => v_cust.id);
 
   return query select v_id, v_shop.id, v_cust.id, v_action;
 end
@@ -1919,6 +2005,13 @@ revoke execute on function
   public.messages_record_unsubscribe_token()
 from public, anon, authenticated;
 
+-- (contract tags for scripts/gen_types.py: output columns that may be null)
+comment on function public.preview_template_message(uuid, public.message_template_key, public.message_channel) is
+  '@nullable: to_address, subject';
+comment on function public.claim_queued_messages(integer, timestamptz) is
+  '@nullable: from_address, subject, reply_to, customer_id, job_id, campaign_id, template_key, unsubscribe_token';
+comment on function public.record_inbound_sms(text, text, text, text) is '@nullable: customer_id, opt_action';
+
 -- pure helpers (no data access)
 revoke execute on function
   public.comms_address_key(public.message_channel, text),
@@ -1930,7 +2023,8 @@ revoke execute on function
   public.comms_unavailable_values(text, jsonb, boolean),
   public.comms_omit_unavailable_values(text, jsonb, boolean),
   public.comms_key_required_link(public.message_template_key),
-  public.comms_render_parts(public.message_channel, text, text, jsonb, text)
+  public.comms_render_parts(public.message_channel, text, text, jsonb, text),
+  public.comms_valid_request_nonce(text)
 from public, anon;
 grant execute on function
   public.comms_address_key(public.message_channel, text),
@@ -1942,7 +2036,8 @@ grant execute on function
   public.comms_unavailable_values(text, jsonb, boolean),
   public.comms_omit_unavailable_values(text, jsonb, boolean),
   public.comms_key_required_link(public.message_template_key),
-  public.comms_render_parts(public.message_channel, text, text, jsonb, text)
+  public.comms_render_parts(public.message_channel, text, text, jsonb, text),
+  public.comms_valid_request_nonce(text)
 to authenticated, service_role;
 
 -- internal builders / service-only pipeline
@@ -1954,7 +2049,7 @@ revoke execute on function
   public.comms_customer_vars(uuid, uuid),
   public.comms_job_vars(uuid),
   public.enqueue_customer_template(uuid, uuid, public.message_template_key, public.message_channel, uuid, jsonb,
-                                   timestamptz, uuid),
+                                   timestamptz, uuid, text),
   public.claim_queued_messages(integer, timestamptz),
   public.mark_message_result(uuid, public.message_status, text, text, text, timestamptz),
   public.update_message_status_by_provider_id(text, public.message_status, text),
@@ -1968,7 +2063,7 @@ grant execute on function
   public.comms_customer_vars(uuid, uuid),
   public.comms_job_vars(uuid),
   public.enqueue_customer_template(uuid, uuid, public.message_template_key, public.message_channel, uuid, jsonb,
-                                   timestamptz, uuid),
+                                   timestamptz, uuid, text),
   public.claim_queued_messages(integer, timestamptz),
   public.mark_message_result(uuid, public.message_status, text, text, text, timestamptz),
   public.update_message_status_by_provider_id(text, public.message_status, text),
@@ -1978,13 +2073,13 @@ to service_role;
 -- staff entry points (checked inside)
 revoke execute on function
   public.template_vars_for_job(uuid),
-  public.enqueue_template_message(uuid, public.message_template_key, timestamptz, public.message_channel),
+  public.enqueue_template_message(uuid, public.message_template_key, timestamptz, public.message_channel, text),
   public.preview_template_message(uuid, public.message_template_key, public.message_channel),
-  public.queue_message(uuid, uuid, public.message_channel, text, text, uuid)
+  public.queue_message(uuid, uuid, public.message_channel, text, text, uuid, text)
 from public, anon;
 grant execute on function
   public.template_vars_for_job(uuid),
-  public.enqueue_template_message(uuid, public.message_template_key, timestamptz, public.message_channel),
+  public.enqueue_template_message(uuid, public.message_template_key, timestamptz, public.message_channel, text),
   public.preview_template_message(uuid, public.message_template_key, public.message_channel),
-  public.queue_message(uuid, uuid, public.message_channel, text, text, uuid)
+  public.queue_message(uuid, uuid, public.message_channel, text, text, uuid, text)
 to authenticated, service_role;

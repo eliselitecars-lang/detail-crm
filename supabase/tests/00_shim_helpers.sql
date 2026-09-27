@@ -1,6 +1,8 @@
 -- 00 foundation: the local Supabase shim and the tests.* helpers behave like
 -- the platform (auth.uid()/role()/email()/jwt(), role switching, storage
 -- helpers) and assertion helpers really fail when they should.
+-- superuser-only assertions are skipped on a non-superuser connection
+select rolsuper as is_superuser from pg_roles where rolname = current_user \gset
 
 -- auth.* read request.jwt.claims (current PostgREST) ...
 select tests.lives($$select set_config('request.jwt.claims',
@@ -20,6 +22,14 @@ select tests.fx_set('u1', tests.create_user('shim-user@test.local', true, '{"ful
 select tests.fx_set('u2', tests.create_user('shim-unconfirmed@test.local', false));
 select tests.eq((select email_confirmed_at is null from auth.users where id = tests.fx('u2')), true,
                 'create_user(confirmed => false) leaves email unconfirmed');
+select tests.eq((select concat_ws('/', instance_id, aud, role, raw_app_meta_data ->> 'provider', created_at is not null)
+                 from auth.users where id = tests.fx('u1')),
+                '00000000-0000-0000-0000-000000000000/authenticated/authenticated/email/t',
+                'create_user sets every column GoTrue''s admin API sets (real auth.users.id has no default)');
+select tests.as_service();
+select tests.throws($$delete from auth.users where id = tests.fx('u2')$$, '42501',
+                    'service_role cannot delete auth.users directly (only GoTrue / the owner can), like Supabase');
+select tests.as_superuser();
 select tests.authenticate_as(tests.fx('u1'));
 select tests.eq(current_user::text, 'authenticated', 'authenticate_as switches to role authenticated');
 select tests.eq(auth.uid(), tests.fx('u1'), 'authenticate_as sets sub');
@@ -33,7 +43,11 @@ select tests.as_service();
 select tests.eq(current_user::text, 'service_role', 'as_service switches to service_role');
 select tests.ok((select rolbypassrls from pg_roles where rolname = 'service_role'), 'service_role bypasses RLS');
 select tests.as_superuser();
+\if :is_superuser
 select tests.ok((select rolsuper from pg_roles where rolname = current_user), 'as_superuser returns to superuser');
+\else
+\echo SKIP (needs superuser): as_superuser returns to the connecting role, which is not a superuser here
+\endif
 
 -- roles look like Supabase's
 select tests.ok(not (select rolcanlogin from pg_roles where rolname = 'anon'), 'anon is NOLOGIN');

@@ -84,6 +84,7 @@ select tests.eq(tests.row_count($$update storage.objects set metadata = '{"size"
                 1::bigint, 'the uploader may overwrite their own object');
 select tests.eq(tests.row_count($$update storage.objects set metadata = '{"size": 1}' where name = (select path from paths where key = 'a_job_a_mgr')$$),
                 0::bigint, 'but not someone else''s');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where name = (select path from paths where key = 'a_job_a_mgr')$$), 0::bigint,
                 'technicians cannot delete others'' photos');
 select tests.throws($$update storage.objects set name = (select path from paths where key = 'a_job_a2') where name = (select path from paths where key = 'a_job_a')$$,
@@ -96,12 +97,15 @@ select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id 
                 'after unassignment only own uploads remain visible');
 select tests.eq(tests.row_count($$update storage.objects set metadata = '{}' where name = (select path from paths where key = 'a_job_a')$$),
                 0::bigint, 'overwrite requires being on the job');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where name = (select path from paths where key = 'a_job_a')$$), 1::bigint,
                 'the uploader deletes their own photo');
 select tests.authenticate_as(tests.fx('u_manager_b'));
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where name = (select path from paths where key = 'a_job_a_mgr')$$), 0::bigint,
                 'shop B deletes nothing of A');
 select tests.authenticate_as(tests.fx('u_manager_a'));
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where name = (select path from paths where key = 'a_job_a2')$$), 1::bigint,
                 'managers delete any photo of the shop');
 
@@ -115,6 +119,7 @@ select tests.throws($$insert into storage.objects (bucket_id, name, owner) value
                     '42501', 'not at the bucket root');
 select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'signatures'$$), 1::bigint,
                 'the uploader reads their own signature back');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'signatures'$$), 0::bigint, 'technicians cannot delete signatures');
 select tests.eq(tests.row_count($$update storage.objects set metadata = '{}' where bucket_id = 'signatures'$$), 0::bigint,
                 'technicians cannot overwrite signatures');
@@ -125,6 +130,7 @@ select tests.authenticate_as(tests.fx('u_manager_b'));
 select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'signatures'$$), 0::bigint, 'shop B reads none of A''s signatures');
 select tests.as_anon();
 select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'signatures'$$), 0::bigint, 'anon reads no signatures');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'signatures'$$), 0::bigint, 'anon deletes no signatures');
 
 -- ------------------------------------------------------------ signatures: public form signers
@@ -178,6 +184,7 @@ select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id 
 
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'signatures'$$), 3::bigint, 'staff read all shop signatures');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where name = tests.fx('shop_a') || '/device/s1.png'$$), 1::bigint,
                 'managers delete signatures');
 
@@ -192,20 +199,54 @@ select tests.lives($$insert into storage.objects (bucket_id, name, owner) values
                    'owners upload shop assets');
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.throws($$insert into storage.objects (bucket_id, name, owner) values ('shop-assets', tests.fx('shop_a') || '/m.png', auth.uid())$$,
-                    '42501', 'managers cannot upload shop assets');
-select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'shop-assets'$$), 0::bigint, 'managers cannot delete shop assets');
+                    '42501', 'managers cannot upload other shop assets (logos etc.)');
+select tests.throws($$insert into storage.objects (bucket_id, name, owner) values ('shop-assets', tests.fx('shop_a') || '/logo.png', auth.uid())$$,
+                    '42501', 'managers cannot upload the logo');
+select tests.throws($$insert into storage.objects (bucket_id, name, owner) values ('shop-assets', tests.fx('shop_a') || '/services', auth.uid())$$,
+                    '42501', 'a file named "services" at the shop root is not the services folder');
+select tests.throws($$insert into storage.objects (bucket_id, name, owner) values ('shop-assets', tests.fx('shop_b') || '/services/m.jpg', auth.uid())$$,
+                    '42501', 'managers cannot upload service images for another shop');
+select tests.lives($$insert into storage.objects (bucket_id, name, owner) values ('shop-assets', tests.fx('shop_a') || '/services/mgr.jpg', auth.uid())$$,
+                   'managers upload service images (<shop>/services/...)');
+select tests.eq(tests.row_count($$update storage.objects set metadata = '{"v": 2}' where name = tests.fx('shop_a') || '/services/wash.jpg'$$), 1::bigint,
+                'managers overwrite service images');
+select tests.throws($$update storage.objects set name = tests.fx('shop_a') || '/logo2.png' where name = tests.fx('shop_a') || '/services/mgr.jpg'$$,
+                    '42501', 'managers cannot move a service image out of the services folder');
+select tests.eq(tests.row_count($$update storage.objects set metadata = '{}' where name = tests.fx('shop_a') || '/logo.png'$$), 0::bigint,
+                'managers cannot overwrite the logo');
+select set_config('storage.allow_delete_query', 'true', true);
+select tests.eq(tests.row_count($$delete from storage.objects where name = tests.fx('shop_a') || '/logo.png'$$), 0::bigint,
+                'managers cannot delete the logo');
+select set_config('storage.allow_delete_query', 'true', true);
+select tests.eq(tests.row_count($$delete from storage.objects where name = tests.fx('shop_a') || '/services/mgr.jpg'$$), 1::bigint,
+                'managers delete service images');
 select tests.authenticate_as(tests.fx('u_tech_a'));
 select tests.throws($$insert into storage.objects (bucket_id, name, owner) values ('shop-assets', tests.fx('shop_a') || '/t.png', auth.uid())$$,
                     '42501', 'technicians cannot upload shop assets');
+select tests.throws($$insert into storage.objects (bucket_id, name, owner) values ('shop-assets', tests.fx('shop_a') || '/services/t.jpg', auth.uid())$$,
+                    '42501', 'technicians cannot upload service images');
+select tests.eq(tests.row_count($$update storage.objects set metadata = '{}' where bucket_id = 'shop-assets'$$), 0::bigint,
+                'technicians cannot overwrite shop assets');
+select set_config('storage.allow_delete_query', 'true', true);
+select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'shop-assets'$$), 0::bigint,
+                'technicians cannot delete shop assets (service images included)');
+select tests.authenticate_as(tests.fx('u_manager_b'));
+select tests.eq(tests.row_count($$update storage.objects set metadata = '{}' where name = tests.fx('shop_a') || '/services/wash.jpg'$$), 0::bigint,
+                'managers of B cannot overwrite A''s service images');
+select set_config('storage.allow_delete_query', 'true', true);
+select tests.eq(tests.row_count($$delete from storage.objects where name = tests.fx('shop_a') || '/services/wash.jpg'$$), 0::bigint,
+                'managers of B cannot delete A''s service images');
 select tests.as_anon();
 select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id = 'shop-assets'$$), 0::bigint,
                 'anon cannot list shop assets (files are downloaded by public URL, which bypasses RLS)');
 select tests.throws($$insert into storage.objects (bucket_id, name) values ('shop-assets', tests.fx('shop_a') || '/anon.png')$$,
                     '42501', 'anon cannot upload shop assets');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'shop-assets'$$), 0::bigint, 'anon cannot delete shop assets');
 select tests.authenticate_as(tests.fx('u_admin_b'));
 select tests.eq(tests.row_count($$update storage.objects set metadata = '{}' where bucket_id = 'shop-assets'$$), 0::bigint,
                 'admins of B cannot overwrite A''s assets');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'shop-assets'$$), 0::bigint,
                 'admins of B cannot delete A''s assets');
 select tests.authenticate_as(tests.fx('u_admin_a'));
@@ -213,6 +254,7 @@ select tests.eq(tests.row_count($$update storage.objects set metadata = '{"v": 2
                 'admins replace assets');
 select tests.throws($$update storage.objects set name = tests.fx('shop_b') || '/logo.png' where name = tests.fx('shop_a') || '/logo.png'$$,
                     '42501', 'assets cannot be moved into another shop');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'shop-assets'$$), 2::bigint, 'admins delete assets');
 
 -- ------------------------------------------------------------ signatures: technicians read only their jobs' signatures
@@ -309,10 +351,12 @@ select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(tests.row_count($$update storage.objects set version = 'replaced' where bucket_id = 'signatures'
                                   and name = tests.fx('shop_a') || '/forms/' || tests.fx('tok_leak') || '/sig.png'$$), 0::bigint,
                 'the signature image of a signed form cannot be overwritten');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'signatures'
                                   and name in (tests.fx('shop_a') || '/forms/' || tests.fx('tok_leak') || '/sig.png',
                                                tests.fx('shop_a') || '/device/job-a2.png')$$), 0::bigint,
                 'nor deleted');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'signatures'
                                   and name = tests.fx('shop_a') || '/forms/' || tests.fx('tok_pending') || '/sig.png'$$), 1::bigint,
                 'an upload not yet used by a signature can still be removed by a manager');
@@ -352,6 +396,7 @@ select tests.ok((select signed_at is not null from public.inspections where id =
 select tests.throws($$delete from public.inspection_marks where inspection_id = tests.fx('insp_ev')$$, '42501', 'marks locked');
 select tests.eq(tests.row_count($$update storage.objects set version = 'replaced' where bucket_id = 'job-photos' and name = (select path from ev where key = 'dent')$$),
                 0::bigint, 'a technician must not overwrite the photo of a signed inspection mark');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'job-photos' and name = (select path from ev where key = 'dent')$$),
                 0::bigint, 'a technician must not delete the photo of a signed inspection mark');
 select tests.eq(tests.row_count($$update storage.objects set name = (select path from ev where key = 'dent') || '.moved'
@@ -370,13 +415,16 @@ select tests.eq(tests.row_count($$select 1 from storage.objects where bucket_id 
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(tests.row_count($$update storage.objects set version = 'replaced' where bucket_id = 'job-photos' and name = (select path from ev where key = 'dent')$$),
                 0::bigint, 'managers cannot overwrite signed evidence either');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'job-photos' and name = (select path from ev where key = 'dent')$$),
                 0::bigint, 'managers cannot delete signed evidence');
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'signatures' and name = (select path from ev where key = 'isig')$$),
                 0::bigint, 'managers cannot delete the signature of a signed inspection');
 select tests.eq(tests.row_count($$update storage.objects set version = 'replaced' where bucket_id = 'signatures' and name = (select path from ev where key = 'isig')$$),
                 0::bigint, 'nor overwrite it');
 select tests.authenticate_as(tests.fx('u_manager_b'));
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where name in (select path from ev)$$), 0::bigint,
                 'another shop touches none of the evidence');
 select tests.as_superuser();
@@ -393,6 +441,7 @@ select tests.authenticate_as(tests.fx('u_tech_a'));
 select tests.eq(tests.row_count($$update storage.objects set version = 'retake' where bucket_id = 'job-photos' and name = (select path from ev where key = 'dent')$$),
                 1::bigint, 'after un-signing the uploader may replace the photo again');
 select tests.authenticate_as(tests.fx('u_manager_a'));
+select set_config('storage.allow_delete_query', 'true', true);
 select tests.eq(tests.row_count($$delete from storage.objects where bucket_id = 'signatures' and name = (select path from ev where key = 'isig')$$),
                 1::bigint, 'and a manager may remove the old signature image');
 

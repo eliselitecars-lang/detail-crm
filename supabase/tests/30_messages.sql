@@ -338,3 +338,73 @@ select tests.eq(public.enqueue_customer_template(tests.fx('shop_b'), tests.fx('c
 select tests.as_anon();
 select tests.throws($$select public.enqueue_template_message(tests.fx('job_a'), 'on_the_way')$$, '42501', 'anon cannot enqueue');
 select tests.as_superuser();
+
+-- ------------------------------------------------------------ request_nonce: idempotent staff sends
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.fx_set('nonce_msg', (public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'Running late, 10 min',
+                                                       null, 'compose-0001')).id);
+select tests.eq((public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'Running late, 10 min',
+                                      null, 'compose-0001')).id, tests.fx('nonce_msg'),
+                'a retry with the same nonce returns the first message');
+select tests.eq((public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'edited text',
+                                      null, 'compose-0001')).body, 'Running late, 10 min',
+                'even when the retried body differs, nothing new is queued');
+select tests.eq((select count(*) from public.messages where shop_id = tests.fx('shop_a') and request_nonce = 'compose-0001'), 1::bigint,
+                'one row for the nonce');
+select tests.eq((select request_nonce from public.messages where id = tests.fx('nonce_msg')), 'compose-0001', 'the nonce is stored');
+select tests.throws_like($$select public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'hi', null, 'short')$$,
+                         '22023', '%request_nonce%', 'a malformed nonce is refused');
+select tests.throws($$select public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'hi', null, 'has space 123')$$,
+                    '22023', 'only letters, digits, - and _');
+select tests.lives($$select public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'hi', null,
+                                                 '550e8400-e29b-41d4-a716-446655440000')$$, 'a UUID string is a valid nonce');
+-- another sender with the same nonce gets a message of their own
+select tests.authenticate_as(tests.fx('u_admin_a'));
+select tests.ok((public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'Running late, 10 min',
+                                      null, 'compose-0001')).id <> tests.fx('nonce_msg'),
+                'the same nonce from another user queues a new message');
+-- another shop's member cannot use a nonce to read shop A's message
+select tests.authenticate_as(tests.fx('u_manager_b'));
+select tests.throws($$select public.queue_message(tests.fx('shop_a'), tests.fx('cust_a'), 'sms', null, 'x', null, 'compose-0001')$$,
+                    '42501', 'shop B cannot replay into shop A');
+
+-- enqueue_template_message
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.fx_set('nonce_tpl', public.enqueue_template_message(tests.fx('job_a'), 'on_the_way', null, 'sms', 'tpl-nonce-01'));
+select tests.ok(tests.fx('nonce_tpl') is not null, 'template send queued');
+select tests.eq(public.enqueue_template_message(tests.fx('job_a'), 'on_the_way', null, 'sms', 'tpl-nonce-01'), tests.fx('nonce_tpl'),
+                'a template send retried with its nonce returns the same message');
+select tests.eq((select count(*) from public.messages where shop_id = tests.fx('shop_a') and request_nonce = 'tpl-nonce-01'), 1::bigint,
+                'queued once');
+select tests.throws($$select public.enqueue_template_message(tests.fx('job_a'), 'on_the_way', null, 'sms', 'bad nonce!')$$, '22023',
+                    'malformed template nonce');
+select tests.authenticate_as(tests.fx('u_tech_a'));
+select tests.ok(public.enqueue_template_message(tests.fx('job_a'), 'on_the_way', null, 'sms', 'tpl-nonce-01') <> tests.fx('nonce_tpl'),
+                'the assigned technician''s send with the same nonce is their own message');
+select tests.throws($$select public.enqueue_template_message(tests.fx('job_a'), 'review_request', null, 'sms', 'tpl-nonce-01')$$, '42501',
+                    'a nonce never bypasses the technician rules');
+
+-- enqueue_customer_template (service_role acting for a staff member)
+select tests.as_service();
+select tests.fx_set('nonce_svc', public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'payment_receipt', 'sms',
+                                   null, '{"amount": "$5.00"}', null, tests.fx('u_manager_a'), 'svc-nonce-001'));
+select tests.eq(public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'payment_receipt', 'sms',
+                  null, '{"amount": "$5.00"}', null, tests.fx('u_manager_a'), 'svc-nonce-001'), tests.fx('nonce_svc'),
+                'the internal core honours the nonce per sender');
+select tests.ok(public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'payment_receipt', 'sms',
+                  null, '{"amount": "$5.00"}', null, tests.fx('u_admin_a'), 'svc-nonce-001') <> tests.fx('nonce_svc'),
+                'per sender');
+select tests.throws($$select public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'payment_receipt', 'sms',
+                        null, null, null, null, '!!')$$, '22023', 'malformed core nonce');
+
+-- the table enforces the shape and the uniqueness per (shop, sender)
+select tests.as_superuser();
+select tests.throws($$update public.messages set request_nonce = 'x' where id = tests.fx('msg_1')$$, '23514',
+                    'request_nonce shape is checked');
+select tests.throws($$insert into public.messages (shop_id, customer_id, direction, channel, to_address, body, status, sent_by, request_nonce)
+                      values (tests.fx('shop_a'), tests.fx('cust_a'), 'outbound', 'sms', '+12055550101', 'dup', 'queued',
+                              tests.fx('u_manager_a'), 'compose-0001')$$, '23505',
+                    'a (shop, sender, nonce) is unique');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.throws($$update public.messages set request_nonce = 'compose-9999' where id = tests.fx('nonce_msg')$$, '42501',
+                    'staff cannot write request_nonce directly');

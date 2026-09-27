@@ -82,9 +82,16 @@
 -- technician of the job's shop (42501) unless they are the client linked to
 -- the job's customer.
 --
--- Error codes: P0002 unknown shop/booking/vehicle; 55000 online booking off;
+-- Error codes: PT404 unknown shop/booking/vehicle; 55000 online booking off;
 -- 22023 invalid input (message says which field); 23P01 slot no longer
 -- available; PT429 daily limit reached.
+--
+-- Not-found convention for public (anon) RPCs — every public_* function,
+-- get_available_slots and create_online_booking: an unknown slug / token /
+-- document raises SQLSTATE 'PT404' (same message text as before), which
+-- PostgREST answers with HTTP 404 (a 'PTxyz' code sets the status). P0002
+-- would surface as HTTP 500. Staff and internal RPCs keep P0002; clients
+-- treat both as not found.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -201,7 +208,7 @@ declare
 begin
   select * into v_shop from public.shops s where s.slug = lower(btrim(p_slug));
   if not found then
-    raise exception 'shop not found' using errcode = 'P0002';
+    raise exception 'shop not found' using errcode = 'PT404';
   end if;
   select * into v_bs from public.booking_settings b where b.shop_id = v_shop.id;
   return jsonb_build_object(
@@ -253,7 +260,7 @@ declare
 begin
   select * into v_shop from public.shops s where s.slug = lower(btrim(p_slug));
   if not found then
-    raise exception 'shop not found' using errcode = 'P0002';
+    raise exception 'shop not found' using errcode = 'PT404';
   end if;
   select b.enabled into v_enabled from public.booking_settings b where b.shop_id = v_shop.id;
   if not coalesce(v_enabled, false) then
@@ -333,7 +340,7 @@ create function public.public_validate_coupon(
   p_slug                 text,
   p_code                 text,
   p_service_ids          uuid[],
-  p_vehicle_category_id  uuid,
+  p_vehicle_category_id  uuid default null,
   p_now                  timestamptz default now()
 ) returns jsonb
 language plpgsql stable security definer
@@ -352,7 +359,7 @@ declare
 begin
   select * into v_shop from public.shops s where s.slug = lower(btrim(p_slug));
   if not found then
-    raise exception 'shop not found' using errcode = 'P0002';
+    raise exception 'shop not found' using errcode = 'PT404';
   end if;
   select b.enabled into v_enabled from public.booking_settings b where b.shop_id = v_shop.id;
   if not coalesce(v_enabled, false) then
@@ -525,7 +532,7 @@ begin
   -- ------------------------------------------------------------ shop
   select * into v_shop from public.shops s where s.slug = lower(btrim(p_slug));
   if not found then
-    raise exception 'shop not found' using errcode = 'P0002';
+    raise exception 'shop not found' using errcode = 'PT404';
   end if;
   select * into v_bs from public.booking_settings b where b.shop_id = v_shop.id;
   if not found or not v_bs.enabled then
@@ -592,7 +599,7 @@ begin
      where v.id = v_veh_id and v.shop_id = v_shop.id and v.archived_at is null and c.archived_at is null
        and v_uid is not null and c.portal_user_id = v_uid;
     if not found then
-      raise exception 'vehicle not found' using errcode = 'P0002';
+      raise exception 'vehicle not found' using errcode = 'PT404';
     end if;
     v_cat := coalesce(v_vehicle.category_id, v_cat);
     select * into v_customer from public.customers c where c.id = v_vehicle.customer_id and c.shop_id = v_shop.id;
@@ -822,8 +829,8 @@ begin
   -- durations too), so this runs only once the vehicle is settled. Still
   -- under the advisory lock; any failure rolls the whole booking back.
   select s.ends_at into v_end
-    from public.get_available_slots(v_shop.slug, v_all_ids, v_cat, (v_start at time zone v_shop.timezone)::date,
-                                    (v_start at time zone v_shop.timezone)::date, v_now) s
+    from public.get_available_slots(v_shop.slug, v_all_ids, (v_start at time zone v_shop.timezone)::date,
+                                    (v_start at time zone v_shop.timezone)::date, v_cat, v_now) s
    where s.starts_at = v_start;
   if v_end is null then
     raise exception 'that time is no longer available; please choose another time' using errcode = '23P01';
@@ -1031,7 +1038,7 @@ declare
 begin
   select j.id into v_id from public.jobs j where j.public_token = p_token;
   if v_id is null then
-    raise exception 'booking not found' using errcode = 'P0002';
+    raise exception 'booking not found' using errcode = 'PT404';
   end if;
   return public.booking_public_json(v_id, public.effective_now(p_now));
 end
@@ -1064,7 +1071,7 @@ declare
 begin
   select * into v_job from public.jobs j where j.public_token = p_token for update;
   if not found then
-    raise exception 'booking not found' using errcode = 'P0002';
+    raise exception 'booking not found' using errcode = 'PT404';
   end if;
   if auth.uid() is not null and public.is_shop_member(v_job.shop_id) and not public.is_shop_manager(v_job.shop_id)
      and not exists (select 1 from public.customers c
@@ -1100,7 +1107,7 @@ begin
       'Booking cancelled by ' || public.integration_customer_label(v_job.shop_id, v_job.customer_id),
       concat_ws(' · ', 'Job #' || v_job.number::text,
                 nullif(concat_ws(' at ', v_vars ->> 'job_date', v_vars ->> 'job_time'), ''), v_reason),
-      v_job.id, null);
+      v_job.id, null, p_customer_id => v_job.customer_id);
   exception when others then
     raise warning 'booking cancellation notification failed for job %: % (%)', v_job.id, sqlerrm, sqlstate;
   end;

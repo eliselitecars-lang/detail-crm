@@ -24,9 +24,9 @@ grant execute on function pg_temp.guest(integer, jsonb) to anon, authenticated, 
 -- a real future slot: three days from today (shop time), first opening
 create temp table anon_slot as
   select min(s.starts_at) as starts_at
-  from public.get_available_slots('shop-a', array[tests.fx('svc_a'), tests.fx('addon_pet')], tests.fx('cat_car_a'),
+  from public.get_available_slots('shop-a', array[tests.fx('svc_a'), tests.fx('addon_pet')], (now() at time zone 'America/Chicago')::date + 3,
                                   (now() at time zone 'America/Chicago')::date + 3,
-                                  (now() at time zone 'America/Chicago')::date + 3) s;
+                                  tests.fx('cat_car_a')) s;
 grant select on anon_slot to anon;
 select tests.ok((select starts_at is not null from anon_slot), 'a future slot exists for the anonymous booking');
 
@@ -104,8 +104,8 @@ select tests.throws_like($$select public.create_online_booking('shop-a', pg_temp
 select tests.as_superuser();
 update public.booking_settings set enabled = false where shop_id = tests.fx('shop_b');
 select tests.as_service();
-select tests.throws($$select pg_temp.book(pg_temp.booking(), 'nope')$$, 'P0002', 'unknown shop');
-select tests.throws($$select pg_temp.book(pg_temp.booking(), null)$$, 'P0002', 'null slug');
+select tests.throws($$select pg_temp.book(pg_temp.booking(), 'nope')$$, 'PT404', 'unknown shop');
+select tests.throws($$select pg_temp.book(pg_temp.booking(), null)$$, 'PT404', 'null slug');
 select tests.throws_like($$select pg_temp.book(pg_temp.booking() || jsonb_build_object('service_ids', jsonb_build_array(tests.fx('svc_b'))), 'shop-b')$$,
                          '55000', '%not enabled%', 'online booking disabled');
 select tests.throws_like($$select pg_temp.book('[]'::jsonb)$$, '22023', '%JSON object%', 'payload must be an object');
@@ -160,7 +160,7 @@ select tests.throws_like($$select pg_temp.book(pg_temp.booking() || jsonb_build_
                                                                                         'category_id', tests.fx('cat_car_b'))))$$,
                          '22023', '%unknown vehicle category%', 'another shop''s vehicle category');
 select tests.throws_like($$select pg_temp.book(pg_temp.booking() || jsonb_build_object('vehicle', jsonb_build_object('id', tests.fx('veh_a'))))$$,
-                         'P0002', '%vehicle not found%', 'a saved vehicle needs its signed-in owner');
+                         'PT404', '%vehicle not found%', 'a saved vehicle needs its signed-in owner');
 
 -- contact
 select tests.throws_like($$select pg_temp.book(pg_temp.booking() - 'customer')$$, '22023', '%contact details%', 'contact required');

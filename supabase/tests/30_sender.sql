@@ -142,7 +142,8 @@ select tests.ok((select bool_and(title = 'New text from Alice Anders' and body =
 select tests.eq((select message_id from public.record_inbound_sms('+12055550100', '+12055550101', 'Hi, running 10 minutes late', 'SMin1')),
                 (select message_id from in1), 'webhook retries are idempotent');
 select tests.eq((select count(*) from public.messages where provider_message_id = 'SMin1'), 1::bigint, 'stored once');
-select tests.eq((select count(*) from public.notifications), 3::bigint, 'notified once');
+select tests.eq((select count(*) from public.notifications where shop_id in (tests.fx('shop_a'), tests.fx('shop_b'))), 3::bigint,
+                'notified once');
 select tests.eq((select count(*) from public.record_inbound_sms('+19995550100', '+12055550101', 'hi', 'SMin2')), 0::bigint,
                 'a To number no shop uses is ignored');
 select tests.throws($$select * from public.record_inbound_sms('2055550100', '+12055550101', 'hi')$$, '22023', 'To must be E.164');

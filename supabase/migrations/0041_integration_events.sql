@@ -180,7 +180,7 @@ begin
         || public.integration_customer_label(v_job.shop_id, v_job.customer_id),
       concat_ws(' · ', v_vars ->> 'services',
                 nullif(concat_ws(' at ', v_vars ->> 'job_date', v_vars ->> 'job_time'), '')),
-      v_job.id, null);
+      v_job.id, null, p_customer_id => v_job.customer_id);
     if v_job.status = 'requested' then
       perform public.integration_send_customer_template(v_job.shop_id, v_job.customer_id, 'booking_request_received',
                                                         v_job.id);
@@ -250,7 +250,8 @@ begin
       concat_ws(' · ', public.integration_customer_label(new.shop_id, new.customer_id),
                 public.format_money(new.total_cents, v_currency),
                 case when new.status = 'declined' then new.declined_reason end),
-      null, auth.uid());
+      new.converted_job_id, auth.uid(),
+      p_customer_id => new.customer_id, p_quote_id => new.id);
   exception when others then
     raise warning 'quote response side effects failed for quote %: % (%)', new.id, sqlerrm, sqlstate;
   end;
@@ -312,7 +313,8 @@ begin
         || public.integration_customer_label(new.shop_id, new.customer_id),
       concat_ws(' · ', v_what, replace(new.method::text, '_', ' '),
                 case when new.tip_cents > 0 then 'includes ' || public.format_money(new.tip_cents, v_currency) || ' tip' end),
-      new.job_id, new.recorded_by);
+      new.job_id, new.recorded_by,
+      p_customer_id => new.customer_id, p_invoice_id => new.invoice_id);
 
     if new.kind in ('deposit', 'payment') then
       v_extra := jsonb_build_object('amount', public.format_money(v_amount, v_currency));
@@ -356,7 +358,8 @@ begin
       new.shop_id, array['owner', 'admin', 'manager']::public.shop_role[], 'form_signed',
       'Form signed: ' || new.title,
       concat_ws(' · ', 'Signed by ' || new.signer_name, 'Job #' || v_job_num::text),
-      new.job_id, new.signed_by);
+      new.job_id, new.signed_by,
+      p_customer_id => new.customer_id);
   exception when others then
     raise warning 'form signed side effects failed for form %: % (%)', new.id, sqlerrm, sqlstate;
   end;

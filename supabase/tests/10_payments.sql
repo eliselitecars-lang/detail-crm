@@ -66,10 +66,19 @@ select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'b
 select tests.throws_like($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_m', 'succeeded', 100, p_job_id => tests.fx('job_a'),
                                                               p_customer_id => tests.fx('cust_a2'))$$,
                          '23514', '%job''s customer%', 'customer must match the job');
-select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_x1', 'succeeded', 100, p_job_id => tests.fx('job_b'),
-                                                         p_customer_id => tests.fx('cust_a'))$$, '23503', 'cannot attach to another shop''s job');
-select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_x2', 'succeeded', 100, p_customer_id => tests.fx('cust_b'))$$,
-                    '23503', 'cannot attach to another shop''s customer');
+-- links that do not exist in the shop (another shop's rows, deleted rows)
+-- are dropped: the money is recorded against what remains, never across shops
+select tests.eq((select concat_ws('/', job_id is null, invoice_id is null, customer_id = tests.fx('cust_a'), status)
+                   from public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_x1', 'succeeded', 100, p_job_id => tests.fx('job_b'),
+                                                     p_customer_id => tests.fx('cust_a'))),
+                't/t/t/succeeded', 'another shop''s job is never attached; the money stays with the customer');
+select tests.throws_like($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_x2', 'succeeded', 100, p_customer_id => tests.fx('cust_b'))$$,
+                         'P0002', '%exists in this shop%', 'another shop''s customer alone leaves nothing to record against');
+select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_x4', 'succeeded', 100, p_invoice_id => gen_random_uuid(),
+                                                         p_job_id => gen_random_uuid(), p_membership_id => gen_random_uuid(), p_kind => 'membership')$$,
+                    'P0002', 'only deleted links: P0002');
+select tests.eq((select count(*) from public.payments where stripe_payment_intent_id in ('pi_x2', 'pi_x4')), 0::bigint,
+                'nothing recorded for them');
 select tests.throws($$select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_x3', 'succeeded', 100, p_kind => 'membership', p_customer_id => tests.fx('cust_a'))$$,
                     '23514', 'membership payments need a membership');
 
@@ -274,7 +283,9 @@ select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.fx_set('inv_draft', (public.create_invoice(tests.fx('cust_a3'), '[{"name":"Clay bar","unit_price_cents":2000}]')).id);
 select tests.as_service();
 select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_d', 'succeeded', 500, p_invoice_id => tests.fx('inv_draft'));
-select tests.ok((select status = 'partially_paid' and issued_at = now() and due_at = now() and amount_paid_cents = 500
+select tests.ok((select status = 'partially_paid' and issued_at = now() and amount_paid_cents = 500
+                        and due_at = (((now() at time zone 'America/Chicago')::date + coalesce((select invoice_due_days from public.shops where id = tests.fx('shop_a')), 0))::timestamp
+                                      + time '23:59:59') at time zone 'America/Chicago'
                  from public.invoices where id = tests.fx('inv_draft')), 'a draft that receives money is issued automatically');
 
 -- ------------------------------------------------------------ table constraints (trusted writers too)

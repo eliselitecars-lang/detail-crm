@@ -12,7 +12,8 @@ select to_regprocedure('public.template_vars_for_job(uuid)') is not null as has_
 
 \if :has_comms
 select tests.as_superuser();
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 \endif
 
 -- Alice's quote, approved and converted to a job

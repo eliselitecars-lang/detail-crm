@@ -62,8 +62,8 @@ insert into storage.objects (bucket_id, name, owner) values
 select tests.fx_set('u_nina', tests.create_user('nina@example.com'));
 create temp table fs as
   select to_char(min(s.starts_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as starts_at
-  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
-         (now() at time zone 'America/Chicago')::date + 3, (now() at time zone 'America/Chicago')::date + 3) s;
+  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], (now() at time zone 'America/Chicago')::date + 3,
+         (now() at time zone 'America/Chicago')::date + 3, tests.fx('cat_car_a')) s;
 create temp table booked (token uuid);
 grant select on fs to authenticated;
 grant insert on booked to authenticated;
@@ -150,7 +150,10 @@ select tests.eq((select concat_ws(',', (select created_by = tests.fx('u_manager_
 \endif
 
 -- ------------------------------------------------------------ the accounts are deleted
-select tests.as_service();
+-- Production deletes accounts through the GoTrue admin API, which runs as
+-- supabase_auth_admin (the owner of auth.users); service_role has no DELETE
+-- privilege there, so the tests delete as the superuser.
+select tests.as_superuser();
 select tests.lives($$delete from auth.users where id = tests.fx('u_manager_a')$$,
   'a manager who wrote records (jobs, blocked times, and in later domains quotes, invoices, payments, memberships, time entries, inspections, photos, campaigns) can be deleted');
 select tests.lives($$delete from auth.users where id = tests.fx('u_admin_a')$$,
@@ -165,7 +168,7 @@ select tests.eq((select count(*) from public.shop_members where user_id in (test
                 0::bigint, 'the memberships of the deleted accounts are gone');
 
 \if :full_platform
-select tests.as_service();
+select tests.as_superuser();
 select tests.lives($$delete from auth.users where id = tests.fx('u_nina')$$,
   'a client who booked online while signed in can delete her account (jobs.created_by ON DELETE SET NULL)');
 select tests.as_superuser();
@@ -194,7 +197,7 @@ select public.transfer_ownership(tests.fx('shop_c'), tests.fx('m_heir_c'));
 select tests.as_superuser();
 select tests.eq((select created_by from public.shops where id = tests.fx('shop_c')), tests.user_id('founder-c@test.local'),
                 'the founder created shop C');
-select tests.as_service();
+select tests.as_superuser();
 select tests.lives($$delete from auth.users where email = 'founder-c@test.local'$$,
                    'the founder of a shop that has another owner can delete their account');
 select tests.as_superuser();

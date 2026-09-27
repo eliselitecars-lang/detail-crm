@@ -19,7 +19,7 @@ select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), array['owner', 'adm
                 'owner + admin');
 select tests.ok((select bool_and(kind = 'new_booking' and title = 'New online booking' and body = 'Alice booked a Full Detail'
                                  and job_id = tests.fx('job_a') and read_at is null)
-                   from public.notifications), 'title/body trimmed, job linked');
+                   from public.notifications where shop_id = tests.fx('shop_a')), 'title/body trimmed, job linked');
 select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), null, 'general', 'Shop update'), 5, 'null roles = every active member');
 select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), '{}', 'general', 'Shop update 2'), 5, 'empty roles = everyone');
 select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), array['technician']::public.shop_role[], 'general', 'Techs only', '',
@@ -29,6 +29,38 @@ select tests.throws($$select public.notify_shop_staff(tests.fx('shop_a'), null, 
 select tests.throws($$select public.notify_shop_staff(tests.fx('shop_a'), null, null, 'x')$$, '22023', 'kind required');
 select tests.throws($$select public.notify_shop_staff(tests.fx('shop_a'), null, 'general', 'x', null, tests.fx('job_b'))$$, 'P0002',
                     'job must belong to the shop');
+-- deep-link ids (customer / quote / invoice) must belong to the shop too
+insert into public.quotes (shop_id, customer_id) values (tests.fx('shop_a'), tests.fx('cust_a')) returning tests.fx_set('nq_a', id);
+insert into public.quotes (shop_id, customer_id) values (tests.fx('shop_b'), tests.fx('cust_b')) returning tests.fx_set('nq_b', id);
+insert into public.invoices (shop_id, customer_id) values (tests.fx('shop_a'), tests.fx('cust_a3')) returning tests.fx_set('ni_a', id);
+insert into public.invoices (shop_id, customer_id) values (tests.fx('shop_b'), tests.fx('cust_b')) returning tests.fx_set('ni_b', id);
+select tests.throws_like($$select public.notify_shop_staff(tests.fx('shop_a'), null, 'general', 'x', p_customer_id => tests.fx('cust_b'))$$,
+                         'P0002', '%customer not found%', 'customer must belong to the shop');
+select tests.throws_like($$select public.notify_shop_staff(tests.fx('shop_a'), null, 'general', 'x', p_quote_id => tests.fx('nq_b'))$$,
+                         'P0002', '%quote not found%', 'quote must belong to the shop');
+select tests.throws_like($$select public.notify_shop_staff(tests.fx('shop_a'), null, 'general', 'x', p_invoice_id => tests.fx('ni_b'))$$,
+                         'P0002', '%invoice not found%', 'invoice must belong to the shop');
+select tests.throws($$select public.notify_shop_staff(tests.fx('shop_a'), null, 'general', 'x', p_quote_id => gen_random_uuid())$$,
+                    'P0002', 'unknown quote');
+select tests.eq(public.notify_shop_staff(tests.fx('shop_a'), array['owner']::public.shop_role[], 'payment_received', 'Linked',
+                                         null, tests.fx('job_a'), null, tests.fx('cust_a'), tests.fx('nq_a'), tests.fx('ni_a')), 1,
+                'every deep link at once');
+select tests.eq((select concat_ws('/', job_id = tests.fx('job_a'), customer_id = tests.fx('cust_a'), quote_id = tests.fx('nq_a'),
+                                  invoice_id = tests.fx('ni_a'))
+                   from public.notifications where title = 'Linked'), 't/t/t/t', 'stored on the notification');
+select tests.throws($$update public.notifications set quote_id = tests.fx('nq_b') where title = 'Linked'$$, '23503',
+                    'the composite FKs reject another shop''s records');
+-- deleting a linked record clears only that link
+delete from public.quotes where id = tests.fx('nq_a');
+delete from public.invoices where id = tests.fx('ni_a');
+select tests.eq((select concat_ws('/', job_id = tests.fx('job_a'), customer_id = tests.fx('cust_a'), quote_id is null, invoice_id is null)
+                   from public.notifications where title = 'Linked'), 't/t/t/t', 'ON DELETE SET NULL per column');
+select tests.authenticate_as(tests.fx('u_owner_a'));
+select tests.throws($$update public.notifications set customer_id = null where title = 'Linked'$$, '42501',
+                    'recipients may only set read_at');
+select tests.as_superuser();
+delete from public.notifications where title = 'Linked';
+select tests.as_service();
 select tests.eq(public.notify_shop_staff(gen_random_uuid(), null, 'general', 'x'), 0, 'unknown shop: nobody');
 select tests.eq(public.notify_shop_staff(tests.fx('shop_b'), array['manager']::public.shop_role[], 'payment_received',
                                          'Payment received', '$50.00', tests.fx('job_b')), 1, 'shop B manager');

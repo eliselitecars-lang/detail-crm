@@ -8,7 +8,7 @@
 -- price_services checks run only when 0040 is applied (--ranges).
 \ir fixtures/two_shops.psql
 
-select to_regprocedure('public.price_services(uuid, uuid, uuid, uuid[], uuid)') is not null as has_pricing \gset
+select to_regprocedure('public.price_services(uuid, uuid, uuid[], uuid, uuid)') is not null as has_pricing \gset
 
 -- ============================================================ memberships keep their vehicle
 select tests.as_superuser();
@@ -23,7 +23,7 @@ select public.sync_stripe_subscription(tests.fx('shop_a'), 'sub_abc123', 'active
 
 \if :has_pricing
 select tests.authenticate_as(tests.fx('u_manager_a'));
-select tests.eq((public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), tests.fx('cat_car_a'), array[tests.fx('svc_a')],
+select tests.eq((public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), array[tests.fx('svc_a')], tests.fx('cat_car_a'),
                                        tests.fx('veh_other')) -> 'lines' -> 0 ->> 'unit_price_cents')::bigint,
                 20000::bigint, 'before: the other vehicle pays full price');
 \endif
@@ -36,7 +36,7 @@ select tests.eq((select vehicle_id from public.memberships where id = tests.fx('
                 'the membership still covers only that vehicle');
 \if :has_pricing
 select tests.authenticate_as(tests.fx('u_manager_a'));
-select tests.eq((public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), tests.fx('cat_car_a'), array[tests.fx('svc_a')],
+select tests.eq((public.price_services(tests.fx('shop_a'), tests.fx('cust_a'), array[tests.fx('svc_a')], tests.fx('cat_car_a'),
                                        tests.fx('veh_other')) -> 'lines' -> 0 ->> 'unit_price_cents')::bigint,
                 20000::bigint, 'after the attempt the membership still does not cover other vehicles');
 \endif
@@ -150,3 +150,100 @@ select tests.eq((select concat_ws('/', cardinality(included_service_ids), name) 
                 '0/B Club', 'B''s plan lost B''s deleted service');
 select tests.eq((select included_service_ids from public.membership_plans where id = tests.fx('plan_w')), array[tests.fx('svc_wash')],
                 'A''s plan untouched');
+
+-- ============================================================ dead payment attempts never block deletes
+-- A declined / cancelled attempt that never moved money (refunded 0, no
+-- paid_at) is removed with its job, invoice or customer; received or
+-- in-flight money still RESTRICTs the delete.
+select tests.as_superuser();
+insert into public.customers (shop_id, first_name) values (tests.fx('shop_a'), 'Dana') returning tests.fx_set('cust_d', id);
+insert into public.customers (shop_id, first_name) values (tests.fx('shop_a'), 'Evan') returning tests.fx_set('cust_e', id);
+insert into public.customers (shop_id, first_name) values (tests.fx('shop_a'), 'Faye') returning tests.fx_set('cust_f', id);
+insert into public.jobs (shop_id, customer_id, status) values (tests.fx('shop_a'), tests.fx('cust_d'), 'requested') returning tests.fx_set('job_dead', id);
+insert into public.jobs (shop_id, customer_id, status) values (tests.fx('shop_a'), tests.fx('cust_d'), 'requested') returning tests.fx_set('job_live', id);
+insert into public.jobs (shop_id, customer_id, status) values (tests.fx('shop_a'), tests.fx('cust_d'), 'requested') returning tests.fx_set('job_paid', id);
+insert into public.jobs (shop_id, customer_id, status) values (tests.fx('shop_a'), tests.fx('cust_d'), 'requested') returning tests.fx_set('job_old', id);
+select tests.as_service();
+-- job_dead: a declined saved-card charge and a cancelled PaymentSheet
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_dead1', 'failed', 5000, 0, 'deposit', 'card', null, tests.fx('job_dead'),
+                                    p_card_brand => 'visa', p_card_last4 => '0002');
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_dead2', 'pending', 5000, 0, 'deposit', 'card', null, tests.fx('job_dead'));
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_dead2', 'cancelled', 5000, 0, 'deposit', 'card', null, tests.fx('job_dead'));
+-- job_live: a PaymentSheet being confirmed right now
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_live', 'pending', 5000, 0, 'deposit', 'card', null, tests.fx('job_live'));
+-- job_paid: money received (then fully refunded: still a money record)
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_paid', 'succeeded', 5000, 0, 'deposit', 'card', null, tests.fx('job_paid'));
+select public.apply_stripe_refund('pi_paid', 5000);
+-- job_old: an abandoned sheet (pending, over an hour old): no longer in
+-- flight, but still unresolved, so it is kept (the sweep cancels it first)
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_old', 'pending', 5000, 0, 'deposit', 'card', null, tests.fx('job_old'));
+select tests.as_superuser();
+update public.payments set created_at = now() - interval '2 hours' where stripe_payment_intent_id = 'pi_old';
+select tests.eq((select string_agg(status::text, ',' order by stripe_payment_intent_id) from public.payments
+                  where stripe_payment_intent_id in ('pi_dead1', 'pi_dead2')), 'failed,cancelled', 'two dead attempts on job_dead');
+
+-- jobs_money_guard counts only real money
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.lives($$update public.jobs set customer_id = tests.fx('cust_e') where id = tests.fx('job_dead')$$,
+                   'a job with only dead attempts can change customer');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.payments where job_id = tests.fx('job_dead')), 2::bigint,
+                'the dead attempts stay on the job as history');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.throws_like($$update public.jobs set customer_id = tests.fx('cust_e') where id = tests.fx('job_live')$$, '23514',
+                         '%invoice or payments%', 'a payment in flight pins the customer');
+select tests.throws_like($$update public.jobs set customer_id = tests.fx('cust_e') where id = tests.fx('job_paid')$$, '23514',
+                         '%invoice or payments%', 'received (even refunded) money pins the customer');
+select tests.lives($$update public.jobs set customer_id = tests.fx('cust_e') where id = tests.fx('job_old')$$,
+                   'an abandoned (no longer in flight) attempt does not pin it');
+update public.jobs set customer_id = tests.fx('cust_d') where id in (tests.fx('job_dead'), tests.fx('job_old'));
+
+-- deleting jobs
+select tests.authenticate_as(tests.fx('u_tech_a'));
+select tests.eq(tests.row_count($$delete from public.jobs where id = tests.fx('job_dead')$$), 0::bigint,
+                'technicians cannot delete jobs (so no payment rows go either)');
+select tests.authenticate_as(tests.fx('u_manager_b'));
+select tests.eq(tests.row_count($$delete from public.jobs where id = tests.fx('job_dead')$$), 0::bigint, 'nor can another shop');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.payments where stripe_payment_intent_id in ('pi_dead1', 'pi_dead2')), 2::bigint,
+                'the denied deletes removed nothing');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq(tests.row_count($$delete from public.jobs where id = tests.fx('job_dead')$$), 1::bigint,
+                'a job with only dead attempts can be deleted');
+select tests.throws($$delete from public.jobs where id = tests.fx('job_live')$$, '23503', 'a job with a payment in flight cannot');
+select tests.throws($$delete from public.jobs where id = tests.fx('job_paid')$$, '23503', 'a job with received money cannot');
+select tests.throws($$delete from public.jobs where id = tests.fx('job_old')$$, '23503', 'an unresolved abandoned attempt still blocks');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.payments where stripe_payment_intent_id in ('pi_dead1', 'pi_dead2')), 0::bigint,
+                'its dead attempts went with it');
+select tests.eq((select count(*) from public.payments where stripe_payment_intent_id in ('pi_live', 'pi_paid', 'pi_old')), 3::bigint,
+                'the refused deletes kept every money record');
+
+-- deleting a draft invoice with a declined attempt
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.fx_set('inv_dead', (public.create_invoice(tests.fx('cust_f'), '[{"name":"Wax","unit_price_cents":4000}]')).id);
+select tests.as_service();
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_dead3', 'failed', 4000, 0, 'payment', 'card', tests.fx('inv_dead'));
+select tests.as_superuser();
+select tests.eq((select status::text from public.invoices where id = tests.fx('inv_dead')), 'draft', 'a declined attempt leaves a draft a draft');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq(tests.row_count($$delete from public.invoices where id = tests.fx('inv_dead')$$), 1::bigint,
+                'the draft invoice can be deleted');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.payments where stripe_payment_intent_id = 'pi_dead3'), 0::bigint,
+                'and its declined attempt went with it');
+
+-- deleting a customer whose only payments are dead attempts
+select tests.as_service();
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_dead4', 'failed', 1500, 0, 'payment', 'card', p_customer_id => tests.fx('cust_f'));
+select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_keep', 'succeeded', 1500, 0, 'payment', 'card', p_customer_id => tests.fx('cust_e'));
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_f')$$), 1::bigint,
+                'a customer with only a declined attempt can be deleted');
+select tests.throws($$delete from public.customers where id = tests.fx('cust_e')$$, '23503', 'a customer who paid cannot');
+select tests.as_superuser();
+select tests.eq((select concat_ws('/', (select count(*) from public.payments where stripe_payment_intent_id = 'pi_dead4'),
+                                      (select count(*) from public.payments where stripe_payment_intent_id = 'pi_keep'))), '0/1',
+                'the dead attempt is gone; the real payment stays');
+select tests.ok(not has_function_privilege('authenticated', 'public.payments_delete_dead_for_parent()', 'execute'),
+                'the cleanup trigger is not an RPC');

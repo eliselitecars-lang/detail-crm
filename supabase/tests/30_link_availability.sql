@@ -12,7 +12,8 @@
 -- they exist to deliver; campaigns using an unavailable link cannot launch.
 \ir fixtures/two_shops.psql
 
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 insert into public.shop_sms_numbers (phone_number, shop_id) values ('+12055550100', tests.fx('shop_a'));
 update public.shops set sms_from_number = '+12055550100' where id = tests.fx('shop_a');
 update public.shops set phone = '+12055550199' where id = tests.fx('shop_a');

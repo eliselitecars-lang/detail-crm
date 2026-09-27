@@ -9,7 +9,8 @@
 -- shop A takes online bookings, so the follow-up's {{booking_page_link}} is live
 update public.booking_settings set enabled = true where shop_id = tests.fx('shop_a');
 
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 -- the platform binds each shop's Twilio number (supabase/setup/twilio.md)
 insert into public.shop_sms_numbers (phone_number, shop_id) values ('+12055550100', tests.fx('shop_a'));
 update public.shops set sms_from_number = '+12055550100' where id = tests.fx('shop_a');
@@ -136,7 +137,8 @@ select tests.as_service();
 select tests.ok(public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'follow_up', 'sms', tests.fx('job_a'))
                   is not null, 'an SMS follow-up worded without links does not need it');
 select tests.as_superuser();
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 
 -- the follow_up token unsubscribes (anonymously, shop-scoped)
 select tests.as_anon();

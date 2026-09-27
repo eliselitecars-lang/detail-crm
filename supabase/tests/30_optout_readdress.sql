@@ -12,7 +12,8 @@
 -- opt-outs (recorded while there was no address) still hold.
 \ir fixtures/two_shops.psql
 
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 insert into public.shop_sms_numbers (phone_number, shop_id)
   values ('+12055550100', tests.fx('shop_a')), ('+13125550199', tests.fx('shop_b'));
 update public.shops set sms_from_number = '+12055550100' where id = tests.fx('shop_a');
@@ -174,9 +175,9 @@ select tests.ok((select phone_unverified and sms_opted_out_at is not null from p
 select tests.fx_set('u_olga', tests.create_user('olga@example.com'));
 create temp table live on commit drop as
   select to_char(min(s.starts_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as starts_at
-  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
+  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], (now() at time zone 'America/Chicago')::date + 3,
                                   (now() at time zone 'America/Chicago')::date + 3,
-                                  (now() at time zone 'America/Chicago')::date + 3) s;
+                                  tests.fx('cat_car_a')) s;
 grant select on live to authenticated;
 select tests.authenticate_as(tests.fx('u_olga'));
 create temp table o2 on commit drop as

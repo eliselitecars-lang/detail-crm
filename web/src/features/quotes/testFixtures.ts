@@ -156,6 +156,7 @@ export function paymentRow(overrides: Partial<Row<'payments'>> = {}): Row<'payme
     amount_cents: 10000,
     tip_cents: 1500,
     refunded_cents: 0,
+    disputed_cents: 0,
     stripe_payment_intent_id: 'pi_123',
     stripe_charge_id: 'ch_123',
     stripe_checkout_session_id: null,

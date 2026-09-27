@@ -251,14 +251,18 @@ language plpgsql security definer
 set search_path = ''
 as $$
 declare
-  v_id uuid;
+  v_id uuid := gen_random_uuid();
 begin
-  insert into auth.users (email, email_confirmed_at, raw_user_meta_data, raw_app_meta_data)
-  values (p_email,
+  -- Every column GoTrue's admin API sets explicitly (the real auth.users.id
+  -- has no default), so the same helper runs on the shim and on a real
+  -- Supabase database.
+  insert into auth.users (instance_id, id, aud, role, email, email_confirmed_at,
+                          raw_user_meta_data, raw_app_meta_data, created_at, updated_at)
+  values ('00000000-0000-0000-0000-000000000000', v_id, 'authenticated', 'authenticated', p_email,
           case when p_confirmed then now() end,
           coalesce(p_meta, '{}'::jsonb),
-          jsonb_build_object('provider', 'email', 'providers', jsonb_build_array('email')))
-  returning id into v_id;
+          jsonb_build_object('provider', 'email', 'providers', jsonb_build_array('email')),
+          now(), now());
   return v_id;
 end
 $$;

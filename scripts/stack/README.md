@@ -126,20 +126,13 @@ plus `sql/test_helpers_stack.sql`, then runs every `supabase/tests/*.sql` in
   harness's `platform_config` row (rolled back), and the suite must run right
   after `up.sh` (`10_money_security.sql` counts all `stripe_events` rows).
 * Per-file preludes (`sql/prelude/<file>.sql`) run inside that file's
-  transaction, before it, and are rolled back with it. There is one:
-  `00_audit_user_delete.sql` deletes `auth.users` rows as `service_role`,
-  which has no SELECT/DELETE on `auth.users` on real Supabase (only
-  `supabase_auth_admin`/`postgres`; the shim grants it), so it failed with
-  42501 at its first delete and its remaining assertions never ran. The
-  prelude grants SELECT, DELETE for that transaction, and the file then
-  proves every ON DELETE SET NULL / write-once audit cascade against the real
-  `auth.users`. The product's real path (GoTrue admin API as
+  transaction, before it, and are rolled back with it. They are only for
+  documented real-platform differences, and there are currently none:
+  `00_audit_user_delete.sql` used to need one (it deleted `auth.users` rows
+  as `service_role`, which has no SELECT/DELETE on `auth.users` on real
+  Supabase). It now deletes as `tests.as_superuser()` and passes on the real
+  stack as is. The product's real path (GoTrue admin API as
   `supabase_auth_admin`) is proven by `verify_stack.mjs`.
-  A concurrent change to that test (uncommitted at the time of the audit,
-  2026-09-27) deletes as `tests.as_superuser()` instead and passes on the real
-  stack without the prelude — once it is committed, delete
-  `sql/prelude/00_audit_user_delete.sql` so the grant can never mask a
-  regression back to `service_role`.
 * Files listed in `known_sql_failures.txt` are reported `KNOWN` (not
   failures) unless `STACK_STRICT=1`, and `FIXED` once they pass. The list is
   currently empty.

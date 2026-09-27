@@ -54,9 +54,9 @@ insert into public.quote_line_items (shop_id, quote_id, name, unit_price_cents, 
 
 -- ------------------------------------------------------------ public_get_quote
 select tests.as_anon();
-select tests.throws($$select public.public_get_quote(tests.fx('q_draft_token'))$$, 'P0002', 'draft quotes are not published');
-select tests.throws($$select public.public_get_quote(gen_random_uuid())$$, 'P0002', 'unknown token: not found');
-select tests.throws($$select public.public_get_quote(null)$$, 'P0002', 'null token: not found');
+select tests.throws($$select public.public_get_quote(tests.fx('q_draft_token'))$$, 'PT404', 'draft quotes are not published');
+select tests.throws($$select public.public_get_quote(gen_random_uuid())$$, 'PT404', 'unknown token: not found');
+select tests.throws($$select public.public_get_quote(null)$$, 'PT404', 'null token: not found');
 create temp table got (doc jsonb);
 grant all on got to anon, authenticated, service_role;
 insert into got select public.public_get_quote(tests.fx('q_token'));
@@ -106,8 +106,8 @@ select tests.throws_like($$select public.public_respond_quote(tests.fx('q_token'
                          '%optional items of this quote%', 'required lines cannot be "selected"');
 select tests.throws_like($$select public.public_respond_quote(tests.fx('q_token'), 'approve', 'Alice', array[tests.fx('qbl_opt')])$$, '22023',
                          '%optional items of this quote%', 'another quote''s (other shop''s) optional line is rejected');
-select tests.throws($$select public.public_respond_quote(tests.fx('q_draft_token'), 'approve', 'Alice')$$, 'P0002', 'drafts cannot be answered');
-select tests.throws($$select public.public_respond_quote(gen_random_uuid(), 'approve', 'Alice')$$, 'P0002', 'unknown token');
+select tests.throws($$select public.public_respond_quote(tests.fx('q_draft_token'), 'approve', 'Alice')$$, 'PT404', 'drafts cannot be answered');
+select tests.throws($$select public.public_respond_quote(gen_random_uuid(), 'approve', 'Alice')$$, 'PT404', 'unknown token');
 truncate got;
 insert into got select public.public_respond_quote(tests.fx('q_token'), ' Approve ', '  Alice Anders ', array[tests.fx('ql_opt1'), tests.fx('ql_opt1'), null]);
 select tests.ok((select doc -> 'quote' ->> 'status' = 'approved' and doc -> 'quote' ->> 'approved_by_name' = 'Alice Anders'
@@ -163,8 +163,8 @@ select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_pub2', 'pending', 10
 select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_pub3', 'failed', 1000, 0, p_invoice_id => tests.fx('inv'));
 
 select tests.as_anon();
-select tests.throws($$select public.public_get_invoice(tests.fx('inv_draft_token'))$$, 'P0002', 'draft invoices are not published');
-select tests.throws($$select public.public_get_invoice(gen_random_uuid())$$, 'P0002', 'unknown token');
+select tests.throws($$select public.public_get_invoice(tests.fx('inv_draft_token'))$$, 'PT404', 'draft invoices are not published');
+select tests.throws($$select public.public_get_invoice(gen_random_uuid())$$, 'PT404', 'unknown token');
 truncate got;
 insert into got select public.public_get_invoice(tests.fx('inv_token'));
 select tests.eq((select pg_temp.keys(doc) from got), 'customer,invoice,job,line_items,payments,shop,vehicle', 'invoice document sections');

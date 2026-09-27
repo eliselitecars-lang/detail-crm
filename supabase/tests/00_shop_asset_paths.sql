@@ -86,6 +86,7 @@ select tests.eq(tests.row_count(format($$update public.shops set logo_path = nul
 -- the stored file may disappear later (deleted through the Storage API);
 -- unrelated edits keep working, only a new path is checked
 select tests.as_superuser();
+select set_config('storage.allow_delete_query', 'true', true);
 delete from storage.objects where bucket_id = 'shop-assets' and name = tests.fx('shop_a') || '/logo-v2.webp';
 select tests.authenticate_as(tests.fx('u_admin_a'));
 select tests.lives(format($$update public.shops set name = 'Shop A Detailing' where id = '%s'$$, tests.fx('shop_a')),

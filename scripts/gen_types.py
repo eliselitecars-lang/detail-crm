@@ -20,10 +20,35 @@ and the pg catalogs, and writes:
      storage.objects policies, grouped by the migration ranges of SPEC
      section 9.
 
+Contract tags (comments in the migrations, stripped from SCHEMA.md text).
+These are the ONLY deviations from `supabase gen types typescript`, and each
+is opt-in per object; untagged objects are typed exactly like Supabase does:
+  * column comment '@insert-optional' — a BEFORE INSERT trigger always fills
+    this NOT NULL column (a document number, a value copied from a parent),
+    so the generated Insert type makes it optional (Row / Update unchanged).
+    Supabase makes every NOT NULL column without a default required on
+    Insert, which would force clients to send a value the server overwrites;
+  * function comment '@nullable: col1, col2' — those RETURNS TABLE output
+    columns may be null, so they are typed `T | null`. Supabase types every
+    RETURNS TABLE column non-null (Postgres does not record the nullability
+    of a function's output columns), which is unsound for outer joins and
+    busy-block rows. A tag naming a column the function does not return is a
+    generation error.
+Functions returning a table's row type (`returns setof <table>`) or a
+composite already follow the table / type's nullability, as in Supabase.
+
+SCHEMA.md also lists who calls each public function ("Called by"): the web /
+iOS / edge-function files found by scripts/check_contracts.py's static scan,
+pg_cron jobs and setup SQL in supabase/setup/, other public functions (from
+their bodies) and RLS policies. So besides the shim + migrations, SCHEMA.md
+depends on which client files call which RPC: regenerate after adding or
+removing an RPC call.
+
 The cluster is always stopped and removed at the end, even on error. Output
-depends only on the shim + migrations (no timestamps), so `--check` can prove
-the committed files are current; `scripts/check_contracts.py` runs the same
-comparison and then checks every web / iOS / edge-function reference.
+depends only on the shim + migrations + client RPC call sites (no timestamps),
+so `--check` can prove the committed files are current;
+`scripts/check_contracts.py` runs the same comparison and then checks every
+web / iOS / edge-function reference.
 
 Usage:
   python3 scripts/gen_types.py                # regenerate both files
@@ -53,6 +78,7 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # keep scripts/ free of __pycache__ (check_contracts is imported lazily)
 DEFAULT_REPO = Path(__file__).resolve().parent.parent
 TS_PATH = Path("web/src/lib/database.types.ts")
 MD_PATH = Path("docs/SCHEMA.md")
@@ -362,6 +388,16 @@ select pubname, schemaname as schema, tablename as table, attnames, rowfilter
 from pg_publication_tables where pubname = 'supabase_realtime'
 """
 
+# Function bodies, only to find which public functions call which (SCHEMA.md
+# "Called by"); not part of the typegen metadata.
+Q_FUNCTION_SOURCES = """
+select p.oid::int8 as id, p.prosrc as src
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.prokind in ('f', 'p')
+  and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid
+                    and d.deptype = 'e')
+"""
+
 Q_BUCKETS = """
 select to_jsonb(b) as b from storage.buckets b
 """
@@ -386,6 +422,7 @@ def introspect(db: Cluster) -> dict:
         "table_privs": db.query(Q_TABLE_PRIVS),
         "column_privs": db.query(Q_COLUMN_PRIVS),
         "publication": db.query(Q_PUBLICATION),
+        "function_sources": db.query(Q_FUNCTION_SOURCES),
         "buckets": [],
     }
     if db.query(Q_STORAGE_EXISTS)[0]["ok"]:
@@ -409,6 +446,46 @@ def introspect(db: Cluster) -> dict:
         ]
         # typegen addresses RPC args by name → sorted by name (sortGeneratorMetadata)
         f["args"] = sorted(f["args_declared"], key=lambda a: ckey(a["name"]))
+    return meta
+
+
+# --------------------------------------------------------------------------
+# Contract tags in catalog comments (see the module docstring)
+# --------------------------------------------------------------------------
+INSERT_OPTIONAL_TAG = "@insert-optional"
+NULLABLE_TAG_RE = re.compile(r"@nullable:\s*([A-Za-z0-9_]+(?:\s*,\s*[A-Za-z0-9_]+)*)")
+
+
+def _strip_tag(text: str | None, pattern) -> str | None:
+    if text is None:
+        return None
+    out = pattern.sub("", text) if hasattr(pattern, "sub") else text.replace(pattern, "")
+    out = re.sub(r"[ \t]+$", "", re.sub(r"[ \t]{2,}", " ", out), flags=re.M).strip()
+    return out or None
+
+
+def apply_contract_tags(meta: dict) -> dict:
+    """Parse the contract tags out of column / function comments (idempotent):
+    columns get `insert_optional`, functions `nullable_columns`, and the tags
+    are removed from the comment text."""
+    for c in meta["columns"]:
+        tagged = INSERT_OPTIONAL_TAG in (c.get("comment") or "")
+        c["insert_optional"] = bool(c.get("insert_optional")) or tagged
+        if tagged:
+            c["comment"] = _strip_tag(c["comment"], INSERT_OPTIONAL_TAG)
+    for f in meta["functions"]:
+        names = list(f.get("nullable_columns") or [])
+        m = NULLABLE_TAG_RE.search(f.get("comment") or "")
+        if m:
+            names += [n.strip() for n in m.group(1).split(",") if n.strip()]
+            f["comment"] = _strip_tag(f["comment"], NULLABLE_TAG_RE)
+        f["nullable_columns"] = sorted(set(names))
+        if names:
+            outs = {a["name"] for a in f.get("args", []) if a["mode"] == "table"}
+            unknown = sorted(set(names) - outs)
+            if unknown:
+                raise GenError(f"{f['name']}: @nullable names {', '.join(unknown)}, which "
+                               f"{'are not output columns' if outs else 'needs a RETURNS TABLE function'}")
     return meta
 
 
@@ -690,7 +767,12 @@ class TsGen:
     def fn_return_type(self, fn) -> str:
         table_args = [a for a in fn["args"] if a["mode"] == "table"]
         if table_args:
-            members = "\n".join(f'  {self.key(a["name"])}: {self.type_ts(a["type_id"])}' for a in table_args)
+            nullable = set(fn.get("nullable_columns") or ())
+            members = "\n".join(
+                f'  {self.key(a["name"])}: '
+                + (self.nullable_union(self.type_ts(a["type_id"]), True) if a["name"] in nullable
+                   else self.type_ts(a["type_id"]))
+                for a in table_args)
             return "{\n" + members + "\n}"
         rel = next((t for t in self.tables + self.foreign_tables if t["id"] == fn["return_type_relation_id"]), None) or \
             next((v for v in self.views + self.mat_views if v["id"] == fn["return_type_relation_id"]), None)
@@ -827,7 +909,8 @@ class TsGen:
                     upd.append(f'{self.key(c["name"])}?: never')
                     continue
                 ins.append(self.column_def(c, c["is_nullable"],
-                                           c["is_nullable"] or c["is_identity"] or c["default_value"] is not None))
+                                           c["is_nullable"] or c["is_identity"] or c["default_value"] is not None
+                                           or bool(c.get("insert_optional"))))
                 upd.append(self.column_def(c, c["is_nullable"], True))
             rels = self.relationships_for(t)
             members = [
@@ -1057,7 +1140,119 @@ def trig_summary(defn: str, table: str) -> str:
     return abbrev(s, 260)
 
 
-def build_snapshot(meta, scan, repo: Path, applied: int | None) -> tuple[str, dict]:
+# --------------------------------------------------------------------------
+# "Called by" — who calls each public function (SCHEMA.md)
+# --------------------------------------------------------------------------
+SETUP_DIR = Path("supabase/setup")
+_CRON_JOB_RE = re.compile(r"\$job\$(.*?)\$job\$", re.S)
+_SQL_CALL_RE = re.compile(r"\bpublic\.([a-z_][a-z0-9_]*)\s*\(")
+
+
+def app_surface(rel: str) -> str:
+    """'web', 'iOS' or 'edge:<function>' for a repo-relative client file."""
+    if rel.startswith("supabase/functions/"):
+        return "edge:" + rel.split("/")[2]
+    if rel.startswith("ios/"):
+        return "iOS"
+    return "web" if rel.startswith("web/") else rel
+
+
+def app_rpc_callers(meta: dict, repo: Path) -> dict[str, list[str]]:
+    """RPC name -> repo-relative web / iOS / edge-function files calling it,
+    from the same static scan scripts/check_contracts.py runs."""
+    import check_contracts  # noqa: PLC0415  (same directory; imports this module)
+    return check_contracts.app_rpc_callers(meta, repo)
+
+
+def setup_sql_callers(repo: Path) -> dict[str, dict[str, set]]:
+    """Function name -> {'pg_cron' | 'setup SQL': {files}} from supabase/setup/*.sql
+    (calls inside a `$job$ ... $job$` cron command count as pg_cron)."""
+    out: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
+    root = repo / SETUP_DIR
+    for path in sorted(root.glob("*.sql")) if root.is_dir() else []:
+        rel = path.relative_to(repo).as_posix()
+        text = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8", errors="replace"))
+        jobs = _CRON_JOB_RE.findall(text)
+        for body in jobs:
+            for name in _SQL_CALL_RE.findall(body):
+                out[name]["pg_cron"].add(rel)
+        for name in _SQL_CALL_RE.findall(_CRON_JOB_RE.sub("", text)):
+            out[name]["setup SQL"].add(rel)
+    return out
+
+
+def function_callers(meta: dict, repo: Path, app_callers: dict | None) -> dict[str, dict]:
+    """Function name -> {'app': {surface: [files]}, 'setup': {kind: [files]},
+    'sql': [function names], 'policies': [schema-qualified tables],
+    'columns': [tables whose CHECK constraints / defaults / generated columns use it]}."""
+    names = {f["name"] for f in meta["functions"] if not f.get("is_extension_member")}
+    name_by_id = {f["id"]: f["name"] for f in meta["functions"]}
+    res: dict[str, dict] = {n: {"app": defaultdict(list), "setup": {}, "sql": set(), "policies": set(),
+                                "columns": set()} for n in names}
+    for name, files in (app_callers or {}).items():
+        if name in res:
+            for rel in files:
+                res[name]["app"][app_surface(rel)].append(rel)
+    for name, kinds in setup_sql_callers(repo).items():
+        if name in res:
+            res[name]["setup"] = {k: sorted(v) for k, v in kinds.items()}
+    for fs in meta.get("function_sources") or []:
+        caller = name_by_id.get(fs["id"])
+        for name in set(_SQL_CALL_RE.findall(fs["src"] or "")):
+            if name in res and name != caller and caller:
+                res[name]["sql"].add(caller)
+    pol_re = {n: re.compile(r"(?<![\w.])(?:public\.)?" + re.escape(n) + r"\s*\(") for n in names}
+    for p in meta["policies"]:
+        text = f"{p['qual'] or ''} {p['with_check'] or ''}"
+        if "(" not in text:
+            continue
+        for n, rx in pol_re.items():
+            if rx.search(text):
+                res[n]["policies"].add(p["table"] if p["schema"] == SCHEMA else f"{p['schema']}.{p['table']}")
+    exprs = [(k["table"], k["def"]) for k in meta["constraints"] if k["type"] == "c"]
+    exprs += [(c["table"], c["default_value"]) for c in meta["columns"] if c.get("default_value")]
+    for table, text in exprs:
+        if not text or "(" not in text:
+            continue
+        for n, rx in pol_re.items():
+            if rx.search(text):
+                res[n]["columns"].add(table)
+    return res
+
+
+def callers_summary(c: dict) -> str:
+    """Compact 'called by' cell for the index tables."""
+    bits = [s for s in ("web", "iOS") if s in c["app"]]
+    bits += sorted(s for s in c["app"] if s.startswith("edge:"))
+    bits += sorted(c["setup"])
+    if c["sql"]:
+        bits.append(f"{len(c['sql'])} SQL fn{'s' if len(c['sql']) != 1 else ''}")
+    if c["policies"]:
+        bits.append(f"RLS ({len(c['policies'])} table{'s' if len(c['policies']) != 1 else ''})")
+    if c.get("columns"):
+        bits.append(f"CHECK/default ({len(c['columns'])} table{'s' if len(c['columns']) != 1 else ''})")
+    return ", ".join(bits) or "—"
+
+
+def callers_detail(c: dict) -> list[str]:
+    """'Called by' bullet lines of a function's section."""
+    out = []
+    for surface in [s for s in ("web", "iOS") if s in c["app"]] + sorted(s for s in c["app"] if s.startswith("edge:")):
+        files = sorted(set(c["app"][surface]))
+        out.append(f"{surface}: " + ", ".join(f"`{f}`" for f in files))
+    for kind in sorted(c["setup"]):
+        out.append(f"{kind}: " + ", ".join(f"`{f}`" for f in c["setup"][kind]))
+    if c["sql"]:
+        out.append("SQL functions: " + ", ".join(f"`{n}`" for n in sorted(c["sql"])))
+    if c["policies"]:
+        out.append("RLS policies on: " + ", ".join(f"`{t}`" for t in sorted(c["policies"])))
+    if c.get("columns"):
+        out.append("CHECK constraints / column defaults of: " + ", ".join(f"`{t}`" for t in sorted(c["columns"])))
+    return out
+
+
+def build_snapshot(meta, scan, repo: Path, applied: int | None,
+                   callers: dict | None = None) -> tuple[str, dict]:
     types = meta["types"]
     rels = {r["name"]: r for r in meta["relations"]}
     tables = sorted([r for r in meta["relations"]], key=lambda r: r["name"])
@@ -1155,6 +1350,12 @@ def build_snapshot(meta, scan, repo: Path, applied: int | None) -> tuple[str, di
             parts.append(f"{role}={letters}" + (f" + cols {' '.join(extra)}" if extra else ""))
         return "; ".join(parts)
 
+    callers = callers or {}
+    no_callers = {"app": {}, "setup": {}, "sql": set(), "policies": set(), "columns": set()}
+
+    def called_by(f):
+        return callers.get(f["name"], no_callers)
+
     L = []
     w = L.append
     w("# Detail CRM — database schema (column-level contract)\n")
@@ -1175,7 +1376,18 @@ def build_snapshot(meta, scan, repo: Path, applied: int | None) -> tuple[str, di
     w("- Legend: grants `S/I/U/D` = table-level SELECT/INSERT/UPDATE/DELETE for the PostgREST role (RLS still applies; "
       "`service_role` bypasses RLS). `cols UPDATE(a, b)` = column-level grant only. Policy expressions are abbreviated "
       "(`public.` stripped, whitespace collapsed, long ones truncated with …). `exec:` = roles with EXECUTE on a function "
-      "(includes PUBLIC grants). DEFINER = SECURITY DEFINER.\n")
+      "(includes PUBLIC grants). DEFINER = SECURITY DEFINER.")
+    w("- Called by: the web (`web/src`), iOS (`ios/`) and edge-function (`supabase/functions/<name>`) files that call "
+      "the function by a static name (the same scan `scripts/check_contracts.py` verifies; tests excluded), pg_cron "
+      "jobs and other setup SQL in `supabase/setup/`, other public SQL functions (`public.<fn>(` in their body) and "
+      "RLS policies (public tables and `storage.objects`). Trigger functions list their triggers instead.")
+    w("- Deviations from `supabase gen types typescript` (opt-in per object, through contract tags in the "
+      "migrations; everything else is byte-identical to the Supabase generator): a column commented "
+      "`@insert-optional` — a NOT NULL column without a default that a BEFORE INSERT trigger always fills — is "
+      "optional in its table's `Insert` type (Supabase makes it required); a function commented "
+      "`@nullable: a, b` types those RETURNS TABLE output columns `T | null` (Supabase types every RETURNS TABLE "
+      "column non-null, because Postgres does not record their nullability). Such columns are listed per table / "
+      "function below.\n")
 
     # ---- index
     w("## Index\n")
@@ -1193,8 +1405,8 @@ def build_snapshot(meta, scan, repo: Path, applied: int | None) -> tuple[str, di
         args = [a for a in f.get("args_declared", []) if a["mode"] in ("in", "inout", "variadic")]
         return ", ".join((a["name"] or "(unnamed)") + ("?" if a["has_default"] else "") for a in args) or "—"
 
-    w("| function | args (`?` = has default) | exec | returns | file |")
-    w("|---|---|---|---|---|")
+    w("| function | args (`?` = has default) | exec | returns | file | called by |")
+    w("|---|---|---|---|---|---|")
     for f in fns:
         if f["return_type"] in ("trigger", "event_trigger"):
             continue
@@ -1203,11 +1415,12 @@ def build_snapshot(meta, scan, repo: Path, applied: int | None) -> tuple[str, di
         files, _c, _s = fn_file_info(f)
         roles = ", ".join(x for x in ("anon", "authenticated") if f[f"exec_{x}"])
         w(f"| `{f['name']}` | {md_cell(arg_names(f))} | {roles}{' · DEFINER' if f['security_definer'] else ''} | "
-          f"`{md_cell(abbrev(strip_public(f['return_type']), 90))}` | {files[0] if files else '?'} |")
+          f"`{md_cell(abbrev(strip_public(f['return_type']), 90))}` | {files[0] if files else '?'} | "
+          f"{md_cell(callers_summary(called_by(f)))} |")
     w("")
     w("### Server-only functions (EXECUTE for `service_role` only: edge functions, webhooks, pg_cron)\n")
-    w("| function | args (`?` = has default) | returns | file |")
-    w("|---|---|---|---|")
+    w("| function | args (`?` = has default) | returns | file | called by |")
+    w("|---|---|---|---|---|")
     for f in fns:
         if f["return_type"] in ("trigger", "event_trigger"):
             continue
@@ -1215,7 +1428,7 @@ def build_snapshot(meta, scan, repo: Path, applied: int | None) -> tuple[str, di
             continue
         files, _c, _s = fn_file_info(f)
         w(f"| `{f['name']}` | {md_cell(arg_names(f))} | `{md_cell(abbrev(strip_public(f['return_type']), 90))}` | "
-          f"{files[0] if files else '?'} |")
+          f"{files[0] if files else '?'} | {md_cell(callers_summary(called_by(f)))} |")
     w("")
 
     # ---- per domain
@@ -1286,6 +1499,10 @@ def build_snapshot(meta, scan, repo: Path, applied: int | None) -> tuple[str, di
                     row += f" {md_cell(abbrev(c['comment'], 200) or '')} |"
                 w(row)
             w("")
+            opt = [c["name"] for c in cols if c.get("insert_optional")]
+            if opt:
+                w("- Optional on insert (`@insert-optional`: a BEFORE INSERT trigger fills them): "
+                  + ", ".join(f"`{n}`" for n in opt))
             kinds = defaultdict(list)
             for k in cons_by.get(name, []):
                 kinds[k["type"]].append(k)
@@ -1342,6 +1559,17 @@ def build_snapshot(meta, scan, repo: Path, applied: int | None) -> tuple[str, di
                 if comment:
                     tag = {"COMMENT ON": "(COMMENT ON) ", "header": "(file header) "}.get(src, "")
                     w(f"- {tag}{abbrev(comment, 1200)}")
+                if f.get("nullable_columns"):
+                    w("- Nullable output columns (`@nullable`): " + ", ".join(f"`{n}`" for n in f["nullable_columns"]))
+                detail = callers_detail(called_by(f))
+                if detail:
+                    w("- Called by:")
+                    for line in detail:
+                        w(f"  - {line}")
+                elif f["exec_anon"] or f["exec_authenticated"]:
+                    w("- Called by: no statically named web / iOS / edge-function / SQL caller in this repo")
+                else:
+                    w("- Called by: no caller in this repo (service-role API / manual operations only)")
                 w("")
         if d["trig_fns"]:
             w("### Trigger functions\n")
@@ -1591,18 +1819,24 @@ def load_meta_file(path: Path) -> tuple[dict, int | None]:
 
 
 def render(meta: dict, applied: int | None, repo: Path, postgrest_version: str | None = "12",
-           use_prettier: bool = True) -> dict:
-    """Both contract files as {repo-relative Path: text} plus a summary."""
+           use_prettier: bool = True, app_callers: dict | None = None) -> dict:
+    """Both contract files as {repo-relative Path: text} plus a summary.
+    `app_callers` (RPC name -> client files, from check_contracts) is computed
+    from `repo` when not given."""
+    raw_meta = meta
     has_prettier = (repo / "web/node_modules/.bin/prettier").exists()
     if use_prettier and not has_prettier:
         raise GenError("web/node_modules/.bin/prettier not found: run `npm ci` in web/ first "
                        "(or pass --no-prettier for a throwaway, unformatted preview)")
+    meta = apply_contract_tags(json.loads(json.dumps(meta)))
     gen = TsGen(meta, postgrest_version or None, quote_keys=use_prettier)
     ts = gen.generate()
     if use_prettier:
         ts = prettier_format(ts, repo)
     scan = scan_migrations(repo / "supabase/migrations")
-    md, counts = build_snapshot(meta, scan, repo, applied)
+    if app_callers is None:
+        app_callers = app_rpc_callers(raw_meta, repo)
+    md, counts = build_snapshot(meta, scan, repo, applied, function_callers(meta, repo, app_callers))
     n_ts_fns = len({fn["name"] for fn, _ in gen.schema_functions()})
     summary = (f"{len(gen.tables) + len(gen.foreign_tables)} tables, {len(gen.views) + len(gen.mat_views)} views, "
                f"{n_ts_fns} RPC-visible functions, "
@@ -1647,11 +1881,21 @@ create type public.money as (amount_cents bigint, currency text);
 create table public.shops (
   id          uuid primary key default gen_random_uuid(),
   name        text not null,
+  code        text not null,
   seq         bigint generated always as identity,
   name_upper  text generated always as (upper(name)) stored,
   unique (id, seq)
 );
 comment on column public.shops.name is 'Display name shown to customers.';
+comment on column public.shops.code is 'Short code, derived from the name on insert. @insert-optional';
+create function public.shops_code() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  new.code := coalesce(new.code, lower(left(new.name, 3)));
+  return new;
+end
+$$;
+create trigger shops_code before insert on public.shops for each row execute function public.shops_code();
 
 -- Visits of a shop.
 create table public.visits (
@@ -1716,15 +1960,16 @@ language sql stable set search_path = '' as $$
 $$;
 
 create function public.visit_summary(p_shop_id uuid)
-returns table (status public.visit_status, n bigint)
+returns table (status public.visit_status, n bigint, last_note text)
 language sql stable set search_path = '' as $$
-  select v.status, count(*) from public.visits v where v.shop_id = p_shop_id group by v.status
+  select v.status, count(*), max(v.notes) from public.visits v where v.shop_id = p_shop_id group by v.status
 $$;
+comment on function public.visit_summary(uuid) is 'Visit counts per status. @nullable: last_note';
 
 -- Deletes finished visits (pg_cron).
 create function public.purge_visits(p_before timestamptz default now()) returns void
 language sql security definer set search_path = '' as $$
-  delete from public.visits where status = 'done'
+  delete from public.visits v where v.status = 'done' and public.visit_count(v.shop_id) > 0
 $$;
 revoke execute on function public.purge_visits(timestamptz) from public, anon, authenticated;
 grant execute on function public.purge_visits(timestamptz) to service_role;
@@ -1754,18 +1999,21 @@ FIXTURE_TS_EXPECT = [
     # identity ALWAYS and generated columns: readable, never writable
     """      shops: {
         Row: {
+          code: string
           id: string
           name: string
           name_upper: string | null
           seq: number
         }
         Insert: {
+          code?: string
           id?: string
           name: string
           name_upper?: never
           seq?: never
         }
         Update: {
+          code?: string
           id?: string
           name?: string
           name_upper?: never
@@ -1830,6 +2078,7 @@ FIXTURE_TS_EXPECT = [
     """      visit_summary: {
         Args: { p_shop_id: string }
         Returns: {
+          last_note: string | null
           n: number
           status: Database["public"]["Enums"]["visit_status"]
         }[]
@@ -1857,12 +2106,23 @@ FIXTURE_TS_EXPECT = [
 
 FIXTURE_MD_EXPECT = [
     "- Migrations applied: 1 (`0001_fixture.sql` … `0001_fixture.sql`)",
-    "- Counts: 3 tables, 1 views, 7 functions (6 non-trigger), 1 enums, 1 composite types, 1 public RLS policies, "
+    "- Counts: 3 tables, 1 views, 8 functions (6 non-trigger), 1 enums, 1 composite types, 1 public RLS policies, "
     "1 storage buckets (1 storage.objects policies)",
     "## Foundation (0001–0009): tenancy, shop setup, CRM, catalog, jobs, scheduling",
     "#### `visits`\n\nfile `0001_fixture.sql` · RLS on · realtime: **yes**\n\n> Visits of a shop.",
     "| photo_path | text | yes |  | Object name in the visit-photos bucket: <shop_id>/<visit_id>/<file>. |",
     "| seq | bigint | no | identity always |",
+    # "Called by": app surfaces, pg_cron, SQL bodies, policies; nullable / insert-optional notes
+    "| `visit_count` | p_shop_id, p_status? | authenticated · DEFINER | `integer` | 0001_fixture.sql | web, 1 SQL fn |",
+    "| `purge_visits` | p_before? | `void` | 0001_fixture.sql | edge:purge, pg_cron |",
+    "- Called by:\n  - web: `web/src/features/visits/api.ts`\n  - SQL functions: `purge_visits`\n",
+    "- Called by:\n  - edge:purge: `supabase/functions/purge/index.ts`\n  - pg_cron: `supabase/setup/cron.sql`\n",
+    "- Called by:\n  - RLS policies on: `storage.objects`\n",
+    "- Nullable output columns (`@nullable`): `last_note`",
+    "- Optional on insert (`@insert-optional`: a BEFORE INSERT trigger fills them): `code`",
+    "- Called by: no statically named web / iOS / edge-function / SQL caller in this repo",
+    # contract tags are parsed out of the comment text
+    "| code | text | no |  | Short code, derived from the name on insert. |",
     "| tags | text[] | no | '{}'::text[] |  |",
     "| `open_visits` (view) | 0001_fixture.sql | security_invoker view (base-table RLS applies to the caller) |  | "
     "anon=SIUD; authenticated=SIUD |",
@@ -1886,6 +2146,17 @@ FIXTURE_MD_EXPECT = [
     "- Stored in: `visits.photo_path`",
     "- `public.visits` — subscribers only receive rows their RLS SELECT policies allow",
 ]
+
+
+# Client / setup files of the fixture repo: the "Called by" sources.
+FIXTURE_CALLERS = {
+    "web/src/features/visits/api.ts":
+        "export const count = (id: string) => supabase.rpc('visit_count', { p_shop_id: id })\n",
+    "supabase/functions/purge/index.ts": "await admin.rpc('purge_visits', {});\n",
+    "supabase/setup/cron.sql":
+        "-- nightly purge (not a call: public.visit_count(x) in a comment)\n"
+        "select cron.schedule('purge', '0 3 * * *', $job$ select public.purge_visits(); $job$);\n",
+}
 
 
 def self_test(repo: Path) -> int:
@@ -1912,6 +2183,9 @@ def self_test(repo: Path) -> int:
         (fx / "supabase/migrations/0001_fixture.sql").write_text(FIXTURE_MIGRATION)
         (fx / "web").mkdir()
         (fx / "web/node_modules").symlink_to(repo / "web/node_modules", target_is_directory=True)
+        for rel, text in FIXTURE_CALLERS.items():
+            (fx / rel).parent.mkdir(parents=True, exist_ok=True)
+            (fx / rel).write_text(text)
 
         cluster = Cluster(fx)
         try:
@@ -1941,6 +2215,9 @@ def self_test(repo: Path) -> int:
         for snippet in FIXTURE_MD_EXPECT:
             expect("SCHEMA.md contains:\n" + snippet, snippet in md)
         expect("trigger functions are not RPCs", "visits_touch:" not in ts)
+        expect("contract tags are stripped from SCHEMA.md",
+               "@nullable: last_note" not in md and "on insert. @insert-optional" not in md)
+        expect("a tagged function keeps the rest of its description", "Visit counts per status." in md)
         expect("storage helper without API use still typed", "storage_path_uuid: {" in ts)
         expect("Views block present", "    Views: {\n      open_visits: {" in ts)
         expect("tables sorted", ts.index("      shops: {") < ts.index("      visit_notes: {") < ts.index("      visits: {"))

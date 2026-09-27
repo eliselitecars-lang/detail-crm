@@ -19,8 +19,8 @@ select tests.eq(public.public_shop_profile('shop-a') #>> '{booking,cancellation_
 select tests.eq(public.public_shop_profile('shop-a') ->> 'city', 'Birmingham', 'city');
 select tests.eq(public.public_shop_profile('shop-a') ->> 'business_type', 'both', 'business type');
 select tests.ok(public.public_shop_profile('shop-a') -> 'booking' -> 'deposit_type' = 'null'::jsonb, 'no deposit: no deposit terms');
-select tests.throws($$select public.public_shop_profile('nope')$$, 'P0002', 'unknown shop');
-select tests.throws($$select public.public_shop_profile(null)$$, 'P0002', 'null slug');
+select tests.throws($$select public.public_shop_profile('nope')$$, 'PT404', 'unknown shop');
+select tests.throws($$select public.public_shop_profile(null)$$, 'PT404', 'null slug');
 select tests.as_superuser();
 update public.booking_settings set enabled = false where shop_id = tests.fx('shop_b');
 update public.booking_settings set require_deposit = true, deposit_type = 'percent', deposit_value = 2500,
@@ -33,7 +33,7 @@ select tests.eq(public.public_shop_profile('shop-a') #>> '{booking,service_area_
 
 -- ------------------------------------------------------------ public_booking_catalog
 select tests.throws_like($$select public.public_booking_catalog('shop-b')$$, '55000', '%not enabled%', 'disabled booking');
-select tests.throws($$select public.public_booking_catalog('nope')$$, 'P0002', 'unknown shop');
+select tests.throws($$select public.public_booking_catalog('nope')$$, 'PT404', 'unknown shop');
 create temp table cat as select public.public_booking_catalog('shop-a') as c;
 grant select on cat to anon;
 select tests.eq(pg_temp.keys((select c from cat)), 'addons,service_categories,services,vehicle_categories', 'catalog keys');

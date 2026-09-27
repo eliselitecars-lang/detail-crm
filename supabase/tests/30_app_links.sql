@@ -27,7 +27,10 @@ select tests.ok(not public.comms_uses_app_links('{{Booking_link}} {{booking_link
 select tests.ok(not public.comms_uses_app_links(null), 'null text');
 
 -- ------------------------------------------------------------ fresh deployment: nothing configured
-select tests.eq((select count(*) from public.platform_config), 0::bigint, 'fresh deployment: platform_config is empty');
+-- a fresh deployment has no app_base_url (reset explicitly: the database may be shared)
+delete from public.platform_config where key = 'app_base_url';
+select tests.eq((select count(*) from public.platform_config where key = 'app_base_url'), 0::bigint,
+                'fresh deployment: no app_base_url');
 
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.throws_like($$select public.enqueue_template_message(tests.fx('job_a'), 'booking_confirmed', null, 'sms')$$,
@@ -65,7 +68,7 @@ select tests.as_service();
 select tests.throws_like($$select public.enqueue_due_automations('2025-06-01 15:00Z')$$, '55000', '%app_base_url%',
                          'automations refuse to run while links cannot be built');
 select tests.as_superuser();
-select tests.eq((select count(*) from public.job_automation_log), 0::bigint,
+select tests.eq((select count(*) from public.job_automation_log where shop_id in (tests.fx('shop_a'), tests.fx('shop_b'))), 0::bigint,
                 'nothing is logged as skipped, so the run catches up once configured');
 
 -- campaigns

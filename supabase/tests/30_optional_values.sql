@@ -12,7 +12,8 @@
 -- and the default wording keeps optional values on lines of their own.
 \ir fixtures/two_shops.psql
 
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 insert into public.shop_sms_numbers (phone_number, shop_id)
   values ('+12055550100', tests.fx('shop_a')), ('+13125550199', tests.fx('shop_b'));
 update public.shops set sms_from_number = '+12055550100', phone = null where id = tests.fx('shop_a');  -- create_shop's p_phone is optional

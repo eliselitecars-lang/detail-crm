@@ -6,7 +6,8 @@
 -- never clear or write suppressions; shop isolation and constraints.
 \ir fixtures/two_shops.psql
 
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 -- the platform binds each shop's Twilio number (supabase/setup/twilio.md)
 insert into public.shop_sms_numbers (phone_number, shop_id)
   values ('+12055550100', tests.fx('shop_a')), ('+13125550199', tests.fx('shop_b'));

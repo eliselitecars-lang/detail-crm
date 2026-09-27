@@ -8,7 +8,8 @@
 -- address), which outlives the message. Access, isolation, denial paths.
 \ir fixtures/two_shops.psql
 
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 insert into public.customers (shop_id, first_name, email, email_opt_in, created_at)
   values (tests.fx('shop_a'), 'Dana', 'dana@example.com', true, '2024-01-01Z') returning tests.fx_set('dana_old', id);
 insert into public.customers (shop_id, first_name, email, email_opt_in, created_at)

@@ -15,7 +15,8 @@
 --     rendering the tokens
 --   * the customer's token keeps working for the booking page and invoice
 \ir fixtures/two_shops.psql
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 
 update public.jobs set scheduled_start = now() + interval '10 days', scheduled_end = now() + interval '10 days 2 hours'
  where id = tests.fx('job_a');

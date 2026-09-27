@@ -186,9 +186,9 @@ select tests.fx_set('u_unconfirmed', tests.create_user('eve@example.com', false)
 -- API callers always book on the server clock: a real slot three days out
 create temp table fs as
   select to_char(min(s.starts_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as starts_at
-  from public.get_available_slots('shop-a', array[tests.fx('svc_a'), tests.fx('svc_wash')], tests.fx('cat_car_a'),
+  from public.get_available_slots('shop-a', array[tests.fx('svc_a'), tests.fx('svc_wash')], (now() at time zone 'America/Chicago')::date + 3,
                                   (now() at time zone 'America/Chicago')::date + 3,
-                                  (now() at time zone 'America/Chicago')::date + 3) s;
+                                  tests.fx('cat_car_a')) s;
 grant select on fs to anon, authenticated;
 create function pg_temp.live(p_overrides jsonb) returns jsonb language sql as $$
   select pg_temp.booking(p_overrides) || jsonb_build_object('starts_at', (select starts_at from fs),
@@ -262,17 +262,17 @@ select tests.eq((select count(*) from public.vehicles where customer_id = tests.
 -- nobody else may book Alice's saved vehicle
 select tests.authenticate_as(tests.fx('u_outsider'));
 select tests.throws_like($$select public.create_online_booking('shop-a', pg_temp.live('{}') || jsonb_build_object('vehicle',
-                             jsonb_build_object('id', tests.fx('veh_a'))))$$, 'P0002', '%vehicle not found%',
+                             jsonb_build_object('id', tests.fx('veh_a'))))$$, 'PT404', '%vehicle not found%',
                          'another user cannot book a saved vehicle');
 select tests.as_anon();
 select tests.throws($$select public.create_online_booking('shop-a', pg_temp.live('{}') || jsonb_build_object('vehicle',
-                      jsonb_build_object('id', tests.fx('veh_a'))))$$, 'P0002', 'anon cannot book a saved vehicle');
+                      jsonb_build_object('id', tests.fx('veh_a'))))$$, 'PT404', 'anon cannot book a saved vehicle');
 select tests.authenticate_as(tests.fx('u_alice'));
 select tests.throws($$select public.create_online_booking('shop-a', pg_temp.live('{}') || jsonb_build_object('vehicle',
-                      jsonb_build_object('id', tests.fx('veh_b'))))$$, 'P0002', 'a vehicle of another shop is not found');
+                      jsonb_build_object('id', tests.fx('veh_b'))))$$, 'PT404', 'a vehicle of another shop is not found');
 select tests.as_superuser();
 update public.vehicles set archived_at = now() where id = tests.fx('veh_a');
 select tests.authenticate_as(tests.fx('u_alice'));
 select tests.throws($$select public.create_online_booking('shop-a', pg_temp.live('{}') || jsonb_build_object('vehicle',
-                      jsonb_build_object('id', tests.fx('veh_a'))))$$, 'P0002', 'archived vehicles cannot be booked');
+                      jsonb_build_object('id', tests.fx('veh_a'))))$$, 'PT404', 'archived vehicles cannot be booked');
 select tests.as_superuser();

@@ -107,9 +107,9 @@ comment on function public.wall_clock_instant(timestamp, text) is
 create function public.get_available_slots(
   p_shop_slug            text,
   p_service_ids          uuid[],
-  p_vehicle_category_id  uuid,
   p_from                 date,
   p_to                   date,
+  p_vehicle_category_id  uuid default null,
   p_now                  timestamptz default now()
 ) returns table (starts_at timestamptz, ends_at timestamptz)
 language plpgsql stable security definer
@@ -139,7 +139,7 @@ begin
   end if;
   select * into v_shop from public.shops s where s.slug = lower(btrim(p_shop_slug));
   if not found then
-    raise exception 'shop not found' using errcode = 'P0002';
+    raise exception 'shop not found' using errcode = 'PT404';
   end if;
   select * into v_bs from public.booking_settings b where b.shop_id = v_shop.id;
   if not found or not v_bs.enabled then
@@ -294,7 +294,7 @@ begin
 end
 $$;
 
-comment on function public.get_available_slots(text, uuid[], uuid, date, date, timestamptz) is
+comment on function public.get_available_slots(text, uuid[], date, date, uuid, timestamptz) is
   'Public (anon) availability for online booking. Range capped at 62 days. p_now is honoured only for trusted callers (effective_now).';
 
 -- ---------------------------------------------------------------------------
@@ -409,6 +409,10 @@ begin
   order by 5, 1, 2;
 end
 $$;
+-- (contract tag for scripts/gen_types.py: busy blocks and blocked times
+-- leave these columns null)
+comment on function public.calendar_events(uuid, timestamptz, timestamptz, boolean) is
+  '@nullable: job_number, status, customer_id, customer_name, vehicle_id, vehicle_label, location_type, service_address, resource_id, member_id, title';
 
 -- ---------------------------------------------------------------------------
 -- Grants
@@ -417,8 +421,8 @@ $$;
 revoke execute on function public.wall_clock_instant(timestamp, text) from public, anon, authenticated;
 grant execute on function public.wall_clock_instant(timestamp, text) to service_role;
 
-revoke execute on function public.get_available_slots(text, uuid[], uuid, date, date, timestamptz) from public;
-grant execute on function public.get_available_slots(text, uuid[], uuid, date, date, timestamptz)
+revoke execute on function public.get_available_slots(text, uuid[], date, date, uuid, timestamptz) from public;
+grant execute on function public.get_available_slots(text, uuid[], date, date, uuid, timestamptz)
   to anon, authenticated, service_role;
 
 revoke execute on function public.calendar_events(uuid, timestamptz, timestamptz, boolean) from public, anon;

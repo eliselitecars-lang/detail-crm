@@ -19,7 +19,10 @@
 -- report_revenue — one row per bucket (day | week | month) covering
 -- [p_from, p_to], empty buckets included. bucket_start is the natural start
 -- of the bucket (Monday / 1st of the month), which can precede p_from; only
--- payments inside [p_from, p_to] are counted.
+-- payments inside [p_from, p_to] are counted. Daily buckets cover at most
+-- 366 days, so the result stays well under PostgREST's max-rows cap; longer
+-- ranges use week or month buckets (report_revenue_totals, 0093, gives the
+-- range totals in one row).
 -- ---------------------------------------------------------------------------
 create function public.report_revenue(
   p_shop_id  uuid,
@@ -46,6 +49,9 @@ begin
   perform public.report_check_range(p_from, p_to);
   if v_unit is null or v_unit not in ('day', 'week', 'month') then
     raise exception 'bucket must be day, week or month' using errcode = '22023';
+  end if;
+  if v_unit = 'day' and p_to - p_from > 365 then
+    raise exception 'daily buckets cover at most 366 days; use weekly or monthly' using errcode = '22023';
   end if;
   select s.timezone into v_tz from public.shops s where s.id = p_shop_id;
 
@@ -82,7 +88,10 @@ $$;
 -- ---------------------------------------------------------------------------
 -- report_payments — received payments in [p_from, p_to] per method (every
 -- payment_method is returned, zeros included, in enum order).
---   collected_cents = net + tips (money kept, tips included)
+--   collected_cents     = net + tips (money kept, tips included)
+--   disputes_lost_cents = Σ disputed_cents: money a lost card dispute took
+--                         back (informational; net / collected are not
+--                         reduced — staff decide whether to bill again)
 -- ---------------------------------------------------------------------------
 create function public.report_payments(p_shop_id uuid, p_from date, p_to date)
 returns table (
@@ -95,7 +104,8 @@ returns table (
   tip_refunds_cents  bigint,
   collected_cents    bigint,
   deposits_cents     bigint,
-  memberships_cents  bigint
+  memberships_cents  bigint,
+  disputes_lost_cents bigint
 )
 language plpgsql stable security definer
 set search_path = ''
@@ -113,6 +123,7 @@ begin
     select p.method as m,
            p.kind,
            p.amount_cents,
+           p.disputed_cents,
            least(p.refunded_cents, p.amount_cents) as refunded_amount,
            greatest(p.refunded_cents - p.amount_cents, 0) as refunded_tip,
            public.payment_net_amount(p.status, p.amount_cents, p.tip_cents, p.refunded_cents) as net,
@@ -132,7 +143,8 @@ begin
          coalesce(sum(r.refunded_tip), 0)::bigint,
          coalesce(sum(r.net + r.tip), 0)::bigint,
          coalesce(sum(r.net) filter (where r.kind = 'deposit'), 0)::bigint,
-         coalesce(sum(r.net) filter (where r.kind = 'membership'), 0)::bigint
+         coalesce(sum(r.net) filter (where r.kind = 'membership'), 0)::bigint,
+         coalesce(sum(r.disputed_cents), 0)::bigint
   from unnest(enum_range(null::public.payment_method)) as pm (m)
   left join received r on r.m = pm.m
   group by pm.m
@@ -228,7 +240,7 @@ $$;
 comment on function public.report_revenue(uuid, date, date, text) is
   'Cash revenue by day/week/month (shop time zone, empty buckets included): gross, refunds, net (excl. tips), tips, count.';
 comment on function public.report_payments(uuid, date, date) is
-  'Received payments per method: counts, gross, refunds, net, tips (net), tip refunds, collected, deposits, memberships.';
+  'Received payments per method: counts, gross, refunds, net, tips (net), tip refunds, collected, deposits, memberships, lost disputes.';
 comment on function public.report_outstanding(uuid, timestamptz) is
   'Open receivables with aging buckets 0-30 / 31-60 / 61-90 / 90+ days past due (shop-local dates).';
 

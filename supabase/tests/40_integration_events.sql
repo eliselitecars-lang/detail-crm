@@ -263,6 +263,41 @@ update public.jobs set status = 'scheduled' where id = tests.fx('ob_job');
 select tests.as_superuser();
 select tests.eq(pg_temp.msgs(tests.fx('ob_job'), 'booking_confirmed'), 'sms,email', 'confirming the request sends booking_confirmed');
 
+-- ------------------------------------------------------------ deep links (notifications carry their records)
+select tests.eq((select count(*) from public.notifications
+                  where kind in ('quote_approved', 'quote_declined') and quote_id = tests.fx('q1')
+                    and customer_id = tests.fx('cust_a') and job_id is null and invoice_id is null), 3::bigint,
+                'quote responses link the quote and its customer (no job before conversion)');
+select tests.eq((select count(*) from public.notifications where kind = 'quote_declined' and quote_id = tests.fx('q2')), 3::bigint,
+                'the declined quote is linked');
+select tests.eq((select count(*) from public.notifications
+                  where kind = 'payment_received' and invoice_id = tests.fx('inv') and job_id = tests.fx('jr')
+                    and customer_id = tests.fx('cust_a') and quote_id is null), 2::bigint,
+                'an invoice payment links the invoice, its job and its customer');
+select tests.eq((select count(*) from public.notifications
+                  where kind = 'payment_received' and body like 'Deposit for job #%' and job_id = tests.fx('jr2')
+                    and customer_id = tests.fx('cust_a') and invoice_id is null), 3::bigint,
+                'a deposit before invoicing links the job and customer only');
+select tests.eq((select count(*) from public.notifications
+                  where kind = 'payment_received' and body = 'Membership: Gold · card' and customer_id = tests.fx('cust_a2')
+                    and job_id is null and invoice_id is null), 3::bigint, 'a membership charge links its customer');
+select tests.eq((select count(*) from public.notifications
+                  where kind = 'form_signed' and job_id = tests.fx('jr2') and customer_id = tests.fx('cust_a')), 3::bigint,
+                'a signed form links its job and customer');
+select tests.eq((select count(*) from public.notifications
+                  where kind = 'inbound_message' and customer_id = tests.fx('cust_a') and job_id is null), 3::bigint,
+                'an inbound text links the matched customer');
+select tests.eq((select count(*) from public.notifications
+                  where kind = 'new_booking' and job_id = tests.fx('ob_job')
+                    and customer_id = (select customer_id from public.jobs where id = tests.fx('ob_job'))), 3::bigint,
+                'a new online booking links the job and its customer');
+-- an inbound text from an unknown number has no customer to link
+select tests.as_service();
+select public.record_inbound_sms('+12055550100', '+12055550177', 'Who is this?', 'SMunknown1');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.notifications where kind = 'inbound_message' and customer_id is null
+                   and title like 'New text from (205) 555-0177'), 3::bigint, 'unknown sender: no customer link');
+
 -- ------------------------------------------------------------ failures never block the business write
 create function pg_temp.explode() returns trigger language plpgsql as $$
 begin

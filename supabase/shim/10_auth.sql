@@ -33,9 +33,11 @@ create unique index if not exists users_email_partial_key on auth.users (email) 
 create unique index if not exists users_phone_key on auth.users (phone);
 
 alter table auth.users enable row level security;
--- API roles never read auth.users directly on Supabase.
-revoke all on auth.users from anon, authenticated;
-grant all on auth.users to service_role;
+-- API roles never touch auth.users directly on Supabase: GoTrue (running as
+-- supabase_auth_admin, the owner) writes it, and service_role has no table
+-- privileges there either — account deletion goes through the GoTrue admin
+-- API. Tests that delete accounts do so as the superuser (tests.as_superuser()).
+revoke all on auth.users from anon, authenticated, service_role;
 
 -- request.jwt.claim.* (legacy PostgREST) or request.jwt.claims (current).
 create or replace function auth.uid() returns uuid

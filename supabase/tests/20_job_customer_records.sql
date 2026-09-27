@@ -112,7 +112,7 @@ select tests.ok((select customer_id = tests.fx('cust_a3') and public_token <> te
                 'its unsigned waiver follows the new customer under a new token');
 select tests.fx_set('tok_u2', (select public_token from public.form_submissions where job_id = tests.fx('job_u')));
 select tests.as_anon();
-select tests.throws($$select public.public_sign_form(tests.fx('tok_u'), 'Alice Anders')$$, 'P0002',
+select tests.throws($$select public.public_sign_form(tests.fx('tok_u'), 'Alice Anders')$$, 'PT404',
                     'the previous customer''s link can no longer sign it');
 select tests.lives($$select public.public_sign_form(tests.fx('tok_u2'), 'Fleet Co')$$, 'the new customer is asked to sign');
 

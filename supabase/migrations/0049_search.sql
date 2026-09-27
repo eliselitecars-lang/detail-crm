@@ -170,7 +170,7 @@ end
 $$;
 
 comment on function public.search_shop(uuid, text, integer) is
-  'Staff global search (customers, vehicles, jobs, quotes, invoices) with LIKE-escaped input and role-based visibility; p_limit applies per kind.';
+  'Staff global search (customers, vehicles, jobs, quotes, invoices) with LIKE-escaped input and role-based visibility; p_limit applies per kind. @nullable: subtitle, number, status, customer_id, job_id';
 
 revoke execute on function public.search_shop(uuid, text, integer) from public, anon;
 grant execute on function public.search_shop(uuid, text, integer) to authenticated, service_role;

@@ -10,7 +10,7 @@ create function pg_temp.slots(p_from date, p_to date, p_services uuid[], p_now t
                               p_cat uuid default null, p_slug text default 'shop-a')
 returns text[] language sql as $$
   select coalesce(array_agg(to_char(s.starts_at at time zone 'UTC', 'MM-DD HH24:MI') order by s.starts_at), '{}')
-  from public.get_available_slots(p_slug, p_services, p_cat, p_from, p_to, p_now) s
+  from public.get_available_slots(p_slug, p_services, p_from, p_to, p_cat, p_now) s
 $$;
 grant execute on function pg_temp.slots(date, date, uuid[], timestamptz, uuid, text) to anon, authenticated;
 
@@ -50,8 +50,8 @@ insert into public.service_prices (shop_id, service_id, vehicle_category_id, pri
   values (tests.fx('shop_a'), tests.fx('svc_a'), tests.fx('cat_car_a'), 18000, 60);
 select tests.eq(cardinality(pg_temp.slots('2025-06-09', '2025-06-09', array[tests.fx('svc_a')], '2025-06-01 12:00Z', tests.fx('cat_car_a'))), 9,
                 'category duration override (60 min) is used');
-select tests.eq((select ends_at - starts_at from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
-                  '2025-06-09', '2025-06-09', '2025-06-01 12:00Z') limit 1), interval '60 minutes', 'ends_at = start + duration');
+select tests.eq((select ends_at - starts_at from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-09',
+                  '2025-06-09', tests.fx('cat_car_a'), '2025-06-01 12:00Z') limit 1), interval '60 minutes', 'ends_at = start + duration');
 select tests.eq(cardinality(pg_temp.slots('2025-06-09', '2025-06-09', array[tests.fx('svc_a')], '2025-06-01 12:00Z', null, 'SHOP-A')), 8,
                 'slug lookup is case-insensitive');
 update public.booking_settings set slot_interval_minutes = 30 where shop_id = tests.fx('shop_a');
@@ -119,40 +119,40 @@ select tests.eq(cardinality(pg_temp.slots('2025-06-09', '2025-06-09', array[test
 select tests.eq(pg_temp.slots('2025-05-01', '2025-05-31', array[tests.fx('svc_a')], '2025-06-01 12:00Z'), '{}'::text[],
                 'dates before today return nothing');
 update public.booking_settings set max_days_ahead = 60 where shop_id = tests.fx('shop_a');
-select tests.eq((select count(*) from public.get_available_slots('shop-a', array[tests.fx('svc_a')], null, '2025-06-01', '2025-08-01',
+select tests.eq((select count(*) from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-01', '2025-08-01', null,
                                                                   '2025-06-01 12:00Z')) > 0, true,
                 '62-day range (inclusive) is allowed');
 
 -- ------------------------------------------------------------ validation
-select tests.throws_like($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_a')], null, '2025-06-01', '2025-08-02', '2025-06-01 12:00Z')$$,
+select tests.throws_like($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-01', '2025-08-02', null, '2025-06-01 12:00Z')$$,
                          '22023', '%62 days%', '63-day range rejected');
-select tests.throws($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_a')], null, '2025-06-09', '2025-06-08', '2025-06-01 12:00Z')$$,
+select tests.throws($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-09', '2025-06-08', null, '2025-06-01 12:00Z')$$,
                     '22023', 'to before from');
-select tests.throws($$select * from public.get_available_slots('shop-a', '{}', null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws($$select * from public.get_available_slots('shop-a', '{}', '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                     '22023', 'no services');
-select tests.throws($$select * from public.get_available_slots('shop-a', null, null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws($$select * from public.get_available_slots('shop-a', null, '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                     '22023', 'null services');
-select tests.throws($$select * from public.get_available_slots('no-such-shop', array[tests.fx('svc_a')], null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
-                    'P0002', 'unknown shop');
-select tests.throws_like($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_b')], null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws($$select * from public.get_available_slots('no-such-shop', array[tests.fx('svc_a')], '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
+                    'PT404', 'unknown shop');
+select tests.throws_like($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_b')], '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                          '22023', '%not available%', 'another shop''s service rejected');
-select tests.throws_like($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_b'), '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws_like($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-09', '2025-06-09', tests.fx('cat_car_b'), '2025-06-01 12:00Z')$$,
                          '22023', '%vehicle category%', 'another shop''s vehicle category rejected');
-select tests.throws($$select * from public.get_available_slots('shop-a', array[gen_random_uuid()], null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws($$select * from public.get_available_slots('shop-a', array[gen_random_uuid()], '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                     '22023', 'unknown service rejected');
 update public.services set active = false where id = tests.fx('addon_a');
-select tests.throws($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_a'), tests.fx('addon_a')], null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws($$select * from public.get_available_slots('shop-a', array[tests.fx('svc_a'), tests.fx('addon_a')], '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                     '22023', 'inactive service rejected');
 update public.services set active = true, online_bookable = false where id = tests.fx('addon_a');
-select tests.throws($$select * from public.get_available_slots('shop-a', array[tests.fx('addon_a')], null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws($$select * from public.get_available_slots('shop-a', array[tests.fx('addon_a')], '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                     '22023', 'non-bookable service rejected');
 update public.services set online_bookable = true, archived_at = now() where id = tests.fx('addon_a');
-select tests.throws($$select * from public.get_available_slots('shop-a', array[tests.fx('addon_a')], null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws($$select * from public.get_available_slots('shop-a', array[tests.fx('addon_a')], '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                     '22023', 'archived service rejected');
 update public.services set duration_minutes = 0, archived_at = null where id = tests.fx('addon_a');
-select tests.throws_like($$select * from public.get_available_slots('shop-a', array[tests.fx('addon_a')], null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws_like($$select * from public.get_available_slots('shop-a', array[tests.fx('addon_a')], '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                          '22023', '%no duration%', 'zero total duration rejected');
-select tests.throws_like($$select * from public.get_available_slots('shop-b', array[tests.fx('svc_b')], null, '2025-06-09', '2025-06-09', '2025-06-01 12:00Z')$$,
+select tests.throws_like($$select * from public.get_available_slots('shop-b', array[tests.fx('svc_b')], '2025-06-09', '2025-06-09', null, '2025-06-01 12:00Z')$$,
                          '55000', '%not enabled%', 'disabled online booking rejected');
 
 -- ------------------------------------------------------------ DST in America/Chicago
@@ -170,7 +170,7 @@ select tests.eq(pg_temp.slots('2025-03-09', '2025-03-09', array[tests.fx('hour_a
                 'spring-forward: 02:00 skipped, no duplicates, 08:00 local is now UTC-5');
 update public.booking_settings set slot_interval_minutes = 30 where shop_id = tests.fx('shop_a');
 select tests.eq((select array_agg(to_char(starts_at at time zone 'America/Chicago', 'HH24:MI') order by starts_at)
-                   from public.get_available_slots('shop-a', array[tests.fx('hour_a')], null, '2025-03-09', '2025-03-09', '2025-02-20 00:00Z')
+                   from public.get_available_slots('shop-a', array[tests.fx('hour_a')], '2025-03-09', '2025-03-09', null, '2025-02-20 00:00Z')
                   where starts_at < '2025-03-09 12:00Z'),
                 array['00:00', '00:30', '01:00', '01:30', '03:00', '03:30', '04:00', '04:30', '05:00'],
                 'spring-forward 30-min grid: 02:00 and 02:30 never offered');
@@ -181,17 +181,17 @@ select tests.eq(pg_temp.slots('2025-11-02', '2025-11-02', array[tests.fx('hour_a
                 array['11-02 05:00', '11-02 06:00', '11-02 08:00', '11-02 09:00', '11-02 10:00', '11-02 11:00',
                       '11-02 14:00', '11-02 15:00'],
                 'fall-back: 00:00 and 01:00 CDT then 02:00..05:00 CST (01:00 once), 08:00 local is now UTC-6');
-select tests.eq((select count(*) = count(distinct starts_at) from public.get_available_slots('shop-a', array[tests.fx('hour_a')], null,
-                  '2025-11-01', '2025-11-03', '2025-10-20 00:00Z')), true, 'no duplicate slots across the fall-back weekend');
+select tests.eq((select count(*) = count(distinct starts_at) from public.get_available_slots('shop-a', array[tests.fx('hour_a')], '2025-11-01',
+                  '2025-11-03', null, '2025-10-20 00:00Z')), true, 'no duplicate slots across the fall-back weekend');
 select tests.eq((select count(distinct to_char(starts_at at time zone 'America/Chicago', 'YYYY-MM-DD HH24:MI'))
-                   = count(*) from public.get_available_slots('shop-a', array[tests.fx('hour_a')], null,
-                  '2025-11-01', '2025-11-03', '2025-10-20 00:00Z')), true, 'no duplicate local wall times either');
+                   = count(*) from public.get_available_slots('shop-a', array[tests.fx('hour_a')], '2025-11-01',
+                  '2025-11-03', null, '2025-10-20 00:00Z')), true, 'no duplicate local wall times either');
 
 -- ------------------------------------------------------------ midnight-spanning hours merge (Fri 20-24 + Sat 00-02)
 insert into public.business_hours (shop_id, weekday, opens_at, closes_at) values
   (tests.fx('shop_a'), 5, '20:00', '24:00'), (tests.fx('shop_a'), 6, '00:00', '02:00');
 select tests.eq((select array_agg(to_char(starts_at at time zone 'America/Chicago', 'HH24:MI') order by starts_at)
-                   from public.get_available_slots('shop-a', array[tests.fx('three_a')], null, '2025-06-13', '2025-06-13', '2025-06-01 12:00Z')),
+                   from public.get_available_slots('shop-a', array[tests.fx('three_a')], '2025-06-13', '2025-06-13', null, '2025-06-01 12:00Z')),
                 array['20:00', '21:00', '22:00', '23:00'], 'a 3-hour slot may run past midnight into Saturday''s hours');
 
 -- ------------------------------------------------------------ callers & the request clock
@@ -221,8 +221,8 @@ select tests.eq(pg_temp.slots('2025-06-02', '2025-06-02', array[tests.fx('svc_a'
 
 select tests.as_anon();
 -- regression: a past p_now used to list the gaps around past jobs (3 slots on 06-02)
-select tests.eq((select count(*) from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
-                   '2025-06-02', '2025-06-02', '2025-06-01 00:00Z')), 0::bigint,
+select tests.eq((select count(*) from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-02',
+                   '2025-06-02', tests.fx('cat_car_a'), '2025-06-01 00:00Z')), 0::bigint,
                 'anon cannot list (and thereby map the busy schedule of) past dates by supplying p_now');
 select tests.eq(pg_temp.slots('2025-06-02', '2025-06-02', array[tests.fx('svc_a')], '2025-06-01 12:00Z'), '{}'::text[],
                 'anon: a past p_now is ignored (no past slots)');

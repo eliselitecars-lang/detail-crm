@@ -304,9 +304,9 @@ end
 $$;
 
 comment on function public.report_sales_by_service(uuid, date, date) is
-  'Completed-job sales per service / custom line: quantity, jobs, gross, allocated discount, pre-tax net.';
+  'Completed-job sales per service / custom line: quantity, jobs, gross, allocated discount, pre-tax net. @nullable: service_id, service_kind, category_id, category_name';
 comment on function public.report_team(uuid, date, date, timestamptz) is
-  'Per-member hours, completed jobs, attributed revenue, commission and labor cost. Managers: pay columns null; technicians: own row.';
+  'Per-member hours, completed jobs, attributed revenue, commission and labor cost. Managers: pay columns null; technicians: own row. @nullable: hourly_rate_cents, commission_bps, commission_cents, labor_cost_cents';
 comment on function public.report_customers(uuid, date, date, integer) is
   'New vs returning customers, customers created, average ticket and top customers by lifetime net paid.';
 

@@ -17,7 +17,11 @@ create table public.notifications (
   kind        public.notification_kind not null,
   title       text not null check (char_length(btrim(title)) between 1 and 200),
   body        text check (body is null or char_length(body) <= 2000),
+  -- deep-link targets (any may be null; cleared when the record is deleted)
   job_id      uuid,
+  customer_id uuid,
+  quote_id    uuid,
+  invoice_id  uuid,
   read_at     timestamptz,
   created_at  timestamptz not null default now(),
   constraint notifications_shop_id_id_key unique (shop_id, id),
@@ -25,12 +29,21 @@ create table public.notifications (
   constraint notifications_member_fk foreign key (shop_id, user_id)
     references public.shop_members (shop_id, user_id) on delete cascade,
   constraint notifications_job_fk foreign key (shop_id, job_id)
-    references public.jobs (shop_id, id) on delete set null (job_id)
+    references public.jobs (shop_id, id) on delete set null (job_id),
+  constraint notifications_customer_fk foreign key (shop_id, customer_id)
+    references public.customers (shop_id, id) on delete set null (customer_id),
+  constraint notifications_quote_fk foreign key (shop_id, quote_id)
+    references public.quotes (shop_id, id) on delete set null (quote_id),
+  constraint notifications_invoice_fk foreign key (shop_id, invoice_id)
+    references public.invoices (shop_id, id) on delete set null (invoice_id)
 );
 create index notifications_recipient_idx on public.notifications (user_id, created_at desc);
 create index notifications_unread_idx on public.notifications (user_id, shop_id) where read_at is null;
 create index notifications_shop_user_idx on public.notifications (shop_id, user_id);
 create index notifications_shop_job_idx on public.notifications (shop_id, job_id);
+create index notifications_shop_customer_idx on public.notifications (shop_id, customer_id);
+create index notifications_shop_quote_idx on public.notifications (shop_id, quote_id);
+create index notifications_shop_invoice_idx on public.notifications (shop_id, invoice_id);
 
 create trigger notifications_05_prevent_shop_change before update on public.notifications
   for each row execute function public.prevent_shop_change();
@@ -82,6 +95,8 @@ grant update (read_at) on public.notifications to authenticated;
 -- role is in p_roles (null/empty = every role) and may read the kind
 -- (manager-only kinds never go to technicians), optionally skipping the user
 -- who caused the event. Returns the number of notifications created.
+-- p_job_id / p_customer_id / p_quote_id / p_invoice_id are the deep-link
+-- targets; each non-null id must belong to p_shop_id (else P0002).
 -- ---------------------------------------------------------------------------
 create function public.notify_shop_staff(
   p_shop_id       uuid,
@@ -90,7 +105,10 @@ create function public.notify_shop_staff(
   p_title         text,
   p_body          text default null,
   p_job_id        uuid default null,
-  p_exclude_user  uuid default null
+  p_exclude_user  uuid default null,
+  p_customer_id   uuid default null,
+  p_quote_id      uuid default null,
+  p_invoice_id    uuid default null
 ) returns integer
 language plpgsql security definer
 set search_path = ''
@@ -110,9 +128,21 @@ begin
      and not exists (select 1 from public.jobs j where j.id = p_job_id and j.shop_id = p_shop_id) then
     raise exception 'job not found in this shop' using errcode = 'P0002';
   end if;
+  if p_customer_id is not null
+     and not exists (select 1 from public.customers c where c.id = p_customer_id and c.shop_id = p_shop_id) then
+    raise exception 'customer not found in this shop' using errcode = 'P0002';
+  end if;
+  if p_quote_id is not null
+     and not exists (select 1 from public.quotes q where q.id = p_quote_id and q.shop_id = p_shop_id) then
+    raise exception 'quote not found in this shop' using errcode = 'P0002';
+  end if;
+  if p_invoice_id is not null
+     and not exists (select 1 from public.invoices i where i.id = p_invoice_id and i.shop_id = p_shop_id) then
+    raise exception 'invoice not found in this shop' using errcode = 'P0002';
+  end if;
 
-  insert into public.notifications (shop_id, user_id, kind, title, body, job_id)
-  select m.shop_id, m.user_id, p_kind, v_title, v_body, p_job_id
+  insert into public.notifications (shop_id, user_id, kind, title, body, job_id, customer_id, quote_id, invoice_id)
+  select m.shop_id, m.user_id, p_kind, v_title, v_body, p_job_id, p_customer_id, p_quote_id, p_invoice_id
   from public.shop_members m
   where m.shop_id = p_shop_id
     and m.active
@@ -124,7 +154,7 @@ begin
 end
 $$;
 
-comment on function public.notify_shop_staff(uuid, public.shop_role[], public.notification_kind, text, text, uuid, uuid) is
+comment on function public.notify_shop_staff(uuid, public.shop_role[], public.notification_kind, text, text, uuid, uuid, uuid, uuid, uuid) is
   'Internal: notify active staff of a shop (by role). Not callable by API clients; used by service_role and definer code/triggers.';
 
 -- Convenience for the bell menu: mark all of the caller's notifications in a
@@ -149,10 +179,10 @@ end
 $$;
 
 revoke execute on function
-  public.notify_shop_staff(uuid, public.shop_role[], public.notification_kind, text, text, uuid, uuid)
+  public.notify_shop_staff(uuid, public.shop_role[], public.notification_kind, text, text, uuid, uuid, uuid, uuid, uuid)
 from public, anon, authenticated;
 grant execute on function
-  public.notify_shop_staff(uuid, public.shop_role[], public.notification_kind, text, text, uuid, uuid)
+  public.notify_shop_staff(uuid, public.shop_role[], public.notification_kind, text, text, uuid, uuid, uuid, uuid, uuid)
 to service_role;
 
 revoke execute on function

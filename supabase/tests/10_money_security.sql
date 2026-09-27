@@ -125,8 +125,9 @@ $$;
 select tests.authenticate_as(tests.fx('u_owner_a'));
 select tests.throws($$select * from public.stripe_events$$, '42501', 'owners cannot read stripe_events');
 select tests.as_service();
-select tests.eq((select count(*) from public.stripe_events), 2::bigint, 'service_role reads stripe_events');
-select tests.eq((select count(*) from public.payments), 6::bigint, 'service_role reads every payment');
+select tests.eq((select count(*) from public.stripe_events where id like 'evt_sec%'), 2::bigint, 'service_role reads stripe_events');
+select tests.eq((select count(*) from public.payments where shop_id in (tests.fx('shop_a'), tests.fx('shop_b'))), 6::bigint,
+                'service_role reads every payment');
 
 -- ------------------------------------------------------------ table grants
 select tests.as_superuser();
@@ -282,3 +283,24 @@ select tests.eq((select count(*) from public.payments where shop_id = tests.fx('
               + (select count(*) from public.customer_payment_methods where shop_id = tests.fx('shop_b')), 0::bigint,
                 'no money rows of the deleted shop remain');
 select tests.eq((select count(*) from public.payments where shop_id = tests.fx('shop_a')), 3::bigint, 'shop A untouched');
+
+-- ============================================================ saved cards belong to the customer's Stripe customer
+select tests.as_superuser();
+update public.customers set stripe_customer_id = 'cus_Alice01' where id = tests.fx('cust_a');
+select tests.as_service();
+select tests.eq((select last4 from public.upsert_customer_payment_method(tests.fx('shop_a'), tests.fx('cust_a'), 'pm_owned', 'visa', '4242',
+                   12, 2031, false, 'cus_Alice01')), '4242', 'a card of the customer''s own Stripe customer is saved');
+select tests.throws_like($$select public.upsert_customer_payment_method(tests.fx('shop_a'), tests.fx('cust_a'), 'pm_foreign', 'visa',
+                           '1111', 12, 2031, false, 'cus_Someone9')$$, '22023', '%another Stripe customer%',
+                         'a card attached to another Stripe customer is refused');
+select tests.throws_like($$select public.upsert_customer_payment_method(tests.fx('shop_a'), tests.fx('cust_a2'), 'pm_nolink', 'visa',
+                           '1111', 12, 2031, false, 'cus_Alice01')$$, '22023', '%another Stripe customer%',
+                         'a customer with no Stripe customer cannot take a Stripe customer''s card');
+select tests.lives($$select public.upsert_customer_payment_method(tests.fx('shop_a'), tests.fx('cust_a'), 'pm_legacy', 'visa', '5555',
+                     1, 2030)$$, 'without the Stripe customer the old check (card owner in this shop) applies');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.customer_payment_methods where stripe_payment_method_id in ('pm_foreign', 'pm_nolink')),
+                0::bigint, 'refused cards are not stored');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.throws($$select public.upsert_customer_payment_method(tests.fx('shop_a'), tests.fx('cust_a'), 'pm_x', 'visa', '1111',
+                      1, 2030, false, 'cus_Alice01')$$, '42501', 'staff cannot write saved cards');

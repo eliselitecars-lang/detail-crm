@@ -108,12 +108,12 @@ select tests.authenticate_as(tests.fx('ru_manager_a'));
 select tests.eq(
   (select jsonb_agg(to_jsonb(r) order by r.method)
      from public.report_payments(tests.fx('rshop_a'), '2025-03-01', '2025-03-31') r),
-  '[{"method":"card","payments_count":4,"gross_cents":83749,"refunds_cents":6000,"net_cents":77749,"tips_cents":3500,"tip_refunds_cents":500,"collected_cents":81249,"deposits_cents":6000,"memberships_cents":0},
-    {"method":"card_present","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0},
-    {"method":"cash","payments_count":3,"gross_cents":6000,"refunds_cents":3000,"net_cents":3000,"tips_cents":0,"tip_refunds_cents":500,"collected_cents":3000,"deposits_cents":3000,"memberships_cents":0},
-    {"method":"check","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0},
-    {"method":"bank_transfer","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0},
-    {"method":"other","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0}]'::jsonb,
+  '[{"method":"card","payments_count":4,"gross_cents":83749,"refunds_cents":6000,"net_cents":77749,"tips_cents":3500,"tip_refunds_cents":500,"collected_cents":81249,"deposits_cents":6000,"memberships_cents":0,"disputes_lost_cents":0},
+    {"method":"card_present","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0},
+    {"method":"cash","payments_count":3,"gross_cents":6000,"refunds_cents":3000,"net_cents":3000,"tips_cents":0,"tip_refunds_cents":500,"collected_cents":3000,"deposits_cents":3000,"memberships_cents":0,"disputes_lost_cents":0},
+    {"method":"check","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0},
+    {"method":"bank_transfer","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0},
+    {"method":"other","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0}]'::jsonb,
   'payments by method (refunds, tips, tip refunds, pending/failed excluded)');
 select tests.eq((select sum(net_cents) from public.report_payments(tests.fx('rshop_a'), '2025-03-01', '2025-03-31')),
                 80749::numeric, 'payments report agrees with revenue');
@@ -223,3 +223,21 @@ select tests.throws(format('select * from public.report_payments(%L::uuid, %L, %
 select tests.throws(format('select public.report_outstanding(%L::uuid)', tests.fx('rshop_a')),
                     '42501', 'anon cannot execute report_outstanding');
 select tests.as_superuser();
+
+-- ============================================================ due on receipt (invoice_due_days = 0): aging starts the next local day
+select tests.as_superuser();
+update public.shops set invoice_due_days = 0 where id = tests.fx('rshop_a');
+select tests.authenticate_as(tests.fx('ru_admin_a'));
+select tests.fx_set('ri_due0', (public.create_invoice(tests.fx('rc_ann'), '[{"name":"Wash","unit_price_cents":4000}]')).id);
+select tests.as_superuser();
+-- issued 2025-04-10 10:00 CDT, due 2025-04-10 23:59:59 CDT
+update public.invoices set status = 'open', issued_at = '2025-04-10 15:00Z' where id = tests.fx('ri_due0');
+select tests.authenticate_as(tests.fx('ru_admin_a'));
+select tests.eq((select jsonb_build_array(e -> 'days_past_due', e -> 'overdue', e ->> 'bucket')
+                   from jsonb_array_elements(public.report_outstanding(tests.fx('rshop_a'), '2025-04-11 04:30Z') -> 'invoices') e
+                  where (e ->> 'invoice_id')::uuid = tests.fx('ri_due0')),
+                '[0, false, "0-30"]'::jsonb, 'due on receipt: not overdue later on the issue day (23:30 CDT)');
+select tests.eq((select jsonb_build_array(e -> 'days_past_due', e -> 'overdue', e ->> 'bucket')
+                   from jsonb_array_elements(public.report_outstanding(tests.fx('rshop_a'), '2025-04-11 05:30Z') -> 'invoices') e
+                  where (e ->> 'invoice_id')::uuid = tests.fx('ri_due0')),
+                '[1, true, "0-30"]'::jsonb, 'overdue from local midnight, 1 day past due');

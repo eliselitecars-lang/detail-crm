@@ -73,9 +73,9 @@ select tests.eq(public.public_get_form(tests.fx('m_form_tok')) -> 'customer',
 select tests.as_superuser();
 create temp table live as
   select to_char(min(s.starts_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as starts_at
-  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
+  from public.get_available_slots('shop-a', array[tests.fx('svc_a')], (now() at time zone 'America/Chicago')::date + 3,
                                   (now() at time zone 'America/Chicago')::date + 3,
-                                  (now() at time zone 'America/Chicago')::date + 3) s;
+                                  tests.fx('cat_car_a')) s;
 grant select on live to authenticated;
 select tests.authenticate_as(tests.fx('u_alice'));
 create temp table t as select public.create_online_booking('shop-a', pg_temp.booking(jsonb_build_object(
@@ -216,8 +216,8 @@ update public.booking_settings set slot_interval_minutes = 45, max_concurrent_jo
 create function pg_temp.local_slots(p_day date, p_from date, p_to date, p_services uuid[] default null) returns text[]
 language sql as $$
   select coalesce(array_agg(to_char(s.starts_at at time zone 'America/Chicago', 'HH24:MI') order by s.starts_at), '{}')
-  from public.get_available_slots('shop-a', coalesce(p_services, array[tests.fx('svc_a')]), tests.fx('cat_car_a'),
-                                  p_from, p_to, '2025-06-01 12:00Z') s
+  from public.get_available_slots('shop-a', coalesce(p_services, array[tests.fx('svc_a')]), p_from,
+                                  p_to, tests.fx('cat_car_a'), '2025-06-01 12:00Z') s
   where (s.starts_at at time zone 'America/Chicago')::date = p_day
 $$;
 select tests.eq(pg_temp.local_slots('2025-06-15', '2025-06-13', '2025-06-15'), pg_temp.local_slots('2025-06-15', '2025-06-15', '2025-06-15'),
@@ -230,8 +230,8 @@ select tests.eq((pg_temp.local_slots('2025-06-13', '2025-06-13', '2025-06-13'))[
 select tests.eq((pg_temp.local_slots('2025-06-15', '2025-06-15', '2025-06-15'))[array_length(pg_temp.local_slots('2025-06-15', '2025-06-15', '2025-06-15'), 1)],
                 '15:30', 'the last Sunday start still ends (2 h) by 18:00');
 create temp table offered as
-  select min(starts_at) as s from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
-                                                          '2025-06-13', '2025-06-15', '2025-06-01 12:00Z')
+  select min(starts_at) as s from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-13',
+                                                          '2025-06-15', tests.fx('cat_car_a'), '2025-06-01 12:00Z')
    where (starts_at at time zone 'America/Chicago')::date = '2025-06-15';
 grant select on offered to service_role;
 select tests.as_service();
@@ -254,8 +254,8 @@ select tests.eq((pg_temp.local_slots('2025-06-15', '2025-06-15', '2025-06-15'))[
 select tests.eq(cardinality(pg_temp.local_slots('2026-03-08', '2026-03-08', '2026-03-08')), 28,
                 '24/7 on the spring-forward day: the 02:xx start does not exist, never duplicated');
 create temp table offered2 as
-  select s.starts_at as s from public.get_available_slots('shop-a', array[tests.fx('svc_a')], tests.fx('cat_car_a'),
-                                                         '2025-06-12', '2025-06-16', '2025-06-01 12:00Z') s
+  select s.starts_at as s from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-12',
+                                                         '2025-06-16', tests.fx('cat_car_a'), '2025-06-01 12:00Z') s
    where (s.starts_at at time zone 'America/Chicago') = '2025-06-15 13:20';
 grant select on offered2 to service_role;
 select tests.as_service();

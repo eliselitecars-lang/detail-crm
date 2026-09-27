@@ -566,6 +566,7 @@ export type Database = {
           shop_id: string
           sms_opt_in: boolean
           sms_opted_out_at: string | null
+          sort_name: string | null
           source: Database["public"]["Enums"]["customer_source"]
           stripe_customer_id: string | null
           tags: string[]
@@ -598,6 +599,7 @@ export type Database = {
           shop_id: string
           sms_opt_in?: boolean
           sms_opted_out_at?: string | null
+          sort_name?: never
           source?: Database["public"]["Enums"]["customer_source"]
           stripe_customer_id?: string | null
           tags?: string[]
@@ -630,6 +632,7 @@ export type Database = {
           shop_id?: string
           sms_opt_in?: boolean
           sms_opted_out_at?: string | null
+          sort_name?: never
           source?: Database["public"]["Enums"]["customer_source"]
           stripe_customer_id?: string | null
           tags?: string[]
@@ -665,7 +668,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
-          body_snapshot: string
+          body_snapshot?: string
           created_at?: string
           customer_id?: string | null
           form_template_id?: string | null
@@ -679,7 +682,7 @@ export type Database = {
           signed_by?: string | null
           signer_ip?: unknown
           signer_name?: string | null
-          title: string
+          title?: string
           updated_at?: string
         }
         Update: {
@@ -1107,7 +1110,7 @@ export type Database = {
           issued_at?: string | null
           job_id?: string | null
           notes?: string | null
-          number: number
+          number?: number
           paid_at?: string | null
           public_token?: string
           sent_at?: string | null
@@ -1115,7 +1118,7 @@ export type Database = {
           status?: Database["public"]["Enums"]["invoice_status"]
           subtotal_cents?: number
           tax_cents?: number
-          tax_rate_bps: number
+          tax_rate_bps?: number
           terms?: string | null
           tip_cents?: number
           total_cents?: number
@@ -1575,7 +1578,7 @@ export type Database = {
           internal_notes?: string | null
           location_type?: Database["public"]["Enums"]["location_type"]
           notes?: string | null
-          number: number
+          number?: number
           public_token?: string
           quote_id?: string | null
           reminder_sent_at?: string | null
@@ -1596,7 +1599,7 @@ export type Database = {
           status?: Database["public"]["Enums"]["job_status"]
           subtotal_cents?: number
           tax_cents?: number
-          tax_rate_bps: number
+          tax_rate_bps?: number
           total_cents?: number
           updated_at?: string
           vehicle_id?: string | null
@@ -1827,10 +1830,10 @@ export type Database = {
           current_period_end?: string | null
           customer_id: string
           id?: string
-          interval: Database["public"]["Enums"]["membership_interval"]
-          interval_count: number
+          interval?: Database["public"]["Enums"]["membership_interval"]
+          interval_count?: number
           plan_id: string
-          price_cents: number
+          price_cents?: number
           shop_id: string
           started_at?: string | null
           status?: Database["public"]["Enums"]["membership_status"]
@@ -1954,6 +1957,7 @@ export type Database = {
           job_id: string | null
           provider_message_id: string | null
           read_at: string | null
+          request_nonce: string | null
           send_after: string
           sent_at: string | null
           sent_by: string | null
@@ -1982,6 +1986,7 @@ export type Database = {
           job_id?: string | null
           provider_message_id?: string | null
           read_at?: string | null
+          request_nonce?: string | null
           send_after?: string
           sent_at?: string | null
           sent_by?: string | null
@@ -2010,6 +2015,7 @@ export type Database = {
           job_id?: string | null
           provider_message_id?: string | null
           read_at?: string | null
+          request_nonce?: string | null
           send_after?: string
           sent_at?: string | null
           sent_by?: string | null
@@ -2057,9 +2063,12 @@ export type Database = {
         Row: {
           body: string | null
           created_at: string
+          customer_id: string | null
           id: string
+          invoice_id: string | null
           job_id: string | null
           kind: Database["public"]["Enums"]["notification_kind"]
+          quote_id: string | null
           read_at: string | null
           shop_id: string
           title: string
@@ -2068,9 +2077,12 @@ export type Database = {
         Insert: {
           body?: string | null
           created_at?: string
+          customer_id?: string | null
           id?: string
+          invoice_id?: string | null
           job_id?: string | null
           kind: Database["public"]["Enums"]["notification_kind"]
+          quote_id?: string | null
           read_at?: string | null
           shop_id: string
           title: string
@@ -2079,15 +2091,32 @@ export type Database = {
         Update: {
           body?: string | null
           created_at?: string
+          customer_id?: string | null
           id?: string
+          invoice_id?: string | null
           job_id?: string | null
           kind?: Database["public"]["Enums"]["notification_kind"]
+          quote_id?: string | null
           read_at?: string | null
           shop_id?: string
           title?: string
           user_id?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "notifications_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "notifications_invoice_fk"
+            columns: ["shop_id", "invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["shop_id", "id"]
+          },
           {
             foreignKeyName: "notifications_job_fk"
             columns: ["shop_id", "job_id"]
@@ -2101,6 +2130,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "shop_members"
             referencedColumns: ["shop_id", "user_id"]
+          },
+          {
+            foreignKeyName: "notifications_quote_fk"
+            columns: ["shop_id", "quote_id"]
+            isOneToOne: false
+            referencedRelation: "quotes"
+            referencedColumns: ["shop_id", "id"]
           },
           {
             foreignKeyName: "notifications_shop_id_fkey"
@@ -2167,6 +2203,7 @@ export type Database = {
           card_last4: string | null
           created_at: string
           customer_id: string
+          disputed_cents: number
           id: string
           invoice_id: string | null
           job_id: string | null
@@ -2191,6 +2228,7 @@ export type Database = {
           card_last4?: string | null
           created_at?: string
           customer_id: string
+          disputed_cents?: number
           id?: string
           invoice_id?: string | null
           job_id?: string | null
@@ -2215,6 +2253,7 @@ export type Database = {
           card_last4?: string | null
           created_at?: string
           customer_id?: string
+          disputed_cents?: number
           id?: string
           invoice_id?: string | null
           job_id?: string | null
@@ -2350,7 +2389,7 @@ export type Database = {
           optional?: boolean
           quantity?: number
           quote_id: string
-          selected: boolean
+          selected?: boolean
           service_id?: string | null
           shop_id: string
           sort?: number
@@ -2461,14 +2500,14 @@ export type Database = {
           id?: string
           internal_notes?: string | null
           notes?: string | null
-          number: number
+          number?: number
           public_token?: string
           sent_at?: string | null
           shop_id: string
           status?: Database["public"]["Enums"]["quote_status"]
           subtotal_cents?: number
           tax_cents?: number
-          tax_rate_bps: number
+          tax_rate_bps?: number
           terms?: string | null
           total_cents?: number
           updated_at?: string
@@ -3079,6 +3118,30 @@ export type Database = {
           },
         ]
       }
+      sms_number_releases: {
+        Row: {
+          id: string
+          phone_number: string
+          released_at: string
+          shop_id: string
+          shop_name: string | null
+        }
+        Insert: {
+          id?: string
+          phone_number: string
+          released_at?: string
+          shop_id: string
+          shop_name?: string | null
+        }
+        Update: {
+          id?: string
+          phone_number?: string
+          released_at?: string
+          shop_id?: string
+          shop_name?: string | null
+        }
+        Relationships: []
+      }
       storage_purge_requests: {
         Row: {
           attempts: number
@@ -3358,6 +3421,10 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      account_deletion_blockers: {
+        Args: Record<PropertyKey, never>
+        Returns: Json
+      }
       app_url: { Args: { p_path: string }; Returns: string }
       apply_checklist_template: {
         Args: { p_job_id: string; p_template_id: string }
@@ -3389,6 +3456,46 @@ export type Database = {
           card_last4: string | null
           created_at: string
           customer_id: string
+          disputed_cents: number
+          id: string
+          invoice_id: string | null
+          job_id: string | null
+          kind: Database["public"]["Enums"]["payment_kind"]
+          membership_id: string | null
+          method: Database["public"]["Enums"]["payment_method"]
+          note: string | null
+          paid_at: string | null
+          recorded_by: string | null
+          refunded_cents: number
+          shop_id: string
+          status: Database["public"]["Enums"]["payment_status"]
+          stripe_charge_id: string | null
+          stripe_checkout_session_id: string | null
+          stripe_payment_intent_id: string | null
+          tip_cents: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "payments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      apply_stripe_dispute: {
+        Args: {
+          p_amount_cents: number
+          p_dispute_status: string
+          p_payment_intent_id: string
+          p_shop_id: string
+        }
+        Returns: {
+          amount_cents: number
+          card_brand: string | null
+          card_last4: string | null
+          created_at: string
+          customer_id: string
+          disputed_cents: number
           id: string
           invoice_id: string | null
           job_id: string | null
@@ -3422,6 +3529,7 @@ export type Database = {
           card_last4: string | null
           created_at: string
           customer_id: string
+          disputed_cents: number
           id: string
           invoice_id: string | null
           job_id: string | null
@@ -3478,22 +3586,22 @@ export type Database = {
         }
         Returns: {
           assigned_member_ids: string[]
-          customer_id: string
-          customer_name: string
+          customer_id: string | null
+          customer_name: string | null
           ends_at: string
           event_type: string
           id: string
           is_busy_block: boolean
-          job_number: number
-          location_type: Database["public"]["Enums"]["location_type"]
-          member_id: string
-          resource_id: string
-          service_address: string
+          job_number: number | null
+          location_type: Database["public"]["Enums"]["location_type"] | null
+          member_id: string | null
+          resource_id: string | null
+          service_address: string | null
           starts_at: string
-          status: Database["public"]["Enums"]["job_status"]
-          title: string
-          vehicle_id: string
-          vehicle_label: string
+          status: Database["public"]["Enums"]["job_status"] | null
+          title: string | null
+          vehicle_id: string | null
+          vehicle_label: string | null
         }[]
       }
       campaign_audience_customers: {
@@ -3583,19 +3691,20 @@ export type Database = {
         Returns: {
           attempts: number
           body: string
-          campaign_id: string
+          campaign_id: string | null
           channel: Database["public"]["Enums"]["message_channel"]
-          customer_id: string
-          from_address: string
+          customer_id: string | null
+          from_address: string | null
           id: string
-          job_id: string
-          reply_to: string
+          job_id: string | null
+          reply_to: string | null
           shop_id: string
           shop_name: string
-          subject: string
-          template_key: Database["public"]["Enums"]["message_template_key"]
+          subject: string | null
+          template_key:
+            Database["public"]["Enums"]["message_template_key"] | null
           to_address: string
-          unsubscribe_token: string
+          unsubscribe_token: string | null
         }[]
       }
       claim_storage_purge: {
@@ -3675,6 +3784,18 @@ export type Database = {
         Args: { p_customer_id: string; p_shop_id: string }
         Returns: Json
       }
+      comms_document_check_access: {
+        Args: { p_shop_id: string; p_what: string }
+        Returns: undefined
+      }
+      comms_document_target: {
+        Args: { p_invoice_id: string; p_quote_id: string }
+        Returns: Record<string, unknown>
+      }
+      comms_document_vars: {
+        Args: { p_invoice_id?: string; p_quote_id?: string }
+        Returns: Json
+      }
       comms_email_with_unsubscribe: {
         Args: { p_body: string; p_link: string }
         Returns: string
@@ -3741,6 +3862,7 @@ export type Database = {
         Returns: boolean
       }
       comms_uses_app_links: { Args: { p_text: string }; Returns: boolean }
+      comms_valid_request_nonce: { Args: { p_nonce: string }; Returns: boolean }
       comms_withdraw_reason: {
         Args: {
           p_msg: Database["public"]["Tables"]["messages"]["Row"]
@@ -4024,6 +4146,24 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      customer_summary: {
+        Args: { p_customer_id: string }
+        Returns: {
+          active_memberships: number
+          completed_jobs: number
+          customer_id: string
+          first_visit_at: string | null
+          last_visit_at: string | null
+          lifetime_paid_cents: number
+          next_job_at: string | null
+          open_balance_cents: number
+          open_quotes: number
+          overdue_balance_cents: number
+          refunded_cents: number
+          tips_cents: number
+          upcoming_jobs: number
+        }[]
+      }
       dashboard_summary: {
         Args: { p_now?: string; p_shop_id: string }
         Returns: Json
@@ -4035,8 +4175,8 @@ export type Database = {
           channel: Database["public"]["Enums"]["message_channel"]
           enabled: boolean
           key: Database["public"]["Enums"]["message_template_key"]
-          offset_minutes: number
-          subject: string
+          offset_minutes: number | null
+          subject: string | null
         }[]
       }
       effective_now: { Args: { p_now: string }; Returns: string }
@@ -4047,9 +4187,19 @@ export type Database = {
           p_extra_vars?: Json
           p_job_id?: string
           p_key: Database["public"]["Enums"]["message_template_key"]
+          p_request_nonce?: string
           p_send_after?: string
           p_sent_by?: string
           p_shop_id: string
+        }
+        Returns: string
+      }
+      enqueue_document_message: {
+        Args: {
+          p_channel?: Database["public"]["Enums"]["message_channel"]
+          p_invoice_id?: string
+          p_quote_id?: string
+          p_request_nonce?: string
         }
         Returns: string
       }
@@ -4059,6 +4209,7 @@ export type Database = {
           p_channel?: Database["public"]["Enums"]["message_channel"]
           p_job_id: string
           p_key: Database["public"]["Enums"]["message_template_key"]
+          p_request_nonce?: string
           p_send_after?: string
         }
         Returns: string
@@ -4118,7 +4269,7 @@ export type Database = {
           p_service_ids: string[]
           p_shop_slug: string
           p_to: string
-          p_vehicle_category_id: string
+          p_vehicle_category_id?: string
         }
         Returns: {
           ends_at: string
@@ -4132,6 +4283,25 @@ export type Database = {
         }
         Returns: boolean
       }
+      inbox_threads: {
+        Args: { p_before?: string; p_limit?: number; p_shop_id: string }
+        Returns: {
+          customer_company: string | null
+          customer_first_name: string | null
+          customer_id: string | null
+          customer_last_name: string | null
+          from_address: string | null
+          last_body: string
+          last_channel: Database["public"]["Enums"]["message_channel"]
+          last_created_at: string
+          last_direction: Database["public"]["Enums"]["message_direction"]
+          last_message_id: string
+          last_status: Database["public"]["Enums"]["message_status"]
+          thread_key: string
+          unread_count: number
+        }[]
+      }
+      inbox_unread_count: { Args: { p_shop_id: string }; Returns: number }
       integration_claim_event: {
         Args: {
           p_event: string
@@ -4227,9 +4397,9 @@ export type Database = {
           deposit_due_cents: number
           deposit_paid_cents: number
           deposit_required_cents: number
-          invoice_id: string
-          invoice_number: number
-          invoice_status: Database["public"]["Enums"]["invoice_status"]
+          invoice_id: string | null
+          invoice_number: number | null
+          invoice_status: Database["public"]["Enums"]["invoice_status"] | null
           job_id: string
           paid_cents: number
           pending_cents: number
@@ -4349,6 +4519,7 @@ export type Database = {
           job_id: string | null
           provider_message_id: string | null
           read_at: string | null
+          request_nonce: string | null
           send_after: string
           sent_at: string | null
           sent_by: string | null
@@ -4446,9 +4617,12 @@ export type Database = {
       notify_shop_staff: {
         Args: {
           p_body?: string
+          p_customer_id?: string
           p_exclude_user?: string
+          p_invoice_id?: string
           p_job_id?: string
           p_kind: Database["public"]["Enums"]["notification_kind"]
+          p_quote_id?: string
           p_roles: Database["public"]["Enums"]["shop_role"][]
           p_shop_id: string
           p_title: string
@@ -4544,6 +4718,28 @@ export type Database = {
         }
         Returns: number
       }
+      preview_campaign_message: {
+        Args: {
+          p_body: string
+          p_channel: Database["public"]["Enums"]["message_channel"]
+          p_shop_id: string
+          p_subject?: string
+        }
+        Returns: Json
+      }
+      preview_document_message: {
+        Args: {
+          p_channel?: Database["public"]["Enums"]["message_channel"]
+          p_invoice_id?: string
+          p_quote_id?: string
+        }
+        Returns: {
+          body: string
+          enabled: boolean
+          subject: string | null
+          to_address: string | null
+        }[]
+      }
       preview_template_message: {
         Args: {
           p_channel?: Database["public"]["Enums"]["message_channel"]
@@ -4553,8 +4749,8 @@ export type Database = {
         Returns: {
           body: string
           enabled: boolean
-          subject: string
-          to_address: string
+          subject: string | null
+          to_address: string | null
         }[]
       }
       price_services: {
@@ -4562,7 +4758,7 @@ export type Database = {
           p_customer_id: string
           p_service_ids: string[]
           p_shop: string
-          p_vehicle_category_id: string
+          p_vehicle_category_id?: string
           p_vehicle_id?: string
         }
         Returns: Json
@@ -4625,13 +4821,14 @@ export type Database = {
         Returns: Json
       }
       public_unsubscribe: { Args: { p_token: string }; Returns: boolean }
+      public_unsubscribe_info: { Args: { p_token: string }; Returns: Json }
       public_validate_coupon: {
         Args: {
           p_code: string
           p_now?: string
           p_service_ids: string[]
           p_slug: string
-          p_vehicle_category_id: string
+          p_vehicle_category_id?: string
         }
         Returns: Json
       }
@@ -4641,6 +4838,7 @@ export type Database = {
           p_channel: Database["public"]["Enums"]["message_channel"]
           p_customer_id: string
           p_job_id?: string
+          p_request_nonce?: string
           p_shop_id: string
           p_subject: string
         }
@@ -4660,6 +4858,7 @@ export type Database = {
           job_id: string | null
           provider_message_id: string | null
           read_at: string | null
+          request_nonce: string | null
           send_after: string
           sent_at: string | null
           sent_by: string | null
@@ -4701,9 +4900,9 @@ export type Database = {
           p_to: string
         }
         Returns: {
-          customer_id: string
+          customer_id: string | null
           message_id: string
-          opt_action: string
+          opt_action: string | null
           shop_id: string
         }[]
       }
@@ -4721,6 +4920,7 @@ export type Database = {
           card_last4: string | null
           created_at: string
           customer_id: string
+          disputed_cents: number
           id: string
           invoice_id: string | null
           job_id: string | null
@@ -4763,6 +4963,7 @@ export type Database = {
           card_last4: string | null
           created_at: string
           customer_id: string
+          disputed_cents: number
           id: string
           invoice_id: string | null
           job_id: string | null
@@ -4795,6 +4996,28 @@ export type Database = {
       render_template: {
         Args: { p_body: string; p_vars: Json }
         Returns: string
+      }
+      reorder_job_line_items: {
+        Args: { p_ids: string[]; p_job_id: string }
+        Returns: undefined
+      }
+      replace_business_hours: {
+        Args: { p_rows: Json; p_shop_id: string }
+        Returns: {
+          closes_at: string
+          created_at: string
+          id: string
+          opens_at: string
+          shop_id: string
+          updated_at: string
+          weekday: number
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "business_hours"
+          isOneToOne: false
+          isSetofReturn: true
+        }
       }
       report_caller_member: { Args: { p_shop_id: string }; Returns: string }
       report_caller_role: {
@@ -4831,6 +5054,7 @@ export type Database = {
         Returns: {
           collected_cents: number
           deposits_cents: number
+          disputes_lost_cents: number
           gross_cents: number
           memberships_cents: number
           method: Database["public"]["Enums"]["payment_method"]
@@ -4857,18 +5081,28 @@ export type Database = {
           tips_cents: number
         }[]
       }
+      report_revenue_totals: {
+        Args: { p_from: string; p_shop_id: string; p_to: string }
+        Returns: {
+          gross_cents: number
+          net_cents: number
+          payments_count: number
+          refunds_cents: number
+          tips_cents: number
+        }[]
+      }
       report_sales_by_service: {
         Args: { p_from: string; p_shop_id: string; p_to: string }
         Returns: {
-          category_id: string
-          category_name: string
+          category_id: string | null
+          category_name: string | null
           discount_cents: number
           gross_cents: number
           jobs_count: number
           net_cents: number
           quantity: number
-          service_id: string
-          service_kind: Database["public"]["Enums"]["service_kind"]
+          service_id: string | null
+          service_kind: Database["public"]["Enums"]["service_kind"] | null
           service_name: string
         }[]
       }
@@ -4881,13 +5115,13 @@ export type Database = {
         }
         Returns: {
           active: boolean
-          commission_bps: number
-          commission_cents: number
+          commission_bps: number | null
+          commission_cents: number | null
           display_name: string
-          hourly_rate_cents: number
+          hourly_rate_cents: number | null
           hours: number
           jobs_completed: number
-          labor_cost_cents: number
+          labor_cost_cents: number | null
           member_id: string
           pre_tax_revenue_cents: number
           revenue_cents: number
@@ -4925,14 +5159,14 @@ export type Database = {
         Args: { p_limit?: number; p_query: string; p_shop_id: string }
         Returns: {
           archived: boolean
-          customer_id: string
+          customer_id: string | null
           id: string
-          job_id: string
+          job_id: string | null
           kind: string
-          number: number
+          number: number | null
           score: number
-          status: string
-          subtitle: string
+          status: string | null
+          subtitle: string | null
           title: string
         }[]
       }
@@ -4940,10 +5174,49 @@ export type Database = {
         Args: { p_service_id: string; p_vehicle_category_id: string }
         Returns: {
           duration_minutes: number
-          price_cents: number
+          price_cents: number | null
         }[]
       }
       set_app_base_url: { Args: { p_url: string }; Returns: string }
+      set_stripe_refund_total: {
+        Args: {
+          p_expected_refunded_cents: number
+          p_payment_intent_id: string
+          p_refunded_cents_total: number
+          p_shop_id: string
+        }
+        Returns: {
+          amount_cents: number
+          card_brand: string | null
+          card_last4: string | null
+          created_at: string
+          customer_id: string
+          disputed_cents: number
+          id: string
+          invoice_id: string | null
+          job_id: string | null
+          kind: Database["public"]["Enums"]["payment_kind"]
+          membership_id: string | null
+          method: Database["public"]["Enums"]["payment_method"]
+          note: string | null
+          paid_at: string | null
+          recorded_by: string | null
+          refunded_cents: number
+          shop_id: string
+          status: Database["public"]["Enums"]["payment_status"]
+          stripe_charge_id: string | null
+          stripe_checkout_session_id: string | null
+          stripe_payment_intent_id: string | null
+          tip_cents: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "payments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       shop_role_of: {
         Args: { p_shop_id: string }
         Returns: Database["public"]["Enums"]["shop_role"]
@@ -4952,11 +5225,11 @@ export type Database = {
         Args: { p_shop_id: string }
         Returns: {
           active: boolean
-          calendar_color: string
+          calendar_color: string | null
           display_name: string
-          email: string
+          email: string | null
           member_id: string
-          phone: string
+          phone: string | null
           role: Database["public"]["Enums"]["shop_role"]
           user_id: string
         }[]
@@ -4988,6 +5261,53 @@ export type Database = {
         SetofOptions: {
           from: "*"
           to: "form_submissions"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      staff_record_quote_response: {
+        Args: {
+          p_action: string
+          p_approved_by_name?: string
+          p_declined_reason?: string
+          p_quote_id: string
+          p_selected_optional_line_ids?: string[]
+        }
+        Returns: {
+          approved_at: string | null
+          approved_by_name: string | null
+          converted_at: string | null
+          converted_job_id: string | null
+          created_at: string
+          created_by: string | null
+          customer_id: string
+          declined_at: string | null
+          declined_reason: string | null
+          discount_cents: number
+          discount_kind: Database["public"]["Enums"]["discount_kind"]
+          discount_value: number
+          expired_at: string | null
+          id: string
+          internal_notes: string | null
+          notes: string | null
+          number: number
+          public_token: string
+          sent_at: string | null
+          shop_id: string
+          status: Database["public"]["Enums"]["quote_status"]
+          subtotal_cents: number
+          tax_cents: number
+          tax_rate_bps: number
+          terms: string | null
+          total_cents: number
+          updated_at: string
+          valid_until: string | null
+          vehicle_id: string | null
+          viewed_at: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "quotes"
           isOneToOne: true
           isSetofReturn: false
         }
@@ -5067,6 +5387,7 @@ export type Database = {
           p_last4?: string
           p_make_default?: boolean
           p_shop_id: string
+          p_stripe_customer_id?: string
           p_stripe_payment_method_id: string
         }
         Returns: {
@@ -5114,6 +5435,7 @@ export type Database = {
           card_last4: string | null
           created_at: string
           customer_id: string
+          disputed_cents: number
           id: string
           invoice_id: string | null
           job_id: string | null

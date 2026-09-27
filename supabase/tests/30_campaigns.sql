@@ -8,7 +8,8 @@
 -- (it is blank while online booking is off: 30_link_availability.sql)
 update public.booking_settings set enabled = true where shop_id = tests.fx('shop_a');
 
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 -- the platform binds each shop's Twilio number (supabase/setup/twilio.md)
 insert into public.shop_sms_numbers (phone_number, shop_id) values ('+12055550100', tests.fx('shop_a'));
 update public.shops set sms_from_number = '+12055550100' where id = tests.fx('shop_a');
@@ -217,7 +218,8 @@ select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.throws_like($$select public.launch_campaign(tests.fx('camp_mail'))$$, '55000', '%unsubscribe%',
                          'email campaigns need unsubscribe links');
 select tests.as_superuser();
-insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test');
+insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
+  on conflict (key) do update set value = excluded.value;
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq((public.launch_campaign(tests.fx('camp_mail'))).recipient_count, 2, 'email launched');
 select tests.fx_set('mail_alice', (select id from public.messages where campaign_id = tests.fx('camp_mail')

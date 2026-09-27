@@ -20,7 +20,8 @@ $$;
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.lives($$select tests.fx_set('inv_a', (public.create_invoice_from_job(tests.fx('job_a'))).id)$$, 'manager invoices a job');
 select tests.ok((select number = 1001 and job_id = tests.fx('job_a') and customer_id = tests.fx('cust_a') and issued_at = now()
-                        and due_at = now() + interval '14 days' and terms = 'Due in 14 days' and created_by = tests.fx('u_manager_a')
+                        and due_at = (((now() at time zone 'America/Chicago')::date + 14)::timestamp + time '23:59:59') at time zone 'America/Chicago'
+                        and terms = 'Due in 14 days' and created_by = tests.fx('u_manager_a')
                         and discount_kind = 'fixed' and discount_value = 1000 and tax_rate_bps = 825 and sent_at is null
                  from public.invoices where id = tests.fx('inv_a')),
                 'invoice header: number, job, customer, issued now, due per shop setting, terms, discount, tax copied');
@@ -170,8 +171,9 @@ select tests.throws_like($$select public.mark_invoice_sent(tests.fx('inv_adhoc')
                          'cannot issue with a past due date');
 update public.invoices set due_at = null where id = tests.fx('inv_adhoc');
 select tests.lives($$select public.mark_invoice_sent(tests.fx('inv_adhoc'))$$, 'issue + send');
-select tests.ok((select status = 'open' and issued_at = now() and sent_at = now() and due_at = now() + interval '14 days'
-                 from public.invoices where id = tests.fx('inv_adhoc')), 'draft -> open, issued and due dates stamped');
+select tests.ok((select status = 'open' and issued_at = now() and sent_at = now()
+                        and due_at = (((now() at time zone 'America/Chicago')::date + 14)::timestamp + time '23:59:59') at time zone 'America/Chicago'
+                 from public.invoices where id = tests.fx('inv_adhoc')), 'draft -> open, issued and due dates stamped (end of the local due date)');
 select tests.eq((public.mark_invoice_sent(tests.fx('inv_adhoc'))).status::text, 'open', 're-sending keeps the status');
 select tests.lives($$select tests.fx_set('inv_empty', (public.create_invoice(tests.fx('cust_a3'))).id)$$);
 select tests.throws_like($$select public.mark_invoice_sent(tests.fx('inv_empty'))$$, '22023', '%at least one line%',
@@ -192,7 +194,7 @@ select tests.fx_set('inv_zero2', (public.create_invoice(tests.fx('cust_a3'), '[{
 select tests.as_superuser();
 update public.invoices set status = 'open', issued_at = '2025-01-10 15:00Z' where id = tests.fx('inv_zero2');
 select tests.eq((select concat_ws('/', status, paid_at, due_at) from public.invoices where id = tests.fx('inv_zero2')),
-                'paid/2025-01-10 15:00:00+00/2025-01-24 15:00:00+00', 'zero-total: paid_at = issued_at; due = issued + 14 days');
+                'paid/2025-01-10 15:00:00+00/2025-01-25 05:59:59+00', 'zero-total: paid_at = issued_at; due = end of the local day 14 days after issue (CST)');
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.lives($$insert into public.invoice_line_items (shop_id, invoice_id, name, unit_price_cents)
                      values (tests.fx('shop_a'), tests.fx('inv_zero'), 'Extra', 1000)$$,
@@ -252,3 +254,51 @@ select tests.throws($$insert into public.invoice_line_items (shop_id, invoice_id
 select tests.throws($$insert into public.invoice_line_items (shop_id, invoice_id, name, unit_price_cents) values (tests.fx('shop_b'), tests.fx('inv_a_new'), 'X', 1)$$,
                     '23503', 'B cannot attach its lines to A''s invoice');
 select tests.throws($$select public.create_invoice(tests.fx('cust_a'))$$, 'P0002', 'B cannot invoice A''s customer');
+
+-- ============================================================ due date = end of the local due day (invoice_due_days)
+-- Regression: due_at was issued_at + N days, so with invoice_due_days = 0 an
+-- invoice was overdue the instant it was issued.
+select tests.as_superuser();
+update public.shops set invoice_due_days = 0 where id = tests.fx('shop_a');
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.fx_set('inv_due0', (public.create_invoice(tests.fx('cust_a3'), '[{"name":"Wash","unit_price_cents":5000}]')).id);
+select tests.as_superuser();
+-- issued 2025-03-08 17:30 CST (23:30Z)
+update public.invoices set status = 'open', issued_at = '2025-03-08 23:30Z' where id = tests.fx('inv_due0');
+select tests.eq((select due_at from public.invoices where id = tests.fx('inv_due0')), '2025-03-09 05:59:59Z'::timestamptz,
+                '0 days: due at the end of the issue day in the shop''s time zone (23:59:59 CST)');
+select tests.ok((select due_at > issued_at and not (due_at < '2025-03-08 23:30Z'::timestamptz)
+                   from public.invoices where id = tests.fx('inv_due0')), 'not overdue when issued (due on receipt)');
+select tests.ok((select due_at < '2025-03-09 06:00Z'::timestamptz from public.invoices where id = tests.fx('inv_due0')),
+                'overdue from the next local midnight');
+-- through mark_invoice_sent (issued now)
+select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.fx_set('inv_due0b', (public.create_invoice(tests.fx('cust_a3'), '[{"name":"Wash","unit_price_cents":5000}]')).id);
+select public.mark_invoice_sent(tests.fx('inv_due0b'));
+select tests.ok((select due_at >= now() and due_at = ((((now() at time zone 'America/Chicago')::date)::timestamp + time '23:59:59')
+                                                       at time zone 'America/Chicago')
+                   from public.invoices where id = tests.fx('inv_due0b')), 'sent today with 0 days: due by the end of today');
+-- an explicit due date is kept
+select tests.fx_set('inv_due_x', (public.create_invoice(tests.fx('cust_a3'), '[{"name":"Wash","unit_price_cents":5000}]')).id);
+update public.invoices set due_at = now() + interval '3 days' where id = tests.fx('inv_due_x');
+select public.mark_invoice_sent(tests.fx('inv_due_x'));
+select tests.eq((select due_at from public.invoices where id = tests.fx('inv_due_x')), now() + interval '3 days',
+                'a due date staff set is not recomputed');
+
+-- DST: a New York shop with 1 day, issued on the day before the spring change
+select tests.as_superuser();
+update public.shops set timezone = 'America/New_York', invoice_due_days = 1 where id = tests.fx('shop_b');
+select tests.authenticate_as(tests.fx('u_manager_b'));
+select tests.fx_set('inv_dst', (public.create_invoice(tests.fx('cust_b'), '[{"name":"Wash","unit_price_cents":5000}]')).id);
+select tests.as_superuser();
+-- 2025-03-08 12:00 EST; due end of 2025-03-09, which is EDT (UTC-4) after 02:00
+update public.invoices set status = 'open', issued_at = '2025-03-08 17:00Z' where id = tests.fx('inv_dst');
+select tests.eq((select due_at from public.invoices where id = tests.fx('inv_dst')), '2025-03-10 03:59:59Z'::timestamptz,
+                'DST: 23:59:59 local on the due date, in the offset of that date (EDT)');
+-- fall back: issued 2025-11-01 (EDT), due 2025-11-02 23:59:59 EST
+select tests.authenticate_as(tests.fx('u_manager_b'));
+select tests.fx_set('inv_dst2', (public.create_invoice(tests.fx('cust_b'), '[{"name":"Wash","unit_price_cents":5000}]')).id);
+select tests.as_superuser();
+update public.invoices set status = 'open', issued_at = '2025-11-01 16:00Z' where id = tests.fx('inv_dst2');
+select tests.eq((select due_at from public.invoices where id = tests.fx('inv_dst2')), '2025-11-03 04:59:59Z'::timestamptz,
+                'DST fall-back: the due day ends at 23:59:59 EST');

@@ -164,3 +164,34 @@ select tests.eq((select array_agg(id) from public.customers), array[tests.fx('cu
 select tests.authenticate_as(tests.fx('u_outsider'));
 select tests.eq(tests.row_count('select * from public.customers'), 0::bigint, 'outsider sees no customers');
 select tests.eq(tests.row_count('select * from public.vehicles'), 0::bigint, 'outsider sees no vehicles');
+
+-- ------------------------------------------------------------ sort_name (list order)
+select tests.authenticate_as(tests.fx('u_manager_a'));
+insert into public.customers (shop_id, company) values (tests.fx('shop_a'), '  Acme Fleet ')
+  returning tests.fx_set('cust_sort_co', id);
+insert into public.customers (shop_id, first_name, last_name) values (tests.fx('shop_a'), 'Zed', 'Adams')
+  returning tests.fx_set('cust_sort_adams', id);
+insert into public.customers (shop_id, first_name, last_name, company) values (tests.fx('shop_a'), 'Bo', ' ', 'Zulu Co')
+  returning tests.fx_set('cust_sort_blank_last', id);
+insert into public.customers (shop_id, first_name) values (tests.fx('shop_a'), 'Cy')
+  returning tests.fx_set('cust_sort_first', id);
+select tests.eq((select sort_name from public.customers where id = tests.fx('cust_sort_co')), 'acme fleet ',
+                'a company-only customer sorts by company');
+select tests.eq((select sort_name from public.customers where id = tests.fx('cust_sort_adams')), 'adams zed',
+                'last name first, then first name');
+select tests.eq((select sort_name from public.customers where id = tests.fx('cust_sort_blank_last')), 'zulu co bo',
+                'a blank last name falls back to the company');
+select tests.eq((select sort_name from public.customers where id = tests.fx('cust_sort_first')), 'cy cy',
+                'a first-name-only customer sorts by first name');
+select tests.eq((select array_agg(id order by sort_name, id) from public.customers
+                  where id in (tests.fx('cust_sort_co'), tests.fx('cust_sort_adams'), tests.fx('cust_sort_blank_last'), tests.fx('cust_sort_first'))),
+                array[tests.fx('cust_sort_co'), tests.fx('cust_sort_adams'), tests.fx('cust_sort_first'), tests.fx('cust_sort_blank_last')],
+                'ordering by sort_name interleaves people and companies');
+select tests.throws($$update public.customers set sort_name = 'x' where id = tests.fx('cust_sort_co')$$, '428C9',
+                    'sort_name is generated');
+update public.customers set last_name = 'Brown' where id = tests.fx('cust_sort_co');
+select tests.eq((select sort_name from public.customers where id = tests.fx('cust_sort_co')), 'brown ',
+                'sort_name follows edits');
+select tests.as_superuser();
+select tests.ok(exists (select 1 from pg_indexes where schemaname = 'public' and indexname = 'customers_shop_sort_name_idx'
+                          and indexdef like '%(shop_id, sort_name, id)%'), 'sort_name is indexed per shop');

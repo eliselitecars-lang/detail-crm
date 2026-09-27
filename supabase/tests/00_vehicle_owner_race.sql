@@ -19,6 +19,10 @@
 -- BEFORE asserting; outcomes are captured in a temp table first. Each race
 -- waits (bounded) until the second session is actually blocked on a lock
 -- before the first one commits, so the interleaving is deterministic.
+-- The races connect through dblink without a password, which only a
+-- superuser may do: on a non-superuser connection the file is skipped.
+select rolsuper as is_superuser from pg_roles where rolname = current_user \gset
+\if :is_superuser
 create extension if not exists dblink with schema extensions;
 
 select (to_regclass('public.quotes') is not null and to_regclass('public.memberships') is not null) as with_money \gset
@@ -234,3 +238,7 @@ select tests.eq((select val from race where key = 'membership_first'), 'err:2351
 \endif
 
 select tests.eq((select val from race where key = 'free'), 'true', 'a vehicle nothing references still changes owner');
+\else
+\echo SKIP (needs superuser): the dblink vehicle owner races were not run
+select tests.ok(not :'is_superuser'::boolean, 'SKIP (needs superuser): the dblink vehicle owner races were not run');
+\endif

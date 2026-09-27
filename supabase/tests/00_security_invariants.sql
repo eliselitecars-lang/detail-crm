@@ -246,7 +246,7 @@ select tests.ok(not has_function_privilege('authenticated', 'public.next_documen
                 'next_document_number is service-only');
 select tests.ok(has_function_privilege('service_role', 'public.next_document_number(uuid, public.document_kind)', 'execute'),
                 'service_role may call next_document_number');
-select tests.ok(has_function_privilege('anon', 'public.get_available_slots(text, uuid[], uuid, date, date, timestamptz)', 'execute'),
+select tests.ok(has_function_privilege('anon', 'public.get_available_slots(text, uuid[], date, date, uuid, timestamptz)', 'execute'),
                 'anon may call get_available_slots');
 select tests.ok(has_function_privilege('anon', 'public.public_get_invite(uuid)', 'execute'), 'anon may call public_get_invite');
 select tests.ok(not has_function_privilege('anon', 'public.create_shop(text, text, text, public.business_type, text, text, text, text)', 'execute'),

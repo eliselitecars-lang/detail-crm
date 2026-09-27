@@ -369,8 +369,8 @@ $$;
 create function public.price_services(
   p_shop                 uuid,
   p_customer_id          uuid,
-  p_vehicle_category_id  uuid,
   p_service_ids          uuid[],
+  p_vehicle_category_id  uuid default null,
   p_vehicle_id           uuid default null
 ) returns jsonb
 language plpgsql stable security definer
@@ -449,5 +449,5 @@ revoke execute on function public.normalize_phone_e164(text, text), public.posta
 grant execute on function public.normalize_phone_e164(text, text), public.postal_code_in_area(text, text[])
   to authenticated, service_role;
 
-revoke execute on function public.price_services(uuid, uuid, uuid, uuid[], uuid) from public, anon;
-grant execute on function public.price_services(uuid, uuid, uuid, uuid[], uuid) to authenticated, service_role;
+revoke execute on function public.price_services(uuid, uuid, uuid[], uuid, uuid) from public, anon;
+grant execute on function public.price_services(uuid, uuid, uuid[], uuid, uuid) to authenticated, service_role;

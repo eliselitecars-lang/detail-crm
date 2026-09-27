@@ -104,6 +104,8 @@ create index quotes_created_by_idx on public.quotes (created_by);
 
 comment on column public.quotes.valid_until is
   'Valid through the end of this date in the shop time zone; null = no expiry.';
+comment on column public.quotes.number is 'Human quote number per shop, assigned by quotes_integrity. @insert-optional';
+comment on column public.quotes.tax_rate_bps is 'Defaults to the shop''s tax rate when omitted (quotes_integrity). @insert-optional';
 
 -- jobs.quote_id (declared in 0006) now gets its composite FK.
 alter table public.jobs
@@ -145,6 +147,8 @@ create table public.quote_line_items (
   constraint quote_line_items_required_selected check (optional or selected)
 );
 create index quote_line_items_shop_quote_idx on public.quote_line_items (shop_id, quote_id, sort);
+comment on column public.quote_line_items.selected is
+  'Always true for required lines; an optional line defaults to not selected (quote_line_items_before_write). @insert-optional';
 create index quote_line_items_shop_service_idx on public.quote_line_items (shop_id, service_id);
 create index quote_line_items_shop_vehicle_idx on public.quote_line_items (shop_id, vehicle_id);
 

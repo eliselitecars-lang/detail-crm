@@ -200,6 +200,12 @@ create unique index memberships_one_open_key on public.memberships (shop_id, pla
   nulls not distinct where status <> 'cancelled';
 create index memberships_shop_customer_idx on public.memberships (shop_id, customer_id);
 create index memberships_shop_plan_idx on public.memberships (shop_id, plan_id);
+comment on column public.memberships.price_cents is
+  'Billing terms copied from the plan when not given (memberships_billing_terms). @insert-optional';
+comment on column public.memberships.interval is
+  'Billing terms copied from the plan when not given (memberships_billing_terms). @insert-optional';
+comment on column public.memberships.interval_count is
+  'Billing terms copied from the plan when not given (memberships_billing_terms). @insert-optional';
 create index memberships_shop_vehicle_idx on public.memberships (shop_id, vehicle_id);
 create index memberships_shop_status_idx on public.memberships (shop_id, status);
 create index memberships_created_by_idx on public.memberships (created_by);
@@ -577,7 +583,8 @@ create function public.upsert_customer_payment_method(
   p_last4                     text default null,
   p_exp_month                 integer default null,
   p_exp_year                  integer default null,
-  p_make_default              boolean default false
+  p_make_default              boolean default false,
+  p_stripe_customer_id        text default null
 ) returns public.customer_payment_methods
 language plpgsql security definer
 set search_path = ''
@@ -586,11 +593,19 @@ declare
   v_existing  public.customer_payment_methods;
   v_row       public.customer_payment_methods;
   v_default   boolean;
+  v_stripe    text;
 begin
   -- serializes default switching per customer
-  perform 1 from public.customers c where c.id = p_customer_id and c.shop_id = p_shop_id for update;
+  select c.stripe_customer_id into v_stripe
+    from public.customers c where c.id = p_customer_id and c.shop_id = p_shop_id for update;
   if not found then
     raise exception 'customer not found' using errcode = 'P0002';
+  end if;
+  -- the Stripe customer the card is attached to (when the caller knows it)
+  -- must be this customer's: a card saved for a Stripe customer the CRM
+  -- customer has since been unlinked from is never listed as theirs
+  if p_stripe_customer_id is not null and p_stripe_customer_id is distinct from v_stripe then
+    raise exception 'payment method belongs to another Stripe customer' using errcode = '22023';
   end if;
   select * into v_existing from public.customer_payment_methods pm
    where pm.shop_id = p_shop_id and pm.stripe_payment_method_id = p_stripe_payment_method_id;
@@ -737,7 +752,7 @@ grant execute on function public.create_membership(uuid, uuid, uuid) to authenti
 revoke execute on function
   public.sync_stripe_subscription(uuid, text, public.membership_status, timestamptz, boolean, uuid, timestamptz,
                                   text, bigint, public.membership_interval, integer),
-  public.upsert_customer_payment_method(uuid, uuid, text, text, text, integer, integer, boolean),
+  public.upsert_customer_payment_method(uuid, uuid, text, text, text, integer, integer, boolean, text),
   public.remove_customer_payment_method(uuid, text),
   public.record_stripe_event(text, text, text, timestamptz),
   public.mark_stripe_event_processed(text, text, timestamptz)
@@ -745,7 +760,7 @@ from public, anon, authenticated;
 grant execute on function
   public.sync_stripe_subscription(uuid, text, public.membership_status, timestamptz, boolean, uuid, timestamptz,
                                   text, bigint, public.membership_interval, integer),
-  public.upsert_customer_payment_method(uuid, uuid, text, text, text, integer, integer, boolean),
+  public.upsert_customer_payment_method(uuid, uuid, text, text, text, integer, integer, boolean, text),
   public.remove_customer_payment_method(uuid, text),
   public.record_stripe_event(text, text, text, timestamptz),
   public.mark_stripe_event_processed(text, text, timestamptz)

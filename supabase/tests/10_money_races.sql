@@ -12,6 +12,10 @@
 -- failed race never leaves data behind for later files. Each race waits
 -- (bounded) until the second session is actually blocked on a lock before
 -- the first one commits, so the interleaving is deterministic.
+-- The races connect through dblink without a password, which only a
+-- superuser may do: on a non-superuser connection the file is skipped.
+select rolsuper as is_superuser from pg_roles where rolname = current_user \gset
+\if :is_superuser
 create extension if not exists dblink with schema extensions;
 
 create temp table race (key text primary key, val text);
@@ -224,3 +228,7 @@ select tests.ok((select val like 'err:23514:%approved quote%' from race where ke
                 'and is then refused');
 select tests.eq((select val from race where key = 'quote_after'), 'approved/90000',
                 'the approved quote keeps the lines the customer approved');
+\else
+\echo SKIP (needs superuser): the dblink money races were not run
+select tests.ok(not :'is_superuser'::boolean, 'SKIP (needs superuser): the dblink money races were not run');
+\endif

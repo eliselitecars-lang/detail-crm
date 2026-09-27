@@ -767,6 +767,8 @@ begin
     order by m.active desc, m.display_name;
 end
 $$;
+-- (contract tag for scripts/gen_types.py: output columns that may be null)
+comment on function public.shop_team(uuid) is '@nullable: calendar_color, phone, email';
 
 -- ---------------------------------------------------------------------------
 -- RLS
