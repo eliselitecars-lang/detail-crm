@@ -27,8 +27,11 @@ enum DashboardService {
 
     // MARK: - Booking requests
 
-    /// Online bookings still waiting for a decision (`requested`), oldest
-    /// appointment first, with customer / vehicle / service names.
+    /// Online bookings still waiting for a decision (`requested`) with
+    /// customer / vehicle / service names. Requests without a requested
+    /// time come first: they never appear in the Calendar (it lists
+    /// scheduled jobs only), so they must not be the ones cut off by the
+    /// page limit. Then soonest appointment first.
     /// Manager+ only (RLS returns nothing useful to technicians).
     static func bookingRequests(shopID: UUID, limit: Int = 25) async throws -> [DashboardSummaryBookingRequest] {
         let jobs: [DashboardSummaryRequestJob] = try await Supa.client
@@ -37,7 +40,7 @@ enum DashboardService {
             .eq("shop_id", value: shopID.uuidString)
             .eq("status", value: "requested")
             .eq("source", value: "online_booking")
-            .order("scheduled_start", ascending: true, nullsFirst: false)
+            .order("scheduled_start", ascending: true, nullsFirst: true)
             .order("created_at", ascending: true)
             .limit(limit)
             .execute()
@@ -138,6 +141,8 @@ enum DashboardService {
     }
 
     /// Declines an online booking: `requested` -> `cancelled` with a reason.
+    /// `cancel_reason` is customer-facing (the public booking page shows
+    /// it), so callers must present it as a message to the customer.
     static func declineBooking(shopID: UUID, jobID: UUID, reason: String?) async throws {
         let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
         let change = CancelChange(

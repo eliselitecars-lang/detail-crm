@@ -100,7 +100,7 @@ struct JobInspectionRow: View {
             }
             Spacer(minLength: Theme.Spacing.sm)
             Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold))
+                .font(Theme.Typography.footnote.weight(.semibold))
                 .foregroundStyle(Theme.textTertiary)
                 .accessibilityHidden(true)
         }

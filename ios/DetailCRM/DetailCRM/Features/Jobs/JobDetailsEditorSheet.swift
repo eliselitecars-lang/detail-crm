@@ -12,6 +12,10 @@ import DetailCore
 
 struct JobDetailsEditorSheet: View {
     let model: JobDetailModel
+    /// Set when opened to schedule an unscheduled job: a time is required
+    /// and saving also moves the job to this status (one row write, so
+    /// `jobs_schedule_required` is satisfied).
+    let targetStatus: JobStatus?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(AppState.self) private var appState
@@ -32,12 +36,26 @@ struct JobDetailsEditorSheet: View {
     @State private var errorMessage: String?
     @State private var didPrefill = false
 
+    init(model: JobDetailModel, targetStatus: JobStatus? = nil) {
+        self.model = model
+        self.targetStatus = targetStatus
+    }
+
     private var job: Job? { model.job }
 
     /// The database requires a time unless the job is requested or cancelled.
     private var canUnschedule: Bool {
-        guard let status = job?.status else { return false }
-        return status == .requested || status == .cancelled
+        guard targetStatus == nil, let status = job?.status else { return false }
+        return !JobDetailModel.statusNeedsTime(status)
+    }
+
+    private var screenTitle: String {
+        switch targetStatus {
+        case .none: return "Edit job"
+        case .some(.scheduled): return "Schedule job"
+        case .some(.confirmed): return "Confirm job"
+        case .some(let status): return status.displayName
+        }
     }
 
     var body: some View {
@@ -46,9 +64,19 @@ struct JobDetailsEditorSheet: View {
                 if let errorMessage {
                     InlineMessage(text: errorMessage, kind: .error)
                 }
+                if let targetStatus {
+                    InlineMessage(
+                        text: "Pick the date and time. Saving moves the job to \(targetStatus.displayName.lowercased()).",
+                        kind: .info
+                    )
+                }
                 scheduleFields
                 locationFields
-                if !model.resources.isEmpty {
+                if model.resourcesFailed {
+                    JobReferenceLoadError(text: "Bays and vans couldn't be loaded, so the bay / van can't be changed right now.") {
+                        await model.loadResources()
+                    }
+                } else if !model.resources.isEmpty {
                     resourceField
                 }
                 FormRow("Notes for the customer", hint: "Shown on the customer's booking and documents.") {
@@ -64,14 +92,14 @@ struct JobDetailsEditorSheet: View {
                     hint: "Leave empty for no deposit."
                 )
             }
-            .navigationTitle("Edit job")
+            .navigationTitle(screenTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    AsyncButton("Save", style: .themePrimaryCompact) {
+                    AsyncButton(targetStatus == nil ? "Save" : "Save & move", style: .themePrimaryCompact) {
                         await save()
                     }
                 }
@@ -165,7 +193,7 @@ struct JobDetailsEditorSheet: View {
     private func prefill() {
         guard !didPrefill, let job else { return }
         didPrefill = true
-        isScheduled = job.scheduledStart != nil
+        isScheduled = job.scheduledStart != nil || targetStatus != nil
         let clock = appState.clock
         let fallbackStart = clock.date(on: clock.addingDays(1, to: Date()), timeString: "09:00") ?? Date()
         start = job.scheduledStart ?? fallbackStart
@@ -228,11 +256,16 @@ struct JobDetailsEditorSheet: View {
             clearCoordinates: addressChanged,
             resourceID: resourceID,
             notes: notes.trimmedNonEmpty,
-            depositRequiredCents: deposit
+            depositRequiredCents: deposit,
+            status: targetStatus
         )
         do {
             try await model.saveDetails(patch)
-            toasts.show("Job updated")
+            if let targetStatus {
+                toasts.show("Job is now \(targetStatus.displayName.lowercased()).")
+            } else {
+                toasts.show("Job updated")
+            }
             dismiss()
         } catch {
             errorMessage = ErrorText.message(for: error)
@@ -318,7 +351,7 @@ struct JobAssigneesSheet: View {
                 }
                 Spacer()
                 Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22))
+                    .font(Theme.Typography.title.weight(.regular))
                     .foregroundStyle(isOn ? Theme.glacier : Theme.textTertiary)
                     .accessibilityHidden(true)
             }
@@ -333,8 +366,8 @@ struct JobAssigneesSheet: View {
     private func save() async {
         errorMessage = nil
         do {
-            try await model.saveAssignments(selected)
-            toasts.show("Team updated")
+            let refreshed = try await model.saveAssignments(selected)
+            toasts.show(refreshed ? "Team updated" : "Team updated. Pull down on the job to refresh it.")
             dismiss()
         } catch {
             errorMessage = ErrorText.message(for: error)

@@ -77,9 +77,22 @@ struct NewJobView: View {
                 current: model.step,
                 isLocked: model.hasStartedCreating,
                 reachable: reachableSteps,
-                onSelect: { step in model.step = step }
+                onSelect: { step in
+                    // Once the job row exists the earlier choices are fixed
+                    // (Retry finishes that job); never jump back.
+                    guard !model.hasStartedCreating else { return }
+                    model.step = step
+                }
             )
             JobDivider()
+            if let problem = model.referenceProblem {
+                JobReferenceLoadError(text: problem) {
+                    await model.loadReferenceData()
+                }
+                .padding(.horizontal, Theme.Spacing.gutter)
+                .padding(.vertical, Theme.Spacing.sm)
+                JobDivider()
+            }
             stepContent
         }
         .screenBackground()
@@ -182,7 +195,9 @@ struct NewJobStepHeader: View {
             .background(Capsule().fill(isCurrent ? Theme.glacier : Theme.surfaceMuted))
         }
         .buttonStyle(.plain)
-        .allowsHitTesting(enabled)
+        // `.disabled` (not just hit testing) so VoiceOver can't activate a
+        // locked step either.
+        .disabled(!enabled)
         .opacity(enabled || isCurrent || isDone ? 1 : 0.6)
         .accessibilityLabel("Step \(step.rawValue + 1): \(step.title)")
         .accessibilityAddTraits(isCurrent ? .isSelected : [])

@@ -105,7 +105,7 @@ struct JobCustomerBlock: View {
                 if canOpenCustomer {
                     NavigationLink(value: AppRoute.customer(customer.id)) {
                         Image(systemName: "chevron.right.circle")
-                            .font(.system(size: 22, weight: .regular))
+                            .font(Theme.Typography.title.weight(.regular))
                             .foregroundStyle(Theme.glacier)
                     }
                     .accessibilityLabel("Open customer")

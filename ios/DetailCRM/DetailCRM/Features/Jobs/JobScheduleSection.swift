@@ -12,6 +12,8 @@ import DetailCore
 struct JobScheduleSection: View {
     let snapshot: JobDetailSnapshot
     let resources: [JobResource]
+    /// The bays/vans list failed to load (names can't be shown).
+    let resourcesFailed: Bool
     let clock: ShopClock
     let canEdit: Bool
     let onEditDetails: () -> Void
@@ -81,7 +83,10 @@ struct JobScheduleSection: View {
 
     private var resourceName: String? {
         guard let id = job.resourceID else { return nil }
-        return resources.first(where: { $0.id == id })?.name ?? "Assigned"
+        if let name = resources.first(where: { $0.id == id })?.name { return name }
+        // Not in the active list: either the list didn't load, or the bay /
+        // van was deactivated or archived after booking.
+        return resourcesFailed ? "Couldn't load the name" : "Inactive or archived"
     }
 
     @ViewBuilder

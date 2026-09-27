@@ -135,6 +135,36 @@ enum JobService {
             .value
     }
 
+    // MARK: - Availability (advisory; the server allows overlaps)
+
+    /// Jobs and blocked times overlapping `[from, to)` from the staff
+    /// calendar feed (`calendar_events`; cancelled jobs excluded).
+    static func busyItems(shopID: UUID, from: Date, to: Date) async throws -> [JobBusyItem] {
+        guard to > from else { return [] }
+        let params = JobCalendarParams(
+            p_shop_id: shopID.uuidString,
+            p_from: Supa.iso(from),
+            p_to: Supa.iso(to),
+            p_include_cancelled: false
+        )
+        return try await Supa.client
+            .rpc("calendar_events", params: params)
+            .execute()
+            .value
+    }
+
+    /// The shop's opening hours (all weekdays).
+    static func businessHours(shopID: UUID) async throws -> [JobBusinessHours] {
+        try await Supa.client
+            .from("business_hours")
+            .select(JobBusinessHours.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .order("weekday", ascending: true)
+            .order("opens_at", ascending: true)
+            .execute()
+            .value
+    }
+
     // MARK: - Status & notes
 
     /// Moves the job to `status` (the status machine validates the edge and
@@ -200,13 +230,15 @@ enum JobService {
     // MARK: - Assignments
 
     /// Manager+: makes the job's assignees exactly `memberIDs` (removes the
-    /// others, adds the new ones).
+    /// others, adds the new ones). Diffs against the rows on the server
+    /// right now — never a screen's possibly stale copy — so calling it
+    /// again after a partial failure never re-inserts an existing member.
     static func setAssignments(
         shopID: UUID,
         jobID: UUID,
-        current: [JobAssignment],
         memberIDs: Set<UUID>
     ) async throws {
+        let current = try await assignments(shopID: shopID, jobID: jobID)
         let removed = current.filter { !memberIDs.contains($0.memberID) }
         let existing = Set(current.map(\.memberID))
         let added = memberIDs.subtracting(existing).sorted { $0.uuidString < $1.uuidString }
@@ -544,8 +576,13 @@ struct JobDetailsPatch: Encodable, Hashable, Sendable {
     var resourceID: UUID?
     var notes: String?
     var depositRequiredCents: Int
+    /// Also move the job to this status in the same update. Used when an
+    /// unscheduled (requested / cancelled) job is scheduled or confirmed:
+    /// `jobs_schedule_required` needs the time in the same row write.
+    var status: JobStatus? = nil
 
     enum CodingKeys: String, CodingKey {
+        case status
         case scheduledStart = "scheduled_start"
         case scheduledEnd = "scheduled_end"
         case locationType = "location_type"
@@ -578,6 +615,7 @@ struct JobDetailsPatch: Encodable, Hashable, Sendable {
         try container.encode(resourceID, forKey: .resourceID)
         try container.encode(notes, forKey: .notes)
         try container.encode(max(0, depositRequiredCents), forKey: .depositRequiredCents)
+        try container.encodeIfPresent(status?.rawValue, forKey: .status)
     }
 }
 
@@ -585,6 +623,13 @@ struct JobDetailsPatch: Encodable, Hashable, Sendable {
 
 private struct JobShopParam: Encodable {
     let p_shop_id: UUID
+}
+
+private struct JobCalendarParams: Encodable {
+    let p_shop_id: String
+    let p_from: String
+    let p_to: String
+    let p_include_cancelled: Bool
 }
 
 private struct JobIDParam: Encodable {

@@ -103,10 +103,10 @@ struct NewJobScheduleStep: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
                 whenCard
                 whereCard
-                if !model.resources.isEmpty {
+                if !model.resources.isEmpty || model.resourcesFailed {
                     resourceCard
                 }
-                if !model.team.isEmpty {
+                if !model.team.isEmpty || model.teamFailed {
                     teamCard
                 }
                 notesCard
@@ -121,6 +121,9 @@ struct NewJobScheduleStep: View {
             }
             .padding(.horizontal, Theme.Spacing.gutter)
             .padding(.vertical, Theme.Spacing.lg)
+        }
+        .task(id: availabilityTaskKey) {
+            await model.loadAvailability()
         }
     }
 
@@ -149,6 +152,8 @@ struct NewJobScheduleStep: View {
                 Text("Ends " + model.clock.dateTimeText(model.end) + " · shop time (" + model.clock.timeZone.identifier + ")")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary)
+                JobDivider()
+                NewJobAvailabilityPanel(model: model)
             } else {
                 Text("The job is saved as a request without a time. Schedule it from the job later.")
                     .font(Theme.Typography.footnote)
@@ -157,6 +162,8 @@ struct NewJobScheduleStep: View {
             }
         }
     }
+
+    private var availabilityTaskKey: NewJobAvailabilityKey? { model.availabilityKey }
 
     private var durationBinding: Binding<Int> {
         Binding(
@@ -194,22 +201,38 @@ struct NewJobScheduleStep: View {
 
     private var resourceCard: some View {
         JobSectionCard("Bay / van") {
-            Picker("Bay / van", selection: $model.resourceID) {
-                Text("None").tag(UUID?.none)
-                ForEach(model.resources) { resource in
-                    Text(resource.name).tag(UUID?.some(resource.id))
+            if model.resourcesFailed && model.resources.isEmpty {
+                JobReferenceLoadError(text: "Bays and vans couldn't be loaded.") {
+                    await model.loadReferenceData()
                 }
+            } else {
+                resourcePicker
             }
-            .pickerStyle(.menu)
-            .tint(Theme.glacier)
         }
+    }
+
+    private var resourcePicker: some View {
+        Picker("Bay / van", selection: $model.resourceID) {
+            Text("None").tag(UUID?.none)
+            ForEach(model.resources) { resource in
+                Text(resource.name).tag(UUID?.some(resource.id))
+            }
+        }
+        .pickerStyle(.menu)
+        .tint(Theme.glacier)
     }
 
     private var teamCard: some View {
         JobSectionCard("Assign") {
-            VStack(spacing: 0) {
-                ForEach(model.team) { member in
-                    memberRow(member)
+            if model.teamFailed && model.team.isEmpty {
+                JobReferenceLoadError(text: "The team couldn't be loaded, so nobody can be assigned yet. Try again, or assign from the job after it's created.") {
+                    await model.loadReferenceData()
+                }
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(model.team) { member in
+                        memberRow(member)
+                    }
                 }
             }
         }
@@ -236,7 +259,7 @@ struct NewJobScheduleStep: View {
                 }
                 Spacer()
                 Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22))
+                    .font(Theme.Typography.title.weight(.regular))
                     .foregroundStyle(isOn ? Theme.glacier : Theme.textTertiary)
                     .accessibilityHidden(true)
             }
@@ -259,6 +282,79 @@ struct NewJobScheduleStep: View {
                 TextField("Only your team sees these", text: $model.internalNotes, axis: .vertical)
                     .lineLimit(2...6)
                     .inputFieldStyle()
+            }
+        }
+    }
+}
+
+// MARK: - Availability
+
+/// What's already booked on the chosen day and warnings for the chosen
+/// time: outside business hours, blocked time, and the chosen bay / van or
+/// team already booked. Advisory — the manager can still book.
+struct NewJobAvailabilityPanel: View {
+    let model: NewJobModel
+
+    var body: some View {
+        JobSectionStateView(
+            model.availability,
+            loadingLabel: "Checking availability…",
+            retry: { await model.loadAvailability() }
+        ) { _ in
+            content(warnings: model.availabilityWarnings, items: model.availabilityDayItems)
+        }
+    }
+
+    private func content(warnings: [String], items: [JobBusyItem]) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            NewJobAvailabilityWarnings(warnings: warnings)
+            Text("Booked that day")
+                .font(Theme.Typography.captionEmphasis)
+                .foregroundStyle(Theme.textSecondary)
+                .accessibilityAddTraits(.isHeader)
+            if items.isEmpty {
+                JobEmptyLine(text: "Nothing booked that day.", systemImage: "calendar")
+            } else {
+                ForEach(items) { item in
+                    row(item)
+                }
+            }
+        }
+    }
+
+    private func row(_ item: JobBusyItem) -> some View {
+        let clashes = item.overlaps(start: model.start, end: model.end)
+        let hint: String = clashes ? "Overlaps the chosen time" : ""
+        return HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
+            Text(model.clock.rangeText(from: item.startsAt, to: item.endsAt))
+                .font(Theme.Typography.footnote.monospacedDigit())
+                .foregroundStyle(clashes ? Theme.danger : Theme.textSecondary)
+            Text(item.summary)
+                .font(Theme.Typography.footnote)
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(Text(hint))
+    }
+}
+
+/// The availability warnings, or an all-clear line.
+struct NewJobAvailabilityWarnings: View {
+    let warnings: [String]
+
+    var body: some View {
+        if warnings.isEmpty {
+            InlineMessage(text: "No conflicts for this time.", kind: .success)
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                ForEach(Array(warnings.enumerated()), id: \.offset) { entry in
+                    InlineMessage(text: entry.element, kind: .error)
+                }
+                Text("You can still book this time.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textTertiary)
             }
         }
     }
@@ -297,6 +393,9 @@ struct NewJobReviewStep: View {
                 InfoRow(label: "Bay / van", value: resource.name, systemImage: "square.grid.2x2")
             }
             InfoRow(label: "Team", value: teamText, systemImage: "person.2")
+            if !model.scheduleLater && !model.availabilityWarnings.isEmpty {
+                NewJobAvailabilityWarnings(warnings: model.availabilityWarnings)
+            }
         }
     }
 

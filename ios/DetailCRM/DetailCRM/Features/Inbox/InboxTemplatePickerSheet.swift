@@ -283,9 +283,10 @@ private struct InboxTemplateSendView: View {
             try await CustomerService.jobs(shopID: shopID, customerID: customerID, limit: 20)
         }
         jobs.apply(result)
-        // Job templates default to the most recent job.
-        if template.requiresJob, jobID == nil, let first = result.value?.first {
-            jobID = first.id
+        // Appointment templates pre-select the customer's next upcoming open
+        // job; otherwise staff choose (never a cancelled/unscheduled guess).
+        if template.requiresJob, jobID == nil, let list = result.value {
+            jobID = InboxComposeRules.defaultJobID(templateKey: template.key, jobs: list, now: Date())
         }
     }
 

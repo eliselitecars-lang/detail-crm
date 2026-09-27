@@ -593,11 +593,19 @@ struct CustomerInvoiceSummary: Codable, Identifiable, Hashable, Sendable {
 }
 
 // table: memberships
+/// A customer's membership. `priceCents`, `interval` and `intervalCount` are
+/// the billing terms of THIS membership (copied from the plan at checkout and
+/// kept when the plan's price later changes), so they are what the customer is
+/// actually billed; the plan is only used for its name.
 struct CustomerMembershipSummary: Codable, Identifiable, Hashable, Sendable {
     var id: UUID
     var planID: UUID
     var vehicleID: UUID?
     var status: MembershipStatus
+    var priceCents: Int
+    /// `month` | `year` (`membership_interval`)
+    var interval: String
+    var intervalCount: Int
     var currentPeriodEnd: Date?
     var cancelAtPeriodEnd: Bool
     var startedAt: Date?
@@ -608,39 +616,32 @@ struct CustomerMembershipSummary: Codable, Identifiable, Hashable, Sendable {
         case planID = "plan_id"
         case vehicleID = "vehicle_id"
         case status
+        case priceCents = "price_cents"
+        case interval
+        case intervalCount = "interval_count"
         case currentPeriodEnd = "current_period_end"
         case cancelAtPeriodEnd = "cancel_at_period_end"
         case startedAt = "started_at"
         case createdAt = "created_at"
     }
 
-    static let selectColumns = "id,plan_id,vehicle_id,status,current_period_end,cancel_at_period_end,started_at,created_at"
-}
+    static let selectColumns = "id,plan_id,vehicle_id,status,price_cents,interval,interval_count,current_period_end,cancel_at_period_end,started_at,created_at"
 
-// table: membership_plans
-struct CustomerMembershipPlanRef: Codable, Identifiable, Hashable, Sendable {
-    var id: UUID
-    var name: String
-    var priceCents: Int
-    /// `month` | `year`
-    var interval: String
-    var intervalCount: Int
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case name
-        case priceCents = "price_cents"
-        case interval
-        case intervalCount = "interval_count"
-    }
-
-    static let selectColumns = "id,name,price_cents,interval,interval_count"
-
-    /// "per month", "every 3 months", "per year".
+    /// "per month", "every 3 months", "per year", "every 2 years".
     var cadenceText: String {
         let unit = interval == "year" ? "year" : "month"
         return intervalCount <= 1 ? "per \(unit)" : "every \(intervalCount) \(unit)s"
     }
+}
+
+// table: membership_plans
+/// Only the plan's name: its current price/cadence may differ from what an
+/// existing membership is billed (see `CustomerMembershipSummary`).
+struct CustomerMembershipPlanRef: Codable, Identifiable, Hashable, Sendable {
+    var id: UUID
+    var name: String
+
+    static let selectColumns = "id,name"
 }
 
 /// A membership joined with its plan for display.

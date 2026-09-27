@@ -19,6 +19,7 @@ struct JobChecklistSection: View {
     @Environment(ToastCenter.self) private var toasts
     @State private var newItem = ""
     @State private var templates: [JobChecklistTemplateRef] = []
+    @State private var templatesError: String?
     @State private var confirmation: ConfirmationRequest?
 
     var body: some View {
@@ -90,6 +91,11 @@ struct JobChecklistSection: View {
                 .accessibilityLabel("Add checklist item")
                 .disabled(newItem.trimmedNonEmpty == nil)
             }
+            if let templatesError {
+                JobReferenceLoadError(text: templatesError) {
+                    await loadTemplates()
+                }
+            }
             if !templates.isEmpty {
                 Menu {
                     ForEach(templates) { template in
@@ -110,8 +116,11 @@ struct JobChecklistSection: View {
 
     private func loadTemplates() async {
         guard canManage, let shopID = try? appState.requireShopID() else { return }
-        if let rows = try? await JobOpsService.checklistTemplates(shopID: shopID) {
-            templates = rows
+        do {
+            templates = try await JobOpsService.checklistTemplates(shopID: shopID)
+            templatesError = nil
+        } catch {
+            templatesError = "Checklist templates couldn't be loaded. " + ErrorText.message(for: error)
         }
     }
 
@@ -172,7 +181,7 @@ struct JobChecklistRow: View {
             Button(action: onToggle) {
                 HStack(spacing: Theme.Spacing.md) {
                     Image(systemName: item.isDone ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 22, weight: .regular))
+                        .font(Theme.Typography.title.weight(.regular))
                         .foregroundStyle(item.isDone ? Theme.success : Theme.textTertiary)
                         .accessibilityHidden(true)
                     Text(item.label)

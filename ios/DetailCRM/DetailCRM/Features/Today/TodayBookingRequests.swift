@@ -5,7 +5,8 @@
 //  Online bookings still waiting for a decision (manager+). Approve moves
 //  the job to Scheduled (the server sends the customer the
 //  booking-confirmed message when that template is enabled); Decline
-//  cancels it with an optional reason.
+//  cancels it with an optional reason that the customer sees on their
+//  booking page (`jobs.cancel_reason`).
 //
 
 import SwiftUI
@@ -25,7 +26,10 @@ struct TodayBookingRequestsSection: View {
                 TodayBookingRequestCard(request: request, context: context, actions: actions)
             }
             if totalPending > requests.count {
-                Text("Showing the first \(requests.count). Open the Calendar to see the rest.")
+                // Requests without a requested time sort last and never
+                // appear in the Calendar (it lists scheduled jobs only), so
+                // point at deciding these first rather than at the Calendar.
+                Text("Showing the first \(requests.count) of \(totalPending). Approve or decline these to see the rest.")
                     .font(Theme.Typography.footnote)
                     .foregroundStyle(Theme.textSecondary)
                     .padding(.horizontal, Theme.Spacing.xs)
@@ -121,8 +125,13 @@ struct TodayDeclineSheet: View {
                             .foregroundStyle(Theme.textSecondary)
                     }
                 }
-                FormRow("Reason (optional)", hint: "Kept on the job for your team.") {
-                    TextField("Why are you declining?", text: $reason, axis: .vertical)
+                // jobs.cancel_reason is customer-facing: the online booking
+                // page shows it in the "This booking was cancelled" banner.
+                FormRow(
+                    "Reason for the customer (optional)",
+                    hint: "The customer sees this on their booking page. Don't include internal notes."
+                ) {
+                    TextField("e.g. We're fully booked that day", text: $reason, axis: .vertical)
                         .lineLimit(3...6)
                         .padding(.vertical, Theme.Spacing.sm)
                         .inputFieldStyle()

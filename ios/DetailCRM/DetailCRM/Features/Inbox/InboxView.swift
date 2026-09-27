@@ -21,6 +21,9 @@ struct InboxView: View {
     @State private var showingNewConversation = false
     @State private var pendingCustomer: Customer?
     @State private var openedConversation: InboxOpenedConversation?
+    /// A background refresh already reported a failure; stay quiet until a
+    /// refresh succeeds again (no toast every 30 s while offline).
+    @State private var pollFailureReported = false
 
     var body: some View {
         Group {
@@ -48,8 +51,10 @@ struct InboxView: View {
         .toolbar { toolbarContent }
         .task {
             guard appState.can(.useInbox) else { return }
+            var isBackground = false
             while !Task.isCancelled {
-                await load()
+                await load(isBackground: isBackground)
+                isBackground = true
                 try? await Task.sleep(for: .seconds(30))
             }
         }
@@ -110,14 +115,28 @@ struct InboxView: View {
         return result
     }
 
-    private func load() async {
+    /// `isBackground` = the 30-second poll: it never swaps an error screen
+    /// for a spinner and reports a refresh failure at most once until a
+    /// refresh succeeds. The first load, Retry and pull to refresh always
+    /// surface their errors.
+    private func load(isBackground: Bool = false) async {
         guard let shopID = try? appState.requireShopID() else { return }
-        state.beginLoading()
+        if !isBackground || state.errorMessage == nil {
+            state.beginLoading()
+        }
         let result = await LoadState<[MessageThread]>.result {
             try await MessageService.threads(shopID: shopID)
         }
-        if case .failed(let message) = result, state.value != nil {
-            toasts.show(message, style: .error)
+        switch result {
+        case .loaded:
+            pollFailureReported = false
+        case .failed(let message):
+            if state.value != nil && (!isBackground || !pollFailureReported) {
+                toasts.show(message, style: .error)
+                if isBackground { pollFailureReported = true }
+            }
+        case .idle, .loading:
+            break
         }
         state.apply(result)
     }

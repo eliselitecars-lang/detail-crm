@@ -71,6 +71,7 @@ struct JobLinesEditorSheet: View {
                             .themedRow()
                     }
                 }
+                noticesSection
                 Section {
                     if lines.isEmpty {
                         JobEmptyLine(text: "No services yet.", systemImage: "list.bullet.rectangle")
@@ -114,6 +115,32 @@ struct JobLinesEditorSheet: View {
             .listStyle(.insetGrouped)
             .screenBackground()
         )
+    }
+
+    /// A write that saved but couldn't be re-read, and the "already
+    /// invoiced" warning (job edits never change an issued invoice).
+    @ViewBuilder
+    private var noticesSection: some View {
+        if let problem = model.linesRefreshProblem {
+            Section {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    InlineMessage(text: problem, kind: .error)
+                    AsyncButton("Refresh", style: .themeSecondaryCompact) {
+                        await model.refreshJobAndLines()
+                    }
+                }
+                .themedRow()
+            }
+        }
+        if let invoice = model.issuedInvoice {
+            Section {
+                InlineMessage(
+                    text: invoice.title + " has already been issued for this job. Changes here update the job only — the invoice keeps its lines and total.",
+                    kind: .info
+                )
+                .themedRow()
+            }
+        }
     }
 
     private func totalsRows(_ job: Job, currency: String) -> some View {

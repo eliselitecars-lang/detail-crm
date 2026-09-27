@@ -14,7 +14,12 @@ import DetailCore
 enum InboxComposeRules {
 
     /// SMS character limit (database + edge function).
-    static let smsLimit = 1600
+    static let smsLimit = MessageService.smsLimit
+
+    /// SMS length as the server counts it (UTF-16 code units).
+    static func smsLength(_ text: String) -> Int {
+        MessageService.smsLength(text)
+    }
 
     /// Why `channel` can't be used for `customer`, or nil when it can.
     static func blockReason(channel: Message.Channel, customer: Customer?) -> String? {
@@ -49,10 +54,48 @@ enum InboxComposeRules {
     static func draftProblem(channel: Message.Channel, body: String) -> String? {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return "Write a message first." }
-        if channel == .sms && trimmed.count > smsLimit {
+        if channel == .sms && smsLength(trimmed) > smsLimit {
             return "Texts are limited to \(smsLimit) characters."
         }
         return nil
+    }
+
+    // MARK: - Job templates
+
+    /// Templates about an upcoming appointment: the job to pre-select is
+    /// the customer's next one.
+    static let upcomingJobTemplateKeys: Set<String> = [
+        "booking_confirmed", "appointment_reminder", "on_the_way", "job_started",
+    ]
+
+    /// The job a template should start with, or nil to make staff choose.
+    /// Only appointment templates get a default: the open, scheduled job
+    /// that starts soonest among those not yet over (`scheduledEnd`, or
+    /// `scheduledStart` when there is no end, at or after `now`). Anything
+    /// else (unscheduled requests, finished or cancelled jobs, receipts,
+    /// invoices) is left for staff to pick.
+    static func defaultJobID(templateKey: String, jobs: [CustomerJobSummary], now: Date) -> UUID? {
+        guard upcomingJobTemplateKeys.contains(templateKey) else { return nil }
+        var best: CustomerJobSummary?
+        for job in jobs where isOpen(job.status) {
+            guard let start = job.scheduledStart else { continue }
+            let end = job.scheduledEnd ?? start
+            guard end >= now else { continue }
+            if let current = best, let currentStart = current.scheduledStart, currentStart <= start {
+                continue
+            }
+            best = job
+        }
+        return best?.id
+    }
+
+    private static func isOpen(_ status: JobStatus) -> Bool {
+        switch status {
+        case .requested, .scheduled, .confirmed, .enRoute, .inProgress:
+            return true
+        case .completed, .cancelled, .noShow:
+            return false
+        }
     }
 
     // MARK: - Local template preview

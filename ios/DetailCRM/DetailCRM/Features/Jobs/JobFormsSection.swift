@@ -19,11 +19,17 @@ struct JobFormsSection: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
     @State private var templates: [JobFormTemplateRef] = []
+    @State private var templatesError: String?
 
     var body: some View {
         JobSectionCard("Forms") {
             JobSectionStateView(model.forms, loadingLabel: "Loading forms…", retry: { await model.loadForms() }) { forms in
                 list(forms)
+            }
+            if canManage, let templatesError {
+                JobReferenceLoadError(text: templatesError) {
+                    await loadTemplates()
+                }
             }
             if canManage && !attachable.isEmpty {
                 attachMenu
@@ -79,8 +85,11 @@ struct JobFormsSection: View {
 
     private func loadTemplates() async {
         guard canManage, let shopID = try? appState.requireShopID() else { return }
-        if let rows = try? await JobOpsService.formTemplates(shopID: shopID) {
-            templates = rows
+        do {
+            templates = try await JobOpsService.formTemplates(shopID: shopID)
+            templatesError = nil
+        } catch {
+            templatesError = "Form templates couldn't be loaded. " + ErrorText.message(for: error)
         }
     }
 

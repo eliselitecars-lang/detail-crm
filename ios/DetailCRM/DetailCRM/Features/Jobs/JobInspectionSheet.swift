@@ -66,6 +66,10 @@ struct JobInspectionSheet: View {
     @State private var markDraft: JobMarkDraftRequest?
     @State private var mileageText = ""
     @State private var fuel: JobFuelLevelChoice = .notRecorded
+    /// True once the user picks a fuel segment. Until then the stored
+    /// percent (any 0–100 value, e.g. 60 from the web app) is kept exactly
+    /// and never rounded to the nearest quarter on save or sign.
+    @State private var fuelEdited = false
     @State private var notesText = ""
     @State private var signerName = ""
     @State private var drawing = SignatureDrawing()
@@ -200,13 +204,18 @@ struct JobInspectionSheet: View {
                 ThemedTextField(label: "Mileage", placeholder: "Odometer reading", text: $mileageText, kind: .number)
                     .disabled(!editable)
                 FormRow("Fuel level") {
-                    Picker("Fuel level", selection: $fuel) {
+                    Picker("Fuel level", selection: fuelBinding) {
                         ForEach(JobFuelLevelChoice.allCases) { choice in
                             Text(choice.title).tag(choice)
                         }
                     }
                     .pickerStyle(.segmented)
                     .disabled(!editable)
+                }
+                if let note = recordedFuelNote(bundle.inspection) {
+                    Text(note)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.textTertiary)
                 }
                 FormRow("Notes") {
                     TextField("Condition notes", text: $notesText, axis: .vertical)
@@ -234,10 +243,34 @@ struct JobInspectionSheet: View {
         return .some(value)
     }
 
+    /// Picking a segment marks the fuel as edited.
+    private var fuelBinding: Binding<JobFuelLevelChoice> {
+        Binding(
+            get: { fuel },
+            set: { newValue in
+                fuel = newValue
+                fuelEdited = true
+            }
+        )
+    }
+
+    /// The fuel percent to save: the user's pick, or the stored value
+    /// untouched when they didn't change it.
+    private func fuelToSave(_ inspection: Inspection) -> Int? {
+        fuelEdited ? fuel.percent : inspection.fuelLevel
+    }
+
+    /// Shows the exact stored percent when it isn't one of the segments.
+    private func recordedFuelNote(_ inspection: Inspection) -> String? {
+        guard !fuelEdited, let stored = inspection.fuelLevel,
+              JobFuelLevelChoice(rawValue: stored) == nil else { return nil }
+        return "Recorded: \(stored)%"
+    }
+
     private func isDirty(_ inspection: Inspection) -> Bool {
         let mileage = Int(mileageText.filter { $0 != "," && $0 != " " })
         return mileage != inspection.mileage
-            || fuel.percent != inspection.fuelLevel
+            || fuelToSave(inspection) != inspection.fuelLevel
             || notesText.trimmedNonEmpty != inspection.notes?.trimmedNonEmpty
     }
 
@@ -249,7 +282,7 @@ struct JobInspectionSheet: View {
             try await model.updateInspection(
                 inspection.id,
                 mileage: mileage,
-                fuelLevel: fuel.percent,
+                fuelLevel: fuelToSave(inspection),
                 notes: notesText
             )
             toasts.show("Inspection saved")
@@ -314,6 +347,7 @@ struct JobInspectionSheet: View {
         didPrefill = true
         mileageText = inspection.mileage.map(String.init) ?? ""
         fuel = JobFuelLevelChoice.nearest(inspection.fuelLevel)
+        fuelEdited = false
         notesText = inspection.notes ?? ""
         signerName = model.snapshot?.customer?.displayName ?? ""
         if let first = bundle?.marks.first {
@@ -407,13 +441,17 @@ struct JobMarkRow: View {
     let onDelete: (() -> Void)?
 
     @State private var photoURL: URL?
+    /// The number badge grows with Dynamic Type.
+    @ScaledMetric(relativeTo: .caption) private var badgeSide: CGFloat = 24
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.md) {
             Text("\(number)")
-                .font(.system(size: 12, weight: .bold).monospacedDigit())
+                .font(Theme.Typography.captionEmphasis.monospacedDigit())
                 .foregroundStyle(Theme.onAccent)
-                .frame(width: 24, height: 24)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .frame(width: badgeSide, height: badgeSide)
                 .background(Circle().fill(Theme.danger))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {

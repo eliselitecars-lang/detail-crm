@@ -146,13 +146,24 @@ struct CalendarEvent: Codable, Hashable, Sendable, Identifiable {
         return String(title[range.upperBound...]).trimmedNonEmpty
     }
 
-    /// Main line for a block or row.
+    /// The customer part of a job title ("Acme — Full Detail" -> "Acme").
+    /// The feed's `customer_name` is built from first/last name only, so
+    /// company-only customers have it nil while the title still starts
+    /// with the company.
+    var titleCustomerPart: String? {
+        guard isJob, let title else { return nil }
+        guard let range = title.range(of: " — ") else { return title.trimmedNonEmpty }
+        return String(title[..<range.lowerBound]).trimmedNonEmpty
+    }
+
+    /// Main line for a block or row (never repeats the services, which
+    /// rows show separately via `servicesSummary`).
     var displayTitle: String {
         if isBlockedTime {
             return title?.trimmedNonEmpty ?? "Blocked"
         }
         if isBusyBlock { return "Busy" }
-        return customerName?.trimmedNonEmpty ?? title?.trimmedNonEmpty ?? "Job"
+        return customerName?.trimmedNonEmpty ?? titleCustomerPart ?? "Job"
     }
 
     /// Whether this event overlaps `[start, end)`.

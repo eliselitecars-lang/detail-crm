@@ -15,6 +15,11 @@ struct JobServicesSection: View {
     let lines: [JobLineItem]
     let currencyCode: String
     let canEdit: Bool
+    /// The job's issued (non-void) invoice, when the money picture is loaded.
+    let invoice: JobIssuedInvoiceInfo?
+    /// Set when a line/discount write succeeded but the re-read failed.
+    let refreshProblem: String?
+    let onRetryRefresh: () async -> Void
     let onEdit: () -> Void
 
     var body: some View {
@@ -23,6 +28,18 @@ struct JobServicesSection: View {
             actionTitle: canEdit ? "Edit" : nil,
             action: canEdit ? onEdit : nil
         ) {
+            if let refreshProblem {
+                InlineMessage(text: refreshProblem, kind: .error)
+                AsyncButton("Refresh services", style: .themeSecondaryCompact) {
+                    await onRetryRefresh()
+                }
+            }
+            if let invoice, invoice.totalCents != job.totalCents {
+                InlineMessage(
+                    text: invoice.title + " was issued with a different total. Changes to these services don't update the invoice.",
+                    kind: .info
+                )
+            }
             if lines.isEmpty {
                 JobEmptyLine(text: canEdit ? "No services yet. Tap Edit to add some." : "No services on this job.", systemImage: "list.bullet.rectangle")
             } else {
@@ -195,7 +212,7 @@ struct JobMoneySummaryView: View {
                     }
                     Spacer(minLength: Theme.Spacing.sm)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(Theme.Typography.footnote.weight(.semibold))
                         .foregroundStyle(Theme.textTertiary)
                         .accessibilityHidden(true)
                 }

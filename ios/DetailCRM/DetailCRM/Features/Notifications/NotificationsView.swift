@@ -77,9 +77,12 @@ struct NotificationsView: View {
         state = .loaded(items)
     }
 
+    /// Uses the current row (not the captured one) so a job page that
+    /// appears again after a push/pop doesn't re-send the update.
     private func markRead(_ item: AppNotification) {
-        guard item.isUnread else { return }
-        setRead(item, read: true)
+        let current = state.value?.first(where: { $0.id == item.id }) ?? item
+        guard current.isUnread else { return }
+        setRead(current, read: true)
     }
 
     private func toggleRead(_ item: AppNotification) {
@@ -187,8 +190,10 @@ private struct NotificationsList: View {
     }
 }
 
-/// A job notification opens the job (and is marked read); any other one
-/// is just marked read on tap.
+/// A job notification opens the job and is marked read when the job
+/// page appears — so every way of activating the link (tap, VoiceOver
+/// double-tap, Switch Control, keyboard) marks it. Any other one is just
+/// marked read on activation.
 private struct NotificationsRowLink: View {
     let item: AppNotification
     let clock: ShopClock
@@ -196,10 +201,12 @@ private struct NotificationsRowLink: View {
 
     var body: some View {
         if let jobID = item.jobID {
-            NavigationLink(value: AppRoute.job(jobID)) {
+            NavigationLink {
+                AppRouteDestination(route: AppRoute.job(jobID))
+                    .onAppear { onOpen(item) }
+            } label: {
                 NotificationsRow(item: item, clock: clock)
             }
-            .simultaneousGesture(TapGesture().onEnded { onOpen(item) })
         } else {
             Button {
                 onOpen(item)

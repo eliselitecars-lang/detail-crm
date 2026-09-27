@@ -23,6 +23,11 @@ struct CalendarTimelineView: View {
     let onRefresh: () async -> Void
     let onSelectDay: (Date) -> Void
 
+    /// The first-hour scroll runs once per range (the parent gives each
+    /// range its own identity), not on every reappearance, so coming back
+    /// from a job keeps the user's place.
+    @State private var didInitialScroll = false
+
     private var hourHeight: CGFloat { compact ? 48 : 60 }
     private let labelWidth: CGFloat = 48
 
@@ -60,6 +65,8 @@ struct CalendarTimelineView: View {
                 }
                 .refreshable { await onRefresh() }
                 .onAppear {
+                    guard !didInitialScroll else { return }
+                    didInitialScroll = true
                     let hour = CalendarLayoutEngine.initialScrollHour(for: layouts)
                     DispatchQueue.main.async {
                         proxy.scrollTo(CalendarHourLabels.anchorID(hour), anchor: .top)
@@ -109,11 +116,16 @@ private struct CalendarWeekHeaderDay: View {
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                // Sized by the text (Dynamic Type), not a fixed frame, so
+                // two-digit dates never truncate at accessibility sizes.
                 Text(CalendarFormat.dayNumber(day, clock: clock))
                     .font(Theme.Typography.captionEmphasis)
                     .foregroundStyle(isToday ? Theme.onAccent : Theme.textPrimary)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(isToday ? Theme.glacier : Color.clear))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .padding(Theme.Spacing.xxs)
+                    .frame(minWidth: 26, minHeight: 26)
+                    .background(Capsule().fill(isToday ? Theme.glacier : Color.clear))
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())

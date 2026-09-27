@@ -240,17 +240,24 @@ struct JobMarkPin: View {
     let number: Int
     let isSelected: Bool
 
+    /// Grows with Dynamic Type, capped so pins never hide the diagram.
+    @ScaledMetric(relativeTo: .caption) private var scaledSide: CGFloat = 26
+
+    private var side: CGFloat { min(scaledSide, 40) }
+
     var body: some View {
         Text("\(number)")
-            .font(.system(size: 12, weight: .bold).monospacedDigit())
+            .font(Theme.Typography.captionEmphasis.monospacedDigit())
             .foregroundStyle(Theme.onAccent)
-            .frame(width: 26, height: 26)
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            .frame(width: side, height: side)
             .background(Circle().fill(Theme.danger))
             .overlay(
                 Circle().strokeBorder(Theme.surface, lineWidth: isSelected ? 3 : 2)
             )
             .scaleEffect(isSelected ? 1.2 : 1)
-            .frame(width: 44, height: 44)
+            .frame(width: max(44, side + 8), height: max(44, side + 8))
             .contentShape(Circle())
             .accessibilityElement()
             .accessibilityLabel("Mark \(number): \(mark.damage.displayName)")

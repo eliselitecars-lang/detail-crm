@@ -21,6 +21,16 @@ enum MessageService {
     /// How many messages a conversation screen loads.
     static let threadWindow = 300
 
+    /// SMS body limit (database + `messaging` edge function).
+    static let smsLimit = 1600
+
+    /// Length of a text as the `messaging` function measures it: JS
+    /// `body.length`, i.e. UTF-16 code units (an emoji counts as 2). This is
+    /// the strictest of the server's checks, so the app matches it.
+    static func smsLength(_ text: String) -> Int {
+        text.utf16.count
+    }
+
     // MARK: - Inbox
 
     /// Conversations, newest activity first, with unread counts.
@@ -67,7 +77,14 @@ enum MessageService {
         for key in order {
             if case .customer(let id) = key { customerIDs.append(id) }
         }
-        let customers = try await CustomerService.fetch(shopID: shopID, ids: customerIDs)
+        // Names are a secondary lookup: if it fails, the conversations still
+        // show (titled "Customer") instead of failing the whole inbox.
+        let customers: [Customer]
+        do {
+            customers = try await CustomerService.fetch(shopID: shopID, ids: customerIDs)
+        } catch {
+            customers = []
+        }
         let customersByID = Dictionary(customers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         return order.compactMap { key -> MessageThread? in
@@ -185,7 +202,7 @@ enum MessageService {
     ) async throws -> InboxSendResult {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw AppError.invalidInput("Write a message first.") }
-        if channel == .sms && trimmed.count > 1600 {
+        if channel == .sms && smsLength(trimmed) > smsLimit {
             throw AppError.invalidInput("Text messages are limited to 1,600 characters.")
         }
         let payload = MessageSendBody(

@@ -21,6 +21,12 @@ struct TodaySnapshot: Sendable {
     var nextJobDetails: DashboardSummaryNextJobDetails?
     /// The signed-in member's open time entries (shift and/or job).
     var openEntries: [DashboardSummaryTimeEntry]
+    /// Set when the booking requests failed to load (the rest of the
+    /// dashboard still shows; the section renders this instead).
+    var requestsError: String? = nil
+    /// Set when the open time entries failed to load. The clock card must
+    /// then not offer Clock in (the member may already be on the clock).
+    var entriesError: String? = nil
 
     var openShift: DashboardSummaryTimeEntry? {
         openEntries.first { $0.isShift && $0.isOpen }
@@ -31,11 +37,19 @@ struct TodaySnapshot: Sendable {
     }
 }
 
+/// A secondary section's rows, or why they could not be loaded.
+struct TodayPartial<Item: Sendable>: Sendable {
+    let items: [Item]
+    let errorMessage: String?
+}
+
 enum TodayLoader {
 
-    /// Loads everything concurrently. The summary, jobs, requests and time
-    /// entries must all succeed; the next job's address is best effort (the
-    /// card still shows without it).
+    /// Loads everything concurrently. The summary and today's jobs must
+    /// succeed (they are the dashboard). Booking requests and open time
+    /// entries are secondary: a failure there degrades to an inline error
+    /// in that section instead of hiding the whole screen. The next job's
+    /// address is best effort (the card still shows without it).
     static func load(
         shopID: UUID,
         memberID: UUID?,
@@ -49,8 +63,8 @@ enum TodayLoader {
 
         let summary = try await summaryTask
         let events = try await eventsTask
-        let pending = try await requestsTask
-        let open = try await entriesTask
+        let pending: TodayPartial<DashboardSummaryBookingRequest> = await requestsTask
+        let open: TodayPartial<DashboardSummaryTimeEntry> = await entriesTask
 
         var details: DashboardSummaryNextJobDetails?
         if let next = summary.nextJob {
@@ -60,27 +74,42 @@ enum TodayLoader {
         return TodaySnapshot(
             summary: summary,
             jobs: todaysJobs(from: events),
-            requests: pending,
+            requests: pending.items,
             nextJobDetails: details,
-            openEntries: open
+            openEntries: open.items,
+            requestsError: pending.errorMessage,
+            entriesError: open.errorMessage
         )
     }
 
-    /// Openable jobs only (busy blocks and blocked time are calendar-only).
+    /// Openable jobs only (busy blocks and blocked time are calendar-only),
+    /// without no-shows — matching `dashboard_summary.jobs_today.total`,
+    /// which excludes cancelled and no-show jobs (the feed already leaves
+    /// out cancelled ones).
     static func todaysJobs(from events: [CalendarEvent]) -> [CalendarEvent] {
         events
-            .filter { $0.isOpenableJob }
+            .filter { $0.isOpenableJob && $0.status != .noShow && $0.status != .cancelled }
             .sorted(by: CalendarService.startOrder)
     }
 
-    private static func requests(shopID: UUID, include: Bool) async throws -> [DashboardSummaryBookingRequest] {
-        guard include else { return [] }
-        return try await DashboardService.bookingRequests(shopID: shopID)
+    private static func requests(shopID: UUID, include: Bool) async -> TodayPartial<DashboardSummaryBookingRequest> {
+        guard include else { return TodayPartial(items: [], errorMessage: nil) }
+        do {
+            let items = try await DashboardService.bookingRequests(shopID: shopID)
+            return TodayPartial(items: items, errorMessage: nil)
+        } catch {
+            return TodayPartial(items: [], errorMessage: ErrorText.message(for: error))
+        }
     }
 
-    private static func entries(shopID: UUID, memberID: UUID?) async throws -> [DashboardSummaryTimeEntry] {
-        guard let memberID else { return [] }
-        return try await DashboardService.openTimeEntries(shopID: shopID, memberID: memberID)
+    private static func entries(shopID: UUID, memberID: UUID?) async -> TodayPartial<DashboardSummaryTimeEntry> {
+        guard let memberID else { return TodayPartial(items: [], errorMessage: nil) }
+        do {
+            let items = try await DashboardService.openTimeEntries(shopID: shopID, memberID: memberID)
+            return TodayPartial(items: items, errorMessage: nil)
+        } catch {
+            return TodayPartial(items: [], errorMessage: ErrorText.message(for: error))
+        }
     }
 
     /// "Good morning" / "Good afternoon" / "Good evening" by shop-local hour.

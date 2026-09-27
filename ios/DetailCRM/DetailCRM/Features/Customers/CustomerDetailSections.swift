@@ -614,13 +614,12 @@ private struct CustomerMembershipRow: View {
                 }
             }
             Spacer(minLength: Theme.Spacing.sm)
-            if let plan = item.plan {
-                VStack(alignment: .trailing, spacing: Theme.Spacing.xxs) {
-                    MoneyText(cents: plan.priceCents, currencyCode: currencyCode, size: .small)
-                    Text(plan.cadenceText)
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                }
+            // The membership's own billing terms, not the plan's current price.
+            VStack(alignment: .trailing, spacing: Theme.Spacing.xxs) {
+                MoneyText(cents: item.membership.priceCents, currencyCode: currencyCode, size: .small)
+                Text(item.membership.cadenceText)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary)
             }
         }
         .padding(.vertical, Theme.Spacing.xs)

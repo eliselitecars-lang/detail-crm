@@ -68,7 +68,7 @@ struct JobHeaderSection: View {
                 Button {
                     onSelectStatus(primaryTarget)
                 } label: {
-                    Label(Self.actionTitle(for: primaryTarget), systemImage: Self.icon(for: primaryTarget))
+                    Label(title(for: primaryTarget), systemImage: Self.icon(for: primaryTarget))
                 }
                 .buttonStyle(.themePrimary)
             }
@@ -94,7 +94,7 @@ struct JobHeaderSection: View {
                 Button(role: target.isSideExit ? .destructive : nil) {
                     onSelectStatus(target)
                 } label: {
-                    Label(Self.menuTitle(for: target, from: job.status), systemImage: Self.icon(for: target))
+                    Label(menuTitle(for: target), systemImage: Self.icon(for: target))
                 }
             }
         } label: {
@@ -121,6 +121,24 @@ struct JobHeaderSection: View {
     }
 
     // MARK: - Wording
+
+    /// No time yet: the step opens the schedule editor first, so say so.
+    private func needsTime(_ target: JobStatus) -> Bool {
+        job.scheduledStart == nil && JobDetailModel.statusNeedsTime(target)
+    }
+
+    private func title(for target: JobStatus) -> String {
+        guard needsTime(target) else { return Self.actionTitle(for: target) }
+        switch target {
+        case .scheduled: return "Pick a time to schedule"
+        case .confirmed: return "Pick a time to confirm"
+        default: return "Pick a time to move to \(target.displayName.lowercased())"
+        }
+    }
+
+    private func menuTitle(for target: JobStatus) -> String {
+        needsTime(target) ? title(for: target) : Self.menuTitle(for: target, from: job.status)
+    }
 
     static func actionTitle(for status: JobStatus) -> String {
         switch status {
@@ -217,7 +235,7 @@ struct JobStatusStepLabel: View {
     var body: some View {
         HStack(spacing: Theme.Spacing.xs) {
             Image(systemName: iconName)
-                .font(.system(size: 11, weight: .bold))
+                .font(Theme.Typography.eyebrow)
                 .accessibilityHidden(true)
             Text(step.displayName)
                 .font(Theme.Typography.captionEmphasis)

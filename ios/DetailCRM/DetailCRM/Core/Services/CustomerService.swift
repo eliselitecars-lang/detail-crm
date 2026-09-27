@@ -269,7 +269,7 @@ enum CustomerService {
             .value
     }
 
-    /// Memberships with their plan (name, price, cadence) for display.
+    /// Memberships (with their own billed price/cadence) plus the plan name.
     static func memberships(shopID: UUID, customerID: UUID) async throws -> [CustomerMembershipItem] {
         let memberships: [CustomerMembershipSummary] = try await Supa.client
             .from("memberships")

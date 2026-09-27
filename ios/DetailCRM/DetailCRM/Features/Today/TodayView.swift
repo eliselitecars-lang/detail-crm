@@ -219,7 +219,7 @@ private struct TodayTechnicianSections: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
-            AnyView(clockCard)
+            AnyView(TodayClockSlot(snapshot: snapshot, context: context, actions: actions))
             if let next = snapshot.summary.nextJob {
                 AnyView(TodayNextJobCard(
                     job: next,
@@ -241,15 +241,6 @@ private struct TodayTechnicianSections: View {
         }
     }
 
-    private var clockCard: some View {
-        TodayClockCard(
-            openShift: snapshot.openShift,
-            openJobEntry: snapshot.openJobEntry,
-            clock: context.clock,
-            onClockIn: actions.clockIn,
-            onClockOut: actions.clockOut
-        )
-    }
 }
 
 private struct TodayManagerSections: View {
@@ -263,7 +254,12 @@ private struct TodayManagerSections: View {
                 AnyView(TodayRevenueSection(revenue: revenue, context: context))
             }
             AnyView(TodayAttentionSection(summary: snapshot.summary, context: context))
-            if !snapshot.requests.isEmpty {
+            if let message = snapshot.requestsError {
+                AnyView(TodaySectionErrorCard(
+                    title: "Booking requests",
+                    message: "Couldn't load booking requests. \(message)"
+                ))
+            } else if !snapshot.requests.isEmpty {
                 AnyView(TodayBookingRequestsSection(
                     requests: snapshot.requests,
                     totalPending: snapshot.summary.pendingBookingRequests ?? snapshot.requests.count,
@@ -288,13 +284,52 @@ private struct TodayManagerSections: View {
             ))
             AnyView(TodayWeekFootnote(count: snapshot.summary.jobsThisWeek, own: false))
             AnyView(TodayClockedInSection(clockedIn: snapshot.summary.clockedIn, context: context))
-            AnyView(TodayClockCard(
+            AnyView(TodayClockSlot(snapshot: snapshot, context: context, actions: actions))
+        }
+    }
+}
+
+/// The shift clock card, or an error card when the member's open time
+/// entries could not be loaded (never offer Clock in blindly: they may
+/// already be on the clock).
+private struct TodayClockSlot: View {
+    let snapshot: TodaySnapshot
+    let context: TodayContext
+    let actions: TodayActions
+
+    var body: some View {
+        if let message = snapshot.entriesError {
+            TodaySectionErrorCard(
+                title: "Shift clock",
+                message: "Couldn't load your time clock. \(message)"
+            )
+        } else {
+            TodayClockCard(
                 openShift: snapshot.openShift,
                 openJobEntry: snapshot.openJobEntry,
                 clock: context.clock,
                 onClockIn: actions.clockIn,
                 onClockOut: actions.clockOut
-            ))
+            )
+        }
+    }
+}
+
+/// A secondary section that failed while the rest of the dashboard loaded.
+private struct TodaySectionErrorCard: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            SectionHeader(title: title)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                InlineMessage(text: message, kind: .error)
+                Text("Pull down to try again.")
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .cardStyle()
         }
     }
 }
@@ -326,7 +361,11 @@ private struct TodayWeekFootnote: View {
 
     private var text: String {
         let jobs = count == 1 ? "1 job" : "\(count) jobs"
-        return own ? "\(jobs) assigned to you this week." : "\(jobs) on the schedule this week."
+        // dashboard_summary counts weeks Monday to Sunday (date_trunc('week')),
+        // which can differ from the Calendar's Sunday-start week: say so.
+        return own
+            ? "\(jobs) assigned to you this week (Mon–Sun)."
+            : "\(jobs) on the schedule this week (Mon–Sun)."
     }
 
     var body: some View {

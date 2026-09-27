@@ -67,8 +67,15 @@ final class JobDetailModel {
     var inspections: LoadState<[JobInspectionBundle]> = .idle
     var forms: LoadState<[FormSubmission]> = .idle
     private(set) var resources: [JobResource] = []
+    /// Bays/vans failed to load (the schedule card says so instead of
+    /// guessing a name).
+    private(set) var resourcesFailed = false
     /// Checklist items with a toggle in flight.
     private(set) var pendingChecklist: Set<UUID> = []
+    /// A line/discount write succeeded but re-reading the job's lines and
+    /// totals failed. Shown with a Refresh button; the write is NOT retried
+    /// (that would duplicate lines).
+    private(set) var linesRefreshProblem: String?
 
     init(jobID: UUID) {
         self.jobID = jobID
@@ -86,6 +93,13 @@ final class JobDetailModel {
 
     var snapshot: JobDetailSnapshot? { detail.value }
     var job: Job? { detail.value?.job }
+
+    /// The job's issued (non-void) invoice from `job_payment_summary`, or nil
+    /// when there is none or the money picture isn't loaded / visible.
+    var issuedInvoice: JobIssuedInvoiceInfo? {
+        guard let loaded = payment.value, let summary = loaded, let invoiceID = summary.invoiceID else { return nil }
+        return JobIssuedInvoiceInfo(invoiceID: invoiceID, number: summary.invoiceNumber, totalCents: summary.totalCents)
+    }
 
     var permissions: JobDetailPermissions {
         JobDetailPermissions(
@@ -137,6 +151,9 @@ final class JobDetailModel {
             try await JobService.detail(shopID: shopID, jobID: jobID)
         }
         detail.apply(result)
+        if result.value != nil {
+            linesRefreshProblem = nil
+        }
         return hadContent ? result.errorMessage : nil
     }
 
@@ -209,11 +226,14 @@ final class JobDetailModel {
     }
 
     /// Bays/vans (names on the schedule card, choices in the editor).
-    /// Failures leave the list empty — the editor then hides the picker.
+    /// A failure is remembered so the screens can say the list is missing.
     func loadResources() async {
         guard let shopID else { return }
-        if let rows = try? await JobService.resources(shopID: shopID) {
-            resources = rows
+        do {
+            resources = try await JobService.resources(shopID: shopID)
+            resourcesFailed = false
+        } catch {
+            resourcesFailed = true
         }
     }
 
@@ -225,8 +245,24 @@ final class JobDetailModel {
         detail = .loaded(snapshot)
     }
 
+    /// Every status except requested / cancelled needs a scheduled time
+    /// (`jobs_schedule_required` CHECK on jobs).
+    static func statusNeedsTime(_ status: JobStatus) -> Bool {
+        status != .requested && status != .cancelled
+    }
+
+    /// True when moving to `target` must first set a date and time (the
+    /// job has none) — the screen opens the schedule editor instead.
+    func needsTimeFirst(for target: JobStatus) -> Bool {
+        guard let job else { return false }
+        return job.scheduledStart == nil && Self.statusNeedsTime(target)
+    }
+
     func changeStatus(to status: JobStatus, cancelReason: String? = nil) async throws {
         let shopID = try requireShop()
+        if needsTimeFirst(for: status) {
+            throw AppError.invalidInput("Set a date and time before moving this job to \(status.displayName.lowercased()).")
+        }
         let updated = try await JobService.updateStatus(
             shopID: shopID,
             jobID: jobID,
@@ -249,33 +285,57 @@ final class JobDetailModel {
         let shopID = try requireShop()
         let updated = try await JobService.updateDetails(shopID: shopID, jobID: jobID, patch: patch)
         replaceJob(updated)
+        if patch.status != nil {
+            // A status change can void or revive forms.
+            await loadForms()
+        }
         await loadPayment()
     }
 
-    func saveAssignments(_ memberIDs: Set<UUID>) async throws {
+    /// Saves the crew. The service diffs against the server's current rows
+    /// (never this screen's copy), so a retry after any failure is safe.
+    /// Returns false when the save worked but the re-read failed (the
+    /// caller tells the user to refresh).
+    @discardableResult
+    func saveAssignments(_ memberIDs: Set<UUID>) async throws -> Bool {
         let shopID = try requireShop()
-        let current = detail.value?.assignments ?? []
-        try await JobService.setAssignments(shopID: shopID, jobID: jobID, current: current, memberIDs: memberIDs)
-        let fresh = try await JobService.assignments(shopID: shopID, jobID: jobID)
-        if var snapshot = detail.value {
-            snapshot.assignments = fresh
-            detail = .loaded(snapshot)
+        try await JobService.setAssignments(shopID: shopID, jobID: jobID, memberIDs: memberIDs)
+        do {
+            let fresh = try await JobService.assignments(shopID: shopID, jobID: jobID)
+            if var snapshot = detail.value {
+                snapshot.assignments = fresh
+                detail = .loaded(snapshot)
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
     // MARK: - Lines & discount (server totals re-fetched after each write)
 
-    /// Re-reads the job row (server totals) and its lines.
-    func refreshJobAndLines() async throws {
-        let shopID = try requireShop()
-        async let jobTask = JobService.job(shopID: shopID, jobID: jobID)
-        async let linesTask = JobService.lineItems(shopID: shopID, jobID: jobID)
-        let job = try await jobTask
-        let lines = try await linesTask
-        if var snapshot = detail.value {
-            snapshot.job = job
-            snapshot.lineItems = lines
-            detail = .loaded(snapshot)
+    /// Re-reads the job row (server totals) and its lines after a write.
+    /// Never throws: the write already succeeded, so a failed re-read is
+    /// reported through `linesRefreshProblem` (with a Refresh button)
+    /// instead of looking like the write failed — which would invite a
+    /// retry that inserts the same lines twice.
+    func refreshJobAndLines() async {
+        guard let shopID else { return }
+        let jobID = self.jobID
+        do {
+            async let jobTask = JobService.job(shopID: shopID, jobID: jobID)
+            async let linesTask = JobService.lineItems(shopID: shopID, jobID: jobID)
+            let job = try await jobTask
+            let lines = try await linesTask
+            if var snapshot = detail.value {
+                snapshot.job = job
+                snapshot.lineItems = lines
+                detail = .loaded(snapshot)
+            }
+            linesRefreshProblem = nil
+        } catch {
+            linesRefreshProblem = "Saved, but the services and totals couldn't be refreshed. "
+                + ErrorText.message(for: error)
         }
         await loadPayment()
         // Catalog lines can attach checklist templates server-side.
@@ -290,19 +350,19 @@ final class JobDetailModel {
     func addLines(_ lines: [JobLineDraft]) async throws {
         let shopID = try requireShop()
         try await JobService.insertLines(shopID: shopID, jobID: jobID, lines: lines)
-        try await refreshJobAndLines()
+        await refreshJobAndLines()
     }
 
     func updateLine(_ lineID: UUID, draft: JobLineDraft) async throws {
         let shopID = try requireShop()
         try await JobService.updateLine(shopID: shopID, lineID: lineID, draft: draft)
-        try await refreshJobAndLines()
+        await refreshJobAndLines()
     }
 
     func deleteLine(_ lineID: UUID) async throws {
         let shopID = try requireShop()
         try await JobService.deleteLine(shopID: shopID, lineID: lineID)
-        try await refreshJobAndLines()
+        await refreshJobAndLines()
     }
 
     func updateDiscount(kind: JobDiscountKind, value: Int) async throws {

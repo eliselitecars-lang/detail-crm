@@ -89,6 +89,22 @@ struct JobSectionStateView<Value, Content: View>: View {
     }
 }
 
+/// A supporting list (templates, team, bays) failed to load: says so and
+/// offers a retry instead of silently hiding the control that needs it.
+struct JobReferenceLoadError: View {
+    let text: String
+    let retry: () async -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            InlineMessage(text: text, kind: .error)
+            AsyncButton("Try again", style: .themeSecondaryCompact) {
+                await retry()
+            }
+        }
+    }
+}
+
 /// One-line empty state inside a section card.
 struct JobEmptyLine: View {
     let text: String
@@ -117,12 +133,15 @@ struct JobIconButton: View {
     let accessibilityLabel: String
     let action: () -> Void
 
+    /// Grows with Dynamic Type (the circle stays round).
+    @ScaledMetric(relativeTo: .callout) private var side: CGFloat = Theme.Size.compactControlHeight
+
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 16, weight: .semibold))
+                .font(Theme.Typography.callout.weight(.semibold))
                 .foregroundStyle(Theme.glacier)
-                .frame(width: Theme.Size.compactControlHeight, height: Theme.Size.compactControlHeight)
+                .frame(width: side, height: side)
                 .background(Circle().fill(Theme.glacier.opacity(0.12)))
         }
         .buttonStyle(.plain)

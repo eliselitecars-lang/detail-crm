@@ -84,7 +84,7 @@ struct JobCatalogRow: View {
         Button(action: onToggle) {
             HStack(alignment: .center, spacing: Theme.Spacing.md) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22))
+                    .font(Theme.Typography.title.weight(.regular))
                     .foregroundStyle(isSelected ? Theme.glacier : Theme.textTertiary)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {

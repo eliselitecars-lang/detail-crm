@@ -25,6 +25,9 @@ struct CustomerEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var draft: CustomerDraft
+    /// The draft as the sheet opened (including a prefilled phone), so an
+    /// untouched sheet can still be swiped away.
+    @State private var initialDraft: CustomerDraft
     @State private var showValidation = false
     @State private var formError: String?
 
@@ -43,6 +46,7 @@ struct CustomerEditorSheet: View {
             initial = CustomerDraft(customer: customer)
         }
         _draft = State(initialValue: initial)
+        _initialDraft = State(initialValue: initial)
     }
 
     private var existing: Customer? {
@@ -77,13 +81,6 @@ struct CustomerEditorSheet: View {
             }
         }
         .interactiveDismissDisabled(draft != initialDraft)
-    }
-
-    private var initialDraft: CustomerDraft {
-        switch mode {
-        case .create: return CustomerDraft()
-        case .edit(let customer): return CustomerDraft(customer: customer)
-        }
     }
 
     private func save() async {

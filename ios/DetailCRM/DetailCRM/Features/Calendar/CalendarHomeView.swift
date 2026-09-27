@@ -69,6 +69,9 @@ struct CalendarHomeView: View {
         .navigationTitle("Calendar")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
+        // Also re-runs whenever the tab / stack root reappears (back from a
+        // job, tab switch); load() only blanks the screen when the range or
+        // filter actually changed, otherwise it refreshes in place.
         .task(id: loadKey) { await load(reset: true) }
         .task { await loadTeamColors() }
         .sheet(isPresented: $showingDatePicker) {
@@ -162,7 +165,14 @@ struct CalendarHomeView: View {
         }
         let requestedRange = range
         let cancelled = includeCancelled
-        if reset {
+        // `reset` asks for a spinner only when what is on screen belongs to
+        // another range / filter. Reappearing on the same range keeps the
+        // loaded calendar (and the timeline's scroll position) visible, and
+        // a failed refetch then shows a toast instead of the error screen.
+        let showsSameKey = state.value.map {
+            $0.range == requestedRange && $0.includeCancelled == cancelled
+        } ?? false
+        if reset && !showsSameKey {
             state = .loading
         } else {
             state.beginLoading()
@@ -236,7 +246,9 @@ private struct CalendarModeContent: View {
                     onRefresh: onRefresh,
                     onSelectDay: onSelectDay
                 )
-                .id(data.range.start)
+                // One identity per mode + range: a new range (or Day <-> Week
+                // on the same start) gets a fresh timeline and first-hour scroll.
+                .id("\(mode.rawValue)|\(data.range.start.timeIntervalSince1970)")
             )
         }
     }

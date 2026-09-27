@@ -25,6 +25,9 @@ struct InboxThreadView: View {
     @State private var didChooseChannel: Bool
     @State private var showingTemplates = false
     @State private var showingAddCustomer = false
+    /// A background refresh already reported a failure; stay quiet until a
+    /// refresh succeeds again (no toast every 15 s while offline).
+    @State private var pollFailureReported = false
 
     init(key: MessageThreadKey, customer: Customer? = nil) {
         _key = State(initialValue: key)
@@ -66,8 +69,10 @@ struct InboxThreadView: View {
         .toolbar { toolbarContent }
         .task(id: key) {
             await loadCustomerIfNeeded()
+            var isBackground = false
             while !Task.isCancelled {
-                await loadMessages()
+                await loadMessages(isBackground: isBackground)
+                isBackground = true
                 try? await Task.sleep(for: .seconds(15))
             }
         }
@@ -124,16 +129,30 @@ struct InboxThreadView: View {
         }
     }
 
-    private func loadMessages() async {
+    /// `isBackground` = the 15-second poll: it never swaps the error screen
+    /// (with its Retry button) for a spinner and reports a refresh failure
+    /// at most once until a refresh succeeds. The first load, Retry and pull
+    /// to refresh always surface their errors.
+    private func loadMessages(isBackground: Bool = false) async {
         guard let shopID = try? appState.requireShopID() else { return }
         let threadKey = key
-        state.beginLoading()
+        if !isBackground || state.errorMessage == nil {
+            state.beginLoading()
+        }
         let result = await LoadState<[Message]>.result {
             try await MessageService.messages(shopID: shopID, thread: threadKey)
         }
         guard threadKey == key else { return }
-        if case .failed(let message) = result, state.value != nil {
-            toasts.show(message, style: .error)
+        switch result {
+        case .loaded:
+            pollFailureReported = false
+        case .failed(let message):
+            if state.value != nil && (!isBackground || !pollFailureReported) {
+                toasts.show(message, style: .error)
+                if isBackground { pollFailureReported = true }
+            }
+        case .idle, .loading:
+            break
         }
         state.apply(result)
         if let messages = result.value, messages.contains(where: { $0.isUnread }) {
@@ -483,10 +502,10 @@ private struct InboxComposer: View {
                         )
                     InboxSendButton(isEnabled: canSend, send: send)
                 }
-                if channel == .sms && draftBody.count > 140 {
-                    Text("\(draftBody.count)/\(InboxComposeRules.smsLimit) characters")
+                if channel == .sms && smsLength > 140 {
+                    Text("\(smsLength)/\(InboxComposeRules.smsLimit) characters")
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(draftBody.count > InboxComposeRules.smsLimit ? Theme.danger : Theme.textTertiary)
+                        .foregroundStyle(smsLength > InboxComposeRules.smsLimit ? Theme.danger : Theme.textTertiary)
                 }
             }
         }

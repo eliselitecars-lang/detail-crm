@@ -19,6 +19,9 @@ struct CustomersView: View {
     @State private var state: LoadState<[Customer]> = .idle
     @State private var canLoadMore = false
     @State private var isLoadingMore = false
+    /// The last "load more" failed: the row offers Try again instead of
+    /// claiming to load.
+    @State private var loadMoreFailed = false
     @State private var tags: [String] = []
     @State private var showingAdd = false
     @State private var openedCustomer: CustomersOpenedCustomer?
@@ -30,6 +33,7 @@ struct CustomersView: View {
                 query: $query,
                 canLoadMore: canLoadMore,
                 isLoadingMore: isLoadingMore,
+                loadMoreFailed: loadMoreFailed,
                 canEdit: appState.can(.editCustomers),
                 loadMore: { await loadMore() },
                 addCustomer: { showingAdd = true }
@@ -99,6 +103,7 @@ struct CustomersView: View {
         }
         if case .loaded(let rows) = result {
             canLoadMore = rows.count == CustomerService.pageSize
+            loadMoreFailed = false
         }
         state.apply(result)
     }
@@ -107,6 +112,7 @@ struct CustomersView: View {
         guard canLoadMore, !isLoadingMore, let current = state.value,
               let shopID = try? appState.requireShopID() else { return }
         isLoadingMore = true
+        loadMoreFailed = false
         defer { isLoadingMore = false }
         let snapshot = query
         do {
@@ -117,8 +123,12 @@ struct CustomersView: View {
             canLoadMore = next.count == CustomerService.pageSize
         } catch is CancellationError {
             return
+        } catch let error as URLError where error.code == .cancelled {
+            return
         } catch {
-            toasts.showError(error)
+            // Shown inline on the load-more row, with Try again.
+            guard snapshot == query else { return }
+            loadMoreFailed = true
         }
     }
 
@@ -156,6 +166,7 @@ private struct CustomersListContent: View {
     @Binding var query: CustomerService.ListQuery
     let canLoadMore: Bool
     let isLoadingMore: Bool
+    let loadMoreFailed: Bool
     let canEdit: Bool
     let loadMore: () async -> Void
     let addCustomer: () -> Void
@@ -179,7 +190,7 @@ private struct CustomersListContent: View {
                         .themedRow()
                     }
                     if canLoadMore {
-                        CustomersLoadMoreRow(isLoading: isLoadingMore, loadMore: loadMore)
+                        CustomersLoadMoreRow(isLoading: isLoadingMore, failed: loadMoreFailed, loadMore: loadMore)
                             .themedRow()
                     }
                 }
@@ -190,24 +201,41 @@ private struct CustomersListContent: View {
 }
 
 /// Appears at the end of the list; loads the next page when it scrolls
-/// into view.
+/// into view. After a failure it says so and offers Try again (it also
+/// retries when scrolled back into view).
 private struct CustomersLoadMoreRow: View {
     let isLoading: Bool
+    let failed: Bool
     let loadMore: () async -> Void
 
     var body: some View {
-        HStack {
-            Spacer()
-            ProgressView()
+        // A plain container (not Group) so `.task` runs once per appearance,
+        // not again whenever the content switches between states.
+        HStack(spacing: Theme.Spacing.sm) {
+            Spacer(minLength: 0)
+            if failed && !isLoading {
+                Text("Couldn't load more customers.")
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                Button("Try again") {
+                    Task { @MainActor in
+                        await loadMore()
+                    }
+                }
+                .buttonStyle(.borderless)
+                .font(Theme.Typography.footnote.weight(.semibold))
                 .tint(Theme.glacier)
-                .opacity(isLoading ? 1 : 0)
-            Text("Loading more…")
-                .font(Theme.Typography.footnote)
-                .foregroundStyle(Theme.textSecondary)
-            Spacer()
+            } else {
+                ProgressView()
+                    .tint(Theme.glacier)
+                    .opacity(isLoading ? 1 : 0)
+                Text("Loading more…")
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Spacer(minLength: 0)
         }
         .padding(.vertical, Theme.Spacing.xs)
-        .accessibilityElement(children: .combine)
         .task {
             await loadMore()
         }

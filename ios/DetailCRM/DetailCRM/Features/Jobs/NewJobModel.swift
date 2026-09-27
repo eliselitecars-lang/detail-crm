@@ -61,6 +61,19 @@ struct NewJobPricingKey: Hashable {
     var categoryID: UUID?
 }
 
+/// The shop-local day range the availability check loaded.
+struct NewJobAvailabilityKey: Hashable {
+    var from: Date
+    var to: Date
+}
+
+/// What's booked around the chosen time, plus the shop's hours.
+struct NewJobAvailabilityData: Hashable {
+    var key: NewJobAvailabilityKey
+    var items: [JobBusyItem]
+    var hours: [JobBusinessHours]
+}
+
 @Observable
 @MainActor
 final class NewJobModel {
@@ -78,6 +91,10 @@ final class NewJobModel {
     private(set) var categories: [JobVehicleCategory] = []
     private(set) var team: [JobTeamMember] = []
     private(set) var resources: [JobResource] = []
+    private(set) var categoriesFailed = false
+    private(set) var teamFailed = false
+    private(set) var resourcesFailed = false
+    private(set) var prefillCustomerFailed = false
 
     // Customer
     var customerQuery = ""
@@ -118,6 +135,10 @@ final class NewJobModel {
     var assigneeIDs: Set<UUID> = []
     var notes = ""
     var internalNotes = ""
+    /// Busy items + hours for the chosen day(s) (SPEC §7 "date/time with
+    /// availability"). Advisory: overlaps are allowed by the server.
+    var availability: LoadState<NewJobAvailabilityData> = .idle
+    private var cachedHours: [JobBusinessHours]?
 
     // Create
     private(set) var createdJob: Job?
@@ -153,20 +174,58 @@ final class NewJobModel {
         return shopID
     }
 
-    /// Categories, team and resources (best effort), and the prefilled customer.
+    /// Categories, team and resources, and the prefilled customer. Each
+    /// failure is remembered (`referenceProblem`) so the flow says what is
+    /// missing and offers a retry, instead of silently hiding the Assign
+    /// card, the bay picker or the size picker.
     func loadReferenceData() async {
         guard let shopID else { return }
-        async let categoriesTask = try? JobService.vehicleCategories(shopID: shopID)
-        async let teamTask = try? JobService.team(shopID: shopID)
-        async let resourcesTask = try? JobService.resources(shopID: shopID)
-        categories = await categoriesTask ?? []
-        team = (await teamTask ?? []).filter(\.active)
-        resources = await resourcesTask ?? []
-        if customer == nil, let prefillCustomerID {
-            if let found = try? await JobService.customer(shopID: shopID, customerID: prefillCustomerID) {
-                await selectCustomer(found)
-            }
+        async let categoriesTask = JobService.vehicleCategories(shopID: shopID)
+        async let teamTask = JobService.team(shopID: shopID)
+        async let resourcesTask = JobService.resources(shopID: shopID)
+        do {
+            categories = try await categoriesTask
+            categoriesFailed = false
+        } catch {
+            categoriesFailed = true
         }
+        do {
+            let rows = try await teamTask
+            team = rows.filter(\.active)
+            teamFailed = false
+        } catch {
+            teamFailed = true
+        }
+        do {
+            resources = try await resourcesTask
+            resourcesFailed = false
+        } catch {
+            resourcesFailed = true
+        }
+        if customer == nil, let prefillCustomerID {
+            do {
+                let found = try await JobService.customer(shopID: shopID, customerID: prefillCustomerID)
+                prefillCustomerFailed = false
+                if let found {
+                    await selectCustomer(found)
+                }
+            } catch {
+                prefillCustomerFailed = true
+            }
+        } else {
+            prefillCustomerFailed = false
+        }
+    }
+
+    /// What supporting data failed to load, as one sentence (nil when all loaded).
+    var referenceProblem: String? {
+        var missing: [String] = []
+        if prefillCustomerFailed { missing.append("the customer") }
+        if categoriesFailed { missing.append("vehicle size categories") }
+        if teamFailed { missing.append("the team") }
+        if resourcesFailed { missing.append("bays and vans") }
+        guard !missing.isEmpty else { return nil }
+        return "Couldn't load " + missing.joined(separator: ", ") + ". Check the connection and try again."
     }
 
     // MARK: - Customer
@@ -387,6 +446,77 @@ final class NewJobModel {
 
     var end: Date {
         start.addingTimeInterval(TimeInterval(durationMinutes * 60))
+    }
+
+    // MARK: - Availability
+
+    /// The day(s) the proposed time touches; nil when scheduling later.
+    var availabilityKey: NewJobAvailabilityKey? {
+        guard !scheduleLater else { return nil }
+        let from = clock.startOfDay(start)
+        let lastDay = clock.startOfDay(max(start, end.addingTimeInterval(-1)))
+        return NewJobAvailabilityKey(from: from, to: clock.addingDays(1, to: lastDay))
+    }
+
+    /// Loads the calendar feed for the chosen day(s) and the shop's hours
+    /// (once). Old data for another day is never shown while loading.
+    func loadAvailability() async {
+        guard let shopID, let key = availabilityKey else { return }
+        if let current = availability.value, current.key == key { return }
+        availability = .loading
+        let knownHours = cachedHours
+        let result = await LoadState<NewJobAvailabilityData>.result {
+            let items = try await JobService.busyItems(shopID: shopID, from: key.from, to: key.to)
+            let hours: [JobBusinessHours]
+            if let knownHours {
+                hours = knownHours
+            } else {
+                hours = try await JobService.businessHours(shopID: shopID)
+            }
+            return NewJobAvailabilityData(key: key, items: items, hours: hours)
+        }
+        // The user picked another day meanwhile, or the task was replaced.
+        guard key == availabilityKey else { return }
+        if case .idle = result { return }
+        availability = result
+        if let data = result.value {
+            cachedHours = data.hours
+        }
+    }
+
+    /// Loaded data for the current day(s) only.
+    private var currentAvailability: NewJobAvailabilityData? {
+        guard let data = availability.value, data.key == availabilityKey else { return nil }
+        return data
+    }
+
+    /// What's already on the calendar for the chosen day(s).
+    var availabilityDayItems: [JobBusyItem] {
+        guard let data = currentAvailability else { return [] }
+        return JobAvailability.dayItems(data.items, start: start, end: end, clock: clock)
+    }
+
+    /// Hours, blocked-time and bay / team double-booking warnings for the
+    /// chosen time, bay / van and team.
+    var availabilityWarnings: [String] {
+        guard let data = currentAvailability else { return [] }
+        var warnings: [String] = []
+        if let problem = JobAvailability.hoursProblem(start: start, end: end, hours: data.hours, clock: clock) {
+            warnings.append(problem)
+        }
+        let resourceList = resources
+        let teamList = team
+        warnings += JobAvailability.conflicts(
+            start: start,
+            end: end,
+            items: data.items,
+            resourceID: resourceID,
+            assigneeIDs: assigneeIDs,
+            clock: clock,
+            resourceName: { id in resourceList.first(where: { $0.id == id })?.name },
+            memberName: { id in teamList.first(where: { $0.memberID == id })?.displayName }
+        )
+        return warnings
     }
 
     func useCustomerAddress() {

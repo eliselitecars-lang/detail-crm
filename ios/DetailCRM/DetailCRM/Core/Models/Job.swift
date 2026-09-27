@@ -619,6 +619,21 @@ struct JobPaymentSummary: Codable, Hashable, Sendable {
 
 /// The invoice issued by `create_invoice_from_job` (only what the job
 /// screen needs to navigate to it).
+/// The job's issued (non-void) invoice, for the "services changed after
+/// invoicing" notes. Values come straight from `job_payment_summary`.
+// rpc: job_payment_summary
+struct JobIssuedInvoiceInfo: Hashable, Sendable {
+    var invoiceID: UUID
+    var number: Int?
+    /// The invoice's total (server value).
+    var totalCents: Int
+
+    /// "Invoice #12", or "The invoice" when it has no number.
+    var title: String {
+        number.map { "Invoice #\($0)" } ?? "The invoice"
+    }
+}
+
 // rpc: create_invoice_from_job
 struct JobCreatedInvoice: Codable, Identifiable, Hashable, Sendable {
     var id: UUID
@@ -981,5 +996,176 @@ struct JobDetailSnapshot: Hashable, Sendable {
     /// Sum of line durations (0 when none have durations).
     var lineDurationMinutes: Int {
         lineItems.reduce(0) { $0 + $1.durationMinutes }
+    }
+}
+
+// MARK: - Availability (New Job schedule step)
+
+/// One busy item from the staff calendar feed — a job or a blocked time —
+/// decoded with just what the New Job availability check needs.
+// rpc: calendar_events
+struct JobBusyItem: Decodable, Identifiable, Hashable, Sendable {
+    var eventType: String
+    var id: UUID
+    var jobNumber: Int?
+    var startsAt: Date
+    var endsAt: Date
+    var isBusyBlock: Bool
+    var customerName: String?
+    var resourceID: UUID?
+    var assignedMemberIDs: [UUID]
+    /// Blocked times: the member blocked (nil = the whole shop).
+    var memberID: UUID?
+    /// Jobs: "Customer — services"; blocked times: the reason.
+    var title: String?
+
+    enum CodingKeys: String, CodingKey {
+        case eventType = "event_type"
+        case id
+        case jobNumber = "job_number"
+        case startsAt = "starts_at"
+        case endsAt = "ends_at"
+        case isBusyBlock = "is_busy_block"
+        case customerName = "customer_name"
+        case resourceID = "resource_id"
+        case assignedMemberIDs = "assigned_member_ids"
+        case memberID = "member_id"
+        case title
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        eventType = try c.decode(String.self, forKey: .eventType)
+        id = try c.decode(UUID.self, forKey: .id)
+        jobNumber = try c.decodeIfPresent(Int.self, forKey: .jobNumber)
+        startsAt = try c.decode(Date.self, forKey: .startsAt)
+        endsAt = try c.decode(Date.self, forKey: .endsAt)
+        isBusyBlock = try c.decodeIfPresent(Bool.self, forKey: .isBusyBlock) ?? false
+        customerName = try c.decodeIfPresent(String.self, forKey: .customerName)
+        resourceID = try c.decodeIfPresent(UUID.self, forKey: .resourceID)
+        assignedMemberIDs = try c.decodeIfPresent([UUID].self, forKey: .assignedMemberIDs) ?? []
+        memberID = try c.decodeIfPresent(UUID.self, forKey: .memberID)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+    }
+
+    var isBlockedTime: Bool { eventType == "blocked_time" }
+
+    func overlaps(start: Date, end: Date) -> Bool {
+        startsAt < end && endsAt > start
+    }
+
+    /// "Job #123 · Jane Doe — Full detail" / "Blocked · Lunch".
+    var summary: String {
+        if isBlockedTime {
+            if let reason = title?.trimmedNonEmpty { return "Blocked · " + reason }
+            return "Blocked time"
+        }
+        let number = jobNumber.map { "Job #\($0)" } ?? "Job"
+        if let text = title?.trimmedNonEmpty ?? customerName?.trimmedNonEmpty {
+            return number + " · " + text
+        }
+        return number
+    }
+}
+
+/// Opening hours for one weekday interval (wall clock, shop time zone).
+// table: business_hours
+struct JobBusinessHours: Decodable, Hashable, Sendable {
+    /// 0 = Sunday … 6 = Saturday (`ShopClock.weekdayIndex`).
+    var weekday: Int
+    /// "09:00:00"; `closesAt` may be "24:00:00".
+    var opensAt: String
+    var closesAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case weekday
+        case opensAt = "opens_at"
+        case closesAt = "closes_at"
+    }
+
+    static let selectColumns = "weekday,opens_at,closes_at"
+}
+
+/// Checks a proposed job time against the shop's hours and what is
+/// already booked. Advisory only: the server does not forbid overlaps,
+/// so these are warnings the manager can book through.
+enum JobAvailability {
+
+    /// Items overlapping the shop-local day(s) the job touches, by start.
+    static func dayItems(_ items: [JobBusyItem], start: Date, end: Date, clock: ShopClock) -> [JobBusyItem] {
+        let dayStart = clock.startOfDay(start)
+        let dayEnd = clock.addingDays(1, to: clock.startOfDay(max(start, end.addingTimeInterval(-1))))
+        return items
+            .filter { $0.overlaps(start: dayStart, end: dayEnd) }
+            .sorted { lhs, rhs in
+                if lhs.startsAt != rhs.startsAt { return lhs.startsAt < rhs.startsAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+    }
+
+    /// Nil when the time sits inside the shop's hours (or no hours are set
+    /// up at all); otherwise a sentence explaining the problem.
+    static func hoursProblem(start: Date, end: Date, hours: [JobBusinessHours], clock: ShopClock) -> String? {
+        guard !hours.isEmpty else { return nil }
+        let weekday = clock.weekdayIndex(start)
+        let intervals: [(open: Date, close: Date)] = hours
+            .filter { $0.weekday == weekday }
+            .compactMap { row in
+                guard let open = clock.date(on: start, timeString: row.opensAt),
+                      let close = clock.date(on: start, timeString: row.closesAt) else { return nil }
+                return (open: open, close: close)
+            }
+            .sorted { $0.open < $1.open }
+        guard !intervals.isEmpty else {
+            return "The shop is closed on " + clock.longDayText(start) + "."
+        }
+        let sameDay = clock.isSameDay(start, end.addingTimeInterval(-1))
+        let fits = intervals.contains { interval in
+            sameDay
+                ? (start >= interval.open && end <= interval.close)
+                : (start >= interval.open && start < interval.close)
+        }
+        if fits { return nil }
+        let open = intervals.map { clock.rangeText(from: $0.open, to: $0.close) }.joined(separator: ", ")
+        return "Outside business hours (open " + open + ")."
+    }
+
+    /// Double bookings for the chosen bay / van and team, and blocked time.
+    static func conflicts(
+        start: Date,
+        end: Date,
+        items: [JobBusyItem],
+        resourceID: UUID?,
+        assigneeIDs: Set<UUID>,
+        clock: ShopClock,
+        resourceName: (UUID) -> String?,
+        memberName: (UUID) -> String?
+    ) -> [String] {
+        var warnings: [String] = []
+        for item in items where item.overlaps(start: start, end: end) {
+            let when = clock.rangeText(from: item.startsAt, to: item.endsAt)
+            if item.isBlockedTime {
+                if let member = item.memberID {
+                    if assigneeIDs.contains(member) {
+                        let name = memberName(member) ?? "A team member"
+                        warnings.append(name + " is blocked " + when + ".")
+                    }
+                } else {
+                    warnings.append("The shop is blocked " + when + (item.title?.trimmedNonEmpty.map { " (" + $0 + ")" } ?? "") + ".")
+                }
+                continue
+            }
+            let label = item.jobNumber.map { "job #\($0)" } ?? "another job"
+            if let resourceID, item.resourceID == resourceID {
+                let name = resourceName(resourceID) ?? "This bay / van"
+                warnings.append(name + " is already booked for " + label + ", " + when + ".")
+            }
+            let shared = item.assignedMemberIDs.filter { assigneeIDs.contains($0) }
+            for member in shared {
+                let name = memberName(member) ?? "A team member"
+                warnings.append(name + " is already on " + label + ", " + when + ".")
+            }
+        }
+        return warnings
     }
 }

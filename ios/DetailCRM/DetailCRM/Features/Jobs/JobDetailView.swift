@@ -17,6 +17,8 @@ import DetailCore
 /// Sheets presented from the job screen.
 enum JobDetailSheet: Identifiable, Hashable {
     case editDetails
+    /// Pick a time and move an unscheduled job to this status in one save.
+    case schedule(JobStatus)
     case assignees
     case lineItems
     case cancel
@@ -28,6 +30,7 @@ enum JobDetailSheet: Identifiable, Hashable {
     var id: String {
         switch self {
         case .editDetails: return "details"
+        case .schedule(let status): return "schedule-" + status.rawValue
         case .assignees: return "assignees"
         case .lineItems: return "lines"
         case .cancel: return "cancel"
@@ -162,6 +165,7 @@ struct JobDetailView: View {
             JobScheduleSection(
                 snapshot: snapshot,
                 resources: model.resources,
+                resourcesFailed: model.resourcesFailed,
                 clock: appState.clock,
                 canEdit: permissions.canEditJob,
                 onEditDetails: { sheet = .editDetails },
@@ -177,6 +181,9 @@ struct JobDetailView: View {
                 lines: snapshot.lineItems,
                 currencyCode: appState.currencyCode,
                 canEdit: permissions.canEditJob,
+                invoice: model.issuedInvoice,
+                refreshProblem: model.linesRefreshProblem,
+                onRetryRefresh: { await model.refreshJobAndLines() },
                 onEdit: { sheet = .lineItems }
             )
         )
@@ -248,6 +255,8 @@ struct JobDetailView: View {
         switch item {
         case .editDetails:
             return AnyView(JobDetailsEditorSheet(model: model))
+        case .schedule(let target):
+            return AnyView(JobDetailsEditorSheet(model: model, targetStatus: target))
         case .assignees:
             return AnyView(JobAssigneesSheet(model: model))
         case .lineItems:
@@ -272,6 +281,17 @@ struct JobDetailView: View {
     private func requestStatus(_ target: JobStatus, job: Job) {
         if target == .cancelled {
             sheet = .cancel
+            return
+        }
+        // A requested / cancelled job without a time can't be scheduled,
+        // confirmed (or anything later) until it has one — the database
+        // rejects it. Pick the time and move the status in one save.
+        if model.needsTimeFirst(for: target) {
+            if permissions.canEditJob {
+                sheet = .schedule(target)
+            } else {
+                toasts.show("Ask a manager to set a date and time for this job first.", style: .error)
+            }
             return
         }
         let isBackward = job.status.transition(to: target)?.direction == .backward
