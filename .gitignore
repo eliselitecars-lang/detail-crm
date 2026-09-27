@@ -1,0 +1,28 @@
+# macOS / editors
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Node / web
+node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# Xcode / Swift
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.build/
+.swiftpm/
+ios/DetailCore/Package.resolved
+
+# Supabase local
+supabase/.temp/
+supabase/.branches/
+.pgdata/
