@@ -26,6 +26,12 @@ mechanical mistakes that would otherwise burn a macOS CI run:
   * auth: a `SupabaseClient(` built without `flowType: .implicit` (the
     app's reset/confirmation links open the web app, which can't redeem a
     PKCE code whose verifier is on the phone)
+  * row caps: a PostgREST `.limit(N)` literal above the server's 1,000-row
+    `max_rows` (the reply is cut short without a word; read a list that
+    must be complete with `PagedQuery.all`)
+  * auth email links: `auth.signUp(` and `resetPasswordForEmail(` pass
+    `redirectTo:` (without it GoTrue links the Site URL root, where the web
+    scrubs and refuses link tokens: see `AuthLinks`)
   * edge-function calls: every `functions.invoke(` / `EdgeFunctions.invoke(`
     / `MoneyEdge.invoke(` in app code names its function with a string
     literal, and that function exists (supabase/functions/<name>/index.ts);
@@ -328,11 +334,53 @@ def check_forbidden(path: Path, code_lines: list[str], source: str, report: Repo
         report.error(path, None, "SupabaseClient built without `flowType: .implicit` — password-reset and "
                                  "confirmation links open the web app, which can't redeem a PKCE code")
     check_button_rows(path, code, report)
+    check_row_caps(path, code, report)
+    check_auth_links(path, code, report)
     if re.search(r"\bAnyJSON\b", code) and not re.search(r"^\s*import\s+Supabase\b", source, re.M):
         report.error(path, None, "uses AnyJSON without 'import Supabase'")
     if ".safeAreaInset(" in code and "onPreferenceChange" in code:
         report.error(path, None, "safeAreaInset combined with preference-key observation "
                                  "(state-driven layout loop risk) — restructure")
+
+
+# PostgREST returns at most `max_rows` rows per request (1,000 on hosted
+# Supabase and in supabase/config.toml) and says nothing when it cuts one.
+SERVER_MAX_ROWS = 1000
+LIMIT_LITERAL = re.compile(r"\.limit\(\s*([0-9][0-9_]*)\s*\)")
+
+
+def check_row_caps(path: Path, code: str, report: Report) -> None:
+    for match in LIMIT_LITERAL.finditer(code):
+        value = int(match.group(1).replace("_", ""))
+        if value > SERVER_MAX_ROWS:
+            line = code.count("\n", 0, match.start()) + 1
+            report.error(path, line, f".limit({value}) is above the server's {SERVER_MAX_ROWS}-row cap, which "
+                                     "truncates the reply silently — page with PagedQuery.all")
+
+
+AUTH_EMAIL_CALL = re.compile(r"\b(?:auth\.signUp|resetPasswordForEmail)\(")
+
+
+def call_arguments(code: str, open_index: int) -> str:
+    """Text between the `(` at `open_index - 1` and its matching `)`."""
+    depth, index = 1, open_index
+    while depth and index < len(code):
+        if code[index] == "(":
+            depth += 1
+        elif code[index] == ")":
+            depth -= 1
+        index += 1
+    return code[open_index:index - 1]
+
+
+def check_auth_links(path: Path, code: str, report: Report) -> None:
+    """Auth emails from the app must link a web page that accepts their
+    tokens (AuthLinks); the Site URL root scrubs and refuses them."""
+    for match in AUTH_EMAIL_CALL.finditer(code):
+        if not re.search(r"\bredirectTo\s*:", call_arguments(code, match.end())):
+            line = code.count("\n", 0, match.start()) + 1
+            report.error(path, line, "auth email without `redirectTo:` links the Site URL root, where the web "
+                                     "refuses link tokens — pass AuthLinks.signUpConfirmation / passwordReset")
 
 
 SIGN_OUT_CALL = re.compile(r"\bappState\.signOut\(\)")
@@ -784,6 +832,25 @@ def self_test() -> int:
     expect("implicit flow in a comment does not count", bool(run_swift(
         "// flowType: .implicit\nlet c = SupabaseClient(supabaseURL: u, supabaseKey: k)\n",
         filename="Supa.swift").errors))
+    expect("limit above the row cap detected", any("row cap" in e for e in run_swift(
+        'let q = Supa.client.from("service_prices").select("*").limit(10000)\n').errors))
+    expect("limit with separators above the cap detected", any("row cap" in e for e in run_swift(
+        "let q = query.limit(2_000)\n").errors))
+    expect("limit at the cap passes", not run_swift("let q = query.limit(1000)\n").errors)
+    expect("limit from a variable passes", not run_swift("let q = query.limit(pageSize)\n").errors)
+    expect("limit in a string ignored", not run_swift('let s = ".limit(10000)"\n').errors)
+    expect("sign-up without redirectTo detected", any("redirectTo" in e for e in run_swift(
+        "let r = try await Supa.client.auth.signUp(\n    email: e,\n    password: p,\n"
+        "    data: [\"full_name\": .string(n)]\n)\n").errors))
+    expect("sign-up with redirectTo passes", not run_swift(
+        "let r = try await Supa.client.auth.signUp(\n    email: e,\n    password: p,\n"
+        "    redirectTo: AuthLinks.signUpConfirmation(webAppBase: AppConfig.webAppURL)\n)\n").errors)
+    expect("password reset without redirectTo detected", any("redirectTo" in e for e in run_swift(
+        "try await Supa.client.auth.resetPasswordForEmail(normalized(email))\n").errors))
+    expect("password reset with redirectTo passes", not run_swift(
+        "try await Supa.client.auth.resetPasswordForEmail(\n    e,\n    redirectTo: AuthLinks.passwordReset(webAppBase: b)\n)\n").errors)
+    expect("redirectTo of a later call does not count", bool(run_swift(
+        "try await Supa.client.auth.signUp(email: e, password: p)\nf(redirectTo: x)\n").errors))
     expect("direct sign-out detected", any("signOut(appState)" in e for e in run_swift(
         "let b = Button(\"Sign out\") { Task { await appState.signOut() } }\n").errors))
     expect("sign-out in SignOutConfirmation.swift allowed", not run_swift(
