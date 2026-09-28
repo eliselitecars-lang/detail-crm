@@ -119,7 +119,7 @@ struct OpsCalendarFeedRow: View {
             .buttonStyle(.themePrimary)
             .disabled(feed.webcalURL == nil)
             .accessibilityHint("Opens the Calendar app to add the subscription")
-            HStack(spacing: Theme.Spacing.sm) {
+            AdaptiveButtonRow(spacing: Theme.Spacing.sm) {
                 Button {
                     guard let url = feed.httpsURL else { return }
                     UIPasteboard.general.url = url

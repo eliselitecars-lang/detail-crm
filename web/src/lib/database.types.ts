@@ -5079,6 +5079,7 @@ export type Database = {
           created_at: string
           current_period_end: string | null
           last_event_at: string | null
+          paid_through: string | null
           plan_id: string | null
           shop_id: string
           status: string
@@ -5094,6 +5095,7 @@ export type Database = {
           created_at?: string
           current_period_end?: string | null
           last_event_at?: string | null
+          paid_through?: string | null
           plan_id?: string | null
           shop_id: string
           status?: string
@@ -5109,6 +5111,7 @@ export type Database = {
           created_at?: string
           current_period_end?: string | null
           last_event_at?: string | null
+          paid_through?: string | null
           plan_id?: string | null
           shop_id?: string
           status?: string
@@ -6310,8 +6313,8 @@ export type Database = {
         Args: {
           p_billing_enabled: boolean
           p_comp_until: string
-          p_current_period_end: string
           p_now: string
+          p_paid_through: string
           p_status: string
           p_trial_ends_at: string
         }

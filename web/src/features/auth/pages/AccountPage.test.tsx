@@ -1,7 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute, signedInAuth } from '@/test/render';
-import { edgeHttpError, resetSupabaseMock, supabase } from '@/test/supabaseMock';
+import {
+  edgeHttpError,
+  mockRpc,
+  pgError,
+  resetSupabaseMock,
+  setTableResult,
+  supabase,
+} from '@/test/supabaseMock';
 import { routes } from '../routes';
 import { reloadTo } from '../leave';
 import AccountPage from './AccountPage';
@@ -43,9 +50,78 @@ async function confirmDelete(user: ReturnType<typeof setup>['user']) {
 
 beforeEach(() => resetSupabaseMock());
 
+function memberRow(id: string, shopId: string, name: string, role: string) {
+  return {
+    id,
+    shop_id: shopId,
+    role,
+    display_name: 'Ana',
+    calendar_color: null,
+    shop: {
+      id: shopId,
+      name,
+      slug: name.toLowerCase().replace(/\s+/g, '-'),
+      timezone: 'America/Chicago',
+      currency: 'usd',
+      logo_path: null,
+      brand_color: null,
+      business_type: 'fixed',
+      techs_can_collect_payments: false,
+      techs_can_share_reports: false,
+      tax_rate_bps: 0,
+    },
+  };
+}
+
 describe('AccountPage', () => {
   it('is a signed-in /account route', () => {
     expect(routes.public?.map((r) => r.path)).toContain('/account');
+  });
+
+  it('lets a member leave a shop, but not one they own', async () => {
+    setTableResult('shop_members', {
+      data: [
+        memberRow('m-1', 'shop-a', 'Apex Detail', 'owner'),
+        memberRow('m-2', 'shop-b', 'Bayside Tint', 'technician'),
+      ],
+    });
+    const calls = mockRpc({ leave_shop: { data: null } });
+    window.localStorage.setItem('detailcrm:lastShop:user-9', 'shop-b');
+    const { user } = setup();
+    const shops = await screen.findByRole('list', { name: 'Your shops' });
+    expect(within(shops).getByText('Apex Detail')).toBeInTheDocument();
+    expect(within(shops).getByText('Transfer ownership to leave')).toBeInTheDocument();
+    expect(within(shops).queryByRole('button', { name: 'Leave Apex Detail' })).toBeNull();
+
+    await user.click(within(shops).getByRole('button', { name: 'Leave Bayside Tint' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave Bayside Tint?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Leave shop' }));
+    await waitFor(() =>
+      expect(calls).toContainEqual({ fn: 'leave_shop', args: { p_shop_id: 'shop-b' } }),
+    );
+    expect(await screen.findByText('You left Bayside Tint')).toBeInTheDocument();
+    // The app no longer tries to reopen the shop that was left.
+    expect(window.localStorage.getItem('detailcrm:lastShop:user-9')).toBeNull();
+  });
+
+  it('keeps the dialog open with the reason when leaving fails', async () => {
+    setTableResult('shop_members', {
+      data: [memberRow('m-2', 'shop-b', 'Bayside Tint', 'manager')],
+    });
+    mockRpc({ leave_shop: pgError('P0002', 'you are not a member of this shop') });
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: 'Leave Bayside Tint' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave Bayside Tint?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Leave shop' }));
+    expect(await within(dialog).findByRole('alert')).toBeInTheDocument();
+  });
+
+  it('shows no shop list for a portal client on no team', async () => {
+    setTableResult('shop_members', { data: [] });
+    setup();
+    expect(await screen.findByRole('heading', { name: 'Delete account' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('Loading your shops…')).toBeNull());
+    expect(screen.queryByRole('list', { name: 'Your shops' })).toBeNull();
   });
 
   it('deletes the account after a typed confirmation, then signs out', async () => {

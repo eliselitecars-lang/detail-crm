@@ -102,7 +102,7 @@ struct JobsReportShareSheet: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Label("Published " + appState.clock.dateTimeText(report.publishedAt), systemImage: "checkmark.seal")
                     .font(Theme.Typography.headline)
-                    .foregroundStyle(Theme.success)
+                    .foregroundStyle(Theme.successInk)
                 Text(report.firstViewedAt != nil ? "The customer has opened it." : "Not opened by the customer yet.")
                     .font(Theme.Typography.footnote)
                     .foregroundStyle(Theme.textSecondary)

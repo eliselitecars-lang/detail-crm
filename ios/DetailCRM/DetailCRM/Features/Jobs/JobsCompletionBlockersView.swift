@@ -89,7 +89,7 @@ struct JobsCompletionBlockersView: View {
             HStack(spacing: Theme.Spacing.md) {
                 Image(systemName: checklistItem?.isDone == true ? "checkmark.circle.fill" : "circle")
                     .font(Theme.Typography.title.weight(.regular))
-                    .foregroundStyle(checklistItem?.isDone == true ? Theme.success : Theme.textTertiary)
+                    .foregroundStyle(checklistItem?.isDone == true ? Theme.successInk : Theme.textTertiary)
                     .accessibilityHidden(true)
                 Text(item.label)
                     .font(Theme.Typography.body)
@@ -111,11 +111,11 @@ struct JobsCompletionBlockersView: View {
         HStack(alignment: .firstTextBaseline) {
             Label(title, systemImage: count.missing > 0 ? "camera.badge.ellipsis" : "checkmark.circle")
                 .font(Theme.Typography.body)
-                .foregroundStyle(count.missing > 0 ? Theme.textPrimary : Theme.success)
+                .foregroundStyle(count.missing > 0 ? Theme.textPrimary : Theme.successInk)
             Spacer()
             Text(count.required == 0 ? "None needed" : "\(count.have) of \(count.required)")
                 .font(Theme.Typography.subheadline.weight(.semibold))
-                .foregroundStyle(count.missing > 0 ? Theme.warning : Theme.textSecondary)
+                .foregroundStyle(count.missing > 0 ? Theme.warningInk : Theme.textSecondary)
         }
         .accessibilityElement(children: .combine)
         .accessibilityHint(count.missing > 0 ? "Add \(count.missing) more in Photos on the job." : "")

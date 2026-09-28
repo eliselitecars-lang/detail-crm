@@ -141,6 +141,59 @@ describe('CustomerDetailPage — parity', () => {
     expect(await screen.findByText('Target customer page')).toBeInTheDocument();
   });
 
+  it('shows what the customer asked for on a lead form', async () => {
+    setTableResult('custom_fields', {
+      data: [
+        {
+          id: 'f-1',
+          key: 'best_time',
+          label: 'Best time to call',
+          type: 'text',
+          options: [],
+          help_text: null,
+          required: false,
+          sort: 0,
+          archived_at: null,
+        },
+      ],
+    });
+    setTableResult('lead_submissions', {
+      data: [
+        {
+          id: 'ls-1',
+          created_at: '2026-09-20T15:00:00Z',
+          message: 'Looking for a ceramic coating on my new car.\nWhat does it take?',
+          answers: { best_time: 'Evenings' },
+          vehicle_info: { year: 2022, make: 'Tesla', model: 'Model Y' },
+          matched_existing: true,
+          form: { name: 'Coating inquiry' },
+        },
+      ],
+      count: 1,
+    });
+    setup();
+    const card = await screen.findByRole('region', { name: 'Web form requests' });
+    expect(await within(card).findByText('Coating inquiry')).toBeInTheDocument();
+    expect(
+      within(card).getByText(/Looking for a ceramic coating on my new car\./),
+    ).toBeInTheDocument();
+    expect(within(card).getByText('2022 Tesla Model Y')).toBeInTheDocument();
+    expect(within(card).getByText('Best time to call')).toBeInTheDocument();
+    expect(within(card).getByText('Evenings')).toBeInTheDocument();
+    expect(within(card).getByText('Existing customer')).toBeInTheDocument();
+    const query = builders.lead_submissions?.[0];
+    expect(query?.eq).toHaveBeenCalledWith('customer_id', 'c-1');
+    expect(query?.order).toHaveBeenCalledWith('created_at', { ascending: false });
+  });
+
+  it('shows no lead card for a customer who never sent a form', async () => {
+    setTableResult('lead_submissions', { data: [], count: 0 });
+    setup();
+    expect(await screen.findByRole('region', { name: 'Contact' })).toBeInTheDocument();
+    await waitFor(() => expect(builders.lead_submissions?.length).toBeGreaterThan(0));
+    expect(screen.queryByRole('region', { name: 'Web form requests' })).not.toBeInTheDocument();
+  });
+
   it('shows a merged duplicate as merged, with no actions', async () => {
     setup({ ...customer, archived_at: '2026-09-01T00:00:00Z', merged_into_id: 'c-2' });
     expect(await screen.findByText(/This customer was merged into/)).toBeInTheDocument();

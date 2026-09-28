@@ -255,9 +255,9 @@ private struct NotificationsRow: View {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: kind.systemImage)
                     .font(Theme.Typography.headline)
-                    .foregroundStyle(iconColor(kind))
+                    .foregroundStyle(Theme.color(for: iconTone(kind)))
                     .frame(width: Theme.Size.avatarSmall, height: Theme.Size.avatarSmall)
-                    .background(Circle().fill(iconColor(kind).opacity(0.14)))
+                    .background(Circle().fill(Theme.fill(for: iconTone(kind))))
                 Circle()
                     .fill(Theme.glacier)
                     .frame(width: 9, height: 9)
@@ -312,15 +312,16 @@ private struct NotificationsRow: View {
     }
 
     /// Money notifications use the money tone; everything else Glacier.
-    private func iconColor(_ kind: AppNotificationKind) -> Color {
+    /// The icon is drawn in the tone's ink on its soft fill.
+    private func iconTone(_ kind: AppNotificationKind) -> StatusTone {
         switch kind {
-        case .paymentReceived, .giftCardPurchased, .membershipJoined: return Theme.amber
-        case .bookingCancelled, .quoteDeclined, .webhookFailing: return Theme.danger
-        case .quoteApproved, .formSigned, .inspectionAcknowledged: return Theme.success
-        case .lowStock, .taskDue, .billingPaymentFailed: return Theme.warning
+        case .paymentReceived, .giftCardPurchased, .membershipJoined: return .money
+        case .bookingCancelled, .quoteDeclined, .webhookFailing: return .danger
+        case .quoteApproved, .formSigned, .inspectionAcknowledged: return .success
+        case .lowStock, .taskDue, .billingPaymentFailed: return .warning
         case .newBooking, .inboundMessage, .general, .jobAssigned, .jobRescheduled,
              .newLead, .taskAssigned, .smsNumberStatus:
-            return Theme.glacier
+            return .info
         }
     }
 }

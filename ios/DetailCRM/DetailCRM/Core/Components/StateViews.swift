@@ -68,7 +68,7 @@ struct ErrorStateView: View {
         VStack(spacing: Theme.Spacing.md) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 36, weight: .regular))
-                .foregroundStyle(Theme.danger)
+                .foregroundStyle(Theme.dangerInk)
                 .accessibilityHidden(true)
             Text("Something went wrong")
                 .font(Theme.Typography.sectionTitle)
@@ -124,9 +124,9 @@ struct InlineMessage: View {
 
     private var toneColor: Color {
         switch kind {
-        case .error: return Theme.danger
+        case .error: return Theme.dangerInk
         case .info: return Theme.textSecondary
-        case .success: return Theme.success
+        case .success: return Theme.successInk
         }
     }
 }

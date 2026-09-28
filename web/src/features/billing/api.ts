@@ -56,12 +56,15 @@ function parse<S extends z.ZodType>(schema: S, value: unknown, what: string): z.
 export function useShopEntitlement(shopId: string) {
   return useQuery({
     queryKey: billingKeys.entitlement(shopId),
-    queryFn: async (): Promise<Entitlement | null> => {
-      const data = unwrap(await supabase.rpc('shop_entitlement', { p_shop_id: shopId }));
-      return data === null ? null : parse(entitlementSchema, data, 'billing status');
-    },
+    queryFn: () => fetchShopEntitlement(shopId),
     staleTime: 60_000,
   });
+}
+
+/** shop_entitlement(p_shop_id) once (useShopEntitlement's query; onboarding reads it directly). */
+export async function fetchShopEntitlement(shopId: string): Promise<Entitlement | null> {
+  const data = unwrap(await supabase.rpc('shop_entitlement', { p_shop_id: shopId }));
+  return data === null ? null : parse(entitlementSchema, data, 'billing status');
 }
 
 /**

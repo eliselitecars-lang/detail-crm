@@ -29,7 +29,7 @@ struct TimeClockSnapshot: Equatable {
 enum TimeClockLoader {
 
     static func snapshot(shopID: UUID, memberID: UUID, clock: ShopClock, now: Date = Date()) async throws -> TimeClockSnapshot {
-        let week = clock.weekInterval(containing: now)
+        let week = clock.totalsWeekInterval(containing: now)
         async let openRows = TimeClockService.openEntries(shopID: shopID, memberID: memberID)
         async let weekRows = TimeClockService.entries(shopID: shopID, memberID: memberID, interval: week)
         let open = try await openRows
@@ -416,7 +416,7 @@ struct TimeClockEntryRow: View {
             VStack(alignment: .trailing, spacing: Theme.Spacing.xxs) {
                 Text(entry.isOpen ? "Running" : TimeEntry.durationText(seconds: entry.durationSeconds()))
                     .font(Theme.Typography.bodyEmphasis.monospacedDigit())
-                    .foregroundStyle(entry.isOpen ? Theme.success : Theme.textPrimary)
+                    .foregroundStyle(entry.isOpen ? Theme.successInk : Theme.textPrimary)
                 StatusBadge(text: kindText, tone: entry.kind == .shift ? .neutral : .info)
                 if entry.source == .manual {
                     Text("Manual")

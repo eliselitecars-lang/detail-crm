@@ -299,6 +299,41 @@ describe('completion gates', () => {
     );
   });
 
+  it('shows who completed the job past its requirements, when and why', async () => {
+    setTableResult('job_gate_overrides', {
+      data: [
+        {
+          id: 'o-1',
+          to_status: 'completed',
+          reason: 'Customer waived the after photos',
+          blockers: {
+            open_required_items: [{ id: 'i1', label: 'Vacuum interior' }],
+            after_photos: { required: 2, have: 1 },
+          },
+          overridden_by: 'user-1',
+          created_at: '2026-09-28T18:00:00Z',
+        },
+      ],
+    });
+    setup({ job: jobDetailRow({ status: 'completed', completed_at: '2026-09-28T18:00:00Z' }) });
+    const notice = await screen.findByRole('region', { name: 'Requirement overrides' });
+    expect(notice).toHaveTextContent('Moved to Completed without meeting its requirements');
+    expect(notice).toHaveTextContent('Customer waived the after photos');
+    await waitFor(() => expect(notice).toHaveTextContent('by Olivia Owner'));
+    const waived = within(notice).getByRole('list', { name: 'Requirements that were not met' });
+    expect(waived).toHaveTextContent('Required checklist item not done: Vacuum interior');
+    expect(waived).toHaveTextContent('2 “after” photos needed (1 so far)');
+    expect(builders.job_gate_overrides?.[0]?.eq).toHaveBeenCalledWith('job_id', 'job-1');
+  });
+
+  it('shows no override notice for a job that met its requirements', async () => {
+    setTableResult('job_gate_overrides', { data: [] });
+    setup({ job: jobDetailRow({ status: 'completed' }) });
+    await screen.findByRole('heading', { name: /Job #/ });
+    await waitFor(() => expect(builders.job_gate_overrides?.length).toBeGreaterThan(0));
+    expect(screen.queryByRole('region', { name: 'Requirement overrides' })).toBeNull();
+  });
+
   it('never offers technicians the override', async () => {
     const { user } = setup({
       role: 'technician',

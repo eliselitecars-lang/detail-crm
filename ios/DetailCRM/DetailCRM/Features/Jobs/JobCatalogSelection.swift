@@ -94,7 +94,7 @@ struct JobCatalogRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Text(detail)
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(priced?.membershipIncluded == true ? Theme.success : Theme.textSecondary)
+                        .foregroundStyle(priced?.membershipIncluded == true ? Theme.successInk : Theme.textSecondary)
                 }
                 Spacer(minLength: Theme.Spacing.sm)
                 priceView

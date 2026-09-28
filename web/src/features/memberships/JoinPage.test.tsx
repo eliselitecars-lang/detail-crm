@@ -85,6 +85,12 @@ describe('JoinPage', () => {
     mockRpc({ public_membership_plans: { data: plans } });
     render('/join/glacier?joined=1');
     expect(await screen.findByText('Welcome aboard!')).toBeInTheDocument();
+    // Cancelling / updating the card happens only in the client portal.
+    expect(screen.getByRole('link', { name: 'sign in to your account' })).toHaveAttribute(
+      'href',
+      '/portal',
+    );
+    expect(screen.getByRole('link', { name: 'My account' })).toHaveAttribute('href', '/portal');
   });
 
   it('shows a calm message for an unknown shop', async () => {

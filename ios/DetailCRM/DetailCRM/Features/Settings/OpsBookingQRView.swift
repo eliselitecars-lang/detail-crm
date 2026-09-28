@@ -113,7 +113,7 @@ struct OpsBookingQRView: View {
                 .foregroundStyle(Theme.textPrimary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: Theme.Spacing.sm) {
+            AdaptiveButtonRow(spacing: Theme.Spacing.sm) {
                 ShareLink(item: url) {
                     Label("Share link", systemImage: "square.and.arrow.up")
                         .frame(maxWidth: .infinity)

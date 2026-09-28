@@ -69,13 +69,13 @@ struct JobChecklistSection: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 Text("\(done) of \(items.count) done")
                     .font(Theme.Typography.footnote.weight(.semibold))
-                    .foregroundStyle(done == items.count ? Theme.success : Theme.textSecondary)
+                    .foregroundStyle(done == items.count ? Theme.successInk : Theme.textSecondary)
                 if openRequired > 0 {
                     Text(openRequired == 1
                          ? "1 required item left before completing"
                          : "\(openRequired) required items left before completing")
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.warning)
+                        .foregroundStyle(Theme.warningInk)
                 }
             }
             Spacer()
@@ -206,7 +206,7 @@ struct JobChecklistRow: View {
                 HStack(spacing: Theme.Spacing.md) {
                     Image(systemName: item.isDone ? "checkmark.circle.fill" : "circle")
                         .font(Theme.Typography.title.weight(.regular))
-                        .foregroundStyle(item.isDone ? Theme.success : Theme.textTertiary)
+                        .foregroundStyle(item.isDone ? Theme.successInk : Theme.textTertiary)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                         Text(item.label)
@@ -217,7 +217,7 @@ struct JobChecklistRow: View {
                         if item.isRequired {
                             Text("Required")
                                 .font(Theme.Typography.captionEmphasis)
-                                .foregroundStyle(item.isDone ? Theme.textTertiary : Theme.warning)
+                                .foregroundStyle(item.isDone ? Theme.textTertiary : Theme.warningInk)
                                 .padding(.horizontal, Theme.Spacing.xs)
                                 .padding(.vertical, Theme.Spacing.xxs)
                                 .background(

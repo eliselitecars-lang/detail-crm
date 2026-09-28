@@ -125,7 +125,8 @@ declare
 begin
   for r in select * from standings loop
     perform tests.as_service();
-    update public.shop_billing set status = r.status, trial_ends_at = r.trial, current_period_end = r.period, comp_until = r.comp
+    update public.shop_billing set status = r.status, trial_ends_at = r.trial, current_period_end = r.period,
+                                   paid_through = r.period, comp_until = r.comp
      where shop_id = tests.fx('shop_a');
     perform tests.authenticate_as(tests.fx('u_manager_a'));
     perform tests.lives(format('insert into public.customers (shop_id, first_name) values (%L, %L)', tests.fx('shop_a'), r.label),
@@ -134,7 +135,8 @@ begin
 end
 $$;
 select tests.as_service();
-update public.shop_billing set status = 'none', trial_ends_at = null, current_period_end = null, comp_until = null
+update public.shop_billing set status = 'none', trial_ends_at = null, current_period_end = null, paid_through = null,
+                               comp_until = null
  where shop_id = tests.fx('shop_a');
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select pg_temp.pt402($$insert into public.customers (shop_id, first_name) values (tests.fx('shop_a'), 'Again')$$, 'lapsed again: PT402');

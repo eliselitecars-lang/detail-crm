@@ -77,11 +77,30 @@ public struct ShopClock: Sendable {
 
     // MARK: - Weeks & months
 
+    /// `Calendar.firstWeekday` value for Monday: the start of a totals week.
+    public static let totalsFirstWeekday = 2
+
     /// The shop-local week containing `date`, starting on `firstWeekday`.
+    /// This is a *display* week (the calendar's week grid). For money and
+    /// hours totals use `totalsWeekInterval(containing:)`.
     public func weekInterval(containing date: Date) -> DateInterval {
+        weekInterval(containing: date, startingOn: firstWeekday)
+    }
+
+    /// The Monday-to-Sunday shop-local week containing `date`: the week every
+    /// "This week" total uses, whatever `firstWeekday` is. It matches the
+    /// server's `date_trunc('week', …)` (ISO weeks start on Monday) in
+    /// `dashboard_summary` and the weekly `report_*` buckets, and the web
+    /// app's report presets and timesheets, so the same preset shows the
+    /// same figures everywhere.
+    public func totalsWeekInterval(containing date: Date) -> DateInterval {
+        weekInterval(containing: date, startingOn: Self.totalsFirstWeekday)
+    }
+
+    private func weekInterval(containing date: Date, startingOn first: Int) -> DateInterval {
         let dayStart = startOfDay(date)
         let weekday = calendar.component(.weekday, from: dayStart)
-        let offset = (weekday - firstWeekday + 7) % 7
+        let offset = (weekday - first + 7) % 7
         let start = addingDays(-offset, to: dayStart)
         let end = addingDays(7, to: start)
         return DateInterval(start: start, end: end)

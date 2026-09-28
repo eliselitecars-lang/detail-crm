@@ -191,7 +191,7 @@ private struct CustomerPrimaryActions: View {
     var body: some View {
         if permissions.canCreateJobs || permissions.canMessage {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                HStack(spacing: Theme.Spacing.md) {
+                AdaptiveButtonRow(spacing: Theme.Spacing.md) {
                     if permissions.canCreateJobs && !customer.isArchived {
                         Button(action: newJob) {
                             Label("New job", systemImage: "plus")
@@ -745,7 +745,7 @@ private struct CustomerSavedCardRow: View {
             if canRemove {
                 Button("Remove", role: .destructive, action: remove)
                     .font(Theme.Typography.footnote)
-                    .foregroundStyle(Theme.danger)
+                    .foregroundStyle(Theme.dangerInk)
                     .accessibilityLabel("Remove \(card.label)")
             }
         }
@@ -859,7 +859,7 @@ private struct CustomerSummaryTile: View {
             if let detail {
                 Text(detail)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(tone == .danger ? Theme.danger : Theme.textSecondary)
+                    .foregroundStyle(tone == .danger ? Theme.dangerInk : Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -870,8 +870,8 @@ private struct CustomerSummaryTile: View {
     private var valueColor: Color {
         switch tone {
         case .plain: return Theme.textPrimary
-        case .money: return Theme.amber
-        case .danger: return Theme.danger
+        case .money: return Theme.moneyInk
+        case .danger: return Theme.dangerInk
         }
     }
 }

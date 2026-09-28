@@ -259,7 +259,7 @@ struct MoneyLineRow: View {
                 if let note {
                     Text(note)
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(noteIsWarning ? Theme.warning : Theme.textSecondary)
+                        .foregroundStyle(noteIsWarning ? Theme.warningInk : Theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

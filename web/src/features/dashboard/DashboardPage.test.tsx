@@ -5,6 +5,7 @@ import {
   builders,
   createBuilder,
   resetSupabaseMock,
+  setFunctionResult,
   setTableResult,
   supabase,
   type Builder,
@@ -12,7 +13,7 @@ import {
 } from '@/test/supabaseMock';
 import DashboardPage from './DashboardPage';
 import { scheduleRow, shopSummary, techSummary } from './fixtures.test-data';
-import { REQUEST_ALREADY_HANDLED } from './api';
+import { DECLINE_PAYMENT_IN_PROGRESS, REQUEST_ALREADY_HANDLED } from './api';
 import {
   customerFromTitle,
   dashboardSummarySchema,
@@ -31,6 +32,15 @@ beforeEach(() => {
   rpcResults = {};
   rpc.mockImplementation((name: string) => createBuilder(rpcResults[name] ?? { data: null }));
 });
+
+const RELEASED = {
+  invoice_id: null,
+  job_id: 'job-9',
+  cancelled: 0,
+  succeeded: 0,
+  in_progress: 0,
+  sessions_expired: 1,
+};
 
 function setup(role: 'owner' | 'technician' = 'owner') {
   return renderRoute(<DashboardPage />, {
@@ -120,6 +130,7 @@ describe('DashboardPage (manager+)', () => {
 
   it('approves and declines booking requests', async () => {
     rpcResults.dashboard_summary = { data: shopSummary };
+    setFunctionResult('payments', { data: RELEASED });
     rpcResults.calendar_events = { data: [] };
     setTableResult('time_entries', { data: [] });
     setTableResult('customers', {
@@ -174,6 +185,85 @@ describe('DashboardPage (manager+)', () => {
       status: 'cancelled',
       cancel_reason: 'Fully booked that day',
     });
+    // The open deposit Checkout / sheet is released before the job is cancelled.
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+      body: { action: 'cancel_open_payments', shop_id: 'shop-1', job_id: 'job-9' },
+    });
+    expect(supabase.functions.invoke.mock.invocationCallOrder[0]).toBeLessThan(
+      decline!.update.mock.invocationCallOrder[0]!,
+    );
+    expect(await screen.findByText('Booking declined')).toBeInTheDocument();
+  });
+
+  it('keeps a request when its deposit payment is still processing', async () => {
+    rpcResults.dashboard_summary = { data: shopSummary };
+    rpcResults.calendar_events = { data: [] };
+    setFunctionResult('payments', { data: { ...RELEASED, in_progress: 1 } });
+    setTableResult('time_entries', { data: [] });
+    setTableResult('customers', {
+      data: [{ id: 'c-9', first_name: 'Sam', last_name: 'Lee', company: null }],
+    });
+    setTableResult('jobs', {
+      data: [
+        {
+          id: 'job-9',
+          number: 1050,
+          scheduled_start: '2026-09-29T14:00:00Z',
+          scheduled_end: '2026-09-29T16:00:00Z',
+          location_type: 'shop',
+          created_at: '2026-09-26T10:00:00Z',
+          customer_id: 'c-9',
+        },
+      ],
+    });
+    const { user } = setup();
+    const requests = await screen.findByRole('region', { name: 'Booking requests' });
+    await within(requests).findByText(/Sam Lee/);
+    await user.click(
+      within(requests).getByRole('button', { name: 'Decline booking from Sam Lee' }),
+    );
+    const dialog = await screen.findByRole('alertdialog', { name: 'Decline this booking?' });
+    await user.type(within(dialog).getByLabelText(/Reason/), 'Fully booked');
+    await user.click(within(dialog).getByRole('button', { name: 'Decline booking' }));
+    expect(await within(dialog).findByText(DECLINE_PAYMENT_IN_PROGRESS)).toBeInTheDocument();
+    expect(
+      builders.jobs?.some((b) =>
+        b.update.mock.calls.some(([p]) => (p as { status?: string }).status === 'cancelled'),
+      ),
+    ).toBe(false);
+  });
+
+  it('says so when a deposit had already been paid for a declined request', async () => {
+    rpcResults.dashboard_summary = { data: shopSummary };
+    rpcResults.calendar_events = { data: [] };
+    setFunctionResult('payments', { data: { ...RELEASED, succeeded: 1 } });
+    setTableResult('time_entries', { data: [] });
+    setTableResult('customers', {
+      data: [{ id: 'c-9', first_name: 'Sam', last_name: 'Lee', company: null }],
+    });
+    setTableResult('jobs', {
+      data: [
+        {
+          id: 'job-9',
+          number: 1050,
+          scheduled_start: '2026-09-29T14:00:00Z',
+          scheduled_end: '2026-09-29T16:00:00Z',
+          location_type: 'shop',
+          created_at: '2026-09-26T10:00:00Z',
+          customer_id: 'c-9',
+        },
+      ],
+    });
+    const { user } = setup();
+    const requests = await screen.findByRole('region', { name: 'Booking requests' });
+    await within(requests).findByText(/Sam Lee/);
+    await user.click(
+      within(requests).getByRole('button', { name: 'Decline booking from Sam Lee' }),
+    );
+    const dialog = await screen.findByRole('alertdialog', { name: 'Decline this booking?' });
+    await user.type(within(dialog).getByLabelText(/Reason/), 'Fully booked');
+    await user.click(within(dialog).getByRole('button', { name: 'Decline booking' }));
+    expect(await screen.findByText(/A card payment had already gone through/)).toBeInTheDocument();
   });
 
   it('shows fleet jobs on today’s schedule by company name', async () => {
@@ -225,6 +315,7 @@ describe('DashboardPage (manager+)', () => {
 
   it('closes the decline dialog with a notice when the request was already handled', async () => {
     rpcResults.dashboard_summary = { data: shopSummary };
+    setFunctionResult('payments', { data: RELEASED });
     rpcResults.calendar_events = { data: [] };
     setTableResult('time_entries', { data: [] });
     setTableResult('customers', {

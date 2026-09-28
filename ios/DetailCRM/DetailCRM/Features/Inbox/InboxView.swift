@@ -372,7 +372,7 @@ private struct InboxThreadListRow: View {
                 if case .unknownSender = thread.key {
                     Text("Not a saved customer")
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.warning)
+                        .foregroundStyle(Theme.warningInk)
                 }
             }
         }

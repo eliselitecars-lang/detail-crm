@@ -9,6 +9,7 @@ import {
   formatPlanAmount,
   hasLiveSubscription,
   isStripeUrl,
+  newShopTrialText,
   planIntervalLabel,
   planMembersLabel,
   planSchema,
@@ -200,5 +201,35 @@ describe('subscription status helpers', () => {
     expect(isStripeUrl('http://checkout.stripe.com/x')).toBe(false);
     expect(isStripeUrl('https://stripe.com.evil.example/x')).toBe(false);
     expect(isStripeUrl('javascript:alert(1)')).toBe(false);
+  });
+});
+
+describe('newShopTrialText (onboarding)', () => {
+  it('states the trial end and length for a new shop in its trial', () => {
+    const trial = entitlement({
+      state: 'trialing',
+      reason: 'trial',
+      trial_ends_at: '2026-10-12T17:00:00Z',
+      current_period_end: null,
+    });
+    expect(newShopTrialText(trial, TZ, NOW)).toBe(
+      'Your free trial runs until Oct 12, 2026 (14 days).',
+    );
+    expect(newShopTrialText({ ...trial, trial_ends_at: '2026-09-29T17:00:00Z' }, TZ, NOW)).toMatch(
+      /\(1 day\)\.$/,
+    );
+  });
+
+  it('says nothing while billing is off, for a comped shop or without a trial end', () => {
+    expect(newShopTrialText(null, TZ, NOW)).toBeNull();
+    expect(
+      newShopTrialText(entitlement({ billing_enabled: false, reason: 'billing_off' }), TZ, NOW),
+    ).toBeNull();
+    expect(
+      newShopTrialText(entitlement({ state: 'comped', reason: 'comped' }), TZ, NOW),
+    ).toBeNull();
+    expect(
+      newShopTrialText(entitlement({ state: 'trialing', reason: 'trial' }), TZ, NOW),
+    ).toBeNull();
   });
 });

@@ -609,7 +609,7 @@ private struct QuoteActionsSection: View {
                 perform(.delete)
             } label: {
                 Text("Delete quote")
-                    .foregroundStyle(Theme.danger)
+                    .foregroundStyle(Theme.dangerInk)
             }
             .buttonStyle(.themePlain)
         }

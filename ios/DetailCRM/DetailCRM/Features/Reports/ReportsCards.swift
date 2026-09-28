@@ -476,7 +476,7 @@ private struct ReportsOutstandingInvoiceRow: View {
                     .foregroundStyle(Theme.textPrimary)
                 Text(detail)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(invoice.overdue ? Theme.warning : Theme.textSecondary)
+                    .foregroundStyle(invoice.overdue ? Theme.warningInk : Theme.textSecondary)
             }
             Spacer(minLength: Theme.Spacing.sm)
             MoneyText(cents: invoice.balanceCents, currencyCode: currencyCode, size: .small, emphasis: .attention)

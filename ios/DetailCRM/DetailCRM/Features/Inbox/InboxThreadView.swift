@@ -284,7 +284,7 @@ private struct InboxThreadBanner: View {
     private func banner(text: String, systemImage: String, actionTitle: String?) -> some View {
         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
             Image(systemName: systemImage)
-                .foregroundStyle(Theme.warning)
+                .foregroundStyle(Theme.warningInk)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 Text(text)
@@ -401,7 +401,7 @@ private struct InboxMessageBubble: View {
                 if let error = failureText {
                     Text(error)
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.danger)
+                        .foregroundStyle(Theme.dangerInk)
                         .multilineTextAlignment(isOutbound ? .trailing : .leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -524,7 +524,7 @@ private struct InboxComposer: View {
                 if channel == .sms && smsLength > 140 {
                     Text("\(smsLength)/\(InboxComposeRules.smsLimit) characters")
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(smsLength > InboxComposeRules.smsLimit ? Theme.danger : Theme.textTertiary)
+                        .foregroundStyle(smsLength > InboxComposeRules.smsLimit ? Theme.dangerInk : Theme.textTertiary)
                 }
             }
         }

@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute, shopValue, signedInAuth } from '@/test/render';
 import {
   builders,
-  createBuilder,
   mockRpc,
   pgError,
   resetSupabaseMock,
@@ -98,17 +97,75 @@ describe('OnboardingPage', () => {
     expect(switchShop).toHaveBeenCalledWith('shop-new');
   });
 
-  it('sends the user back to step 1 when the booking link is taken', async () => {
-    supabase.rpc.mockReturnValueOnce(
-      createBuilder({
-        error: {
-          code: '23505',
-          message: 'slug "glacier" is already taken',
-          details: null,
-          hint: null,
+  it('links the pricing page and tells the owner how long their trial runs when billing is on', async () => {
+    const trialEnd = new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString();
+    const calls = mockRpc({
+      public_billing_plans: {
+        data: [
+          {
+            id: 'plan-1',
+            name: 'Solo',
+            description: null,
+            amount_cents: 4900,
+            currency: 'usd',
+            interval: 'month',
+            interval_count: 1,
+            max_members: 1,
+            features: [],
+          },
+        ],
+      },
+      create_shop: { data: { id: 'shop-new', name: 'Glacier Detailing' } },
+      replace_business_hours: { data: [] },
+      shop_entitlement: {
+        data: {
+          billing_enabled: true,
+          state: 'trialing',
+          reason: 'trial',
+          plan_name: null,
+          trial_ends_at: trialEnd,
+          current_period_end: null,
+          cancel_at_period_end: false,
+          max_members: null,
+          members_used: 1,
+          can_write: true,
+          is_owner: true,
         },
-      }),
+      },
+    });
+    const { user } = setup();
+    expect(await screen.findByRole('link', { name: 'pricing page' })).toHaveAttribute(
+      'href',
+      '/pricing',
     );
+    await user.type(screen.getByLabelText(/Shop name/), 'Glacier Detailing');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Contact & location' });
+    await user.selectOptions(screen.getByLabelText(/Time zone/), 'America/Chicago');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Taxes & hours' });
+    await user.click(screen.getByRole('button', { name: 'Create shop' }));
+    expect(await screen.findByText('Dashboard home')).toBeInTheDocument();
+    expect(calls).toContainEqual({ fn: 'shop_entitlement', args: { p_shop_id: 'shop-new' } });
+    expect(
+      await screen.findByText(/Your free trial runs until .* \(14 days\)\./),
+    ).toBeInTheDocument();
+  });
+
+  it('shows no pricing link or trial while billing is off', async () => {
+    mockRpc({ public_billing_plans: { data: [] } });
+    setup();
+    await screen.findByRole('heading', { name: 'Your business' });
+    await waitFor(() =>
+      expect(
+        (supabase.rpc.mock.calls as unknown[][]).some((call) => call[0] === 'public_billing_plans'),
+      ).toBe(true),
+    );
+    expect(screen.queryByRole('link', { name: 'pricing page' })).toBeNull();
+  });
+
+  it('sends the user back to step 1 when the booking link is taken', async () => {
+    mockRpc({ create_shop: pgError('23505', 'slug "glacier" is already taken') });
     const { user } = setup();
     await user.type(screen.getByLabelText(/Shop name/), 'Glacier');
     await user.click(screen.getByRole('button', { name: 'Continue' }));

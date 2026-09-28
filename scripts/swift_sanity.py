@@ -18,6 +18,14 @@ mechanical mistakes that would otherwise burn a macOS CI run:
     frames, types nested inside generic functions, `AnyJSON` without
     `import Supabase`, and `safeAreaInset` combined with preference-key
     observers in one file
+  * accessibility: a tone *fill* color (`Theme.amber/success/warning/
+    danger`) used as text via `foregroundStyle`/`foregroundColor` (too
+    light to read in light mode — use the matching `…Ink` token), and two
+    or more theme buttons side by side in a bare `HStack` (labels
+    truncate at accessibility text sizes — use `AdaptiveButtonRow`)
+  * auth: a `SupabaseClient(` built without `flowType: .implicit` (the
+    app's reset/confirmation links open the web app, which can't redeem a
+    PKCE code whose verifier is on the phone)
   * edge-function calls: every `functions.invoke(` / `EdgeFunctions.invoke(`
     / `MoneyEdge.invoke(` in app code names its function with a string
     literal, and that function exists (supabase/functions/<name>/index.ts);
@@ -287,6 +295,8 @@ FORBIDDEN = [
     (re.compile(r"\.frame\([^)]*\b(?:width|height|minWidth|minHeight|maxWidth|maxHeight)\s*:\s*-\s*\d"),
      "negative frame size"),
 ]
+FILL_AS_TEXT = re.compile(r"\.foreground(?:Style|Color)\(.*\bTheme\.(amber|success|warning|danger)\b")
+INK_FOR = {"amber": "moneyInk", "success": "successInk", "warning": "warningInk", "danger": "dangerInk"}
 URL_FORCE = re.compile(r"URL\(string:[^)]*\)\s*!")
 HARD_COLOR = re.compile(r"\b(?:UIColor|Color)\((?:red:|white:|hue:|\.sRGB|light:|hex:)")
 
@@ -301,12 +311,42 @@ def check_forbidden(path: Path, code_lines: list[str], source: str, report: Repo
             report.error(path, index + 1, "force-unwrapped URL(string:) — build URLs with guard/URLComponents")
         if HARD_COLOR.search(text) and name != "Theme.swift":
             report.error(path, index + 1, "hard-coded color — add a token to Theme.swift instead")
+        fill = FILL_AS_TEXT.search(text)
+        if fill and name != "Theme.swift":
+            report.error(path, index + 1, f"Theme.{fill.group(1)} is a fill color and fails contrast as text — "
+                                          f"use Theme.{INK_FOR[fill.group(1)]}")
     code = "\n".join(code_lines)
+    if re.search(r"\bSupabaseClient\(", code) and not re.search(r"\bflowType:\s*\.implicit\b", code):
+        report.error(path, None, "SupabaseClient built without `flowType: .implicit` — password-reset and "
+                                 "confirmation links open the web app, which can't redeem a PKCE code")
+    check_button_rows(path, code, report)
     if re.search(r"\bAnyJSON\b", code) and not re.search(r"^\s*import\s+Supabase\b", source, re.M):
         report.error(path, None, "uses AnyJSON without 'import Supabase'")
     if ".safeAreaInset(" in code and "onPreferenceChange" in code:
         report.error(path, None, "safeAreaInset combined with preference-key observation "
                                  "(state-driven layout loop risk) — restructure")
+
+
+HSTACK_OPEN = re.compile(r"\bHStack\b[^{\n]*\{")
+THEME_BUTTON = re.compile(r"\.buttonStyle\(\.theme(?:Primary|Money|Secondary|Destructive)")
+
+
+def check_button_rows(path: Path, code: str, report: Report) -> None:
+    """Two or more filled/outlined theme buttons directly side by side in an
+    HStack truncate at accessibility text sizes; AdaptiveButtonRow stacks
+    them instead. `code` has strings blanked, so braces are structural."""
+    for match in HSTACK_OPEN.finditer(code):
+        depth, index = 1, match.end()
+        while depth and index < len(code):
+            if code[index] == "{":
+                depth += 1
+            elif code[index] == "}":
+                depth -= 1
+            index += 1
+        if len(THEME_BUTTON.findall(code, match.end(), index)) >= 2:
+            line = code.count("\n", 0, match.start()) + 1
+            report.error(path, line, "theme buttons side by side in an HStack truncate at accessibility "
+                                     "text sizes — use AdaptiveButtonRow")
 
 
 EDGE_INVOKE = re.compile(r"\b(?:functions|EdgeFunctions|MoneyEdge)\.invoke\(\s*")
@@ -647,6 +687,35 @@ def self_test() -> int:
         'let r: R = try await EdgeFunctions.invoke(functionName, body: body)\n').errors)
     expect("edge call in a comment ignored", not run_swift(
         '// EdgeFunctions.invoke("nope", body: b)\nlet x = 1\n').errors)
+    expect("fill color as text detected", any("moneyInk" in e for e in run_swift(
+        "let v = Text(a).foregroundStyle(Theme.amber)\n").errors))
+    expect("fill color in a ternary foreground detected", bool(run_swift(
+        "let v = Text(a).foregroundStyle(late ? Theme.warning : Theme.textSecondary)\n").errors))
+    expect("ink token as text passes", not run_swift(
+        "let v = Text(a).foregroundStyle(Theme.moneyInk)\n").errors)
+    expect("fill color as a fill passes", not run_swift(
+        "let v = Circle().fill(Theme.danger)\n").errors)
+    expect("fill colors allowed as text inside Theme.swift", not run_swift(
+        "let v = Text(a).foregroundStyle(Theme.amber)\n", filename="Theme.swift").errors)
+    expect("theme buttons in a bare HStack detected", any("AdaptiveButtonRow" in e for e in run_swift(
+        "let v = HStack(spacing: 8) {\n  Button(\"A\") {}\n    .buttonStyle(.themePrimaryCompact)\n"
+        "  Button(\"B\") { f() }\n    .buttonStyle(.themeSecondaryCompact)\n}\n").errors))
+    expect("theme buttons in AdaptiveButtonRow pass", not run_swift(
+        "let v = AdaptiveButtonRow(spacing: 8) {\n  Button(\"A\") {}\n    .buttonStyle(.themePrimaryCompact)\n"
+        "  Button(\"B\") {}\n    .buttonStyle(.themeSecondaryCompact)\n}\n").errors)
+    expect("one theme button beside plain content passes", not run_swift(
+        "let v = HStack {\n  Text(\"x\")\n  Button(\"B\") {}\n    .buttonStyle(.themeSecondaryCompact)\n}\n").errors)
+    expect("buttons in sibling HStacks pass", not run_swift(
+        "let v = VStack {\n  HStack { Button(\"A\") {}.buttonStyle(.themePrimary) }\n"
+        "  HStack { Button(\"B\") {}.buttonStyle(.themeSecondary) }\n}\n").errors)
+    expect("PKCE client detected", any("implicit" in e for e in run_swift(
+        "let c = SupabaseClient(supabaseURL: u, supabaseKey: k)\n", filename="Supa.swift").errors))
+    expect("implicit client passes", not run_swift(
+        "let c = SupabaseClient(supabaseURL: u, supabaseKey: k, options: SupabaseClientOptions(\n"
+        "    auth: SupabaseClientOptions.AuthOptions(flowType: .implicit)))\n", filename="Supa.swift").errors)
+    expect("implicit flow in a comment does not count", bool(run_swift(
+        "// flowType: .implicit\nlet c = SupabaseClient(supabaseURL: u, supabaseKey: k)\n",
+        filename="Supa.swift").errors))
     stub = run_swift("// FEATURE_STUB: later\nstruct V {}\n")
     expect("stub counted", len(stub.stubs) == 1 and not stub.errors)
 

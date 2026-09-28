@@ -66,10 +66,10 @@ private struct TodayBookingRequestCard: View {
             }
             Label(whenText, systemImage: "calendar")
                 .font(Theme.Typography.subheadline.weight(.medium))
-                .foregroundStyle(request.job.scheduledStart == nil ? Theme.warning : Theme.textPrimary)
+                .foregroundStyle(request.job.scheduledStart == nil ? Theme.warningInk : Theme.textPrimary)
 
             if context.canDecideBookings {
-                HStack(spacing: Theme.Spacing.sm) {
+                AdaptiveButtonRow(spacing: Theme.Spacing.sm) {
                     Button("Approve") { actions.approve(request) }
                         .buttonStyle(.themePrimaryCompact)
                         .disabled(request.job.scheduledStart == nil)

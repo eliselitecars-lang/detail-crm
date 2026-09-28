@@ -187,7 +187,10 @@ struct JobVehicleDiagramShape: Shape {
 }
 
 /// The drawing plus its marks; taps on empty space report a normalized
-/// point (when `onTap` is set), taps on a pin select it.
+/// point (when `onTap` is set), taps on a pin select it. Pointing is the
+/// only way to add a mark *here*, so screens that set `onTap` also offer
+/// the named areas of `JobVehicleView.areas` as a button (see
+/// `JobInspectionSheet`) for assistive-technology users.
 struct JobVehicleDiagramView: View {
     let view: JobVehicleView
     let marks: [InspectionMark]
@@ -208,6 +211,9 @@ struct JobVehicleDiagramView: View {
                     JobMarkPin(mark: mark, number: index + 1, isSelected: mark.id == selectedMarkID)
                         .position(x: CGFloat(mark.x) * size.width, y: CGFloat(mark.y) * size.height)
                         .onTapGesture {
+                            onSelectMark?(mark)
+                        }
+                        .accessibilityAction {
                             onSelectMark?(mark)
                         }
                 }

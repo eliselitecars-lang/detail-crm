@@ -75,7 +75,7 @@ struct TimeClockTeamView: View {
         .confirmation($confirmation)
         .task {
             if !didSetWeek {
-                weekStart = appState.clock.weekInterval(containing: Date()).start
+                weekStart = appState.clock.totalsWeekInterval(containing: Date()).start
                 didSetWeek = true
             }
             await loadTeam()
@@ -165,7 +165,7 @@ struct TimeClockTeamView: View {
             return
         }
         let clock = appState.clock
-        let interval = clock.weekInterval(containing: weekStart)
+        let interval = clock.totalsWeekInterval(containing: weekStart)
         if quietly {
             sheet.beginLoading()
         } else {
@@ -271,7 +271,7 @@ private struct TimeClockOpenRow: View {
             TimelineView(.periodic(from: Date(), by: 60)) { context in
                 Text(TimeEntry.durationText(seconds: entry.durationSeconds(now: context.date)))
                     .font(Theme.Typography.bodyEmphasis.monospacedDigit())
-                    .foregroundStyle(Theme.success)
+                    .foregroundStyle(Theme.successInk)
             }
         }
         .accessibilityElement(children: .combine)
@@ -286,7 +286,7 @@ private struct TimeClockWeekStepper: View {
     var body: some View {
         HStack {
             Button {
-                weekStart = clock.addingDays(-7, to: clock.weekInterval(containing: weekStart).start)
+                weekStart = clock.addingDays(-7, to: clock.totalsWeekInterval(containing: weekStart).start)
             } label: {
                 Image(systemName: "chevron.left")
                     .frame(width: Theme.Size.compactControlHeight, height: Theme.Size.compactControlHeight)
@@ -301,7 +301,7 @@ private struct TimeClockWeekStepper: View {
                 .multilineTextAlignment(.center)
             Spacer(minLength: Theme.Spacing.sm)
             Button {
-                weekStart = clock.addingDays(7, to: clock.weekInterval(containing: weekStart).start)
+                weekStart = clock.addingDays(7, to: clock.totalsWeekInterval(containing: weekStart).start)
             } label: {
                 Image(systemName: "chevron.right")
                     .frame(width: Theme.Size.compactControlHeight, height: Theme.Size.compactControlHeight)
@@ -313,7 +313,7 @@ private struct TimeClockWeekStepper: View {
     }
 
     private var label: String {
-        let week = clock.weekInterval(containing: weekStart)
+        let week = clock.totalsWeekInterval(containing: weekStart)
         return "\(clock.shortDayText(week.start)) – \(clock.shortDayText(clock.addingDays(-1, to: week.end)))"
     }
 }

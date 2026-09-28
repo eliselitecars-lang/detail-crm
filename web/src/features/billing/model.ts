@@ -211,6 +211,25 @@ export function billingBanner(
   return null;
 }
 
+/**
+ * For a shop that was just created (onboarding): the trial it starts with,
+ * as "Your free trial runs until Oct 12, 2026 (14 days)." — null while
+ * billing is off or when the shop is not in a platform trial (comped, or no
+ * trial configured).
+ */
+export function newShopTrialText(
+  entitlement: Entitlement | null | undefined,
+  timezone: string,
+  now: Date = new Date(),
+): string | null {
+  if (!entitlement?.billing_enabled) return null;
+  if (entitlement.state !== 'trialing' || entitlement.reason !== 'trial') return null;
+  if (!entitlement.trial_ends_at) return null;
+  const days = daysLeft(entitlement.trial_ends_at, timezone, now);
+  const end = formatDate(entitlement.trial_ends_at, timezone);
+  return `Your free trial runs until ${end} (${days === 1 ? '1 day' : `${days} days`}).`;
+}
+
 export const STATE_LABELS: Record<EntitlementState, string> = {
   active: 'Active',
   trialing: 'Trial',

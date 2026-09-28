@@ -101,7 +101,7 @@ struct JobsDayMapView: View {
     private func handOffBar(_ stops: [JobsDayMapModel.Stop]) -> some View {
         let routeStops = stops.map(\.routeStop)
         return VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack(spacing: Theme.Spacing.sm) {
+            AdaptiveButtonRow(spacing: Theme.Spacing.sm) {
                 if let url = JobsRouteLinks.googleMapsURL(stops: routeStops) {
                     Button {
                         openURL(url)
@@ -206,11 +206,11 @@ struct JobsDayMapView: View {
         } else if model.notFound.contains(stop.id) {
             Text("Couldn't place this address on the map. Check it on the job.")
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.warning)
+                .foregroundStyle(Theme.warningInk)
         } else if stop.address == nil {
             Text("No service address on this job.")
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.warning)
+                .foregroundStyle(Theme.warningInk)
         }
     }
 

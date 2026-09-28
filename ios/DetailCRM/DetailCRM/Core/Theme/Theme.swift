@@ -18,13 +18,34 @@ enum Theme {
 
     // MARK: - Brand palette (fixed)
 
+    // Fill colors: solid button fills, badge/banner tints, bars, dots and
+    // calendar blocks. Amber, warning and success are too light to be read
+    // as text in light mode (about 2:1 to 3.5:1 on white), so text and
+    // icons use the matching `…Ink` token below; `scripts/swift_sanity.py`
+    // rejects a fill color passed to `foregroundStyle`/`foregroundColor`.
+
     /// Glacier — interaction, selection, links, primary non-money actions.
     static let glacier = Color(light: 0x1F6FEB, dark: 0x4C8DF6)
-    /// Amber — money amounts that need attention and primary money actions.
+    /// Amber — the primary money action fill (`.themeMoney`) and money tints.
     static let amber = Color(light: 0xE8A23A, dark: 0xF0B252)
     static let success = Color(light: 0x1F9D55, dark: 0x34B871)
     static let warning = Color(light: 0xD98A0B, dark: 0xF0A43A)
     static let danger = Color(light: 0xD93F3F, dark: 0xF06464)
+
+    // MARK: - Tone text ("ink")
+
+    // Readable text/icon versions of the fill colors (the web app's
+    // `*-ink` tokens). Each meets WCAG AA 4.5:1 on background, surface,
+    // surfaceMuted and on its own 14 % badge fill, in both modes.
+
+    /// Money amounts that need attention (balances due, amounts owed).
+    static let moneyInk = Color(light: 0x8A560E, dark: 0xF2BD6B)
+    static let successInk = Color(light: 0x157240, dark: 0x5FD394)
+    static let warningInk = Color(light: 0x8F5A05, dark: 0xF3BC5E)
+    static let dangerInk = Color(light: 0xA82E2E, dark: 0xF28B8B)
+    /// Informational tone text (Glacier itself is fine for links and
+    /// buttons on surfaces but too light on its own badge fill).
+    static let glacierInk = Color(light: 0x1553B8, dark: 0x7FB0FF)
 
     /// Brand tile gradient (app icon, launch mark) — same in both modes.
     static let brandGradient = LinearGradient(
@@ -61,8 +82,20 @@ enum Theme {
 
     // MARK: - Status tones
 
-    /// Foreground color for a status tone.
+    /// Text/icon color for a status tone (the readable ink).
     static func color(for tone: StatusTone) -> Color {
+        switch tone {
+        case .neutral: return textSecondary
+        case .info: return glacierInk
+        case .success: return successInk
+        case .warning: return warningInk
+        case .danger: return dangerInk
+        case .money: return moneyInk
+        }
+    }
+
+    /// Solid fill color for a status tone (bars, dots, blocks) — not text.
+    static func accent(for tone: StatusTone) -> Color {
         switch tone {
         case .neutral: return textSecondary
         case .info: return glacier
@@ -73,9 +106,10 @@ enum Theme {
         }
     }
 
-    /// Soft background fill for a status tone (badges, banners).
+    /// Soft background fill for a status tone (badges, banners), drawn
+    /// behind `color(for:)` text.
     static func fill(for tone: StatusTone) -> Color {
-        color(for: tone).opacity(0.14)
+        accent(for: tone).opacity(0.14)
     }
 
     // MARK: - Spacing (4-pt grid)
@@ -301,16 +335,27 @@ enum ThemeButtonVariant {
 /// Solid/outlined pill used by every theme button. Reads `isEnabled` from
 /// the environment inside a View (not the style) so disabled state renders
 /// reliably.
+///
+/// Labels stay on one line (shrinking slightly before truncating) at
+/// standard text sizes; at accessibility sizes (AX1–AX5) they wrap onto as
+/// many lines as they need, so a money or destructive action is never cut
+/// off to "Complete an…". Put side-by-side buttons in `AdaptiveButtonRow`.
 private struct ThemeButtonBody: View {
     let configuration: ButtonStyleConfiguration
     let variant: ThemeButtonVariant
     let compact: Bool
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
+        let wraps = dynamicTypeSize.isAccessibilitySize
         configuration.label
             .font(compact ? Theme.Typography.buttonCompact : Theme.Typography.button)
-            .lineLimit(1)
+            .lineLimit(wraps ? nil : 1)
+            .minimumScaleFactor(wraps ? 1 : 0.8)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, wraps ? Theme.Spacing.sm : 0)
             .foregroundStyle(foreground)
             .padding(.horizontal, compact ? Theme.Spacing.md : Theme.Spacing.lg)
             .frame(maxWidth: compact ? nil : .infinity)

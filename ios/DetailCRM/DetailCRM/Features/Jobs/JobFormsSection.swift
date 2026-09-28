@@ -111,7 +111,7 @@ struct JobFormRow: View {
     var body: some View {
         HStack(spacing: Theme.Spacing.md) {
             Image(systemName: form.isSigned ? "checkmark.seal.fill" : "doc.text")
-                .foregroundStyle(form.isSigned ? Theme.success : Theme.glacier)
+                .foregroundStyle(form.isSigned ? Theme.successInk : Theme.glacier)
                 .frame(width: Theme.Size.rowIcon)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {

@@ -1,6 +1,6 @@
 import { BadgeCheck, CreditCard } from 'lucide-react';
 import { useState } from 'react';
-import { useParams, useSearchParams } from 'react-router';
+import { Link, useParams, useSearchParams } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
   Badge,
@@ -17,6 +17,7 @@ import { formatBps, formatCents } from '@/lib/money';
 import { normalizePhone } from '@/lib/phone';
 import { Banner, PublicError, PublicLoading } from '@/features/public-docs/shared/PublicPage';
 import { toBranding } from '@/features/public-docs/shared/schemas';
+import { CUSTOMER_PORTAL_PATH } from '@/features/portal/paths';
 import { billingLabel } from './api';
 import {
   newRequestNonce,
@@ -74,7 +75,11 @@ function JoinContent({ slug, data }: { slug: string; data: PublicPlans }) {
         {joined && (
           <Banner tone="success" title="Welcome aboard!">
             Your payment went through and your membership is being set up. You’ll get a confirmation
-            from {data.shop.name} shortly.
+            from {data.shop.name} shortly. To cancel or update your card later,{' '}
+            <Link to={CUSTOMER_PORTAL_PATH} className="font-medium underline underline-offset-2">
+              sign in to your account
+            </Link>{' '}
+            with the email you used at checkout.
           </Banner>
         )}
         {canceled && !joined && (
@@ -340,7 +345,11 @@ function JoinForm({ slug, plan, currency }: { slug: string; plan: PublicPlan; cu
             plan.interval,
             plan.interval_count,
           )}{' '}
-          until you cancel. Card details are handled by Stripe and never stored by the shop.
+          until you cancel. Cancel or update your card any time from{' '}
+          <Link to={CUSTOMER_PORTAL_PATH} className="text-primary-ink hover:underline">
+            your account
+          </Link>
+          . Card details are handled by Stripe and never stored by the shop.
         </p>
         <Button
           type="submit"

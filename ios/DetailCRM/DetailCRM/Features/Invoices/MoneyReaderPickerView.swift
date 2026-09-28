@@ -118,7 +118,7 @@ struct MoneyReaderPickerView: View {
                     }
                 } label: {
                     Text("Disconnect reader")
-                        .foregroundStyle(Theme.danger)
+                        .foregroundStyle(Theme.dangerInk)
                 }
                 .disabled(model.phase.isBusy)
                 .themedRow()

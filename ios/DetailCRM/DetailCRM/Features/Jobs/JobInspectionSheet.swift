@@ -3,7 +3,9 @@
 //  DetailCRM
 //
 //  One inspection: pick a view (front / rear / sides / top / interior),
-//  tap the diagram to mark damage (type, note, optional photo), record
+//  tap the diagram (or pick a named area from "Add mark", the path for
+//  VoiceOver and Switch Control) to mark damage (type, note, optional
+//  photo), record
 //  mileage and fuel, and collect the customer's signature — which locks
 //  the inspection (a manager must remove the signature to change it).
 //
@@ -19,6 +21,8 @@ struct JobMarkDraftRequest: Identifiable, Hashable {
     let view: JobVehicleView
     let x: Double
     let y: Double
+    /// The named area chosen from "Add mark"; prefills the mark's note.
+    var areaName: String? = nil
 }
 
 /// Fuel gauge choices (stored as percent).
@@ -156,19 +160,50 @@ struct JobInspectionSheet: View {
                     onTap: editable ? { point in addMark(at: point, inspectionID: bundle.id) } : nil,
                     onSelectMark: { mark in selectedMarkID = mark.id }
                 )
-                Text(editable ? "Tap the drawing where the damage is." : "This inspection is signed and locked.")
+                if editable {
+                    addMarkMenu(inspectionID: bundle.id)
+                }
+                Text(editable
+                     ? "Tap the drawing where the damage is, or choose the spot from Add mark."
+                     : "This inspection is signed and locked.")
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         )
     }
 
-    private func addMark(at point: CGPoint, inspectionID: UUID) {
+    /// Adds a mark on a named part of the current view: the way to record
+    /// damage without pointing at the drawing (VoiceOver, Switch Control,
+    /// Voice Control, Full Keyboard Access), and handy for small panels.
+    private func addMarkMenu(inspectionID: UUID) -> some View {
+        Menu {
+            ForEach(selectedView.areas) { area in
+                Button(area.name) {
+                    addMark(
+                        at: CGPoint(x: area.x, y: area.y),
+                        inspectionID: inspectionID,
+                        areaName: area.name
+                    )
+                }
+            }
+        } label: {
+            Label("Add mark", systemImage: "plus.circle")
+                .frame(maxWidth: .infinity)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.themeSecondary)
+        .accessibilityLabel("Add damage mark on the \(selectedView.displayName.lowercased()) view")
+        .accessibilityHint("Choose the part of the vehicle that is damaged.")
+    }
+
+    private func addMark(at point: CGPoint, inspectionID: UUID, areaName: String? = nil) {
         markDraft = JobMarkDraftRequest(
             inspectionID: inspectionID,
             view: selectedView,
             x: Double(point.x),
-            y: Double(point.y)
+            y: Double(point.y),
+            areaName: areaName
         )
     }
 
@@ -479,7 +514,7 @@ struct JobMarkRow: View {
             if let onDelete {
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash")
-                        .foregroundStyle(Theme.danger)
+                        .foregroundStyle(Theme.dangerInk)
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.plain)
@@ -515,7 +550,7 @@ struct JobSignedBlock: View {
                     .foregroundStyle(Theme.textPrimary)
             } icon: {
                 Image(systemName: "checkmark.seal.fill")
-                    .foregroundStyle(Theme.success)
+                    .foregroundStyle(Theme.successInk)
             }
             if signaturePath != nil {
                 AsyncImage(url: imageURL) { image in
@@ -553,12 +588,20 @@ struct JobMarkEditorSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var damage: JobDamageKind = .scratch
-    @State private var note = ""
+    /// Starts as the chosen area's name ("Front door") so the saved mark
+    /// says where it is even to someone who can't see the pin.
+    @State private var note: String
     @State private var photo: Data?
     @State private var showingCamera = false
     @State private var errorMessage: String?
 
     private let columns = [GridItem(.adaptive(minimum: 96), spacing: Theme.Spacing.sm)]
+
+    init(model: JobDetailModel, draft: JobMarkDraftRequest) {
+        self.model = model
+        self.draft = draft
+        _note = State(initialValue: draft.areaName ?? "")
+    }
 
     var body: some View {
         NavigationStack {

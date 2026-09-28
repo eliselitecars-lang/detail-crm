@@ -52,7 +52,7 @@ struct PaymentsLedgerRange: Hashable {
         case .today:
             interval = clock.dayInterval(containing: now)
         case .thisWeek:
-            interval = clock.weekInterval(containing: now)
+            interval = clock.totalsWeekInterval(containing: now)
         case .thisMonth:
             interval = clock.monthInterval(containing: now)
         case .last30Days:
@@ -386,7 +386,7 @@ private struct PaymentsLedgerRow: View {
                 if payment.refundedCents > 0 {
                     Text("− \(Money.format(cents: payment.refundedCents, currencyCode: currencyCode)) refunded")
                         .font(Theme.Typography.moneySmall)
-                        .foregroundStyle(Theme.danger)
+                        .foregroundStyle(Theme.dangerInk)
                 }
                 if payment.status != .succeeded {
                     StatusBadge(payment.status)

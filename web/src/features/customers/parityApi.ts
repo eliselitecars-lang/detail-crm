@@ -26,6 +26,8 @@ export const parityKeys = {
     [...customerKeys.all(shopId), 'referral-code', customerId] as const,
   referralCredits: (shopId: string, customerId: string) =>
     [...customerKeys.all(shopId), 'referral-credits', customerId] as const,
+  leadRequests: (shopId: string, customerId: string) =>
+    [...customerKeys.all(shopId), 'lead-requests', customerId] as const,
   mergePreview: (shopId: string, sourceId: string, targetId: string) =>
     [...customerKeys.all(shopId), 'merge-preview', sourceId, targetId] as const,
 };
@@ -208,6 +210,103 @@ export type CustomFieldRow = Pick<
   Row<'custom_fields'>,
   'id' | 'key' | 'label' | 'type' | 'options' | 'help_text' | 'required' | 'sort' | 'archived_at'
 >;
+
+// ---------------------------------------------------------------------------
+// Lead form requests (P-9)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the customer asked for on a lead form (lead_submissions, written only
+ * by public_submit_lead). A submission never changes an existing customer, so
+ * the message, the answers and the vehicle they described live only here.
+ */
+export interface LeadRequest {
+  id: string;
+  created_at: string;
+  /** null when the form was deleted. */
+  form_name: string | null;
+  message: string | null;
+  answers: CustomData;
+  /** The vehicle as the visitor described it ({year, make, model}). */
+  vehicle: { year: number | null; make: string | null; model: string | null } | null;
+  /** The customer already existed (their record was left unchanged). */
+  matched_existing: boolean;
+}
+
+/** Most recent requests shown on the customer page. */
+export const LEAD_REQUESTS_LIMIT = 10;
+
+const leadVehicleSchema = z.object({
+  year: z.number().int().nullable().optional(),
+  make: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
+});
+
+const leadRequestRowSchema = z.object({
+  id: z.string(),
+  created_at: z.string(),
+  message: z.string().nullable(),
+  answers: z.unknown(),
+  vehicle_info: z.unknown(),
+  matched_existing: z.boolean(),
+  form: z.object({ name: z.string() }).nullable().optional(),
+});
+
+/** Year make model, or null when the visitor gave none of them. */
+export function leadVehicleText(vehicle: LeadRequest['vehicle']): string | null {
+  if (!vehicle) return null;
+  const text = [vehicle.year, vehicle.make, vehicle.model]
+    .filter((p) => p !== null && p !== undefined && String(p).trim() !== '')
+    .join(' ');
+  return text || null;
+}
+
+/**
+ * The customer's lead form submissions, newest first (managers+: RLS on
+ * lead_submissions and lead_forms). `total` is the exact count, so the card
+ * can say when older requests are not shown.
+ */
+export function useCustomerLeadRequests(customerId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: parityKeys.leadRequests(shopId, customerId),
+    enabled,
+    queryFn: async (): Promise<{ requests: LeadRequest[]; total: number }> => {
+      const { data, error, count } = await supabase
+        .from('lead_submissions')
+        .select(
+          'id, created_at, message, answers, vehicle_info, matched_existing, form:lead_forms(name)',
+          {
+            count: 'exact',
+          },
+        )
+        .eq('shop_id', shopId)
+        .eq('customer_id', customerId)
+        .order('created_at', { ascending: false })
+        .limit(LEAD_REQUESTS_LIMIT);
+      const rows = z.array(leadRequestRowSchema).parse(unwrap({ data, error }) ?? []);
+      const requests = rows.map((row): LeadRequest => {
+        const vehicle = leadVehicleSchema.safeParse(row.vehicle_info);
+        return {
+          id: row.id,
+          created_at: row.created_at,
+          form_name: row.form?.name ?? null,
+          message: row.message,
+          answers: readCustomData(row.answers),
+          vehicle: vehicle.success
+            ? {
+                year: vehicle.data.year ?? null,
+                make: vehicle.data.make ?? null,
+                model: vehicle.data.model ?? null,
+              }
+            : null,
+          matched_existing: row.matched_existing,
+        };
+      });
+      return { requests, total: count ?? requests.length };
+    },
+  });
+}
 
 /** The shop's customer fields in order (archived ones kept: saved answers keep their label). */
 export function useCustomerFields() {

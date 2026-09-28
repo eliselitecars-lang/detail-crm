@@ -7,6 +7,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { unwrap } from '@/lib/db';
 import { AppError } from '@/lib/errors';
+import {
+  cancelOpenPaymentsResultSchema,
+  type CancelOpenPaymentsResult,
+} from '@/features/invoices/api';
+import { EdgeFunctionError, invokeEdge } from '@/features/quotes/shared/edge';
 import { shopDayRangeUtc, type LocalDate } from '@/lib/dates';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
@@ -192,11 +197,61 @@ export function useApproveRequest(shopId: string) {
   });
 }
 
-/** requested → cancelled with a reason. */
+export const DECLINE_PAYMENT_IN_PROGRESS =
+  'A card payment for this booking is still processing. Wait for it to finish, then decline.';
+
+export interface DeclineRequestInput {
+  jobId: string;
+  reason: string;
+  /**
+   * Release the job's open card payments first (payments.cancel_open_payments
+   * with `job_id`): an online booking can have an open deposit Checkout /
+   * sheet, and nobody may pay for a declined appointment. True for every role
+   * that can collect payments (the same rule as the job page and iPhone).
+   */
+  releasePayments: boolean;
+}
+
+export interface DeclineRequestResult {
+  /** Card payments that had already gone through and were recorded. */
+  recorded: number;
+}
+
+/**
+ * requested → cancelled with a reason. The open deposit links / sheets are
+ * released first; a payment still processing stops the decline (the status
+ * does not change) so the money is never taken for a cancelled job.
+ */
 export function useDeclineRequest(shopId: string) {
   const invalidate = useInvalidateJobs(shopId);
+  const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({ jobId, reason }: { jobId: string; reason: string }) => {
+    mutationFn: async ({
+      jobId,
+      reason,
+      releasePayments,
+    }: DeclineRequestInput): Promise<DeclineRequestResult> => {
+      let recorded = 0;
+      if (releasePayments) {
+        let released: CancelOpenPaymentsResult;
+        try {
+          released = await invokeEdge(
+            'payments',
+            'cancel_open_payments',
+            { shop_id: shopId, job_id: jobId },
+            cancelOpenPaymentsResultSchema,
+          );
+        } catch (error) {
+          if (error instanceof EdgeFunctionError && error.reason === 'payment_in_progress') {
+            throw new AppError(DECLINE_PAYMENT_IN_PROGRESS, { kind: 'validation', cause: error });
+          }
+          throw error;
+        }
+        if (released.in_progress > 0) {
+          throw new AppError(DECLINE_PAYMENT_IN_PROGRESS, { kind: 'validation' });
+        }
+        recorded = released.succeeded;
+      }
       requireChanged(
         unwrap(
           await supabase
@@ -208,8 +263,17 @@ export function useDeclineRequest(shopId: string) {
             .select('id'),
         ),
       );
+      return { recorded };
     },
-    onSettled: invalidate,
+    onSettled: (_data, _error, input) =>
+      Promise.all([
+        invalidate(),
+        ...(input.releasePayments
+          ? (['invoices', 'payments'] as const).map((domain) =>
+              queryClient.invalidateQueries({ queryKey: shopKey(shopId, domain) }),
+            )
+          : []),
+      ]),
   });
 }
 

@@ -103,7 +103,11 @@ struct Shop: Codable, Identifiable, Hashable, Sendable {
         "created_at", "updated_at", "techs_can_share_reports",
     ].joined(separator: ",")
 
-    /// Calendar math and formatting in the shop's time zone.
+    /// Calendar math and formatting in the shop's time zone. Its display
+    /// week (the calendar grid) starts on Sunday like the web calendar; every
+    /// "This week" total (reports, payments, hours) uses
+    /// `totalsWeekInterval`, which starts on Monday like the server's
+    /// `date_trunc('week')` and the web app.
     var clock: ShopClock {
         ShopClock(timeZoneIdentifier: timezone)
     }

@@ -47,7 +47,7 @@ enum ReportRangePreset: String, CaseIterable, Identifiable, Sendable {
         case .today:
             return ReportDateRange(firstDay: today, lastDay: today)
         case .thisWeek:
-            let week = clock.weekInterval(containing: today)
+            let week = clock.totalsWeekInterval(containing: today)
             return ReportDateRange(firstDay: week.start, lastDay: clock.addingDays(-1, to: week.end))
         case .thisMonth:
             let month = clock.monthInterval(containing: today)

@@ -191,7 +191,7 @@ struct JobPhotosSection: View {
                 }
             }
             .pickerStyle(.segmented)
-            HStack(spacing: Theme.Spacing.sm) {
+            AdaptiveButtonRow(spacing: Theme.Spacing.sm) {
                 PhotoPickerButton(maxSelection: 10, onPicked: { images, failed in
                     picked(images, failed: failed)
                 }) {

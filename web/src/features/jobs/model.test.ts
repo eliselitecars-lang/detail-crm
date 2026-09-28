@@ -29,6 +29,7 @@ import {
   sumDurations,
   vehicleLabel,
   type StatusTransition,
+  waivedBlockers,
 } from './model';
 
 const T = (
@@ -340,5 +341,33 @@ describe('deposit follow-ups and videos', () => {
     expect(formatVideoLength(65)).toBe('1:05');
     expect(formatVideoLength(null)).toBeNull();
     expect(formatVideoLength(0)).toBeNull();
+  });
+});
+
+describe('waivedBlockers', () => {
+  it('describes the stored snapshot of what was waived', () => {
+    expect(
+      waivedBlockers({
+        open_required_items: [
+          { id: 'a', label: 'Vacuum' },
+          { id: 'b', label: 'Wipe glass' },
+        ],
+        after_photos: { required: 3, have: 0 },
+      }).map((b) => b.text),
+    ).toEqual([
+      'Required checklist items not done: Vacuum, Wipe glass',
+      '3 “after” photos needed (0 so far)',
+    ]);
+    expect(waivedBlockers({ before_photos: { required: 1, have: 0 } })).toEqual([
+      { key: 'before_photos', text: '1 “before” photo needed (0 so far)' },
+    ]);
+  });
+
+  it('skips malformed parts', () => {
+    expect(waivedBlockers(null)).toEqual([]);
+    expect(waivedBlockers([])).toEqual([]);
+    expect(waivedBlockers({ open_required_items: 'x', after_photos: { required: '2' } })).toEqual(
+      [],
+    );
   });
 });

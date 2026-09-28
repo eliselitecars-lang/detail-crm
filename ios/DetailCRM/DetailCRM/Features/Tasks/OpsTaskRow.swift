@@ -75,7 +75,7 @@ struct OpsTaskRow: View {
             ZStack {
                 Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
                     .font(Theme.Typography.sectionTitle)
-                    .foregroundStyle(task.isDone ? Theme.success : Theme.textTertiary)
+                    .foregroundStyle(task.isDone ? Theme.successInk : Theme.textTertiary)
                     .opacity(isSaving ? 0 : 1)
                 ProgressView()
                     .tint(Theme.glacier)
@@ -94,7 +94,7 @@ struct OpsTaskRow: View {
         HStack(spacing: Theme.Spacing.xs) {
             if let dueText {
                 Label(dueText, systemImage: task.isOverdue(now: now) ? "exclamationmark.circle" : "clock")
-                    .foregroundStyle(task.isOverdue(now: now) ? Theme.danger : Theme.textSecondary)
+                    .foregroundStyle(task.isOverdue(now: now) ? Theme.dangerInk : Theme.textSecondary)
             }
             if let assignee = references.memberName(task.assigneeMemberID) {
                 Text(dueText == nil ? "For \(assignee)" : "· For \(assignee)")

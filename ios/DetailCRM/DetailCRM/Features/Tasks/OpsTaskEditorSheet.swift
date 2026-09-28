@@ -87,7 +87,7 @@ struct OpsTaskEditorSheet: View {
                         } label: {
                             Label("Delete task", systemImage: "trash")
                                 .font(Theme.Typography.button)
-                                .foregroundStyle(Theme.danger)
+                                .foregroundStyle(Theme.dangerInk)
                                 .frame(maxWidth: .infinity, minHeight: Theme.Size.controlHeight)
                                 .contentShape(Rectangle())
                         }

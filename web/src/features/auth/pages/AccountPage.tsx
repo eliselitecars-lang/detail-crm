@@ -1,12 +1,30 @@
-import { ArrowLeft, FileText, Shield, Store, Trash2 } from 'lucide-react';
+import { ArrowLeft, FileText, LogOut, Shield, Store, Trash2 } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
-import { Button, Dialog, FormField, Input, SectionCard } from '@/components/ui';
+import {
+  Button,
+  ConfirmDialog,
+  Dialog,
+  ErrorState,
+  FormField,
+  Input,
+  LoadingState,
+  SectionCard,
+  useToast,
+} from '@/components/ui';
+import { ROLE_LABELS } from '@/features/shop/permissions';
+import type { ShopMembership } from '@/features/shop/types';
 import { PRIVACY_PATH, TERMS_PATH } from '@/features/legal/paths';
 import { errorMessage } from '@/lib/errors';
 import { storageKeys, writeLocal } from '@/lib/storage';
-import { ownedShopsOf, useDeleteAccount, type OwnedShop } from '../accountApi';
+import {
+  ownedShopsOf,
+  useDeleteAccount,
+  useLeaveShop,
+  useMyMemberships,
+  type OwnedShop,
+} from '../accountApi';
 import { useAuth } from '../authContext';
 import { ACCOUNT_DELETED_LOGIN, reloadTo } from '../leave';
 
@@ -33,7 +51,7 @@ export default function AccountPage() {
   }, []);
 
   return (
-    <PublicLayout shop={{ name: 'Your account' }}>
+    <PublicLayout shop={{ name: 'Your account' }} accountLink={false}>
       <div className="flex flex-col gap-4 sm:gap-5">
         <div className="flex flex-col gap-2">
           {back && (
@@ -48,10 +66,130 @@ export default function AccountPage() {
           <h1 className="text-ink text-xl font-semibold sm:text-2xl">Your account</h1>
           {user?.email && <p className="text-muted text-sm break-all">Signed in as {user.email}</p>}
         </div>
+        <YourShopsCard />
         <DeleteAccountCard />
         <LegalCard />
       </div>
     </PublicLayout>
+  );
+}
+
+/**
+ * The shop teams the user belongs to, each with "Leave" (leave_shop) for
+ * every role but owner. Hidden for someone on no team (a portal client).
+ */
+function YourShopsCard() {
+  const { user } = useAuth();
+  const userId = user?.id ?? '';
+  const memberships = useMyMemberships(userId);
+  const [leaving, setLeaving] = useState<ShopMembership | null>(null);
+
+  if (memberships.isPending) {
+    return (
+      <SectionCard title="Your shops">
+        <LoadingState variant="rows" rows={2} label="Loading your shops…" />
+      </SectionCard>
+    );
+  }
+  if (memberships.isError) {
+    return (
+      <SectionCard title="Your shops">
+        <ErrorState
+          compact
+          error={memberships.error}
+          onRetry={() => void memberships.refetch()}
+          retrying={memberships.isRefetching}
+        />
+      </SectionCard>
+    );
+  }
+  const rows = [...memberships.data].sort((a, b) => a.shop.name.localeCompare(b.shop.name));
+  if (rows.length === 0) return null;
+
+  return (
+    <SectionCard
+      title="Your shops"
+      description="The shop teams you belong to. Leaving one removes your access to it; your other shops are not affected."
+    >
+      <ul className="divide-line flex flex-col divide-y" aria-label="Your shops">
+        {rows.map((m) => (
+          <li
+            key={m.memberId}
+            className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <Store className="text-muted size-4 shrink-0" aria-hidden="true" />
+              <span className="min-w-0">
+                <span className="text-ink block truncate text-sm font-medium">{m.shop.name}</span>
+                <span className="text-muted block text-sm">{ROLE_LABELS[m.role]}</span>
+              </span>
+            </span>
+            {m.role === 'owner' ? (
+              <span className="text-muted text-sm">Transfer ownership to leave</span>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                leadingIcon={<LogOut className="size-4" aria-hidden="true" />}
+                aria-label={`Leave ${m.shop.name}`}
+                onClick={() => setLeaving(m)}
+              >
+                Leave…
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {leaving && (
+        <LeaveShopDialog userId={userId} membership={leaving} onClose={() => setLeaving(null)} />
+      )}
+    </SectionCard>
+  );
+}
+
+function LeaveShopDialog({
+  userId,
+  membership,
+  onClose,
+}: {
+  userId: string;
+  membership: ShopMembership;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const leave = useLeaveShop(userId);
+  const name = membership.shop.name;
+
+  const confirm = async () => {
+    try {
+      await leave.mutateAsync(membership.shopId);
+      toast.success(`You left ${name}`);
+      onClose();
+    } catch {
+      // shown in the dialog
+    }
+  };
+
+  return (
+    <ConfirmDialog
+      open
+      onClose={onClose}
+      onConfirm={() => void confirm()}
+      title={`Leave ${name}?`}
+      description="You lose access to its schedule, jobs and customers right away, and you’re clocked out of any open time entry there. To come back, an admin has to invite you again."
+      confirmLabel="Leave shop"
+      tone="danger"
+      loading={leave.isPending}
+    >
+      {leave.isError && (
+        <p
+          role="alert"
+          className="bg-danger-soft text-danger-ink rounded-control px-3 py-2 text-sm"
+        >
+          {errorMessage(leave.error)}
+        </p>
+      )}
+    </ConfirmDialog>
   );
 }
 

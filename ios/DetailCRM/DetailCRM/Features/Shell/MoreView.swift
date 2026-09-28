@@ -129,7 +129,7 @@ struct MoreView: View {
                     }
                 } label: {
                     Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
-                        .foregroundStyle(Theme.danger)
+                        .foregroundStyle(Theme.dangerInk)
                 }
                 .themedRow()
             }

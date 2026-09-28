@@ -167,7 +167,7 @@ private struct InvoiceListRow: View {
                     .lineLimit(1)
                 Text(dateLine)
                     .font(Theme.Typography.footnote)
-                    .foregroundStyle(invoice.isOverdue() ? Theme.danger : Theme.textSecondary)
+                    .foregroundStyle(invoice.isOverdue() ? Theme.dangerInk : Theme.textSecondary)
             }
             Spacer(minLength: Theme.Spacing.sm)
             VStack(alignment: .trailing, spacing: Theme.Spacing.xxs) {

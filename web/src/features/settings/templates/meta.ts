@@ -200,7 +200,7 @@ export const TEMPLATE_GROUPS: readonly TemplateGroup[] = [
         key: 'lead_received',
         label: 'Lead received',
         description:
-          'Auto-reply to someone who fills in one of your lead forms (when the form has auto-reply on).',
+          'Auto-reply to someone who fills in one of your lead forms (when the form has auto-reply on). It’s emailed, and texted only to a customer already on file whose number you verified — never to a number typed into the form. It greets everyone as “there”: the name from a form is never put in the message.',
         channels: BOTH,
         audience: 'customer',
       },

@@ -153,23 +153,55 @@ Deno.test("delete_shop: billing is cancelled, links expired, sheets released, th
 // ---------------------------------------------------------------------------
 
 const PLATFORM_SUB = "sub_1Platform";
+const PLATFORM_CUSTOMER = "cus_1PlatformShop";
 
-function billedShop(extra: FixtureOptions = {}) {
+/**
+ * A busy shop that pays the platform: shop_billing tracks PLATFORM_SUB, and
+ * GET /subscriptions?customer= lists `platformSubs` (the platform
+ * customer's subscriptions; the tracked one active by default).
+ */
+function billedShop(extra: FixtureOptions = {}, platformSubs?: Row[]) {
   const f = busyShop(extra);
   f.db.seed("shop_billing", [{
     shop_id: SHOP,
-    stripe_customer_id: "cus_1PlatformShop",
+    stripe_customer_id: PLATFORM_CUSTOMER,
     stripe_subscription_id: PLATFORM_SUB,
     status: "active",
   }]);
+  const subs = platformSubs ?? [platformSub(PLATFORM_SUB)];
+  f.db.http.on("GET", `${STRIPE}/subscriptions`, (_req, { url }) =>
+    jsonResponse({
+      object: "list",
+      has_more: false,
+      data: subs.filter((x) => x.customer === url.searchParams.get("customer")),
+    }));
   return f;
+}
+
+function platformSub(id: string, extra: Row = {}): Row {
+  return {
+    id,
+    object: "subscription",
+    customer: PLATFORM_CUSTOMER,
+    status: "active",
+    cancel_at_period_end: false,
+    items: { object: "list", data: [] },
+    ...extra,
+  };
 }
 
 function stripeError(status: number, type: string, message: string, code?: string) {
   return () => jsonResponse({ error: { type, message, ...(code ? { code } : {}) } }, status);
 }
 
-Deno.test("delete_shop: the shop's platform subscription is cancelled first, on the platform account", async () => {
+/** [method, path, cancel_at_period_end form value] of the platform subscription calls. */
+function platformCalls(f: ReturnType<typeof busyShop>, ids: string[] = [PLATFORM_SUB]) {
+  return f.stripeCalls()
+    .filter((c) => ids.some((id) => c.url.pathname === `/v1/subscriptions/${id}`))
+    .map((c) => [c.method, c.url.pathname, c.form.get("cancel_at_period_end")]);
+}
+
+Deno.test("delete_shop: the platform subscription stops renewing first and is cancelled once the shop is gone", async () => {
   const f = billedShop();
   const res = await f.call(del, "owner");
   assertEquals(res.status, 200);
@@ -179,49 +211,85 @@ Deno.test("delete_shop: the shop's platform subscription is cancelled first, on 
     sessions_expired: 3,
     platform_subscription_cancelled: true,
   });
-  const cancel = f.stripe("DELETE", `/subscriptions/${PLATFORM_SUB}`);
-  assertEquals(cancel.length, 1);
+  assertEquals(platformCalls(f), [
+    ["POST", `/v1/subscriptions/${PLATFORM_SUB}`, "true"],
+    ["DELETE", `/v1/subscriptions/${PLATFORM_SUB}`, null],
+  ]);
+  const calls = f.stripeCalls();
   // The platform account itself: never a connected account.
-  assertEquals(cancel[0]?.headers.get("stripe-account"), null);
+  for (const c of calls.filter((c) => c.url.pathname.includes(PLATFORM_SUB))) {
+    assertEquals(c.headers.get("stripe-account"), null);
+  }
+  const list = f.stripe("GET", "/subscriptions")[0];
   assertEquals(
-    cancel[0]?.headers.get("idempotency-key")?.startsWith(
-      "dcrm:platform_subscription_shop_delete:",
-    ),
+    [list?.url.searchParams.get("customer"), list?.url.searchParams.get("status")],
+    [PLATFORM_CUSTOMER, "all"],
+  );
+  assertEquals(list?.headers.get("stripe-account"), null);
+  const cancel = f.stripe("DELETE", `/subscriptions/${PLATFORM_SUB}`)[0];
+  assertEquals(
+    cancel?.headers.get("idempotency-key")?.startsWith("dcrm:platform_subscription_shop_delete:"),
     true,
   );
-  // Before any link is expired or membership cancelled.
-  const calls = f.stripeCalls();
+  // Renewal stopped before any link is expired or membership cancelled; the
+  // immediate cancel only after the shop row is deleted.
   const at = (path: string, method: string) =>
     calls.findIndex((c) => c.method === method && c.url.pathname === `/v1${path}`);
-  const platform = at(`/subscriptions/${PLATFORM_SUB}`, "DELETE");
-  assertEquals(platform < at("/checkout/sessions/cs_1Invoice/expire", "POST"), true);
-  assertEquals(platform < at(`/subscriptions/${SUB}`, "DELETE"), true);
+  const hold = at(`/subscriptions/${PLATFORM_SUB}`, "POST");
+  assertEquals(hold < at("/checkout/sessions/cs_1Invoice/expire", "POST"), true);
+  assertEquals(hold < at(`/subscriptions/${SUB}`, "DELETE"), true);
+  const shopDelete = f.db.http.calls.findIndex((c) =>
+    c.method === "DELETE" && c.url.pathname === "/rest/v1/shops"
+  );
+  const platformDelete = f.db.http.calls.findIndex((c) =>
+    c.method === "DELETE" && c.url.pathname === `/v1/subscriptions/${PLATFORM_SUB}`
+  );
+  assertEquals(shopDelete >= 0 && shopDelete < platformDelete, true);
   assertEquals(f.logs.events("platform_subscription_cancelled")[0]?.subscription, PLATFORM_SUB);
   assertEquals(f.logs.events("shop_deleted")[0]?.platform_subscription_cancelled, true);
   assertEquals(f.db.table("shops").some((x) => x.id === SHOP), false);
 });
 
+Deno.test("delete_shop: every live platform subscription of the shop's customer ends, not only the tracked one", async () => {
+  const DUP = "sub_2Duplicate";
+  const f = billedShop({}, [
+    platformSub(PLATFORM_SUB),
+    platformSub(DUP, { status: "trialing" }),
+    platformSub("sub_3Pending", { status: "incomplete" }),
+    platformSub("sub_4Ending", { cancel_at_period_end: true }),
+    platformSub("sub_5Old", { status: "canceled" }),
+    platformSub("sub_6Else", { customer: "cus_1SomeoneElse" }),
+  ]);
+  const res = await f.call(del, "owner");
+  assertEquals((await res.json()).platform_subscription_cancelled, true);
+  const ids = [PLATFORM_SUB, DUP, "sub_3Pending", "sub_4Ending", "sub_5Old", "sub_6Else"];
+  assertEquals(platformCalls(f, ids), [
+    ["POST", `/v1/subscriptions/${PLATFORM_SUB}`, "true"],
+    ["POST", `/v1/subscriptions/${DUP}`, "true"],
+    // nothing paid yet: ended outright
+    ["DELETE", "/v1/subscriptions/sub_3Pending", null],
+    // already set to end: left as it is until the shop is gone
+    ["DELETE", `/v1/subscriptions/${PLATFORM_SUB}`, null],
+    ["DELETE", `/v1/subscriptions/${DUP}`, null],
+    ["DELETE", "/v1/subscriptions/sub_4Ending", null],
+  ]);
+});
+
 Deno.test("delete_shop: a platform subscription already ended or gone in Stripe is fine", async () => {
-  // Stripe refuses a second cancel; the subscription reads canceled.
-  const ended = billedShop({ subscriptions: { [PLATFORM_SUB]: "canceled" } });
-  ended.db.http.once(
-    "DELETE",
-    `${STRIPE}/subscriptions/${PLATFORM_SUB}`,
-    stripeError(400, "invalid_request_error", "This subscription is already canceled."),
-  );
+  // Listed as canceled: nothing to end.
+  const ended = billedShop({ subscriptions: { [PLATFORM_SUB]: "canceled" } }, [
+    platformSub(PLATFORM_SUB, { status: "canceled" }),
+  ]);
   const a = await ended.call(del, "owner");
   assertEquals(a.status, 200);
   assertEquals((await a.json()).platform_subscription_cancelled, false);
-  assertEquals(
-    ended.stripe("GET", `/subscriptions/${PLATFORM_SUB}`)[0]?.headers.get("stripe-account"),
-    null,
-  );
+  assertEquals(platformCalls(ended).filter((c) => c[0] !== "GET"), []);
   assertEquals(ended.db.table("shops").some((x) => x.id === SHOP), false);
 
-  // Stripe no longer has it.
-  const gone = billedShop();
+  // Stripe no longer has it (not listed, and 404 when read).
+  const gone = billedShop({}, []);
   gone.db.http.once(
-    "DELETE",
+    "GET",
     `${STRIPE}/subscriptions/${PLATFORM_SUB}`,
     stripeError(404, "invalid_request_error", "No such subscription", "resource_missing"),
   );
@@ -229,6 +297,23 @@ Deno.test("delete_shop: a platform subscription already ended or gone in Stripe 
   assertEquals(b.status, 200);
   assertEquals((await b.json()).platform_subscription_cancelled, false);
   assertEquals(gone.db.table("shops").some((x) => x.id === SHOP), false);
+
+  // Cancelled by someone else between the hold and the final cancel.
+  const raced = billedShop();
+  raced.db.http.on(
+    "GET",
+    `${STRIPE}/subscriptions/${PLATFORM_SUB}`,
+    () => jsonResponse(platformSub(PLATFORM_SUB, { status: "canceled" })),
+  );
+  raced.db.http.once(
+    "DELETE",
+    `${STRIPE}/subscriptions/${PLATFORM_SUB}`,
+    stripeError(400, "invalid_request_error", "This subscription is already canceled."),
+  );
+  const r = await raced.call(del, "owner");
+  assertEquals(r.status, 200);
+  await r.body?.cancel();
+  assertEquals(raced.logs.events("platform_subscription_cancel_failed"), []);
 
   // No platform subscription at all (never subscribed, or billing off).
   const none = busyShop();
@@ -238,21 +323,25 @@ Deno.test("delete_shop: a platform subscription already ended or gone in Stripe 
   assertEquals(none.stripe("DELETE", `/subscriptions/${PLATFORM_SUB}`).length, 0);
 });
 
-Deno.test("delete_shop: a Stripe failure cancelling the platform subscription is 502 and changes nothing", async () => {
+Deno.test("delete_shop: a Stripe failure stopping the platform subscription is 502 and changes nothing", async () => {
   for (
-    const failure of [
-      stripeError(500, "api_error", "Something went wrong on Stripe's end."),
-      // a refusal that is not "already canceled": the subscription is still live
-      stripeError(400, "invalid_request_error", "This request cannot be processed right now."),
-    ]
+    const [method, path, failure] of [
+      ["POST", `/subscriptions/${PLATFORM_SUB}`, stripeError(500, "api_error", "Stripe is down.")],
+      [
+        "POST",
+        `/subscriptions/${PLATFORM_SUB}`,
+        stripeError(400, "invalid_request_error", "This request cannot be processed right now."),
+      ],
+      ["GET", "/subscriptions", stripeError(500, "api_error", "Stripe is down.")],
+    ] as const
   ) {
     const f = billedShop();
-    f.db.http.once("DELETE", `${STRIPE}/subscriptions/${PLATFORM_SUB}`, failure);
+    f.db.http.once(method, `${STRIPE}${path}`, failure);
     const res = await f.call(del, "owner");
     const body = await res.json();
     assertEquals([res.status, body.code, body.details], [502, "upstream_error", {
       reason: "platform_subscription_cancel_failed",
-    }]);
+    }], path);
     assertEquals(
       body.error,
       "The shop's subscription could not be cancelled, so the shop was not deleted. " +
@@ -261,13 +350,101 @@ Deno.test("delete_shop: a Stripe failure cancelling the platform subscription is
     // Nothing else changed: links open, memberships and their subscriptions
     // untouched, the shop and its billing row still there.
     assertEquals(f.stripe("POST", "/checkout/sessions/:id/expire").length, 0);
-    assertEquals(f.stripe("DELETE", `/subscriptions/${SUB}`).length, 0);
+    assertEquals(f.stripe("DELETE", "/subscriptions/:id").length, 0);
     assertEquals(f.db.table("memberships").every((m) => m.status !== "cancelled"), true);
     assertEquals(f.rpcCalls.some((c) => c.name === "sync_stripe_subscription"), false);
     assertEquals(f.db.table("shops").some((x) => x.id === SHOP), true);
     assertEquals(f.db.table("shop_billing")[0]?.stripe_subscription_id, PLATFORM_SUB);
     assertEquals(f.logs.events("shop_deleted").length, 0);
   }
+});
+
+Deno.test("delete_shop: when a later step fails the shop keeps its platform subscription (renewal resumed)", async () => {
+  const cases: Array<[string, (f: ReturnType<typeof billedShop>) => void, string]> = [
+    [
+      "a pay link paid at the last moment",
+      (f) =>
+        f.db.http.once("POST", `${STRIPE}/checkout/sessions/cs_1Invoice/expire`, () => {
+          const paid = f.sessions.find((x) => x.id === "cs_1Invoice");
+          if (paid) paid.status = "complete";
+          return jsonResponse(
+            {
+              error: {
+                type: "invalid_request_error",
+                message: "Only open sessions can be expired.",
+              },
+            },
+            400,
+          );
+        }),
+      "conflict",
+    ],
+    [
+      "a membership that cannot be cancelled",
+      (f) =>
+        f.db.http.once(
+          "DELETE",
+          `${STRIPE}/subscriptions/${SUB}`,
+          stripeError(500, "api_error", "Stripe is down."),
+        ),
+      "service_unavailable",
+    ],
+    [
+      "the database guard (55000)",
+      (f) =>
+        f.db.http.once(
+          "DELETE",
+          "https://fake-project.supabase.co/rest/v1/shops",
+          () =>
+            jsonResponse({
+              code: "55000",
+              message: "a card payment is in progress for this shop",
+              details: null,
+              hint: null,
+            }, 400),
+        ),
+      "conflict",
+    ],
+  ];
+  for (const [what, arrange, code] of cases) {
+    const f = billedShop();
+    arrange(f);
+    const res = await f.call(del, "owner");
+    assertEquals((await errorOf(res))[1], code, what);
+    assertEquals(f.db.table("shops").some((s) => s.id === SHOP), true, what);
+    // Stopped renewing, then resumed; never cancelled.
+    assertEquals(platformCalls(f), [
+      ["POST", `/v1/subscriptions/${PLATFORM_SUB}`, "true"],
+      ["POST", `/v1/subscriptions/${PLATFORM_SUB}`, "false"],
+    ], what);
+    assertEquals(f.logs.events("platform_subscription_resumed").length, 1, what);
+  }
+
+  // One the owner had already set to end is not resumed by the undo.
+  const ending = billedShop({}, [platformSub(PLATFORM_SUB, { cancel_at_period_end: true })]);
+  ending.db.http.once(
+    "DELETE",
+    "https://fake-project.supabase.co/rest/v1/shops",
+    () => jsonResponse({ code: "55000", message: "busy", details: null, hint: null }, 400),
+  );
+  await (await ending.call(del, "owner")).body?.cancel();
+  assertEquals(platformCalls(ending), []);
+});
+
+Deno.test("delete_shop: a failed final cancel is logged; the shop is deleted and nothing renews", async () => {
+  const f = billedShop();
+  f.db.http.once(
+    "DELETE",
+    `${STRIPE}/subscriptions/${PLATFORM_SUB}`,
+    stripeError(500, "api_error", "Stripe is down."),
+  );
+  const res = await f.call(del, "owner");
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).platform_subscription_cancelled, true);
+  assertEquals(f.db.table("shops").some((s) => s.id === SHOP), false);
+  assertEquals(platformCalls(f)[0], ["POST", `/v1/subscriptions/${PLATFORM_SUB}`, "true"]);
+  const failed = f.logs.events("platform_subscription_cancel_failed")[0];
+  assertEquals([failed?.level, failed?.subscription], ["error", PLATFORM_SUB]);
 });
 
 Deno.test("delete_shop: money still processing keeps the platform subscription too", async () => {
@@ -278,9 +455,10 @@ Deno.test("delete_shop: money still processing keeps the platform subscription t
   });
   assertEquals((await errorOf(await f.call(del, "owner")))[2], { reason: "payment_in_progress" });
   assertEquals(f.stripe("DELETE", "/subscriptions/:id").length, 0);
+  assertEquals(f.stripe("POST", "/subscriptions/:id").length, 0);
 });
 
-Deno.test("delete_shop: a shop without Stripe Connect still cancels its platform subscription", async () => {
+Deno.test("delete_shop: a shop without Stripe Connect still ends its platform subscription", async () => {
   const f = fixture({ account: null });
   f.db.seed("shop_billing", [{
     shop_id: SHOP,
@@ -289,12 +467,13 @@ Deno.test("delete_shop: a shop without Stripe Connect still cancels its platform
   }]);
   const res = await f.call({ ...del, confirm_name: "Shine Co" }, "owner");
   assertEquals((await res.json()).platform_subscription_cancelled, true);
-  // Only the platform call: nothing on a connected account.
-  assertEquals(f.stripeCalls().map((c) => [c.method, c.url.pathname]), [[
-    "DELETE",
-    `/v1/subscriptions/${PLATFORM_SUB}`,
-  ]]);
-  assertEquals(f.stripeCalls()[0]?.headers.get("stripe-account"), null);
+  // Only platform calls: nothing on a connected account.
+  assertEquals(f.stripeCalls().map((c) => [c.method, c.url.pathname]), [
+    ["GET", `/v1/subscriptions/${PLATFORM_SUB}`],
+    ["POST", `/v1/subscriptions/${PLATFORM_SUB}`],
+    ["DELETE", `/v1/subscriptions/${PLATFORM_SUB}`],
+  ]);
+  for (const call of f.stripeCalls()) assertEquals(call.headers.get("stripe-account"), null);
 });
 
 Deno.test("delete_shop: money still processing refuses the deletion before anything changes", async () => {

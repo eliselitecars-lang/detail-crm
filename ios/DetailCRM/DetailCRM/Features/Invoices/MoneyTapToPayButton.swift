@@ -261,12 +261,12 @@ struct MoneyTapToPayButton: View {
             case .succeeded:
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 56))
-                    .foregroundStyle(Theme.success)
+                    .foregroundStyle(Theme.successInk)
                     .accessibilityHidden(true)
             case .failed:
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 56))
-                    .foregroundStyle(Theme.danger)
+                    .foregroundStyle(Theme.dangerInk)
                     .accessibilityHidden(true)
             case .canceled:
                 Image(systemName: "xmark.circle")

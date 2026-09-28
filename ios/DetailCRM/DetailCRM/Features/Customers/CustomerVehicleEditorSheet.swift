@@ -61,7 +61,7 @@ struct CustomerVehicleEditorSheet: View {
                         } label: {
                             Label("Remove vehicle", systemImage: "trash")
                                 .font(Theme.Typography.button)
-                                .foregroundStyle(Theme.danger)
+                                .foregroundStyle(Theme.dangerInk)
                                 .frame(maxWidth: .infinity, minHeight: Theme.Size.controlHeight)
                                 .contentShape(Rectangle())
                         }

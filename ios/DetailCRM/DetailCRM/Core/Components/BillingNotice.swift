@@ -22,7 +22,7 @@ struct BillingNoticeBanner: View {
         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
             Image(systemName: notice.isWarning ? "exclamationmark.triangle.fill" : "info.circle.fill")
                 .font(Theme.Typography.subheadline)
-                .foregroundStyle(notice.isWarning ? Theme.warning : Theme.glacier)
+                .foregroundStyle(notice.isWarning ? Theme.warningInk : Theme.glacier)
                 .accessibilityHidden(true)
             Text(notice.text(clock: clock))
                 .font(Theme.Typography.footnote)

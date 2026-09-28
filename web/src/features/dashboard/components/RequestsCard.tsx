@@ -14,6 +14,7 @@ import {
 } from '@/components/ui';
 import { formatDateTime } from '@/lib/dates';
 import { errorMessage, toAppError } from '@/lib/errors';
+import { useCan } from '@/features/shop/useCan';
 import {
   useApproveRequest,
   useBookingRequests,
@@ -136,14 +137,28 @@ function DeclineDialog({
 }) {
   const toast = useToast();
   const decline = useDeclineRequest(shopId);
+  const canCollect = useCan('payments.collect');
   const [reason, setReason] = useState('');
   const tooLong = reason.length > 1000;
 
   const submit = async () => {
     if (!reason.trim() || tooLong) return;
     try {
-      await decline.mutateAsync({ jobId: request.id, reason });
-      toast.success('Booking declined', `Job #${request.number} was cancelled.`);
+      const { recorded } = await decline.mutateAsync({
+        jobId: request.id,
+        reason,
+        releasePayments: canCollect,
+      });
+      if (recorded > 0) {
+        toast.info(
+          'Booking declined',
+          `Job #${request.number} was cancelled. ${
+            recorded === 1 ? 'A card payment had' : 'Card payments had'
+          } already gone through — it’s recorded on the job, so refund it if needed.`,
+        );
+      } else {
+        toast.success('Booking declined', `Job #${request.number} was cancelled.`);
+      }
       onClose();
     } catch (error) {
       // Already approved/cancelled elsewhere: nothing to decline any more.
@@ -163,7 +178,9 @@ function DeclineDialog({
       role="alertdialog"
       size="sm"
       title="Decline this booking?"
-      description={`${request.customerName ?? 'The customer'}’s request #${request.number} will be cancelled.`}
+      description={`${request.customerName ?? 'The customer'}’s request #${request.number} will be cancelled${
+        canCollect ? ' and any open deposit link closed, so nobody pays for it' : ''
+      }.`}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={decline.isPending}>

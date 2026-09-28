@@ -13,8 +13,18 @@
 --   status none / incomplete otherwise            lapsed    (no_subscription | trial_ended
 --                                                            | incomplete)
 --   canceled / unpaid / incomplete_expired /
---   paused, current_period_end > now              active    (period_remaining)
+--   paused, paid_through > now                    active    (period_remaining)
 --   the same otherwise                            lapsed    (the status itself)
+-- An ended subscription keeps access through paid_through (0100: the end of
+-- the last period the shop was in good standing for), NEVER through Stripe's
+-- current_period_end: Stripe moves the period on at renewal before the
+-- renewal is paid, so after failed retries (canceled / unpaid) that date is
+-- the end of the period that was never paid — up to a year away on a yearly
+-- plan. billing_apply_subscription keeps paid_through: the period end while
+-- active / trialing, capped at the event time from past_due / unpaid /
+-- paused on (so dunning that ends in canceled / unpaid lapses the shop at
+-- once), unchanged by canceled / incomplete / incomplete_expired (a shop
+-- that cancels while paid up keeps the rest of that period).
 -- can_write = state <> 'lapsed' (shop_can_write). Billing state is judged on
 -- the wall clock (now()), never on a caller's p_now.
 --
@@ -42,7 +52,7 @@ create function public.billing_state(
   p_billing_enabled     boolean,
   p_status              text,
   p_trial_ends_at       timestamptz,
-  p_current_period_end  timestamptz,
+  p_paid_through        timestamptz,
   p_comp_until          timestamptz,
   p_now                 timestamptz,
   out state             text,
@@ -77,7 +87,7 @@ begin
                          else 'trial_ended' end;
         end if;
       when 'canceled', 'unpaid', 'incomplete_expired', 'paused' then
-        if p_current_period_end is not null and p_current_period_end > p_now then
+        if p_paid_through is not null and p_paid_through > p_now then
           state := 'active'; reason := 'period_remaining';
         else
           state := 'lapsed'; reason := p_status;
@@ -101,7 +111,7 @@ as $$
     from (select 1) one
     left join public.shop_billing b on b.shop_id = p_shop_id
    cross join lateral public.billing_state(public.billing_enabled(), coalesce(b.status, 'none'), b.trial_ends_at,
-                                           b.current_period_end, b.comp_until, now()) s
+                                           b.paid_through, b.comp_until, now()) s
 $$;
 
 -- May the shop create new business records right now? (Billing off: always.)
@@ -164,7 +174,9 @@ $$;
 -- current_period_end, cancel_at_period_end, max_members, members_used) are
 -- for owners, admins and managers: technicians get null (false) there and
 -- only the standing they need to explain a refusal. Never prices or Stripe
--- ids.
+-- ids. current_period_end is the renewal / end date of a live subscription;
+-- for an ended one (canceled / unpaid / incomplete_expired / paused) it is
+-- when access ends or ended (paid_through), never the unpaid period's end.
 -- ---------------------------------------------------------------------------
 create function public.shop_entitlement(p_shop_id uuid) returns jsonb
 language plpgsql stable security definer
@@ -185,7 +197,7 @@ begin
   select * into v_b from public.shop_billing b where b.shop_id = p_shop_id;
   select p.name into v_plan from public.platform_plans p where p.id = v_b.plan_id;
   select s.state, s.reason into v_state, v_reason
-    from public.billing_state(v_enabled, coalesce(v_b.status, 'none'), v_b.trial_ends_at, v_b.current_period_end,
+    from public.billing_state(v_enabled, coalesce(v_b.status, 'none'), v_b.trial_ends_at, v_b.paid_through,
                               v_b.comp_until, now()) s;
   v_details := v_role in ('owner', 'admin', 'manager');
   return jsonb_build_object(
@@ -194,7 +206,9 @@ begin
     'reason', v_reason,
     'plan_name', case when v_details then v_plan end,
     'trial_ends_at', case when v_details then v_b.trial_ends_at end,
-    'current_period_end', case when v_details then v_b.current_period_end end,
+    'current_period_end', case when not v_details then null
+                               when v_b.status in ('canceled', 'unpaid', 'incomplete_expired', 'paused') then v_b.paid_through
+                               else v_b.current_period_end end,
     'cancel_at_period_end', v_details and coalesce(v_b.cancel_at_period_end, false),
     'max_members', case when v_details then public.billing_max_members(p_shop_id) end,
     'members_used', case when v_details then public.billing_seats_used(p_shop_id) end,
@@ -464,7 +478,11 @@ $$;
 --   * trial_used once a subscription had a trial (p_trial_end or trialing);
 --     trial_ends_at follows the subscription's trial_end when it has one;
 --   * canceled (subscription deleted): current_period_end is kept when the
---     event carries none, cancel_at_period_end becomes false.
+--     event carries none, cancel_at_period_end becomes false;
+--   * paid_through (what an ended subscription keeps access through, see
+--     the header): active / trialing -> the period end; past_due / unpaid /
+--     paused -> at most the event time (the period Stripe moved on to is
+--     not paid); canceled / incomplete / incomplete_expired -> unchanged.
 -- 22023: malformed ids, a status Stripe does not have, no event time.
 -- ---------------------------------------------------------------------------
 create function public.billing_apply_subscription(
@@ -529,6 +547,11 @@ begin
          trial_ends_at = coalesce(p_trial_end, b.trial_ends_at),
          trial_used = b.trial_used or p_trial_end is not null or p_status = 'trialing',
          current_period_end = coalesce(p_current_period_end, b.current_period_end),
+         paid_through = case when p_status in ('active', 'trialing')
+                               then coalesce(p_current_period_end, b.current_period_end)
+                             when p_status in ('past_due', 'unpaid', 'paused')
+                               then least(b.paid_through, p_event_created)
+                             else b.paid_through end,
          cancel_at_period_end = case when p_status = any (v_ended) then false
                                      else coalesce(p_cancel_at_period_end, false) end,
          last_event_at = greatest(coalesce(b.last_event_at, p_event_created), p_event_created)

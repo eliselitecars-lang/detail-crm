@@ -753,12 +753,15 @@ owner typed it (compared trimmed and case-insensitively). In order:
    PaymentSheets and reader intents cancelled, money that already landed
    recorded); a payment still processing (a card attempt, or an ACH debit
    clearing) refuses the deletion before anything else changes;
-2. the shop's own **platform** subscription (what the shop pays for the
-   CRM: `shop_billing.stripe_subscription_id`, read with the service role;
-   [`docs/BILLING.md`](../../docs/BILLING.md)) is cancelled **now** on the
-   platform Stripe account (no `Stripe-Account` header). One that already
-   ended, or that Stripe no longer has, is fine. Any other Stripe failure
-   stops the deletion here with `502 upstream_error` reason
+2. the shop's own **platform** subscriptions (what the shop pays for the
+   CRM, [`docs/BILLING.md`](../../docs/BILLING.md): the one
+   `shop_billing.stripe_subscription_id` tracks **and** every other one of
+   the shop's platform customer that can still bill, e.g. a duplicate the
+   webhook has not resolved yet) stop renewing: `cancel_at_period_end` is
+   set on the platform Stripe account (no `Stripe-Account` header). That is
+   reversible. One still `incomplete` (nothing paid) is cancelled outright;
+   one already set to end is left as it is. A Stripe failure stops the
+   deletion here with `502 upstream_error` reason
    `platform_subscription_cancel_failed` — no link, membership or record
    has changed yet;
 3. every open Checkout link the CRM created on the account (pay, deposit,
@@ -768,7 +771,16 @@ owner typed it (compared trimmed and case-insensitively). In order:
    a completed link started), then it is recorded `cancelled`;
 5. the shop is deleted. The database cascades to every tenant row, queues
    the shop's stored files for `storage-purge` and logs its SMS number in
-   `sms_number_releases` (the operator releases it in Twilio).
+   `sms_number_releases` (the operator releases it in Twilio);
+6. only then are the platform subscriptions from step 2 cancelled **now**.
+   A Stripe failure here is logged (`platform_subscription_cancel_failed`,
+   error level) and the deletion stands: step 2 already stopped renewals.
+
+When step 3, 4 or 5 fails (the `409` / `5xx` below) the shop still exists,
+so step 2 is undone: renewal is switched back on for each subscription step
+2 set to end (a failure to undo is logged as
+`platform_subscription_resume_failed`; the owner can resume it in the
+Customer Portal).
 
 The Stripe Connect account is left intact: the owner keeps the Express
 dashboard, the balance and the payouts. A shop without Stripe Connect skips
@@ -776,7 +788,7 @@ steps 1, 3 and 4's Stripe calls (step 2 still runs).
 
 200: `{deleted: true, memberships_cancelled, sessions_expired,
 platform_subscription_cancelled}` (`platform_subscription_cancelled`: this
-deletion ended a live platform subscription). Afterwards drop every cached
+deletion ended at least one live platform subscription). Afterwards drop every cached
 query of that shop and leave its screens.
 
 Errors: `403 forbidden` (not the owner), `404 not_found`,
@@ -1353,6 +1365,16 @@ purchase UI in the app: App Store 3.1.1 / 3.1.3); it reads the
   `shop_entitlement` briefly). `request_nonce` as for money actions: a retry
   with the same nonce gets the same session; without one, identical requests
   within 10 minutes share one.
+  **One subscription per shop.** Before a session is made, the shop's
+  platform customer's subscriptions are listed in Stripe: any that can still
+  bill (anything but `canceled` / `incomplete_expired`) is `409
+  already_subscribed`, even while `shop_billing` does not know it yet (paid,
+  webhook not arrived). The session gets `expires_at` one hour after the end
+  of the current 10-minute idempotency window (60 to 70 minutes; Stripe's
+  default is 24 hours). After it is made, every OLDER open subscription
+  Checkout of the shop is expired, so only the newest link can be paid; an
+  older one that completed at that moment wins (the new one is expired too,
+  `409 already_subscribed`).
 - **`portal`**: a Customer Portal session for the shop's platform customer,
   `return_url` `APP_BASE_URL/app/settings/billing`, using the operator's
   **default portal configuration** (Stripe Dashboard; plan switching,
@@ -1368,7 +1390,7 @@ Errors (plus the common ones):
 |---|---|---|---|
 | `checkout`, `portal` | 403 `forbidden` | | not the shop's owner (also non-members) |
 | `checkout` | 422 `unprocessable` | `billing_disabled` | the platform has not turned billing on |
-| `checkout` | 409 `conflict` | `already_subscribed` | a subscription that still exists in Stripe (status trialing / active / past_due / unpaid / paused, 0101 `has_live_subscription`): use `portal` to switch plans or settle it |
+| `checkout` | 409 `conflict` | `already_subscribed` | the shop has a subscription that can still bill: in `shop_billing` (trialing / active / past_due / unpaid / paused, 0101 `has_live_subscription`) or in Stripe for its platform customer (those, or `incomplete`: a payment still being confirmed; the webhook may not have arrived). Use `portal` to switch plans or settle it; after paying, wait for the confirmation instead of choosing a plan again |
 | `checkout` | 404 `not_found` | `plan_not_found` | unknown or inactive plan (refresh the plan list) |
 | `checkout` | 409 `conflict` | `billing_account_changed` | `billing_link_customer` 23505: this shop was just linked to a different platform customer (a concurrent first checkout); refresh and retry — the retry uses the linked one |
 | `checkout` | 409 `conflict` | `customer_conflict` | `billing_link_customer` 23505: the Stripe customer belongs to another shop (support case) |
@@ -1404,9 +1426,25 @@ CORS, no JWT, not called by apps. Responses as `stripe-webhook`:
   **and** `metadata.shop_id` naming the same shop, as `checkout` sets them):
   `billing_link_customer`, then the subscription is applied. A foreign
   session (a Payment Link, another product) is ignored.
+- **One subscription per shop.** Before a subscription that is live or
+  `incomplete` is applied, the customer's subscriptions are listed in
+  Stripe (`status: all`). The oldest live one (trialing / active / past_due
+  / unpaid / paused; `created`, then id) is the shop's: a newer one is a
+  duplicate and is never applied — the oldest is applied instead, so the
+  row never flips between two subscriptions. A duplicate this platform's
+  `checkout` created (`metadata.shop_id` = the shop) is refunded (every paid
+  invoice's payment, `reason: duplicate`, idempotency key per payment) and
+  then cancelled now (`result: "applied"`, detail
+  `duplicate_subscription_cancelled`, warning
+  `billing_duplicate_subscription_cancelled` with `refunded_cents`). Refunds
+  run first, so a retry after a failure still finds the duplicate live and
+  finishes it. One made elsewhere (no such metadata, e.g. the Dashboard) is
+  only logged (`ignored`, reason `duplicate_subscription`, warning) for the
+  operator. Nothing is cancelled for a customer no shop is linked to.
 - `invoice.payment_failed`: the subscription is refreshed (usually
   `past_due`), then `billing_payment_failed` notifies the owner
   (`billing_payment_failed` notification, deep link to Settings > Billing).
+  Not for a duplicate (it was just cancelled).
 - `product.*` / `price.*`: the whole plan sync runs again.
 - Not ours (a customer no shop is linked to — `billing_apply_subscription`
   answers `{shop_id: null, applied: false}`, never an error — a customer or

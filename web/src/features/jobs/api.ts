@@ -72,6 +72,8 @@ export function useStatusTransitions() {
 
 export interface TeamMember {
   memberId: string;
+  /** auth user id (shop_team.user_id): who did something (overridden_by, …). */
+  userId: string | null;
   name: string;
   role: Row<'shop_members'>['role'];
   color: string | null;
@@ -80,6 +82,7 @@ export interface TeamMember {
 
 const teamRowSchema = z.object({
   member_id: z.string(),
+  user_id: z.string().nullable().optional(),
   display_name: z.string(),
   role: z.enum(['owner', 'admin', 'manager', 'technician']),
   calendar_color: z.string().nullable(),
@@ -99,6 +102,7 @@ export function useTeam() {
       return rows
         .map((r) => ({
           memberId: r.member_id,
+          userId: r.user_id ?? null,
           name: r.display_name,
           role: r.role,
           color: r.calendar_color,
@@ -739,6 +743,53 @@ export async function fetchCompletionBlockers(jobId: string): Promise<GateState>
   return gateStateSchema.parse(
     unwrap(await supabase.rpc('job_completion_blockers', { p_job_id: jobId })),
   );
+}
+
+/** A move past the completion gates (P-11): set_job_status with force. */
+export interface GateOverride {
+  id: string;
+  to_status: JobStatus;
+  reason: string | null;
+  /** The blocking part of the gate state that was waived (see waivedBlockers). */
+  blockers: unknown;
+  /** auth user id of the manager who moved the job (null once their account is gone). */
+  overridden_by: string | null;
+  created_at: string;
+}
+
+const gateOverrideSchema = z.object({
+  id: z.string(),
+  to_status: jobStatusSchema,
+  reason: z.string().nullable(),
+  blockers: z.unknown(),
+  overridden_by: z.string().nullable(),
+  created_at: z.string(),
+});
+
+/**
+ * job_gate_overrides for the job, oldest first: the audit trail of every
+ * time a manager moved it past its required checklist items or photo
+ * minimums, with the reason they gave. Everyone who can work the job reads
+ * it (RLS can_work_job).
+ */
+export function useGateOverrides(jobId: string) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: jobKeys.part(shopId, jobId, 'gate-overrides'),
+    queryFn: async (): Promise<GateOverride[]> =>
+      z
+        .array(gateOverrideSchema)
+        .parse(
+          unwrap(
+            await supabase
+              .from('job_gate_overrides')
+              .select('id, to_status, reason, blockers, overridden_by, created_at')
+              .eq('shop_id', shopId)
+              .eq('job_id', jobId)
+              .order('created_at', { ascending: true }),
+          ) ?? [],
+        ),
+  });
 }
 
 // Line items -----------------------------------------------------------------

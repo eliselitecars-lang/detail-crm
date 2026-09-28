@@ -31,6 +31,16 @@ enum Supa {
     /// fails offline, which would look like a sign-out). AppState then
     /// refreshes it during bootstrap: offline shows Retry, a revoked
     /// session emits `.signedOut`.
+    ///
+    /// `flowType: .implicit` (supabase-swift defaults to PKCE): the app has
+    /// no URL scheme, so its password-reset and sign-up confirmation emails
+    /// link to the web app (`/reset-password`, the site URL). A PKCE link
+    /// lands there as `?code=…` whose code_verifier sits in this phone's
+    /// keychain, so the browser can't redeem it ("This reset link is
+    /// invalid or has expired"). Implicit links carry the session in the
+    /// URL fragment, which the web client (also implicit) reads on any
+    /// device. Password sign-in and token refresh don't depend on the flow
+    /// type. `scripts/swift_sanity.py` guards this setting.
     static let client: SupabaseClient = {
         let url = AppConfig.supabaseURL ?? URL(string: "https://placeholder.invalid")!
         let key = AppConfig.isConfigured ? AppConfig.supabaseAnonKey : "placeholder-anon-key"
@@ -38,7 +48,10 @@ enum Supa {
             supabaseURL: url,
             supabaseKey: key,
             options: SupabaseClientOptions(
-                auth: SupabaseClientOptions.AuthOptions(emitLocalSessionAsInitialSession: true)
+                auth: SupabaseClientOptions.AuthOptions(
+                    flowType: .implicit,
+                    emitLocalSessionAsInitialSession: true
+                )
             )
         )
     }()

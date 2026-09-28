@@ -258,7 +258,7 @@ function FormCard({
           {' · '}
           {form.auto_reply ? (
             <>
-              Auto-reply on (
+              Auto-reply on: emailed, texted only to a verified number on file (
               <Link
                 className="text-primary underline"
                 to="/app/settings/templates?edit=lead_received"
@@ -530,7 +530,7 @@ function FormDialog({
             render={({ field }) => (
               <Switch
                 label="Send an auto-reply"
-                description="Sends the “Lead received” message by text and/or email (each channel that’s on in Messages & automations)."
+                description="Emails the “Lead received” message (when email is on for it in Messages & automations), greeting them as “there”. It’s texted only to a customer already on file whose number you verified, never to a number typed into the form."
                 checked={field.value}
                 onCheckedChange={field.onChange}
               />

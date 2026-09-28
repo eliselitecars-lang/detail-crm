@@ -394,7 +394,7 @@ private struct TodayNoNextJobCard: View {
         HStack(spacing: Theme.Spacing.md) {
             Image(systemName: "checkmark.circle")
                 .font(Theme.Typography.sectionTitle)
-                .foregroundStyle(Theme.success)
+                .foregroundStyle(Theme.successInk)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 Text("Nothing up next")

@@ -7,6 +7,7 @@ import type { z } from 'zod';
 import { AuthLayout } from '@/components/layout/AuthLayout';
 import { Button, FormField, Input } from '@/components/ui';
 import { errorMessage } from '@/lib/errors';
+import { PRICING_PATH } from '@/features/billing/model';
 import { useAuth } from '../authContext';
 import { signUp } from '../api';
 import { FormAlert } from '../FormAlert';
@@ -21,6 +22,9 @@ export default function SignupPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const next = safeNext(params.get('next'));
+  // Someone setting up a shop (not a customer heading to the portal or a
+  // teammate accepting an invite) sees where the plans are.
+  const settingUpShop = /^\/app(?:[/?#]|$)/.test(next);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [sentTo, setSentTo] = useState<string | null>(null);
   const {
@@ -117,6 +121,15 @@ export default function SignupPage() {
         <Button type="submit" loading={isSubmitting} fullWidth size="lg">
           Create account
         </Button>
+        {settingUpShop && (
+          <p className="text-muted text-center text-sm">
+            Setting up a shop? See{' '}
+            <Link to={PRICING_PATH} className="text-primary-ink font-medium hover:underline">
+              plans and pricing
+            </Link>
+            .
+          </p>
+        )}
       </form>
     </AuthLayout>
   );

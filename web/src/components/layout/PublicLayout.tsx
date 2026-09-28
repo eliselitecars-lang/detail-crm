@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react';
+import { Link } from 'react-router';
 import { cn } from '@/lib/cn';
 import { shopAssetUrl } from '@/lib/supabase';
 import { brandStyle } from './brand';
 import { formatPhone } from '@/lib/phone';
+import { CUSTOMER_PORTAL_PATH } from '@/features/portal/paths';
 import { LegalLinks } from './LegalLinks';
 
 export interface PublicShopBranding {
@@ -34,13 +36,22 @@ export interface PublicLayoutProps {
    * (features/booking/tracking.ts), so the tag never sees another page.
    */
   fullPageLinks?: boolean;
+  /**
+   * The footer's "My account" link to the client portal (/portal: upcoming
+   * visits, membership cancel / card update, documents, service reports,
+   * referral credit). On by default for shop-branded pages; off on the
+   * portal itself and on pages that belong to the service (`brand`).
+   */
+  accountLink?: boolean;
 }
 
 /**
  * Shop-branded frame for customer-facing pages (/book, /booking, /q, /i, /f,
  * /portal). Use the `brand` colour utilities (bg-brand text-brand-fg) inside
  * for shop-coloured accents; Amber stays reserved for pay buttons. The footer
- * links the operator's Privacy Policy and Terms of Service.
+ * links the operator's Privacy Policy and Terms of Service, and "My account"
+ * (the client portal) so a customer can always find where they manage their
+ * membership, card and documents.
  */
 export function PublicLayout({
   shop,
@@ -49,8 +60,11 @@ export function PublicLayout({
   width = 'narrow',
   className,
   fullPageLinks = false,
+  accountLink,
 }: PublicLayoutProps) {
   const logoUrl = shopAssetUrl(shop?.logoPath);
+  const showAccountLink = accountLink ?? !brand;
+  const footerLink = 'rounded-control hover:text-ink underline-offset-2 hover:underline';
   return (
     <div className="bg-canvas flex min-h-dvh flex-col" style={brandStyle(shop?.brandColor)}>
       <header className="border-line bg-surface border-b">
@@ -102,6 +116,16 @@ export function PublicLayout({
               {shop.email}
             </a>
           )}
+          {showAccountLink &&
+            (fullPageLinks ? (
+              <a href={CUSTOMER_PORTAL_PATH} className={footerLink}>
+                My account
+              </a>
+            ) : (
+              <Link to={CUSTOMER_PORTAL_PATH} className={footerLink}>
+                My account
+              </Link>
+            ))}
           <span>Powered by Detail CRM</span>
           <LegalLinks fullPageLoad={fullPageLinks} />
         </div>

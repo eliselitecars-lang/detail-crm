@@ -9,6 +9,8 @@
  * are missing. The operator reviews the text with counsel (docs/LAUNCH.md).
  */
 import type { ReactNode } from 'react';
+import { Link } from 'react-router';
+import { PRICING_PATH } from '@/features/billing/model';
 import { LegalList, LegalSubheading, Term, type LegalSection } from './components/LegalDocument';
 import { operatorName, operatorNameStart, type LegalOperator } from './operator';
 
@@ -722,9 +724,12 @@ export function termsOfService(operator: LegalOperator): LegalText {
             <LegalList>
               <li>
                 <Term>Plans and prices:</Term> the plans, their prices, billing periods, any limit
-                on team size and any free trial are shown on our pricing page and in the web app
-                (Settings → Billing) before you subscribe. The amount you pay, including any taxes,
-                is shown on Stripe’s checkout page before you confirm.
+                on team size and any free trial are shown on our{' '}
+                <Link to={PRICING_PATH} className="text-primary-ink underline underline-offset-2">
+                  pricing page
+                </Link>{' '}
+                and in the web app (Settings → Billing) before you subscribe. The amount you pay,
+                including any taxes, is shown on Stripe’s checkout page before you confirm.
               </li>
               <li>
                 <Term>Who manages it:</Term> only the shop owner can subscribe, change plans, update
@@ -753,8 +758,10 @@ export function termsOfService(operator: LegalOperator): LegalText {
               <li>
                 <Term>Failed payments:</Term> if a renewal payment fails, Stripe tries again and the
                 shop keeps working in the meantime; the owner is notified. If the payment still
-                cannot be collected, the shop keeps full use until the end of the current billing
-                period, and then the pause described under “When a subscription ends” applies.
+                cannot be collected once Stripe stops retrying, the subscription ends: the shop
+                keeps full use until the end of the last billing period that was paid for (which may
+                already have passed), and then the pause described under “When a subscription ends”
+                applies.
               </li>
               <li>
                 <Term>Team size:</Term> on a plan with a team limit, active team members and pending

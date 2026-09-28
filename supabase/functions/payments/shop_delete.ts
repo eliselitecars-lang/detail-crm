@@ -6,12 +6,13 @@
  *      PaymentSheets cancelled, money that already landed recorded); a
  *      payment still processing refuses the deletion (409
  *      payment_in_progress) before anything else changes;
- *   2. the shop's own subscription to the platform (shop_billing, 0100 —
- *      what the shop pays the operator, docs/BILLING.md) is cancelled
- *      immediately on the PLATFORM account (no Stripe-Account header;
- *      already ended or missing in Stripe is fine). A Stripe failure stops
- *      the deletion here with 502 upstream_error, before any link,
- *      membership or record changed;
+ *   2. every platform subscription of the shop (what the shop pays the
+ *      operator, docs/BILLING.md: the one shop_billing tracks AND any other
+ *      live one of the shop's platform customer, e.g. a duplicate the webhook
+ *      has not resolved yet) is set to end at its period end on the PLATFORM
+ *      account (no Stripe-Account header). That is reversible, and from then
+ *      on nothing renews. A Stripe failure stops the deletion here with 502
+ *      upstream_error, before any link, membership or record changed;
  *   3. every open Checkout link the CRM created on the account (invoice pay
  *      links, booking deposits, card-saving and membership links) is expired
  *      (one just paid: 409 payment_in_progress);
@@ -24,8 +25,14 @@
  *   5. the shop row is deleted (the database cascades to every tenant row,
  *      queues its stored files for storage-purge and logs its SMS number in
  *      sms_number_releases; shops_money_delete_guard re-checks memberships and
- *      payments in flight).
+ *      payments in flight);
+ *   6. only now are the platform subscriptions cancelled immediately. A
+ *      failure here is logged (platform_subscription_cancel_failed); the
+ *      deletion stands, and step 2 already guarantees no further renewal.
  *
+ * When 3, 4 or 5 fails the shop still exists, so step 2 is undone: each
+ * subscription it scheduled to end is set to renew again (a failure to undo
+ * is logged; the owner can resume it in the Customer Portal).
  * A shop that never connected Stripe skips the Connect calls (1, 3 and the
  * memberships' subscriptions). The Connect account itself is left intact:
  * the owner keeps the Express dashboard, the balance and the payouts.
@@ -66,7 +73,7 @@ export interface DeleteShopResponse {
   deleted: true;
   memberships_cancelled: number;
   sessions_expired: number;
-  /** True when this deletion ended the shop's live platform subscription. */
+  /** True when this deletion ended a live platform subscription of the shop. */
   platform_subscription_cancelled: boolean;
 }
 
@@ -132,53 +139,150 @@ function platformCancelFailed(cause: unknown): HttpError {
   });
 }
 
+/** A platform subscription the deletion ends (step 2 -> 6). */
+interface PlatformSubscription {
+  id: string;
+  /** Step 2 set cancel_at_period_end (undone if the deletion fails). */
+  scheduled: boolean;
+  /** Step 2 already cancelled it (it was incomplete). */
+  ended: boolean;
+}
+
 /**
- * Cancels the shop's platform subscription now (step 2). true when this call
- * ended a live subscription; false when the shop has none, or it had already
- * ended, or Stripe no longer has it. Any other failure is a 502
- * (platformCancelFailed).
+ * Every platform subscription of the shop that can still bill: the customer's
+ * live ones (anything but canceled / incomplete_expired) and the one
+ * shop_billing tracks. Stripe failures are 502 (platformCancelFailed).
  */
-async function cancelPlatformSubscription(s: Services, shopId: string): Promise<boolean> {
+async function platformSubscriptions(s: Services, shopId: string): Promise<Stripe.Subscription[]> {
   // Service role: authenticated has no column grant on the Stripe ids.
   const { data, error } = await s.admin
     .from("shop_billing")
-    .select("stripe_subscription_id")
+    .select("stripe_customer_id, stripe_subscription_id")
     .eq("shop_id", shopId)
-    .maybeSingle<{ stripe_subscription_id: string | null }>();
+    .maybeSingle<{ stripe_customer_id: string | null; stripe_subscription_id: string | null }>();
   if (error) throw dbFailure("shop_billing lookup", error);
-  const subscriptionId = data?.stripe_subscription_id ?? null;
-  if (!subscriptionId) return false;
+  const customer = data?.stripe_customer_id ?? null;
+  const tracked = data?.stripe_subscription_id ?? null;
+  const found = new Map<string, Stripe.Subscription>();
   try {
-    // The platform account itself: no Stripe-Account header.
-    const cancelled = await s.stripe.subscriptions.cancel(subscriptionId, {}, {
-      idempotencyKey: await idempotencyKey(
-        "platform_subscription_shop_delete",
-        shopId,
-        subscriptionId,
-      ),
-    });
-    if (!ENDED.has(cancelled.status)) {
-      throw new Error(`platform subscription still ${cancelled.status} after cancel`);
-    }
-    s.log.info("platform_subscription_cancelled", {
-      shop_id: shopId,
-      subscription: subscriptionId,
-    });
-    return true;
-  } catch (err) {
-    if (isMissing(err)) return false;
-    if (isInvalidRequest(err)) {
-      // Already cancelled (Stripe refuses a second cancel): read its state.
-      try {
-        const current = await s.stripe.subscriptions.retrieve(subscriptionId);
-        if (ENDED.has(current.status)) return false;
-      } catch (readErr) {
-        if (isMissing(readErr)) return false;
-        throw platformCancelFailed(readErr);
+    if (customer) {
+      // The platform account itself: no Stripe-Account header.
+      for await (
+        const sub of s.stripe.subscriptions.list({ customer, status: "all", limit: 100 })
+      ) {
+        if (!ENDED.has(sub.status)) found.set(sub.id, sub);
       }
     }
+    if (tracked && !found.has(tracked)) {
+      try {
+        const sub = await s.stripe.subscriptions.retrieve(tracked);
+        if (!ENDED.has(sub.status)) found.set(sub.id, sub);
+      } catch (err) {
+        if (!isMissing(err)) throw err;
+      }
+    }
+  } catch (err) {
     throw platformCancelFailed(err);
   }
+  return [...found.values()];
+}
+
+/**
+ * Step 2: nothing renews from here on. A subscription already set to end at
+ * its period end is left as it is (and never resumed by releasePlatformHolds).
+ * One still incomplete (nothing paid, no access) is cancelled outright.
+ */
+async function holdPlatformSubscriptions(
+  s: Services,
+  shopId: string,
+): Promise<PlatformSubscription[]> {
+  const held: PlatformSubscription[] = [];
+  for (const sub of await platformSubscriptions(s, shopId)) {
+    try {
+      if (sub.status === "incomplete") {
+        await s.stripe.subscriptions.cancel(sub.id);
+        held.push({ id: sub.id, scheduled: false, ended: true });
+      } else if (sub.cancel_at_period_end) {
+        held.push({ id: sub.id, scheduled: false, ended: false });
+      } else {
+        // No custom idempotency key: setting the flag is idempotent, and a
+        // replayed key would hand back a stale answer after an undo.
+        const updated = await s.stripe.subscriptions.update(sub.id, {
+          cancel_at_period_end: true,
+        });
+        held.push({ id: sub.id, scheduled: true, ended: false });
+        if (!updated.cancel_at_period_end && !ENDED.has(updated.status)) {
+          throw new Error(`platform subscription ${sub.id} still renews after the update`);
+        }
+      }
+    } catch (err) {
+      if (isMissing(err)) continue; // gone from Stripe meanwhile: nothing to end
+      await releasePlatformHolds(s, shopId, held);
+      throw platformCancelFailed(err);
+    }
+  }
+  return held;
+}
+
+/** Undoes step 2 when the deletion failed afterwards (best effort, logged). */
+async function releasePlatformHolds(
+  s: Services,
+  shopId: string,
+  held: PlatformSubscription[],
+): Promise<void> {
+  for (const sub of held) {
+    if (!sub.scheduled) continue;
+    try {
+      await s.stripe.subscriptions.update(sub.id, { cancel_at_period_end: false });
+      s.log.info("platform_subscription_resumed", { shop_id: shopId, subscription: sub.id });
+    } catch (err) {
+      s.log.error("platform_subscription_resume_failed", {
+        shop_id: shopId,
+        subscription: sub.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
+ * Step 6 (the shop is gone): cancels each subscription now. true when one was
+ * live; a Stripe failure is logged only (step 2 already stopped renewals).
+ */
+async function cancelPlatformSubscriptions(
+  s: Services,
+  shopId: string,
+  held: PlatformSubscription[],
+): Promise<boolean> {
+  for (const sub of held) {
+    if (sub.ended) continue;
+    try {
+      const cancelled = await s.stripe.subscriptions.cancel(sub.id, {}, {
+        idempotencyKey: await idempotencyKey("platform_subscription_shop_delete", shopId, sub.id),
+      });
+      if (!ENDED.has(cancelled.status)) {
+        throw new Error(`platform subscription still ${cancelled.status} after cancel`);
+      }
+      s.log.info("platform_subscription_cancelled", { shop_id: shopId, subscription: sub.id });
+    } catch (err) {
+      if (isMissing(err)) continue;
+      if (isInvalidRequest(err)) {
+        // Already cancelled (Stripe refuses a second cancel).
+        try {
+          const current = await s.stripe.subscriptions.retrieve(sub.id);
+          if (ENDED.has(current.status)) continue;
+        } catch (readErr) {
+          if (isMissing(readErr)) continue;
+        }
+      }
+      s.log.error("platform_subscription_cancel_failed", {
+        shop_id: shopId,
+        subscription: sub.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return held.length > 0;
 }
 
 /** Records the membership cancelled (service role), like membership_cancel. */
@@ -308,25 +412,35 @@ export async function deleteShop(
     if (clearing.error) throw dbFailure("processing payments lookup", clearing.error);
     if ((clearing.data ?? []).length > 0) throw paymentInProgress();
   }
-  // The shop's own platform subscription ends first: when Stripe fails here
-  // (502) no link, membership or record has changed yet.
-  const platformCancelled = await cancelPlatformSubscription(s, shop.id);
-  const sessionsExpired = account ? await expireShopSessions(s, account, shop.id) : 0;
-  const membershipsCancelled = await cancelMemberships(s, account, shop.id);
-
-  const { data, error } = await s.admin.from("shops").delete().eq("id", shop.id).select("id");
-  if (error) {
-    if (error.code === "55000") {
-      // shops_money_delete_guard: a membership or payment appeared meanwhile.
-      throw new HttpError(
-        "conflict",
-        "A payment or membership changed while deleting the shop. Try again in a moment.",
-        { details: { reason: "payment_in_progress" }, cause: error },
-      );
+  // Step 2: the shop's platform subscriptions stop renewing (reversible);
+  // when Stripe fails here (502) no link, membership or record has changed.
+  const held = await holdPlatformSubscriptions(s, shop.id);
+  let sessionsExpired: number;
+  let membershipsCancelled: number;
+  try {
+    sessionsExpired = account ? await expireShopSessions(s, account, shop.id) : 0;
+    membershipsCancelled = await cancelMemberships(s, account, shop.id);
+    const deleted = await s.admin.from("shops").delete().eq("id", shop.id).select("id");
+    if (deleted.error) {
+      if (deleted.error.code === "55000") {
+        // shops_money_delete_guard: a membership or payment appeared meanwhile.
+        throw new HttpError(
+          "conflict",
+          "A payment or membership changed while deleting the shop. Try again in a moment.",
+          { details: { reason: "payment_in_progress" }, cause: deleted.error },
+        );
+      }
+      throw dbFailure("shops delete", deleted.error);
     }
-    throw dbFailure("shops delete", error);
+    if (!Array.isArray(deleted.data) || deleted.data.length === 0) {
+      throw errors.notFound("Shop not found.");
+    }
+  } catch (err) {
+    // The shop is still there: it keeps its plan.
+    await releasePlatformHolds(s, shop.id, held);
+    throw err;
   }
-  if (!Array.isArray(data) || data.length === 0) throw errors.notFound("Shop not found.");
+  const platformCancelled = await cancelPlatformSubscriptions(s, shop.id, held);
   s.log.info("shop_deleted", {
     shop_id: shop.id,
     deleted_by: caller.id,

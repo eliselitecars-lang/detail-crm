@@ -11,6 +11,7 @@ import { AssignmentsCard } from './components/detail/AssignmentsCard';
 import { ChecklistCard } from './components/detail/ChecklistCard';
 import { DocumentsCard } from './components/detail/DocumentsCard';
 import { FormsCard } from './components/detail/FormsCard';
+import { GateOverridesNotice } from './components/detail/GateOverridesNotice';
 import { InspectionsCard } from './components/detail/InspectionsCard';
 import { JobCustomDataCard } from './components/detail/JobCustomDataCard';
 import { LineItemsCard } from './components/detail/LineItemsCard';
@@ -102,6 +103,7 @@ function JobView({ job }: { job: JobDetail }) {
       <Card padded className="mb-4">
         <StatusControl job={job} />
       </Card>
+      <GateOverridesNotice jobId={job.id} />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="flex min-w-0 flex-col gap-4 lg:col-span-2">
           <ScheduleCard job={job} />

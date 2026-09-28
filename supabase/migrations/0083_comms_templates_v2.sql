@@ -15,7 +15,9 @@
 --                                                            switch per channel, the wording of
 --                                                            each follow-up lives in
 --                                                            service_followups
---   lead_received       sms, email   enabled   transactional  lead form auto-reply (0088)
+--   lead_received       sms, email   enabled   transactional  lead form auto-reply (0088): emailed,
+--                                                            texted only to a verified phone;
+--                                                            {{customer_first_name}} is "there"
 --   job_report          sms, email   enabled   transactional  publish_job_report (ops 0072)
 --   gift_card_delivery  email only   enabled   transactional  gift cards (money 0066)
 --   referral_reward     sms, email   enabled   transactional  referral credit (money 0069)

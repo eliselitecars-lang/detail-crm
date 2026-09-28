@@ -170,7 +170,7 @@ struct TodayClockCard: View {
         HStack(alignment: .center, spacing: Theme.Spacing.md) {
             Image(systemName: openShift == nil ? "clock" : "clock.fill")
                 .font(Theme.Typography.sectionTitle)
-                .foregroundStyle(openShift == nil ? Theme.textSecondary : Theme.success)
+                .foregroundStyle(openShift == nil ? Theme.textSecondary : Theme.successInk)
                 .frame(width: Theme.Size.rowIcon)
                 .accessibilityHidden(true)
 
@@ -202,7 +202,7 @@ struct TodayClockCard: View {
             HStack(spacing: Theme.Spacing.xs) {
                 Text(shift.clockIn, style: .timer)
                     .font(Theme.Typography.money)
-                    .foregroundStyle(Theme.success)
+                    .foregroundStyle(Theme.successInk)
                 Text("since \(clock.timeText(shift.clockIn))")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textSecondary)

@@ -297,7 +297,7 @@ private struct TeamInviteRow: View {
             }
             Text(expiryText)
                 .font(Theme.Typography.footnote)
-                .foregroundStyle(invite.isExpired() ? Theme.warning : Theme.textSecondary)
+                .foregroundStyle(invite.isExpired() ? Theme.warningInk : Theme.textSecondary)
             HStack(spacing: Theme.Spacing.sm) {
                 AsyncButton("Resend", style: .themeSecondaryCompact) {
                     await resend(invite)
@@ -313,7 +313,7 @@ private struct TeamInviteRow: View {
                     revoke(invite)
                 } label: {
                     Text("Revoke")
-                        .foregroundStyle(Theme.danger)
+                        .foregroundStyle(Theme.dangerInk)
                 }
                 .buttonStyle(.borderless)
             }

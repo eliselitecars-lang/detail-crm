@@ -19,15 +19,26 @@
  *    customer, a foreign checkout) is acknowledged as `ignored`; anything that
  *    may succeed on retry throws, so the webhook answers 500 and Stripe
  *    redelivers.
+ *  - One subscription per shop. Before a live subscription is applied, the
+ *    customer's subscriptions are listed in Stripe: the OLDEST live one is
+ *    the shop's; a newer one (a second Checkout paid before the first one's
+ *    webhook arrived, or an earlier link paid later) is a duplicate. It is
+ *    never applied (the row keeps tracking the oldest, which is applied
+ *    instead); when this platform's checkout created it (metadata.shop_id
+ *    is the shop) what it charged is refunded and it is cancelled now, so a
+ *    shop is never billed twice. One made elsewhere (the Dashboard) is only
+ *    logged for the operator.
  *  - Handlers are safe to re-run (the event ledger re-runs an attempt that
  *    failed part-way): linking is idempotent, applying is ordered by time,
- *    and the payment-failed notification is the last write.
+ *    a duplicate's refunds and cancellation carry idempotency keys (refunds
+ *    first, so a retry still finds the duplicate live and finishes it), and
+ *    the payment-failed notification is the last write.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { syncPlans } from "../_shared/billing_plans.ts";
 import { isUuid } from "../_shared/ids.ts";
 import type { Logger } from "../_shared/log.ts";
-import type { Stripe } from "../_shared/stripe.ts";
+import { idempotencyKey, type Stripe } from "../_shared/stripe.ts";
 import { isStripeError } from "../_shared/stripe_errors.ts";
 
 /**
@@ -68,6 +79,11 @@ export const SUBSCRIPTION_STATUSES = [
 ] as const;
 
 export type SubscriptionStatus = typeof SUBSCRIPTION_STATUSES[number];
+
+/** Statuses of a subscription that is the shop's plan (0101 v_live). */
+const LIVE_STATUSES = new Set<string>(["trialing", "active", "past_due", "unpaid", "paused"]);
+/** Statuses of a subscription that can never bill again (0101 v_ended). */
+const ENDED_STATUSES = new Set<string>(["canceled", "incomplete_expired"]);
 
 export interface BillingContext {
   admin: SupabaseClient;
@@ -159,6 +175,29 @@ export function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
 }
 
 /**
+ * The subscription that is the shop's among its customer's subscriptions: the
+ * oldest live one (created, then id), or null when none is live. Any other
+ * subscription that is live or still incomplete is a duplicate while this
+ * one exists.
+ */
+export function survivingSubscription(
+  subs: ReadonlyArray<Pick<Stripe.Subscription, "id" | "status" | "created">>,
+): string | null {
+  let best: Pick<Stripe.Subscription, "id" | "status" | "created"> | null = null;
+  for (const sub of subs) {
+    if (!LIVE_STATUSES.has(sub.status)) continue;
+    const created = Number.isFinite(sub.created) ? sub.created : Number.MAX_SAFE_INTEGER;
+    const bestCreated = best && Number.isFinite(best.created)
+      ? best.created
+      : Number.MAX_SAFE_INTEGER;
+    if (!best || created < bestCreated || (created === bestCreated && sub.id < best.id)) {
+      best = sub;
+    }
+  }
+  return best?.id ?? null;
+}
+
+/**
  * billing_apply_subscription arguments for a subscription, or null when it
  * cannot be applied (malformed ids, a status the database does not know).
  * `deleted` (customer.subscription.deleted) always records `canceled`.
@@ -234,7 +273,8 @@ function ignore(
   fields: Record<string, unknown> = {},
 ): Outcome {
   const suspicious = reason === "shop_mismatch" || reason === "customer_conflict" ||
-    reason === "subscription_conflict" || reason === "subscription_rejected";
+    reason === "subscription_conflict" || reason === "subscription_rejected" ||
+    reason === "duplicate_subscription";
   if (suspicious) ctx.log.warn("billing_event_ignored", { reason, ...fields });
   else ctx.log.info("billing_event_ignored", { reason, ...fields });
   return { result: "ignored", reason };
@@ -272,9 +312,153 @@ interface ApplyResult {
   outcome: Outcome;
   /** The shop the customer is linked to (null: not a Detail CRM customer). */
   shopId: string | null;
+  /** The event's subscription was a duplicate (see the header); not applied. */
+  duplicate?: boolean;
 }
 
+/**
+ * Applies `sub` to the shop, unless another, older live subscription of the
+ * same customer is the shop's: then `sub` is a duplicate (resolveDuplicate).
+ */
 async function applySubscription(
+  ctx: BillingContext,
+  sub: Stripe.Subscription,
+  deleted: boolean,
+): Promise<ApplyResult> {
+  const cid = customerId(sub.customer as string | { id: string } | null);
+  if (deleted || ENDED_STATUSES.has(sub.status) || !cid || !subscriptionId(sub.id)) {
+    return await applyToShop(ctx, sub, deleted);
+  }
+  const subs = await customerSubscriptions(ctx, cid, sub);
+  const keep = survivingSubscription(subs);
+  const kept = keep === null ? undefined : subs.find((x) => x.id === keep);
+  if (!kept || kept.id === sub.id) return await applyToShop(ctx, sub, deleted);
+  return await resolveDuplicate(ctx, sub, kept);
+}
+
+/** Every subscription of the customer, with `current` as it stands now. */
+async function customerSubscriptions(
+  ctx: BillingContext,
+  customer: string,
+  current: Stripe.Subscription,
+): Promise<Stripe.Subscription[]> {
+  const subs: Stripe.Subscription[] = [];
+  for await (
+    const sub of ctx.stripe.subscriptions.list({ customer, status: "all", limit: 100 })
+  ) {
+    if (sub.id !== current.id) subs.push(sub);
+  }
+  subs.push(current);
+  return subs;
+}
+
+/**
+ * `dup` is a newer subscription of a customer whose older `keep` is live:
+ * the shop's row is brought to `keep` (never to `dup`), then a duplicate this
+ * platform's checkout created for the shop is refunded and cancelled. Nothing
+ * happens for a customer that is not a Detail CRM shop's.
+ */
+async function resolveDuplicate(
+  ctx: BillingContext,
+  dup: Stripe.Subscription,
+  keep: Stripe.Subscription,
+): Promise<ApplyResult> {
+  const kept = await applyToShop(ctx, keep, false);
+  const shopId = kept.shopId;
+  if (!shopId) return { ...kept, duplicate: true };
+  if (dup.metadata?.shop_id !== shopId) {
+    return {
+      outcome: ignore(ctx, "duplicate_subscription", {
+        subscription: dup.id,
+        kept: keep.id,
+        shop_id: shopId,
+        cancelled: false,
+      }),
+      shopId,
+      duplicate: true,
+    };
+  }
+  const refundedCents = await refundSubscription(ctx, dup, shopId);
+  await cancelDuplicate(ctx, dup);
+  ctx.log.warn("billing_duplicate_subscription_cancelled", {
+    shop_id: shopId,
+    subscription: dup.id,
+    kept: keep.id,
+    refunded_cents: refundedCents,
+  });
+  return {
+    outcome: applied(ctx, "duplicate_subscription_cancelled", {
+      subscription: dup.id,
+      kept: keep.id,
+      shop_id: shopId,
+    }),
+    shopId,
+    duplicate: true,
+  };
+}
+
+const paymentIntentRef = idMatching(/^pi_[A-Za-z0-9]+$/);
+const chargeRef = idMatching(/^(ch|py)_[A-Za-z0-9]+$/);
+
+/** Refunds every paid invoice of the subscription; the cents refunded. */
+async function refundSubscription(
+  ctx: BillingContext,
+  sub: Stripe.Subscription,
+  shopId: string,
+): Promise<number> {
+  let refunded = 0;
+  for await (
+    const invoice of ctx.stripe.invoices.list({ subscription: sub.id, status: "paid", limit: 100 })
+  ) {
+    if (!(invoice.amount_paid > 0) || !invoice.id) continue;
+    const payments = await ctx.stripe.invoicePayments.list({
+      invoice: invoice.id,
+      status: "paid",
+      limit: 100,
+    });
+    for (const payment of payments.data) {
+      const pi = paymentIntentRef(payment.payment?.payment_intent);
+      const charge = chargeRef(payment.payment?.charge);
+      const target = pi ?? charge;
+      if (!target) continue;
+      try {
+        const refund = await ctx.stripe.refunds.create(
+          {
+            ...(pi ? { payment_intent: pi } : { charge: target }),
+            reason: "duplicate",
+            metadata: { shop_id: shopId, subscription: sub.id, invoice: invoice.id },
+          },
+          { idempotencyKey: await idempotencyKey("billing_duplicate_refund", target) },
+        );
+        refunded += refund.amount ?? 0;
+      } catch (err) {
+        // Refunded already (by the operator, or an earlier attempt without
+        // our key): nothing left to give back.
+        if (isStripeError(err) && err.code === "charge_already_refunded") continue;
+        throw err;
+      }
+    }
+  }
+  return refunded;
+}
+
+/** Cancels the duplicate now (already ended or gone in Stripe is fine). */
+async function cancelDuplicate(ctx: BillingContext, sub: Stripe.Subscription): Promise<void> {
+  try {
+    await ctx.stripe.subscriptions.cancel(sub.id, {}, {
+      idempotencyKey: await idempotencyKey("billing_duplicate_cancel", sub.id),
+    });
+  } catch (err) {
+    if (isMissing(err)) return;
+    if (isStripeError(err) && err.type === "StripeInvalidRequestError") {
+      const current = await currentSubscription(ctx, sub.id, null);
+      if (!current || ENDED_STATUSES.has(current.status)) return;
+    }
+    throw err;
+  }
+}
+
+async function applyToShop(
   ctx: BillingContext,
   sub: Stripe.Subscription,
   deleted: boolean,
@@ -426,6 +610,9 @@ async function onInvoicePaymentFailed(
   if (sub) {
     const refreshed = await applySubscription(ctx, sub, sub.status === "canceled");
     if (refreshed.shopId === null) return refreshed.outcome; // not a Detail CRM customer
+    // A duplicate's failed payment: it was just cancelled (or is the
+    // operator's to sort out); the shop's own subscription is fine.
+    if (refreshed.duplicate) return refreshed.outcome;
   }
   try {
     await rpc<null>(ctx, "billing_payment_failed", {

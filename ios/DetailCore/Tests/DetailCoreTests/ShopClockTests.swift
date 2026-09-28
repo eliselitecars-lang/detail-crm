@@ -91,6 +91,33 @@ final class ShopClockTests: XCTestCase {
         XCTAssertEqual(mondayClock.dateString(week.end), "2026-03-09")
     }
 
+    func testTotalsWeekStartsMondayLikePostgresDateTruncWeek() {
+        // Sunday 2026-09-27 (Chicago): Postgres `date_trunc('week', date
+        // '2026-09-27')` is Monday 2026-09-21, so "This week" is 09-21..09-27
+        // even though the default display week starts on Sunday.
+        let sundayNoon = utc("2026-09-27T17:00:00Z")
+        let totals = chicago.totalsWeekInterval(containing: sundayNoon)
+        XCTAssertEqual(chicago.dateString(totals.start), "2026-09-21")
+        XCTAssertEqual(chicago.dateString(chicago.addingDays(-1, to: totals.end)), "2026-09-27")
+        XCTAssertEqual(totals.start, utc("2026-09-21T05:00:00Z"))
+        XCTAssertEqual(chicago.dateString(chicago.weekInterval(containing: sundayNoon).start), "2026-09-27")
+
+        // Monday itself starts its own week; late Sunday night shop time
+        // (already Monday in UTC) still belongs to the previous week.
+        XCTAssertEqual(chicago.dateString(chicago.totalsWeekInterval(containing: utc("2026-09-28T05:00:00Z")).start), "2026-09-28")
+        XCTAssertEqual(chicago.dateString(chicago.totalsWeekInterval(containing: utc("2026-09-28T04:59:00Z")).start), "2026-09-21")
+    }
+
+    func testTotalsWeekIgnoresDisplayFirstWeekdayAndHandlesDST() {
+        let saturdayClock = ShopClock(timeZoneIdentifier: "America/Chicago", locale: Locale(identifier: "en_US_POSIX"), firstWeekday: 7)
+        // Week containing the fall-back Sunday 2026-11-01: Mon 10-26 .. Mon 11-02 (one 25 h day).
+        let week = saturdayClock.totalsWeekInterval(containing: utc("2026-10-29T17:00:00Z"))
+        XCTAssertEqual(saturdayClock.dateString(week.start), "2026-10-26")
+        XCTAssertEqual(saturdayClock.dateString(week.end), "2026-11-02")
+        XCTAssertEqual(week.duration, 7 * 86_400 + 3_600)
+        XCTAssertEqual(ShopClock.totalsFirstWeekday, 2)
+    }
+
     func testMonthInterval() {
         let month = chicago.monthInterval(containing: utc("2026-11-15T12:00:00Z"))
         XCTAssertEqual(month.start, utc("2026-11-01T05:00:00Z"))

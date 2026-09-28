@@ -46,6 +46,11 @@ ios/
   access token has expired (`emitLocalSessionAsInitialSession`); bootstrap
   refreshes it, so opening the app offline lands on `failed` (Retry) rather
   than Sign In, and a later `.tokenRefreshed` finishes the bootstrap.
+  The client uses the **implicit** auth flow (`flowType: .implicit`;
+  supabase-swift defaults to PKCE): the app has no URL scheme, so
+  password-reset and sign-up confirmation emails open the web app, which
+  can only redeem a link that carries the session in its fragment, not a
+  PKCE `?code=` whose verifier is in the phone's keychain.
   **Session expiry:** when the session is over (Auth refuses a refresh, or
   the Auth client drops the session itself) AppState signs out through its
   one sign-out path, on this device only, and the sign-in screen shows
@@ -97,7 +102,10 @@ ios/
   barcodes, check-digit-verified first), `JobStatus` + transition
   rules, quote/invoice/payment/membership statuses, `ShopRole`/`Capability`,
   `TemplateRenderer` (`{{placeholder}}`), `PhoneNumber` (E.164), `VIN`,
-  `ShopClock` (shop-timezone days/weeks, DST-safe), `Validation` (email and
+  `ShopClock` (shop-timezone days/weeks, DST-safe; `weekInterval` is the
+  Sunday-first calendar grid week, `totalsWeekInterval` the Monday-first
+  week every "This week" total uses, matching the server's
+  `date_trunc('week')` and the web app), `Validation` (email and
   slug rules identical to the database), `SessionExpiry` (when a refused
   request means the session is over; `SessionExpiryGate`),
   `ShopEntitlement` (the shop's subscription standing, which status line
@@ -245,6 +253,15 @@ verification, geostamped clock-in, the day map), Bluetooth (card readers).
 3. **Theme tokens only.** Colors, fonts, spacing, radii and button styles come
    from `Theme` (`.themePrimary`, `.themeMoney` for money actions only,
    `.cardStyle()`, `.screenBackground()`, …). Amber is reserved for money.
+   `Theme.amber/success/warning/danger` are *fill* colors (buttons, badge
+   tints, bars); text and icons use the matching ink (`moneyInk`,
+   `successInk`, `warningInk`, `dangerInk`, `glacierInk`, or
+   `Theme.color(for: tone)`), which meets WCAG AA 4.5:1 in both modes.
+   `swift_sanity.py` rejects a fill color passed to `foregroundStyle`.
+   Theme buttons wrap their labels at accessibility text sizes; put two or
+   more side by side in `AdaptiveButtonRow` (it stacks them at AX sizes),
+   never a bare `HStack` (also checked). Anything drawn for pointing only
+   (the inspection diagram) needs a button path too (`JobVehicleView.areas`).
 4. **Model annotations.** Every Codable struct mapped to a table has explicit
    `CodingKeys` and a `// table: <name>` line directly above it; RPC result
    structs use `// rpc: <name>`. `scripts/check_contracts.py` checks the

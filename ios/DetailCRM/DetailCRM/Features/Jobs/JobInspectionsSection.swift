@@ -87,7 +87,7 @@ struct JobInspectionRow: View {
     var body: some View {
         HStack(spacing: Theme.Spacing.md) {
             Image(systemName: bundle.inspection.isSigned ? "checkmark.seal.fill" : "doc.text.magnifyingglass")
-                .foregroundStyle(bundle.inspection.isSigned ? Theme.success : Theme.glacier)
+                .foregroundStyle(bundle.inspection.isSigned ? Theme.successInk : Theme.glacier)
                 .frame(width: Theme.Size.rowIcon)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {

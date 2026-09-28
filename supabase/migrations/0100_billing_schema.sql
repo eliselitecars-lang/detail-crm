@@ -33,7 +33,8 @@
 -- (the webhook through 0101's RPCs). Owners, admins and managers of the shop
 -- may SELECT it directly, but never the Stripe ids: authenticated holds a
 -- column-level SELECT grant without stripe_customer_id,
--- stripe_subscription_id and last_event_at (select explicit columns;
+-- stripe_subscription_id, paid_through and last_event_at (select explicit
+-- columns; shop_entitlement reports the access end;
 -- `select *` is refused). Everyone else — technicians too — reads the
 -- shop's standing through shop_entitlement(p_shop_id) (0101).
 -- ============================================================================
@@ -119,6 +120,7 @@ create table public.shop_billing (
   trial_ends_at           timestamptz,
   trial_used              boolean not null default false,
   current_period_end      timestamptz,
+  paid_through            timestamptz,
   cancel_at_period_end    boolean not null default false,
   comp_until              timestamptz,
   last_event_at           timestamptz,
@@ -135,6 +137,10 @@ comment on column public.shop_billing.trial_ends_at is
   'End of the shop''s trial: the in-app trial (set_billing_config / new shops) or the Stripe subscription''s trial_end.';
 comment on column public.shop_billing.trial_used is
   'A Stripe subscription of this shop had a trial: checkout no longer carries the in-app trial over.';
+comment on column public.shop_billing.current_period_end is
+  'Stripe''s current period end of the subscription. Stripe moves it on at renewal BEFORE the renewal is paid, so it is never what an ended subscription keeps access through (paid_through is).';
+comment on column public.shop_billing.paid_through is
+  'End of the last period the shop is in good standing for (billing_apply_subscription, 0101): the period end while the subscription is active / trialing; capped at the event time once it is past_due / unpaid / paused (the period Stripe moved on to was not paid). An ended subscription (canceled / unpaid / incomplete_expired / paused) keeps access until this time, never until current_period_end.';
 comment on column public.shop_billing.comp_until is
   'Free until this time (''infinity'' = for good): billing_set_comp, the operator''s pilot-shop tool.';
 comment on column public.shop_billing.last_event_at is

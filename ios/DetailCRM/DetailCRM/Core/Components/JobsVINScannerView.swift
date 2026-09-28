@@ -128,7 +128,7 @@ struct JobsVINScannerView: View {
                 .font(Theme.Typography.footnote)
                 .foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: Theme.Spacing.sm) {
+            AdaptiveButtonRow(spacing: Theme.Spacing.sm) {
                 Button("Keep scanning") { unconfirmed = nil }
                     .buttonStyle(.themeSecondaryCompact)
                 Button("Use this VIN") { finish(vin, verified: false) }

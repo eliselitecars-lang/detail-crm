@@ -108,9 +108,9 @@ private struct ToastBanner: View {
 
     private var toneColor: Color {
         switch toast?.style ?? .info {
-        case .success: return Theme.success
+        case .success: return Theme.successInk
         case .info: return Theme.glacier
-        case .error: return Theme.danger
+        case .error: return Theme.dangerInk
         }
     }
 }

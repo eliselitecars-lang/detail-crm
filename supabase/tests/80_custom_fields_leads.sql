@@ -6,8 +6,9 @@
 -- create_online_booking, public_booking_questions, lead forms (field
 -- rules, token), public_get_lead_form / public_submit_lead (new vs
 -- matched — a matched customer is never modified —, consent only as
--- ticked, honeypot, PT429 limits, notification with the customer, the
--- auto-reply), submissions RLS, the customer-merge follow-up and
+-- ticked, honeypot, PT429 limits incl. per client IP, notification with the
+-- customer, the auto-reply: emailed, texted only to a verified phone, never
+-- carrying the visitor's text), submissions RLS, the customer-merge follow-up and
 -- cross-shop isolation.
 \ir fixtures/two_shops.psql
 \ir fixtures/40_booking_setup.psql
@@ -337,10 +338,11 @@ select public.public_submit_lead(tests.fx('tok2'), jsonb_build_object('first_nam
                                                                       'vehicle', jsonb_build_object('make', 'Ford', 'model', 'F-150')));
 select tests.as_superuser();
 select tests.eq((select array_agg(channel::text order by channel) from public.messages m join public.customers c on c.id = m.customer_id
-                  where m.template_key = 'lead_received' and c.email = 'rita@example.com'), array['sms', 'email'],
-                'the auto-reply goes out on both channels (transactional: no opt-in needed)');
-select tests.ok((select body like 'Hi Rita, thanks for reaching out to Shop A!%' from public.messages
-                  where template_key = 'lead_received' and channel = 'sms'), 'lead_received wording');
+                  where m.template_key = 'lead_received' and c.email = 'rita@example.com'), array['email'],
+                'the auto-reply is emailed (transactional: no opt-in needed) — never texted to a new lead''s unverified phone');
+select tests.ok((select body like E'Hi there,\n\nThanks for reaching out to Shop A!%' from public.messages
+                  where template_key = 'lead_received' and channel = 'email' and to_address = 'rita@example.com'),
+                'lead_received wording: a neutral greeting, never the name the visitor typed');
 select tests.eq((select array[coalesce(message, 'null'), coalesce(vehicle_info::text, 'null')] from public.lead_submissions
                   where lead_form_id = tests.fx('form2')), array['null', 'null'], 'fields the form does not ask are ignored');
 select tests.eq((select count(*) from public.notifications where pushed_at is null and kind = 'new_lead'), 0::bigint,
@@ -373,7 +375,7 @@ select tests.eq((select array[c.lifecycle::text, c.phone, c.phone_unverified::te
                 array['lead', '+12055550188', 'true', 'false'], 'a new lead with exactly what was entered');
 select tests.eq((select array_agg(m.to_address order by m.channel) from public.messages m join public.customers c on c.id = m.customer_id
                   where m.template_key = 'lead_received' and c.email = 'vic@example.com'),
-                array['+12055550188', 'vic@example.com'], 'the auto-reply reaches the submitted phone (and the email)');
+                array['vic@example.com'], 'the auto-reply reaches the email only (the submitted phone is unverified)');
 select tests.eq((select to_jsonb(c) - 'updated_at' from public.customers c where id = tests.fx('cust_v')), (select c from vic_before),
                 'the unverified record is untouched');
 -- the same unverified phone given again: that record matches
@@ -406,6 +408,58 @@ select tests.as_superuser();
 select tests.eq((select count(*) from public.lead_submissions where customer_id = tests.fx('cust_val')), 1::bigint,
                 'a verified record matches by email (never modified)');
 select tests.eq((select phone from public.customers where id = tests.fx('cust_val')), '+12055550176', '(its phone is kept)');
+select tests.eq((select array_agg(m.channel::text || ':' || m.to_address order by m.channel) from public.messages m
+                  where m.template_key = 'lead_received' and m.customer_id = tests.fx('cust_val')),
+                array['sms:+12055550176', 'email:val@example.com'],
+                'a matched customer with a phone the shop verified is texted there (never at the submitted phone)');
+select tests.ok((select bool_and(body like 'Hi there, thanks for reaching out to Shop A!%') from public.messages
+                  where template_key = 'lead_received' and channel = 'sms'), 'lead_received SMS wording');
+
+-- abuse: the public token cannot turn the auto-reply into an SMS / email
+-- relay (premium-range numbers, phishing text in the name field)
+select tests.as_anon();
+select public.public_submit_lead(tests.fx('tok2'),
+         jsonb_build_object('first_name', 'Your card was charged $499. Dispute: https://evil.example/x', 'phone', '+88212345001'));
+select public.public_submit_lead(tests.fx('tok2'),
+         jsonb_build_object('first_name', 'Account locked, verify at https://evil.example/login', 'email', 'victim1@example.org',
+                            'last_name', 'https://evil.example/2'));
+select tests.as_superuser();
+select tests.eq((select count(*) from public.messages where to_address = '+88212345001'), 0::bigint,
+                'nothing is texted to a foreign / premium-range number typed into the form');
+select tests.eq((select count(*) from public.messages where template_key = 'lead_received' and channel = 'sms'
+                    and to_address not in ('+12055550176')), 0::bigint,
+                'no auto-reply SMS ever went to a phone typed into a public form');
+select tests.ok((select body not like '%evil.example%' and body like E'Hi there,\n\n%' from public.messages
+                  where template_key = 'lead_received' and to_address = 'victim1@example.org'),
+                'the emailed auto-reply carries none of the visitor''s text');
+select tests.eq((select count(*) from public.messages where template_key = 'lead_received' and body like '%evil.example%'), 0::bigint,
+                'no auto-reply relays a link typed into the form');
+select tests.eq((select count(*) from public.customers where phone = '+88212345001' and lifecycle = 'lead'), 1::bigint,
+                '(the lead itself is still captured for staff)');
+
+-- per client IP: at most 10 submissions per form in 24 hours
+select tests.as_anon();
+select set_config('request.headers', '{"x-forwarded-for": "198.51.100.40"}', true);
+select tests.eq((select count(*) from generate_series(1, 10) g
+                  where public.public_submit_lead(tests.fx('tok2'),
+                          jsonb_build_object('first_name', 'Ip', 'email', 'ip-' || g || '@example.com')) ->> 'ok' = 'true'),
+                10::bigint, '10 leads from one connection are accepted');
+select tests.throws_like($$select public.public_submit_lead(tests.fx('tok2'), '{"first_name": "Ip", "email": "ip-11@example.com"}'::jsonb)$$,
+                         'PT429', '%this connection%', 'the 11th from the same IP in 24 hours is refused');
+select tests.as_superuser();
+select tests.eq((select count(*) from public.lead_submissions where lead_form_id = tests.fx('form2') and signer_ip = '198.51.100.40'),
+                10::bigint, 'submissions record the client IP');
+select tests.as_anon();
+select set_config('request.headers', '{"x-forwarded-for": "198.51.100.41"}', true);
+select tests.eq(public.public_submit_lead(tests.fx('tok2'), '{"first_name": "Ip", "email": "ip-12@example.com"}'::jsonb) ->> 'ok', 'true',
+                'another connection is unaffected');
+select tests.as_superuser();
+update public.lead_submissions set created_at = created_at - interval '25 hours' where signer_ip = '198.51.100.40';
+select tests.as_anon();
+select set_config('request.headers', '{"x-forwarded-for": "198.51.100.40"}', true);
+select tests.eq(public.public_submit_lead(tests.fx('tok2'), '{"first_name": "Ip", "email": "ip-13@example.com"}'::jsonb) ->> 'ok',
+                'true', 'the window is a rolling 24 hours');
+select set_config('request.headers', '', true);
 
 -- ============================================================ submissions RLS
 select tests.as_anon();

@@ -81,7 +81,7 @@ struct OpsReferralCodeRow: View {
                 .foregroundStyle(Theme.textPrimary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: Theme.Spacing.sm) {
+            AdaptiveButtonRow(spacing: Theme.Spacing.sm) {
                 ShareLink(
                     item: url,
                     message: Text("Book with \(appState.shop?.name ?? "us") using my link and get a discount on your first visit.")

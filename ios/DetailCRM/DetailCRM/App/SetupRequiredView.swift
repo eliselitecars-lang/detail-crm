@@ -37,7 +37,7 @@ struct SetupRequiredView: View {
                         ForEach(AppConfig.missingKeys, id: \.self) { key in
                             Label(key, systemImage: "key")
                                 .font(Theme.Typography.footnote.monospaced())
-                                .foregroundStyle(Theme.warning)
+                                .foregroundStyle(Theme.warningInk)
                         }
                     }
                 }

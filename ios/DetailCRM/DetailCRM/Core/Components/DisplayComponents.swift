@@ -11,8 +11,9 @@ import DetailCore
 
 // MARK: - Money
 
-/// Formats integer cents in the shop currency. Amber is used only when the
-/// amount needs attention (`emphasis: .attention`, e.g. a balance due).
+/// Formats integer cents in the shop currency. The money ink (a readable
+/// amber) is used only when the amount needs attention (`emphasis:
+/// .attention`, e.g. a balance due).
 struct MoneyText: View {
     enum Size {
         case small
@@ -52,7 +53,7 @@ struct MoneyText: View {
         switch emphasis {
         case .normal: return Theme.textPrimary
         case .secondary: return Theme.textSecondary
-        case .attention: return Theme.amber
+        case .attention: return Theme.moneyInk
         }
     }
 }

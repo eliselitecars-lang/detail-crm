@@ -4,7 +4,9 @@
 -- plan by price, trial_used, out-of-order and equal-time events, canceled
 -- keeps the period end, which subscription may replace the current one,
 -- cross-shop subscription), billing_payment_failed (owner-only neutral
--- notification, no pile-up, stale events), access for API roles.
+-- notification, no pile-up, stale events), access for API roles, and
+-- paid_through: a renewal that fails and ends canceled / unpaid / paused
+-- never keeps the shop active through the unpaid period.
 \ir fixtures/two_shops.psql
 
 select tests.as_service();
@@ -108,9 +110,16 @@ select tests.ok((select status = 'canceled' and current_period_end = '2020-02-01
 select tests.eq((select s.state from public.shop_billing_standing(tests.fx('shop_a')) s), 'lapsed',
                 'its period (Feb 2020) is over: lapsed');
 select tests.eq(pg_temp.apply('cus_WhA', 'sub_1', 'price_WhM', 'canceled', '2026-01-04Z', null, '2099-01-01Z') -> 'applied',
-                'true'::jsonb, 'a canceled subscription whose period runs on');
+                'true'::jsonb, 'a canceled subscription whose (Stripe) period runs on');
+select tests.eq((select s.state || '/' || s.reason from public.shop_billing_standing(tests.fx('shop_a')) s), 'lapsed/canceled',
+                'but the shop was only paid up to Feb 2020: access follows paid_through, not current_period_end');
+-- paid up (active through 2099), then canceled at once: the paid period remains
+select pg_temp.apply('cus_WhA', 'sub_1', 'price_WhM', 'active', '2026-01-04 00:00:01Z', null, '2099-01-01Z');
+select tests.eq(pg_temp.apply('cus_WhA', 'sub_1', 'price_WhM', 'canceled', '2026-01-04 00:00:02Z', null, '2099-01-01Z') -> 'applied',
+                'true'::jsonb, 'canceled while paid up');
 select tests.eq((select s.state || '/' || s.reason from public.shop_billing_standing(tests.fx('shop_a')) s), 'active/period_remaining',
-                'keeps the shop active until the period ends');
+                'keeps the shop active until the paid period ends');
+select tests.ok((select paid_through = '2099-01-01Z' from pg_temp.row_a()), 'paid_through: the period it paid for');
 select tests.ok(not (public.billing_checkout_context(tests.fx('shop_a'), tests.fx('u_owner_a')) -> 'has_live_subscription')::boolean,
                 'a canceled subscription is not live: the owner may check out again');
 
@@ -170,3 +179,66 @@ select tests.eq((select count(*) from public.notifications where shop_id = tests
                 3::bigint, 'an older failure while still past due is sent');
 select tests.eq((select count(*) from public.notifications where shop_id = tests.fx('shop_b') and kind = 'billing_payment_failed'),
                 0::bigint, 'shop B untouched');
+
+-- ============================================================ failed renewals never buy the unpaid period
+-- Stripe moves current_period_end on at renewal, before the renewal is paid:
+-- when every retry fails and Stripe cancels the subscription (or marks it
+-- unpaid), that date is the end of a period nobody paid for.
+create function pg_temp.reset_b() returns void language sql as $$
+  update public.shop_billing set status = 'none', stripe_subscription_id = null, current_period_end = null, paid_through = null,
+                                 last_event_at = null, trial_ends_at = null
+   where shop_id = tests.fx('shop_b') $$;
+create function pg_temp.standing_b() returns text language sql as $$
+  select s.state || '/' || s.reason from public.shop_billing_standing(tests.fx('shop_b')) s $$;
+grant execute on function pg_temp.reset_b(), pg_temp.standing_b() to authenticated, service_role;
+
+-- a yearly plan: paid until 20 days ago, the renewal (period +345 days) failed, retries ran out
+select pg_temp.reset_b();
+select pg_temp.apply('cus_WhB', 'sub_B1', 'price_WhM', 'active', now() - interval '385 days', null, now() - interval '20 days');
+select pg_temp.apply('cus_WhB', 'sub_B1', 'price_WhM', 'active', now() - interval '20 days', null, now() + interval '345 days');
+select pg_temp.apply('cus_WhB', 'sub_B1', 'price_WhM', 'past_due', now() - interval '20 days' + interval '1 hour', null,
+                     now() + interval '345 days');
+select tests.eq(pg_temp.standing_b(), 'past_due/past_due', 'while Stripe retries, the shop stays usable');
+select pg_temp.apply('cus_WhB', 'sub_B1', 'price_WhM', 'canceled', now(), null, now() + interval '345 days');
+select tests.eq(pg_temp.standing_b(), 'lapsed/canceled', 'canceled after failed retries: lapsed at once (not in 345 days)');
+select tests.ok(not public.shop_can_write(tests.fx('shop_b')), 'and it cannot write');
+select tests.authenticate_as(tests.fx('u_owner_b'));
+select tests.ok((select (e ->> 'state') = 'lapsed' and not (e ->> 'can_write')::boolean
+                        and (e ->> 'current_period_end')::timestamptz < now()
+                   from (select public.shop_entitlement(tests.fx('shop_b')) as e) x),
+                'entitlement: lapsed, no write, and the access end shown is in the past (never the unpaid period''s end)');
+select tests.as_service();
+
+-- the same, ending unpaid
+select pg_temp.reset_b();
+select pg_temp.apply('cus_WhB', 'sub_B2', 'price_WhM', 'active', now() - interval '40 days', null, now() - interval '10 days');
+select pg_temp.apply('cus_WhB', 'sub_B2', 'price_WhM', 'past_due', now() - interval '10 days', null, now() + interval '20 days');
+select pg_temp.apply('cus_WhB', 'sub_B2', 'price_WhM', 'unpaid', now() - interval '1 day', null, now() + interval '20 days');
+select tests.eq(pg_temp.standing_b(), 'lapsed/unpaid', 'unpaid after failed retries: lapsed');
+
+-- the reported sequence: past_due with a period a year away, then canceled
+select pg_temp.reset_b();
+select pg_temp.apply('cus_WhB', 'sub_B3', 'price_WhM', 'past_due', now() - interval '20 days', null, now() + interval '364 days');
+select pg_temp.apply('cus_WhB', 'sub_B3', 'price_WhM', 'canceled', now(), null, now() + interval '364 days');
+select tests.eq(pg_temp.standing_b(), 'lapsed/canceled', 'past_due then canceled: lapsed, not active/period_remaining');
+
+-- a trial that ended without a payment method (paused): lapsed
+select pg_temp.reset_b();
+select pg_temp.apply('cus_WhB', 'sub_B4', 'price_WhM', 'trialing', now() - interval '14 days', now() - interval '1 minute',
+                     now() - interval '1 minute');
+select pg_temp.apply('cus_WhB', 'sub_B4', 'price_WhM', 'paused', now(), now() - interval '1 minute', now() + interval '30 days');
+select tests.eq(pg_temp.standing_b(), 'lapsed/paused', 'paused after the trial: lapsed (the new period is not paid)');
+
+-- a retry that succeeded: the recovered period is paid, a later cancellation keeps it
+select pg_temp.reset_b();
+select pg_temp.apply('cus_WhB', 'sub_B5', 'price_WhM', 'past_due', now() - interval '5 days', null, now() + interval '25 days');
+select pg_temp.apply('cus_WhB', 'sub_B5', 'price_WhM', 'active', now() - interval '3 days', null, now() + interval '25 days');
+select pg_temp.apply('cus_WhB', 'sub_B5', 'price_WhM', 'canceled', now() - interval '1 day', null, now() + interval '25 days');
+select tests.eq(pg_temp.standing_b(), 'active/period_remaining', 'paid after a retry, then canceled: keeps the paid period');
+select tests.ok((select paid_through = current_period_end from public.shop_billing where shop_id = tests.fx('shop_b')),
+                'paid_through = the paid period end');
+-- a stale past_due (older than what is applied) changes nothing
+select tests.eq(pg_temp.apply('cus_WhB', 'sub_B5', 'price_WhM', 'past_due', now() - interval '4 days') -> 'applied', 'false'::jsonb,
+                'an older past_due is ignored');
+select tests.eq(pg_temp.standing_b(), 'active/period_remaining', 'and the paid period stands');
+select pg_temp.reset_b();

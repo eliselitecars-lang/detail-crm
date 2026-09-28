@@ -34,7 +34,7 @@ import {
   recurringPrice,
   SHOP,
 } from "../billing/test_fixtures.ts";
-import { applySubscriptionArgs, HANDLED_EVENT_TYPES } from "./handlers.ts";
+import { applySubscriptionArgs, HANDLED_EVENT_TYPES, survivingSubscription } from "./handlers.ts";
 import { makeHandler, type WebhookResponse } from "./index.ts";
 
 const SECRET = "whsec_FakeBillingSecret0000000000";
@@ -649,4 +649,267 @@ Deno.test("product.* / price.* events re-run the plan sync", async () => {
     assertEquals(plans.price_1Yearly?.active, false, type);
     assertEquals(rpcCalls(db, "billing_deactivate_plans_except").length, 1, type);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Duplicate subscriptions (one live subscription per shop)
+// ---------------------------------------------------------------------------
+
+const FIRST = "sub_1First";
+const SECOND = "sub_2Second";
+
+/** The shop's paid subscription (older) and a second one paid later. */
+function twoSubscriptions(
+  stripe: FakePlatformStripe,
+  second: Row = {},
+): void {
+  stripe.putSubscription(subscription({ id: FIRST, created: T1 - 600 }));
+  stripe.putSubscription(subscription({ id: SECOND, created: T1 - 60, ...second }));
+  stripe.invoices = [
+    { id: "in_1First", object: "invoice", subscription: FIRST, status: "paid", amount_paid: 4_900 },
+    {
+      id: "in_2Second",
+      object: "invoice",
+      subscription: SECOND,
+      status: "paid",
+      amount_paid: 4_900,
+    },
+  ];
+  stripe.invoicePayments = [
+    {
+      id: "inpay_1",
+      object: "invoice_payment",
+      invoice: "in_1First",
+      status: "paid",
+      amount_paid: 4_900,
+      payment: { type: "payment_intent", payment_intent: "pi_1First" },
+    },
+    {
+      id: "inpay_2",
+      object: "invoice_payment",
+      invoice: "in_2Second",
+      status: "paid",
+      amount_paid: 4_900,
+      payment: { type: "payment_intent", payment_intent: "pi_2Second" },
+    },
+  ];
+}
+
+function status(stripe: FakePlatformStripe, id: string): unknown {
+  return stripe.subscriptions.get(id)?.status;
+}
+
+Deno.test("survivingSubscription: the oldest live subscription; ended and incomplete never survive", () => {
+  const sub = (id: string, status: string, created: number) => ({ id, status, created });
+  assertEquals(
+    survivingSubscription([sub("sub_b", "active", 20), sub("sub_a", "trialing", 10)]),
+    "sub_a",
+  );
+  assertEquals(
+    survivingSubscription([sub("sub_a", "canceled", 1), sub("sub_b", "past_due", 5)]),
+    "sub_b",
+  );
+  assertEquals(
+    survivingSubscription([sub("sub_b", "active", 5), sub("sub_a", "active", 5)]),
+    "sub_a",
+  );
+  assertEquals(survivingSubscription([sub("sub_a", "incomplete", 1)]), null);
+  assertEquals(survivingSubscription([]), null);
+});
+
+Deno.test("duplicate subscription: a second one paid later is refunded and cancelled; the shop keeps the first", async () => {
+  const { db, stripe, handler, row, logs } = setup({
+    billing: { stripe_subscription_id: FIRST, status: "active", last_event_at: iso(T1 - 600) },
+  });
+  twoSubscriptions(stripe);
+  const res = await ok(
+    await deliver(
+      handler,
+      event("customer.subscription.created", subscription({ id: SECOND }), { created: T1 }),
+    ),
+  );
+  assertEquals(res.result, "applied");
+  // only the first one is ever applied to the shop
+  assertEquals(rpcCalls(db, "billing_apply_subscription").map((a) => a.p_subscription_id), [
+    FIRST,
+  ]);
+  assertEquals([row().stripe_subscription_id, row().status], [FIRST, "active"]);
+  // what the second one charged is refunded, then it is cancelled now
+  assertEquals(stripe.refunds.map((r) => [r.payment_intent, r.reason, r.amount]), [
+    ["pi_2Second", "duplicate", 4_900],
+  ]);
+  assert(String(stripe.refunds[0]?.idempotency_key).startsWith("dcrm:billing_duplicate_refund:"));
+  const calls = stripeCalls(db);
+  const refundAt = calls.findIndex((c) => c.url.pathname === "/v1/refunds");
+  const cancelAt = calls.findIndex((c) =>
+    c.method === "DELETE" && c.url.pathname === `/v1/subscriptions/${SECOND}`
+  );
+  assert(refundAt >= 0 && refundAt < cancelAt, "refund before the cancellation");
+  assertEquals([status(stripe, FIRST), status(stripe, SECOND)], ["active", "canceled"]);
+  for (const call of calls) assertEquals(call.headers.get("stripe-account"), null);
+  const warned = logs.events("billing_duplicate_subscription_cancelled")[0];
+  assertEquals([warned?.subscription, warned?.kept, warned?.refunded_cents], [
+    SECOND,
+    FIRST,
+    4_900,
+  ]);
+
+  // The duplicate's own later events never flip the shop to it: its
+  // cancellation leaves the shop active on the first subscription.
+  await ok(
+    await deliver(
+      handler,
+      event("customer.subscription.deleted", subscription({ id: SECOND, status: "canceled" }), {
+        created: T2,
+      }),
+    ),
+  );
+  assertEquals([row().stripe_subscription_id, row().status], [FIRST, "active"]);
+  assertEquals(stripe.refunds.length, 1);
+});
+
+Deno.test("duplicate subscription: resolved the same way whichever event arrives first", async () => {
+  // Neither subscription's webhook has arrived yet; the second checkout's
+  // completion is the first event the shop sees.
+  const { db, stripe, handler, row } = setup({ billing: { stripe_customer_id: null } });
+  twoSubscriptions(stripe);
+  const res = await ok(
+    await deliver(
+      handler,
+      event("checkout.session.completed", checkoutSession({ subscription: SECOND })),
+    ),
+  );
+  assertEquals(res.result, "applied");
+  assertEquals(rpcCalls(db, "billing_apply_subscription").map((a) => a.p_subscription_id), [
+    FIRST,
+  ]);
+  assertEquals([row().stripe_customer_id, row().stripe_subscription_id, row().status], [
+    "cus_1Shop",
+    FIRST,
+    "active",
+  ]);
+  assertEquals(status(stripe, SECOND), "canceled");
+  // the first subscription's own events apply normally and cancel nothing
+  await ok(
+    await deliver(
+      handler,
+      event("customer.subscription.created", subscription({ id: FIRST }), { created: T2 }),
+    ),
+  );
+  assertEquals([row().stripe_subscription_id, status(stripe, FIRST)], [FIRST, "active"]);
+  assertEquals(stripe.refunds.length, 1);
+});
+
+Deno.test("duplicate subscription: a trialing or unpaid duplicate is cancelled without a refund", async () => {
+  const { stripe, handler, row } = setup({
+    billing: { stripe_subscription_id: FIRST, status: "active" },
+  });
+  twoSubscriptions(stripe, { status: "incomplete" });
+  stripe.invoices = [];
+  await ok(
+    await deliver(handler, event("customer.subscription.updated", subscription({ id: SECOND }))),
+  );
+  assertEquals(stripe.refunds, []);
+  assertEquals(status(stripe, SECOND), "canceled");
+  assertEquals(row().stripe_subscription_id, FIRST);
+});
+
+Deno.test("duplicate subscription: a failed refund answers 500 and the redelivery finishes it once", async () => {
+  const { db, stripe, handler, row } = setup({
+    billing: { stripe_subscription_id: FIRST, status: "active" },
+  });
+  twoSubscriptions(stripe);
+  db.http.once("POST", "https://api.stripe.com/v1/refunds", () =>
+    new Response(
+      JSON.stringify({ error: { type: "api_error", message: "Stripe is down" } }),
+      { status: 500, headers: { "content-type": "application/json" } },
+    ));
+  const body = event(
+    "invoice.paid",
+    subscriptionInvoice({
+      parent: { type: "subscription_details", subscription_details: { subscription: SECOND } },
+    }),
+    { id: "evt_1DupRetry" },
+  );
+  const first = await deliver(handler, body);
+  assertEquals(first.status, 500);
+  await first.body?.cancel();
+  // not cancelled yet, so the redelivery still recognises it as a duplicate
+  assertEquals(status(stripe, SECOND), "active");
+  assertEquals(row().stripe_subscription_id, FIRST);
+  assertEquals((await ok(await deliver(handler, body))).result, "applied");
+  assertEquals(stripe.refunds.length, 1);
+  assertEquals(status(stripe, SECOND), "canceled");
+  assertEquals(row().stripe_subscription_id, FIRST);
+});
+
+Deno.test("duplicate subscription: a failed payment of the duplicate does not notify the owner", async () => {
+  const { stripe, handler, state } = setup({
+    billing: { stripe_subscription_id: FIRST, status: "active" },
+  });
+  twoSubscriptions(stripe, { status: "past_due" });
+  stripe.invoices = [];
+  const invoice = subscriptionInvoice({
+    status: "open",
+    parent: { type: "subscription_details", subscription_details: { subscription: SECOND } },
+  });
+  await ok(await deliver(handler, event("invoice.payment_failed", invoice)));
+  assertEquals(state.notifications, []);
+  assertEquals(status(stripe, SECOND), "canceled");
+});
+
+Deno.test("duplicate subscription: one made outside Detail CRM is logged, never applied or cancelled", async () => {
+  const { db, stripe, handler, row, logs } = setup({
+    billing: { stripe_subscription_id: FIRST, status: "active" },
+  });
+  twoSubscriptions(stripe, { metadata: {} });
+  const res = await ok(
+    await deliver(handler, event("customer.subscription.created", subscription({ id: SECOND }))),
+  );
+  assertEquals(res.result, "ignored");
+  const ignored = logs.events("billing_event_ignored").at(-1);
+  assertEquals([ignored?.reason, ignored?.level, ignored?.kept], [
+    "duplicate_subscription",
+    "warn",
+    FIRST,
+  ]);
+  assertEquals(rpcCalls(db, "billing_apply_subscription").map((a) => a.p_subscription_id), [
+    FIRST,
+  ]);
+  assertEquals([row().stripe_subscription_id, status(stripe, SECOND)], [FIRST, "active"]);
+  assertEquals(stripe.refunds, []);
+});
+
+Deno.test("duplicate subscription: nothing is cancelled for a customer that is not a Detail CRM shop's", async () => {
+  const { stripe, handler } = setup();
+  twoSubscriptions(stripe, { customer: "cus_1Stranger" });
+  stripe.putSubscription(subscription({ id: FIRST, customer: "cus_1Stranger", created: 1 }));
+  const res = await ok(
+    await deliver(
+      handler,
+      event(
+        "customer.subscription.created",
+        subscription({ id: SECOND, customer: "cus_1Stranger" }),
+      ),
+    ),
+  );
+  assertEquals(res.result, "ignored");
+  assertEquals([status(stripe, FIRST), status(stripe, SECOND)], ["active", "active"]);
+  assertEquals(stripe.refunds, []);
+});
+
+Deno.test("resubscribing after the first subscription ended is not a duplicate", async () => {
+  const { stripe, handler, row } = setup({
+    billing: { stripe_subscription_id: FIRST, status: "canceled" },
+  });
+  twoSubscriptions(stripe);
+  const first = stripe.subscriptions.get(FIRST);
+  assert(first);
+  first.status = "canceled";
+  await ok(
+    await deliver(handler, event("customer.subscription.created", subscription({ id: SECOND }))),
+  );
+  assertEquals([row().stripe_subscription_id, row().status], [SECOND, "active"]);
+  assertEquals(status(stripe, SECOND), "active");
+  assertEquals(stripe.refunds, []);
 });

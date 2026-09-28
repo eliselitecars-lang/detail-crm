@@ -287,7 +287,7 @@ struct NewJobVehicleRow: View {
                     .foregroundStyle(Theme.textPrimary)
                 Text(detail)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(categoryName == nil ? Theme.warning : Theme.textSecondary)
+                    .foregroundStyle(categoryName == nil ? Theme.warningInk : Theme.textSecondary)
             }
             Spacer(minLength: Theme.Spacing.sm)
             Image(systemName: isSelected ? "checkmark.circle.fill" : "chevron.right")

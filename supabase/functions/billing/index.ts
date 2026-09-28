@@ -11,7 +11,12 @@
  *   checkout    {shop_id, plan_id, request_nonce?}  owner only -> {url}
  *               Stripe Checkout (mode subscription) for the shop's platform
  *               customer (created and linked on first use). Stripe Tax only
- *               with BILLING_AUTOMATIC_TAX=true (off by default).
+ *               with BILLING_AUTOMATIC_TAX=true (off by default). One live
+ *               subscription per shop: refused (409 already_subscribed) while
+ *               the database OR Stripe has one for the shop's customer (the
+ *               webhook may not have arrived yet); the session expires after
+ *               about an hour, and every older open checkout of the shop is
+ *               expired, so at most one payable link exists at a time.
  *   portal      {shop_id}                           owner only -> {url}
  *               Stripe Customer Portal (plan changes, cancellation, card).
  *   sync_plans  {}                                  pg_cron / deploy (x-cron-secret)
@@ -62,6 +67,16 @@ export const MIN_TRIAL_LEAD_MS = 48 * 60 * 60 * 1000 + 60 * 1000;
 
 /** Identical checkouts without a request_nonce share a key for this long. */
 export const IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * How long a Checkout link stays payable (Stripe's default is 24 hours; its
+ * minimum is 30 minutes). checkoutExpiresAt counts it from the end of the
+ * idempotency window, so a link lives between this and this + 10 minutes.
+ */
+export const CHECKOUT_TTL_MS = 60 * 60 * 1000;
+
+/** Stripe subscription statuses that can never bill again. */
+const ENDED_SUBSCRIPTION = new Set<string>(["canceled", "incomplete_expired"]);
 
 const CUSTOMER_ID = /^cus_[A-Za-z0-9]+$/;
 
@@ -239,6 +254,93 @@ export function requestPart(nonce: string | undefined, now: number): string {
   return nonce ? `n:${nonce}` : `w:${Math.floor(now / IDEMPOTENCY_WINDOW_MS)}`;
 }
 
+/**
+ * The session's expires_at (Unix seconds): CHECKOUT_TTL_MS after the end of
+ * the current idempotency window, so identical requests in one window send
+ * the same parameters (Stripe refuses a reused key with different ones).
+ */
+export function checkoutExpiresAt(now: number): number {
+  const windowEnd = (Math.floor(now / IDEMPOTENCY_WINDOW_MS) + 1) * IDEMPOTENCY_WINDOW_MS;
+  return (windowEnd + CHECKOUT_TTL_MS) / 1000;
+}
+
+function alreadySubscribed(pending = false): HttpError {
+  return errors.conflict(
+    pending
+      ? "A payment for this shop's subscription is still being confirmed. " +
+        "Refresh in a few minutes, or use Manage billing."
+      : "This shop already has a subscription. Use Manage billing to change or cancel it.",
+    { reason: "already_subscribed" },
+  );
+}
+
+/**
+ * Refuses a checkout while Stripe already has a subscription for the shop's
+ * platform customer that can still bill (anything but canceled /
+ * incomplete_expired), whatever the database says: a subscription just paid
+ * for reaches shop_billing only when its webhook arrives.
+ */
+async function refuseIfSubscribedInStripe(
+  s: Services,
+  shopId: string,
+  customer: string,
+): Promise<void> {
+  for await (
+    const sub of s.stripe().subscriptions.list({ customer, status: "all", limit: 100 })
+  ) {
+    if (ENDED_SUBSCRIPTION.has(sub.status)) continue;
+    s.log.warn("billing_checkout_refused", {
+      shop_id: shopId,
+      subscription: sub.id,
+      status: sub.status,
+    });
+    throw alreadySubscribed(sub.status === "incomplete");
+  }
+}
+
+function isOlder(a: Stripe.Checkout.Session, b: Stripe.Checkout.Session): boolean {
+  return a.created < b.created || (a.created === b.created && a.id < b.id);
+}
+
+/**
+ * Expires every open subscription checkout of the shop created before
+ * `current`, so an earlier link left open in another tab or email can no
+ * longer start a second subscription. An older one that completed meanwhile
+ * did start one: `current` is expired too and the owner gets 409.
+ */
+async function expireOlderCheckouts(
+  s: Services,
+  shopId: string,
+  customer: string,
+  current: Stripe.Checkout.Session,
+): Promise<void> {
+  const stripe = s.stripe();
+  for await (
+    const session of stripe.checkout.sessions.list({ customer, status: "open", limit: 100 })
+  ) {
+    if (
+      session.id === current.id || session.status !== "open" ||
+      session.mode !== "subscription" || session.metadata?.shop_id !== shopId ||
+      !isOlder(session, current)
+    ) continue;
+    try {
+      await stripe.checkout.sessions.expire(session.id, {}, {
+        idempotencyKey: await idempotencyKey("billing_checkout_expire", session.id),
+      });
+      s.log.info("billing_checkout_expired", { shop_id: shopId, session: session.id });
+    } catch (err) {
+      if (!isStripeError(err) || err.type !== "StripeInvalidRequestError") throw err;
+      const now = await stripe.checkout.sessions.retrieve(session.id);
+      if (now.status !== "complete") continue;
+      s.log.warn("billing_checkout_raced", { shop_id: shopId, session: session.id });
+      await stripe.checkout.sessions.expire(current.id, {}, {
+        idempotencyKey: await idempotencyKey("billing_checkout_expire", current.id),
+      });
+      throw alreadySubscribed();
+    }
+  }
+}
+
 function billingUrl(s: Services, checkout?: "success" | "cancelled"): string {
   const url = `${s.env.appBaseUrl()}${BILLING_SETTINGS_PATH}`;
   return checkout ? withQuery(url, { checkout }) : url;
@@ -298,12 +400,7 @@ export async function checkout(
       reason: "billing_disabled",
     });
   }
-  if (context.has_live_subscription) {
-    throw errors.conflict(
-      "This shop already has a subscription. Use Manage billing to change or cancel it.",
-      { reason: "already_subscribed" },
-    );
-  }
+  if (context.has_live_subscription) throw alreadySubscribed();
   const { data: plan, error } = await s.admin
     .from("platform_plans")
     .select("id, stripe_price_id")
@@ -321,7 +418,12 @@ export async function checkout(
     );
   }
 
+  // A customer created just now has no subscriptions yet.
+  if (context.stripe_customer_id) {
+    await refuseIfSubscribedInStripe(s, input.shop_id, context.stripe_customer_id);
+  }
   const customer = await shopCustomer(s, input.shop_id, context);
+  const expiresAt = checkoutExpiresAt(s.now);
   const trialEnd = checkoutTrialEnd(context.trial_end, s.now);
   // Optional Stripe Tax (BILLING_AUTOMATIC_TAX): Checkout collects the address
   // it needs and saves it on the shop's platform customer for renewals.
@@ -341,6 +443,7 @@ export async function checkout(
       ...(tax ? { automatic_tax: { enabled: true }, customer_update: { address: "auto" } } : {}),
       success_url: billingUrl(s, "success"),
       cancel_url: billingUrl(s, "cancelled"),
+      expires_at: expiresAt,
     },
     {
       idempotencyKey: await idempotencyKey(
@@ -351,11 +454,13 @@ export async function checkout(
         customer,
         trialEnd ?? 0,
         tax ? "tax" : "no_tax",
+        expiresAt,
         requestPart(input.request_nonce, s.now),
       ),
     },
   );
   if (!session.url) throw new Error("Stripe returned a Checkout Session without a URL");
+  await expireOlderCheckouts(s, input.shop_id, customer, session);
   s.log.info("billing_checkout_created", {
     shop_id: input.shop_id,
     plan_id: plan.id,

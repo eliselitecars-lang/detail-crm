@@ -37,11 +37,19 @@
 -- ticked (never on by default), answers as its custom data, the vehicle as
 -- its first vehicle; its phone counts as unverified (0042). Required
 -- questions are enforced (22023). Abuse limits (PT429): 3 submissions per
--- email / phone per form, 200 per form, in any rolling 24 hours; a filled-in
--- honeypot ('website') is answered as a success and writes nothing.
+-- email / phone per form, 10 per client IP (form_signer_ip) per form, 200
+-- per form, in any rolling 24 hours; a filled-in honeypot ('website') is
+-- answered as a success and writes nothing.
 -- Managers are notified ('new_lead', deep link to the customer) when the
 -- form says so; the 'lead_received' auto-reply (transactional) goes out
--- when the form enables it.
+-- when the form enables it. The form token is public (embedded on the
+-- shop's site) and proves neither the phone nor the email, so the
+-- auto-reply can never be a relay for the visitor's text or a way to text
+-- arbitrary numbers from the shop's sender: it carries nothing the visitor
+-- typed (customer_first_name is always "there", customer_name is empty),
+-- it is emailed, and it is texted only to a phone the shop itself verified
+-- (a matched customer whose phone is not phone_unverified) — never to the
+-- unverified phone of a new lead, whatever its country.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -411,6 +419,9 @@ declare
   v_matched  boolean := false;
   v_vehicle  uuid;
   v_who      text;
+  v_ip       inet := public.form_signer_ip();
+  -- the auto-reply's variables: nothing the visitor typed (see the header)
+  v_reply    constant jsonb := jsonb_build_object('customer_first_name', 'there', 'customer_name', null);
 begin
   v_form := public.comms_live_lead_form(p_token);
   if jsonb_typeof(p_payload) is distinct from 'object' then
@@ -489,6 +500,16 @@ begin
 
   -- abuse limits (per form, serialised)
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('public.lead_form:' || v_form.id::text, 0));
+  -- one client (IP) cannot use up the form's daily allowance on its own
+  if v_ip is not null then
+    select count(*) into v_recent from public.lead_submissions ls
+     where ls.shop_id = v_form.shop_id and ls.lead_form_id = v_form.id and ls.created_at > v_now - interval '24 hours'
+       and ls.signer_ip = v_ip;
+    if v_recent >= 10 then
+      raise exception 'too many requests from this connection; please try again later or call the shop'
+        using errcode = 'PT429';
+    end if;
+  end if;
   select count(*) into v_recent from public.lead_submissions ls
    where ls.shop_id = v_form.shop_id and ls.lead_form_id = v_form.id and ls.created_at > v_now - interval '24 hours';
   if v_recent >= 200 then
@@ -540,7 +561,7 @@ begin
   insert into public.lead_submissions (shop_id, lead_form_id, customer_id, vehicle_id, vehicle_info, answers, message,
                                        matched_existing, signer_ip, created_at)
   values (v_form.shop_id, v_form.id, v_cust.id, v_vehicle, v_vinfo, v_answers, v_message, v_matched,
-          public.form_signer_ip(), v_now);
+          v_ip, v_now);
 
   begin
     if v_form.notify_staff then
@@ -552,7 +573,11 @@ begin
         null, null, p_customer_id => v_cust.id);
     end if;
     if v_form.auto_reply then
-      perform public.integration_send_customer_template(v_form.shop_id, v_cust.id, 'lead_received', null, null, false);
+      -- emailed; texted only to a phone the shop verified (see the header)
+      perform public.enqueue_customer_template(v_form.shop_id, v_cust.id, 'lead_received', 'email', null, v_reply);
+      if v_cust.phone is not null and not v_cust.phone_unverified then
+        perform public.enqueue_customer_template(v_form.shop_id, v_cust.id, 'lead_received', 'sms', null, v_reply);
+      end if;
     end if;
   exception when others then
     raise warning 'lead side effects failed for form %: % (%)', v_form.id, sqlerrm, sqlstate;

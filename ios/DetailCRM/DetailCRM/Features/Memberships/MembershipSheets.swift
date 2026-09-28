@@ -162,7 +162,7 @@ struct MembershipNewSheet: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 Label("Membership created", systemImage: "checkmark.circle.fill")
                     .font(Theme.Typography.sectionTitle)
-                    .foregroundStyle(Theme.success)
+                    .foregroundStyle(Theme.successInk)
                 Text("\(customer?.displayName ?? "The customer") is on \(plan?.name ?? "the plan"). Share the checkout link so they can add a card and start billing.")
                     .font(Theme.Typography.subheadline)
                     .foregroundStyle(Theme.textSecondary)
@@ -323,7 +323,7 @@ struct MembershipDetailSheet: View {
                 }
             } label: {
                 Text("Discard membership")
-                    .foregroundStyle(Theme.danger)
+                    .foregroundStyle(Theme.dangerInk)
             }
             .buttonStyle(.themePlain)
         } else if (membership.status == .active || membership.status == .pastDue) && membership.canCancel {
@@ -348,7 +348,7 @@ struct MembershipDetailSheet: View {
                 }
             } label: {
                 Text("Cancel now")
-                    .foregroundStyle(Theme.danger)
+                    .foregroundStyle(Theme.dangerInk)
             }
             .buttonStyle(.themePlain)
         }

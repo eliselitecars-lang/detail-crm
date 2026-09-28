@@ -330,7 +330,7 @@ struct NewJobAvailabilityPanel: View {
         return HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
             Text(model.clock.rangeText(from: item.startsAt, to: item.endsAt))
                 .font(Theme.Typography.footnote.monospacedDigit())
-                .foregroundStyle(clashes ? Theme.danger : Theme.textSecondary)
+                .foregroundStyle(clashes ? Theme.dangerInk : Theme.textSecondary)
             Text(item.summary)
                 .font(Theme.Typography.footnote)
                 .foregroundStyle(Theme.textPrimary)
@@ -475,7 +475,7 @@ struct NewJobPricingPreview: View {
                         if let note = line.note?.trimmedNonEmpty {
                             Text(note)
                                 .font(Theme.Typography.caption)
-                                .foregroundStyle(Theme.success)
+                                .foregroundStyle(Theme.successInk)
                         }
                     }
                     Spacer(minLength: Theme.Spacing.sm)
@@ -484,7 +484,7 @@ struct NewJobPricingPreview: View {
                     } else {
                         Text("No price")
                             .font(Theme.Typography.caption)
-                            .foregroundStyle(Theme.danger)
+                            .foregroundStyle(Theme.dangerInk)
                     }
                 }
                 .accessibilityElement(children: .combine)

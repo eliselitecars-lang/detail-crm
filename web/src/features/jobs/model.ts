@@ -171,6 +171,50 @@ export function gateBlockers(state: GateStateLike, from: JobStatus, to: JobStatu
   return out;
 }
 
+/**
+ * The blockers a manager waived (job_gate_overrides.blockers, the blocking
+ * part of the gate state that job_gate_blockers_for returned: only the keys
+ * that blocked are present), as the same sentences the gate dialog shows.
+ * Unknown or malformed parts are skipped.
+ */
+export function waivedBlockers(raw: unknown): GateBlocker[] {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  const snapshot = raw as Record<string, unknown>;
+  const counts = (value: unknown): { required: number; have: number } | null => {
+    if (value === null || typeof value !== 'object') return null;
+    const { required, have } = value as Record<string, unknown>;
+    return typeof required === 'number' && typeof have === 'number' ? { required, have } : null;
+  };
+  const items = Array.isArray(snapshot.open_required_items)
+    ? snapshot.open_required_items.filter(
+        (i): i is { id: string; label: string } =>
+          i !== null &&
+          typeof i === 'object' &&
+          typeof (i as { label?: unknown }).label === 'string',
+      )
+    : [];
+  const none = { required: 0, have: 0 };
+  const completing = gateBlockers(
+    {
+      open_required_items: items,
+      after_photos: counts(snapshot.after_photos) ?? none,
+      before_photos: none,
+    },
+    'in_progress',
+    'completed',
+  );
+  const starting = gateBlockers(
+    {
+      open_required_items: [],
+      after_photos: none,
+      before_photos: counts(snapshot.before_photos) ?? none,
+    },
+    'scheduled',
+    'in_progress',
+  );
+  return [...completing, ...starting];
+}
+
 // ---------------------------------------------------------------------------
 // Deposit follow-ups (P-3)
 // ---------------------------------------------------------------------------

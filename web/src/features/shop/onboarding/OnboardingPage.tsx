@@ -17,6 +17,8 @@ import {
 } from '@/components/ui';
 import { useAuth } from '@/features/auth/authContext';
 import { FormAlert } from '@/features/auth/FormAlert';
+import { billingKeys, fetchShopEntitlement, useBillingPlans } from '@/features/billing/api';
+import { newShopTrialText, PRICING_PATH } from '@/features/billing/model';
 import { cn } from '@/lib/cn';
 import { browserTimeZone, listTimeZones } from '@/lib/dates';
 import { toAppError, type AppError } from '@/lib/errors';
@@ -65,6 +67,7 @@ export default function OnboardingPage() {
     trigger,
     setValue,
     setError,
+    getValues,
     formState: { errors, isSubmitting },
   } = useForm<OnboardingInput, unknown, OnboardingValues>({
     resolver: zodResolver(onboardingSchema),
@@ -96,11 +99,34 @@ export default function OnboardingPage() {
       setStep((s) => Math.min(s + 1, 2));
   };
 
-  const finish = async (shopId: string) => {
+  // Billing on = the platform offers plans ([] while billing is off).
+  const plans = useBillingPlans();
+  const billingOn = (plans.data?.length ?? 0) > 0;
+
+  /** The new shop's trial ("Your free trial runs until …"), or null (billing off / unknown). */
+  const trialText = async (shopId: string, timezone: string): Promise<string | null> => {
+    try {
+      const entitlement = await queryClient.fetchQuery({
+        queryKey: billingKeys.entitlement(shopId),
+        queryFn: () => fetchShopEntitlement(shopId),
+      });
+      return newShopTrialText(entitlement, timezone);
+    } catch {
+      return null; // Settings > Billing shows it; never block finishing setup
+    }
+  };
+
+  const finish = async (shopId: string, timezone: string) => {
+    const trial = await trialText(shopId, timezone);
     switchShop(shopId);
     await queryClient.invalidateQueries({ queryKey: shellKeys.memberships(user?.id ?? '') });
     await refetch();
-    toast.success('Your shop is ready', 'Next: add your services and prices in Catalog.');
+    toast.success(
+      'Your shop is ready',
+      trial
+        ? `${trial} Next: add your services and prices in Catalog.`
+        : 'Next: add your services and prices in Catalog.',
+    );
     await navigate('/app', { replace: true });
   };
 
@@ -144,7 +170,7 @@ export default function OnboardingPage() {
       );
       return;
     }
-    await finish(shopId);
+    await finish(shopId, values.timezone);
   });
 
   return (
@@ -176,6 +202,15 @@ export default function OnboardingPage() {
           A few details so bookings, invoices and reminders look right. You can change everything
           later.
         </p>
+        {billingOn && (
+          <p className="text-muted mt-2 text-sm">
+            Compare plans on the{' '}
+            <Link to={PRICING_PATH} className="text-primary-ink font-medium hover:underline">
+              pricing page
+            </Link>
+            . Your shop’s trial and subscription are under Settings › Billing.
+          </p>
+        )}
         {memberships.length === 0 && (
           <p className="text-muted mt-2 text-sm">
             Booked a service with a shop? Your appointments are in the{' '}
@@ -404,7 +439,10 @@ export default function OnboardingPage() {
               </div>
               <div className="flex flex-col-reverse gap-2 sm:flex-row">
                 {createdShopId && submitError && (
-                  <Button variant="secondary" onClick={() => void finish(createdShopId)}>
+                  <Button
+                    variant="secondary"
+                    onClick={() => void finish(createdShopId, getValues('timezone'))}
+                  >
                     Skip for now
                   </Button>
                 )}

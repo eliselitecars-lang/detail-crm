@@ -6,6 +6,7 @@ import { formatDate } from '@/lib/dates';
 import { formatPhone, phoneHref } from '@/lib/phone';
 import { CustomDataCard } from './CustomDataCard';
 import { CustomerSummaryCard } from './CustomerSummaryCard';
+import { LeadRequestsCard } from './LeadRequestsCard';
 import { ReferralCard } from './ReferralCard';
 import { UnbilledJobsCard } from './UnbilledJobsCard';
 import { customerAddress, LIFECYCLE_LABELS, SOURCE_LABELS, type CustomerRow } from '../model';
@@ -29,6 +30,7 @@ export function OverviewTab({ customer }: { customer: CustomerRow }) {
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       {canSeeTotals && <CustomerSummaryCard customerId={customer.id} />}
       {canInvoice && !customer.merged_into_id && <UnbilledJobsCard customerId={customer.id} />}
+      <LeadRequestsCard customerId={customer.id} />
       <SectionCard title="Contact" level={2}>
         <KeyValueList
           items={[

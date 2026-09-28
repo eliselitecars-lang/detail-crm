@@ -144,6 +144,14 @@ export class FakePlatformStripe {
   products: CatalogProduct[] = [];
   prices: CatalogPrice[] = [];
   readonly subscriptions = new Map<string, Row>();
+  /** Checkout Sessions created (or seeded), in creation order. */
+  readonly sessions: Row[] = [];
+  /** Invoices (GET /invoices filters by subscription and status). */
+  invoices: Row[] = [];
+  /** Invoice payments (GET /invoice_payments filters by invoice). */
+  invoicePayments: Row[] = [];
+  /** Refunds created (POST /refunds), with the form's target and reason. */
+  readonly refunds: Row[] = [];
   /** Page size of list answers (tests pagination). */
   pageSize = 100;
   /** When set, POST /billing_portal/sessions answers this Stripe error. */
@@ -155,6 +163,20 @@ export class FakePlatformStripe {
   putSubscription(sub: Row): this {
     this.subscriptions.set(sub.id as string, sub);
     return this;
+  }
+
+  /** A Checkout Session as Stripe stores it (open, subscription mode). */
+  putSession(session: Row): Row {
+    const row = {
+      object: "checkout.session",
+      mode: "subscription",
+      status: "open",
+      created: Math.floor(NOW / 1000) - 3600,
+      url: `https://checkout.stripe.com/c/pay/${session.id}`,
+      ...session,
+    };
+    this.sessions.push(row);
+    return row;
   }
 
   install(db: FakeSupabase): void {
@@ -220,13 +242,107 @@ export class FakePlatformStripe {
         metadata: { shop_id: call.form.get("metadata[shop_id]") },
       });
     });
-    http.on("POST", `${STRIPE}/checkout/sessions`, () =>
-      jsonResponse({
-        id: "cs_test_1Billing",
-        object: "checkout.session",
-        mode: "subscription",
-        url: "https://checkout.stripe.com/c/pay/cs_test_1Billing",
+    http.on("GET", `${STRIPE}/subscriptions`, (_req, { url }) => {
+      const customer = url.searchParams.get("customer");
+      const status = url.searchParams.get("status");
+      const items = [...this.subscriptions.values()].filter((sub) =>
+        (customer === null || sub.customer === customer) &&
+        (status === "all" ||
+          (status === null ? sub.status !== "canceled" : sub.status === status))
+      );
+      return page(items as Array<Row & { id: string }>, url, "/v1/subscriptions");
+    });
+    http.on("DELETE", `${STRIPE}/subscriptions/:id`, (_req, { params }) => {
+      const sub = this.subscriptions.get(params.id ?? "");
+      if (!sub) {
+        return jsonResponse(
+          stripeErrorBody("invalid_request_error", "No such subscription", {
+            code: "resource_missing",
+          }),
+          404,
+        );
+      }
+      if (sub.status === "canceled") {
+        return jsonResponse(
+          stripeErrorBody("invalid_request_error", "This subscription is already canceled."),
+          400,
+        );
+      }
+      sub.status = "canceled";
+      return jsonResponse(sub);
+    });
+    http.on("GET", `${STRIPE}/invoices`, (_req, { url }) => {
+      const sub = url.searchParams.get("subscription");
+      const status = url.searchParams.get("status");
+      const items = this.invoices.filter((inv) =>
+        (sub === null || inv.subscription === sub) && (status === null || inv.status === status)
+      );
+      return page(items as Array<Row & { id: string }>, url, "/v1/invoices");
+    });
+    http.on("GET", `${STRIPE}/invoice_payments`, (_req, { url }) => {
+      const invoice = url.searchParams.get("invoice");
+      const items = this.invoicePayments.filter((p) => p.invoice === invoice);
+      return page(items as Array<Row & { id: string }>, url, "/v1/invoice_payments");
+    });
+    http.on("POST", `${STRIPE}/refunds`, (_req, { call }) => {
+      const target = call.form.get("payment_intent") ?? call.form.get("charge");
+      const payment = this.invoicePayments.find((p) => {
+        const pay = p.payment as Row | undefined;
+        return pay?.payment_intent === target || pay?.charge === target;
+      });
+      const refund = {
+        id: `re_${this.refunds.length + 1}Dup`,
+        object: "refund",
+        amount: (payment?.amount_paid as number | undefined) ?? 0,
+        status: "succeeded",
+        payment_intent: call.form.get("payment_intent"),
+        charge: call.form.get("charge"),
+        reason: call.form.get("reason"),
+        idempotency_key: call.headers.get("idempotency-key"),
+      };
+      this.refunds.push(refund);
+      return jsonResponse(refund);
+    });
+    http.on("POST", `${STRIPE}/checkout/sessions`, (_req, { call }) => {
+      const n = this.sessions.length + 1;
+      const metadata: Record<string, string> = {};
+      for (const [key, value] of call.form) {
+        const m = /^metadata\[([^\]]+)\]$/.exec(key);
+        if (m?.[1]) metadata[m[1]] = value;
+      }
+      return jsonResponse(this.putSession({
+        id: `cs_test_${n}Billing`,
+        customer: call.form.get("customer"),
+        metadata,
+        created: Math.floor(NOW / 1000) + n,
+        expires_at: Number(call.form.get("expires_at")),
       }));
+    });
+    http.on("GET", `${STRIPE}/checkout/sessions`, (_req, { url }) => {
+      const customer = url.searchParams.get("customer");
+      const status = url.searchParams.get("status");
+      const items = this.sessions.filter((x) =>
+        (customer === null || x.customer === customer) && (status === null || x.status === status)
+      );
+      return page(items as Array<Row & { id: string }>, url, "/v1/checkout/sessions");
+    });
+    http.on("GET", `${STRIPE}/checkout/sessions/:id`, (_req, { params }) => {
+      const found = this.sessions.find((x) => x.id === params.id);
+      return found
+        ? jsonResponse(found)
+        : jsonResponse(stripeErrorBody("invalid_request_error", "No such checkout.session"), 404);
+    });
+    http.on("POST", `${STRIPE}/checkout/sessions/:id/expire`, (_req, { params }) => {
+      const found = this.sessions.find((x) => x.id === params.id);
+      if (!found || found.status !== "open") {
+        return jsonResponse(
+          stripeErrorBody("invalid_request_error", "Only open sessions can be expired."),
+          400,
+        );
+      }
+      found.status = "expired";
+      return jsonResponse({ ...found, url: null });
+    });
     http.on("POST", `${STRIPE}/billing_portal/sessions`, () => {
       if (this.portalError) return jsonResponse(this.portalError.body, this.portalError.status);
       return jsonResponse({

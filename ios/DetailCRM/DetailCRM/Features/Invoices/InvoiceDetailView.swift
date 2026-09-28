@@ -495,7 +495,7 @@ struct InvoicePaymentRow: View {
                     if let processing = payment.processingNote {
                         Text(processing)
                             .font(Theme.Typography.footnote)
-                            .foregroundStyle(Theme.warning)
+                            .foregroundStyle(Theme.warningInk)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -510,7 +510,7 @@ struct InvoicePaymentRow: View {
                     if payment.refundedCents > 0 {
                         Text("− \(Money.format(cents: payment.refundedCents, currencyCode: currencyCode)) refunded")
                             .font(Theme.Typography.moneySmall)
-                            .foregroundStyle(Theme.danger)
+                            .foregroundStyle(Theme.dangerInk)
                     }
                     StatusBadge(payment.status)
                 }
@@ -567,7 +567,7 @@ private struct InvoiceManageSection: View {
                     present(.void)
                 } label: {
                     Text("Void invoice")
-                        .foregroundStyle(Theme.danger)
+                        .foregroundStyle(Theme.dangerInk)
                 }
                 .buttonStyle(.themePlain)
             }

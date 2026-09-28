@@ -84,7 +84,7 @@ private struct TodayRevenueTile: View {
             Label(title, systemImage: "dollarsign.circle")
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.textSecondary)
-                .labelStyle(TodayTintedIconLabelStyle(tint: Theme.amber))
+                .labelStyle(TodayTintedIconLabelStyle(tint: Theme.moneyInk))
             MoneyText(cents: period.netCents, currencyCode: currencyCode)
             Text(detailText)
                 .font(Theme.Typography.caption)
@@ -198,7 +198,7 @@ private struct TodayInvoiceTileLink: View {
             Label(title, systemImage: systemImage)
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.textSecondary)
-                .labelStyle(TodayTintedIconLabelStyle(tint: totals.count > 0 ? Theme.amber : Theme.textTertiary))
+                .labelStyle(TodayTintedIconLabelStyle(tint: totals.count > 0 ? Theme.moneyInk : Theme.textTertiary))
             MoneyText(
                 cents: totals.balanceCents,
                 currencyCode: context.currencyCode,

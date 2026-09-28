@@ -127,6 +127,34 @@ describe('SignupPage', () => {
   });
 });
 
+describe('SignupPage pricing link', () => {
+  it('links someone setting up a shop to the plans', () => {
+    renderRoute(<SignupPage />, { routePath: '/signup', path: '/signup', shop: null });
+    expect(screen.getByRole('link', { name: 'plans and pricing' })).toHaveAttribute(
+      'href',
+      '/pricing',
+    );
+  });
+
+  it('never shows platform pricing to a customer or an invited teammate', () => {
+    renderRoute(<SignupPage />, {
+      routePath: '/signup',
+      path: '/signup?next=%2Fportal',
+      shop: null,
+    });
+    expect(screen.queryByRole('link', { name: 'plans and pricing' })).toBeNull();
+  });
+
+  it('hides it for an invite sign-up too', () => {
+    renderRoute(<SignupPage />, {
+      routePath: '/signup',
+      path: '/signup?next=%2Finvite%2Fabc',
+      shop: null,
+    });
+    expect(screen.queryByRole('link', { name: 'plans and pricing' })).toBeNull();
+  });
+});
+
 describe('ForgotPasswordPage', () => {
   it('sends a reset link that returns to /reset-password', async () => {
     const { user } = renderRoute(<ForgotPasswordPage />, { shop: null });

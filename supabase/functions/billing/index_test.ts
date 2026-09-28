@@ -30,7 +30,10 @@ import {
   USERS,
 } from "./test_fixtures.ts";
 import {
+  CHECKOUT_TTL_MS,
+  checkoutExpiresAt,
   checkoutTrialEnd,
+  IDEMPOTENCY_WINDOW_MS,
   isPortalNotConfigured,
   MIN_TRIAL_LEAD_MS,
   requestPart,
@@ -397,6 +400,128 @@ Deno.test("checkout: idempotency key follows the request nonce (retry = same key
   assertEquals(requestPart(undefined, NOW), requestPart(undefined, NOW + 1_000));
   assertNotEquals(requestPart(undefined, NOW), requestPart(undefined, NOW + 11 * 60_000));
   assertEquals(requestPart("abc", NOW), "n:abc");
+});
+
+Deno.test("checkout: 409 while Stripe already has a subscription the webhook has not recorded yet", async () => {
+  // The owner paid, the confirmation is still pending, and they choose a plan
+  // again: shop_billing does not know the subscription yet, Stripe does.
+  for (const status of ["active", "trialing", "past_due", "unpaid", "paused", "incomplete"]) {
+    const f = fixture({ billing: { stripe_customer_id: "cus_1Shop" } });
+    f.stripe.putSubscription({
+      id: "sub_1Paid",
+      object: "subscription",
+      customer: "cus_1Shop",
+      status,
+    });
+    const [code, reason] = await errorOf(await f.call(checkoutBody()));
+    assertEquals([code, reason], [409, "conflict"], status);
+    assertEquals(f.stripeCalls("POST", "/checkout/sessions").length, 0, status);
+    const list = f.stripeCalls("GET", "/subscriptions")[0];
+    assertEquals(
+      [list?.url.searchParams.get("customer"), list?.url.searchParams.get("status")],
+      ["cus_1Shop", "all"],
+    );
+    assertEquals(f.logs.events("billing_checkout_refused")[0]?.subscription, "sub_1Paid", status);
+  }
+  const pending = fixture({ billing: { stripe_customer_id: "cus_1Shop" } });
+  pending.stripe.putSubscription({
+    id: "sub_1Paid",
+    object: "subscription",
+    customer: "cus_1Shop",
+    status: "incomplete",
+  });
+  const body = await responseJson<{ error: string; details: unknown }>(
+    await pending.call(checkoutBody()),
+  );
+  assertMatch(body.error, /still being confirmed/);
+  assertEquals(body.details, { reason: "already_subscribed" });
+
+  // Ended ones, and another customer's, do not count.
+  const f = fixture({ billing: { stripe_customer_id: "cus_1Shop" } });
+  f.stripe.putSubscription({ id: "sub_1Old", customer: "cus_1Shop", status: "canceled" });
+  f.stripe.putSubscription({ id: "sub_1Exp", customer: "cus_1Shop", status: "incomplete_expired" });
+  f.stripe.putSubscription({ id: "sub_1Else", customer: "cus_1Other", status: "active" });
+  assertEquals((await f.call(checkoutBody())).status, 200);
+});
+
+Deno.test("checkout: the link expires after about an hour (never Stripe's 24-hour default)", async () => {
+  const f = fixture();
+  assertEquals((await f.call(checkoutBody())).status, 200);
+  const expiresAt = Number(f.stripeCalls("POST", "/checkout/sessions")[0]?.form.get("expires_at"));
+  assertEquals(expiresAt, checkoutExpiresAt(NOW));
+  assert(expiresAt * 1000 >= NOW + CHECKOUT_TTL_MS);
+  assert(expiresAt * 1000 <= NOW + CHECKOUT_TTL_MS + IDEMPOTENCY_WINDOW_MS);
+  // Stripe's bounds: at least 30 minutes, at most 24 hours
+  for (const now of [NOW, NOW + 1, NOW + 599_999, NOW + 600_000]) {
+    const at = checkoutExpiresAt(now) * 1000;
+    assert(at - now >= 30 * 60_000 && at - now <= 24 * HOUR, String(now));
+  }
+  // identical requests in one idempotency window send identical parameters
+  assertEquals(checkoutExpiresAt(NOW + 1_000), checkoutExpiresAt(NOW));
+  assertEquals(checkoutExpiresAt(NOW + IDEMPOTENCY_WINDOW_MS - 1), checkoutExpiresAt(NOW));
+  assertNotEquals(checkoutExpiresAt(NOW + IDEMPOTENCY_WINDOW_MS), checkoutExpiresAt(NOW));
+});
+
+Deno.test("checkout: older open checkouts of the shop are expired, so only the newest link can be paid", async () => {
+  const f = fixture({ billing: { stripe_customer_id: "cus_1Shop" } });
+  const shopLink = { metadata: { shop_id: SHOP }, customer: "cus_1Shop" };
+  f.stripe.putSession({ id: "cs_1Earlier", ...shopLink });
+  f.stripe.putSession({ id: "cs_1Paid", ...shopLink, status: "complete" });
+  f.stripe.putSession({ id: "cs_1Gone", ...shopLink, status: "expired" });
+  f.stripe.putSession({ id: "cs_1Payment", ...shopLink, mode: "payment" });
+  f.stripe.putSession({ id: "cs_1Foreign", customer: "cus_1Shop", metadata: {} });
+  const res = await f.call(checkoutBody());
+  assertEquals(await responseJson(res), {
+    url: "https://checkout.stripe.com/c/pay/cs_test_6Billing",
+  });
+  assertEquals(
+    f.stripe.sessions.map((x) => [x.id, x.status]),
+    [
+      ["cs_1Earlier", "expired"],
+      ["cs_1Paid", "complete"],
+      ["cs_1Gone", "expired"],
+      ["cs_1Payment", "open"],
+      ["cs_1Foreign", "open"],
+      ["cs_test_6Billing", "open"],
+    ],
+  );
+  const expire = f.stripeCalls("POST", "/checkout/sessions/cs_1Earlier/expire")[0];
+  assertMatch(
+    expire?.headers.get("idempotency-key") ?? "",
+    /^dcrm:billing_checkout_expire:[0-9a-f]{64}$/,
+  );
+  for (const call of f.stripeCalls()) assertEquals(call.headers.get("stripe-account"), null);
+
+  // A newer link (another tab) is left for that request to handle.
+  const g = fixture({ billing: { stripe_customer_id: "cus_1Shop" } });
+  g.stripe.putSession({ id: "cs_9Newer", ...shopLink, created: Math.floor(NOW / 1000) + 3600 });
+  assertEquals((await g.call(checkoutBody())).status, 200);
+  assertEquals(g.stripe.sessions.map((x) => x.status), ["open", "open"]);
+});
+
+Deno.test("checkout: an older link paid at the same moment wins; the new link is expired and 409", async () => {
+  const f = fixture({ billing: { stripe_customer_id: "cus_1Shop" } });
+  const older = f.stripe.putSession({
+    id: "cs_1Earlier",
+    customer: "cus_1Shop",
+    metadata: { shop_id: SHOP },
+  });
+  f.db.http.once("POST", "https://api.stripe.com/v1/checkout/sessions/cs_1Earlier/expire", () => {
+    older.status = "complete";
+    return new Response(
+      JSON.stringify({
+        error: { type: "invalid_request_error", message: "Only open sessions can be expired." },
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  });
+  assertEquals(await errorOf(await f.call(checkoutBody())), [409, "conflict", {
+    reason: "already_subscribed",
+  }]);
+  assertEquals(f.stripe.sessions.map((x) => [x.id, x.status]), [
+    ["cs_1Earlier", "complete"],
+    ["cs_test_2Billing", "expired"],
+  ]);
 });
 
 // ---------------------------------------------------------------------------

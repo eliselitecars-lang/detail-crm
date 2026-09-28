@@ -251,7 +251,7 @@ private struct TeamMemberAccessSection: View {
                     toggleActive()
                 } label: {
                     Text(member.active ? "Deactivate member" : "Reactivate member")
-                        .foregroundStyle(member.active ? Theme.danger : Theme.glacier)
+                        .foregroundStyle(member.active ? Theme.dangerInk : Theme.glacier)
                 }
                 .themedRow()
             }
