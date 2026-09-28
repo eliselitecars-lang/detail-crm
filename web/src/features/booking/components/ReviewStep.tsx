@@ -1,5 +1,6 @@
 import { Pencil } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { CustomFieldValues } from '@/components/customFields';
 import { Button, ErrorState, KeyValueList, LoadingState } from '@/components/ui';
 import { formatInTz, formatTimeRange } from '@/lib/dates';
 import { formatBps, formatCents } from '@/lib/money';
@@ -8,8 +9,13 @@ import { sentenceCase } from '@/lib/errors';
 import { TotalsList } from '@/features/public-docs/shared/DocumentLines';
 import { Banner } from '@/features/public-docs/shared/PublicPage';
 import { timeZoneName } from '@/features/public-docs/shared/format';
-import { usePricePreview, type BookingCatalog, type ShopProfile } from '../api';
-import { locationFor, priceFor, type StepId, type WizardState } from '../model';
+import {
+  usePricePreview,
+  type BookingCatalog,
+  type BookingQuestion,
+  type ShopProfile,
+} from '../api';
+import { answersFor, locationFor, priceFor, type StepId, type WizardState } from '../model';
 import { StepFrame } from './StepFrame';
 
 export function ReviewStep({
@@ -18,6 +24,8 @@ export function ReviewStep({
   catalog,
   state,
   categoryId,
+  linkToken,
+  questions,
   error,
   submitting,
   onEdit,
@@ -31,6 +39,9 @@ export function ReviewStep({
   state: WizardState;
   /** null when the shop has no vehicle categories. */
   categoryId: string | null;
+  linkToken: string | null;
+  /** The booking questions shown for this location. */
+  questions: readonly BookingQuestion[];
   /** Booking failure that no earlier step can fix (shown here). */
   error: ReactNode;
   submitting: boolean;
@@ -42,11 +53,15 @@ export function ReviewStep({
   const currency = profile.currency;
   const tz = profile.timezone;
   const itemIds = [...state.serviceIds, ...state.addonIds];
+  const location = locationFor(state.details, profile.business_type);
   const preview = usePricePreview(slug, {
     serviceIds: itemIds,
     vehicleCategoryId: categoryId,
     code: state.details.couponCode,
+    locationType: location,
+    linkToken,
   });
+  const answered = answersFor(questions, state.answers).answers;
   const couponRejected =
     state.details.couponCode !== '' && preview.data !== undefined && !preview.data.valid;
 
@@ -57,7 +72,7 @@ export function ReviewStep({
 
   const { vehicle, details, slot } = state;
   const category = catalog.vehicle_categories.find((c) => c.id === vehicle.categoryId)?.name;
-  const mobile = locationFor(details, profile.business_type) === 'mobile';
+  const mobile = location === 'mobile';
   const booking = profile.booking;
 
   const depositText = !booking.require_deposit
@@ -162,6 +177,9 @@ export function ReviewStep({
             ...(details.notes ? [{ key: 'notes', label: 'Notes', value: details.notes }] : []),
           ]}
         />
+        {questions.length > 0 && Object.keys(answered).length > 0 && (
+          <CustomFieldValues fields={questions} data={answered} className="mt-2" />
+        )}
       </ReviewSection>
 
       <section aria-labelledby="review-estimate" className="flex flex-col gap-2">

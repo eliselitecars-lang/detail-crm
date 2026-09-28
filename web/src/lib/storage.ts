@@ -23,4 +23,6 @@ export const storageKeys = {
   theme: 'detailcrm:theme',
   lastShop: (userId: string) => `detailcrm:lastShop:${userId}`,
   sidebarCollapsed: 'detailcrm:sidebarCollapsed',
+  /** CSV import column choices (header → field), per shop and kind. */
+  importMapping: (shopId: string, kind: string) => `detailcrm:importMapping:${shopId}:${kind}`,
 } as const;

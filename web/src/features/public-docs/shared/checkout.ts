@@ -18,7 +18,9 @@ export type CheckoutResult = z.output<typeof checkoutResultSchema>;
 
 export type CheckoutRequest =
   | { action: 'invoice_checkout'; token: string; tipCents: number }
-  | { action: 'booking_deposit_checkout'; token: string };
+  | { action: 'booking_deposit_checkout'; token: string }
+  /** A self-scheduled quote's deposit (token = the quote's /q token). */
+  | { action: 'quote_deposit_checkout'; token: string };
 
 /** 8–64 url-safe characters (schemas.requestNonce): one per user click. */
 export function newRequestNonce(): string {

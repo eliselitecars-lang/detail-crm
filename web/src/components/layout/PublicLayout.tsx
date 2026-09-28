@@ -28,6 +28,12 @@ export interface PublicLayoutProps {
   /** Narrow (documents/forms) or wide (booking wizard). */
   width?: 'narrow' | 'wide';
   className?: string;
+  /**
+   * The footer's legal links leave the document (full page loads) instead of
+   * routing inside it: set while a shop's analytics tag is loaded on the page
+   * (features/booking/tracking.ts), so the tag never sees another page.
+   */
+  fullPageLinks?: boolean;
 }
 
 /**
@@ -42,6 +48,7 @@ export function PublicLayout({
   children,
   width = 'narrow',
   className,
+  fullPageLinks = false,
 }: PublicLayoutProps) {
   const logoUrl = shopAssetUrl(shop?.logoPath);
   return (
@@ -96,7 +103,7 @@ export function PublicLayout({
             </a>
           )}
           <span>Powered by Detail CRM</span>
-          <LegalLinks />
+          <LegalLinks fullPageLoad={fullPageLinks} />
         </div>
       </footer>
     </div>

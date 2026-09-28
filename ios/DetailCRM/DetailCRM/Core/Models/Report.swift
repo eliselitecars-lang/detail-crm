@@ -8,8 +8,9 @@
 //
 //  Access (server-enforced): revenue / payments / outstanding / sales by
 //  service / customers are owner/admin/manager only (technicians get
-//  42501); report_team returns every member for managers+ (pay columns
-//  null for managers) and only the caller's own row for technicians.
+//  42501); report_team returns every member for managers+ (pay and
+//  earnings columns null for managers) and only the caller's own row for
+//  technicians.
 //
 
 import Foundation
@@ -325,6 +326,13 @@ struct ReportTeamRow: Codable, Identifiable, Hashable, Sendable {
     var commissionBps: Int?
     var commissionCents: Int?
     var laborCostCents: Int?
+    /// Earnings columns (P-12, 0065): null for managers; owners / admins get
+    /// every member's, technicians their own. Total = labor + every
+    /// commission + tips.
+    var tipsCents: Int?
+    var serviceCommissionCents: Int?
+    var salesCommissionCents: Int?
+    var totalEarningsCents: Int?
 
     var id: UUID { memberID }
 
@@ -342,6 +350,10 @@ struct ReportTeamRow: Codable, Identifiable, Hashable, Sendable {
         case commissionBps = "commission_bps"
         case commissionCents = "commission_cents"
         case laborCostCents = "labor_cost_cents"
+        case tipsCents = "tips_cents"
+        case serviceCommissionCents = "service_commission_cents"
+        case salesCommissionCents = "sales_commission_cents"
+        case totalEarningsCents = "total_earnings_cents"
     }
 
     init(from decoder: Decoder) throws {
@@ -359,11 +371,22 @@ struct ReportTeamRow: Codable, Identifiable, Hashable, Sendable {
         commissionBps = try container.decodeIfPresent(Int.self, forKey: .commissionBps)
         commissionCents = try container.decodeIfPresent(Int.self, forKey: .commissionCents)
         laborCostCents = try container.decodeIfPresent(Int.self, forKey: .laborCostCents)
+        tipsCents = try container.decodeIfPresent(Int.self, forKey: .tipsCents)
+        serviceCommissionCents = try container.decodeIfPresent(Int.self, forKey: .serviceCommissionCents)
+        salesCommissionCents = try container.decodeIfPresent(Int.self, forKey: .salesCommissionCents)
+        totalEarningsCents = try container.decodeIfPresent(Int.self, forKey: .totalEarningsCents)
     }
 
     /// Whether the server returned any compensation column for this row.
     var hasPayColumns: Bool {
         hourlyRateCents != nil || commissionBps != nil || commissionCents != nil || laborCostCents != nil
+            || totalEarningsCents != nil
+    }
+
+    /// Whether the server returned the earnings breakdown (tips, service /
+    /// sales commission, total) for this row.
+    var hasEarnings: Bool {
+        totalEarningsCents != nil
     }
 }
 

@@ -15,6 +15,7 @@
 
 import Foundation
 import Observation
+import Supabase
 import DetailCore
 
 enum NewJobStep: Int, CaseIterable, Identifiable {
@@ -122,7 +123,14 @@ final class NewJobModel {
 
     // Schedule
     var scheduleLater = false
-    var start = Date()
+    var start = Date() {
+        didSet {
+            // Keep a repeat rule anchored on the picked first visit.
+            if repeatEnabled {
+                repeatDraft.rule = repeatDraft.rule.movingStart(from: oldValue, to: start, calendar: clock.calendar)
+            }
+        }
+    }
     var durationMinutes = 60
     private(set) var durationEdited = false
     var locationType: JobLocationType = .shop
@@ -139,6 +147,20 @@ final class NewJobModel {
     /// availability"). Advisory: overlaps are allowed by the server.
     var availability: LoadState<NewJobAvailabilityData> = .idle
     private var cachedHours: [JobBusinessHours]?
+
+    // Repeat (P-1): managers create a recurring series instead of one job.
+    var repeatEnabled = false {
+        didSet {
+            if repeatEnabled && !oldValue {
+                repeatDraft.rule = JobsSeriesDraft.Rule.defaults(for: start, calendar: clock.calendar)
+            }
+            repeatPreview = .idle
+        }
+    }
+    var repeatDraft = JobsSeriesDraft() {
+        didSet { if repeatDraft != oldValue { repeatPreview = .idle } }
+    }
+    var repeatPreview: LoadState<[JobsSeriesOccurrence]> = .idle
 
     // Create
     private(set) var createdJob: Job?
@@ -347,11 +369,13 @@ final class NewJobModel {
         }
     }
 
-    /// Validates the VIN (DetailCore) and fills year/make/model/trim from NHTSA vPIC.
-    func decodeVIN() async {
+    /// Validates the VIN (DetailCore) and fills year/make/model/trim from
+    /// NHTSA vPIC. A scanned VIN the user confirmed despite its check digit
+    /// (vehicles built outside North America) skips that check.
+    func decodeVIN(requireCheckDigit: Bool = true) async {
         vehicleError = nil
         let vin = VIN.normalize(vehicleDraft.vin)
-        let check = VIN.validate(vin)
+        let check = VIN.validate(vin, requireCheckDigit: requireCheckDigit)
         guard check == .valid else {
             vehicleError = check.message
             return
@@ -537,10 +561,97 @@ final class NewJobModel {
         if locationType == .mobile && addressLine1.trimmedNonEmpty == nil {
             return "Enter the service address for a mobile job."
         }
+        if let problem = repeatProblem {
+            return problem
+        }
         if notes.count > 20_000 || internalNotes.count > 20_000 {
             return "Notes are limited to 20,000 characters."
         }
         return nil
+    }
+
+    // MARK: - Repeat
+
+    /// Whether this job is created as a recurring series.
+    var createsSeries: Bool { repeatEnabled && !scheduleLater }
+
+    /// What stops a series from being created, if anything.
+    var repeatProblem: String? {
+        guard createsSeries else { return nil }
+        if orderedSelection.isEmpty {
+            return "Choose at least one service: every visit of a repeating job gets the same services."
+        }
+        if orderedSelection.count > 30 {
+            return "A repeating job can have at most 30 services."
+        }
+        if !repeatDraft.rule.isValid {
+            return "Pick at least one day of the week to repeat on."
+        }
+        if case .onDate(let until) = repeatDraft.end, clock.startOfDay(until) < clock.startOfDay(start) {
+            return "The repeat end date is before the first visit."
+        }
+        if durationMinutes < 15 || durationMinutes > 44_640 {
+            return "A repeating visit lasts between 15 minutes and 31 days."
+        }
+        return nil
+    }
+
+    /// The `p_series` JSON for create / preview.
+    var seriesJSON: [String: AnyJSON] {
+        let calendar = clock.calendar
+        var json = repeatDraft.rule.json.merging(repeatDraft.endJSON(calendar: calendar)) { _, new in new }
+        let isMobile = locationType == .mobile
+        json["start_date"] = .string(JobsSeriesDraft.dayString(start, calendar: calendar))
+        json["local_start"] = .string(JobsSeriesDraft.timeString(start, calendar: calendar))
+        json["duration_minutes"] = .integer(durationMinutes)
+        json["location_type"] = .string(locationType.rawValue)
+        json["template_lines"] = .array(orderedSelection.map { id in
+            AnyJSON.object(["service_id": .string(id.uuidString.lowercased()), "quantity": .integer(1)])
+        })
+        json["assignee_member_ids"] = .array(
+            assigneeIDs.sorted { $0.uuidString < $1.uuidString }.map { AnyJSON.string($0.uuidString) }
+        )
+        if let customer { json["customer_id"] = .string(customer.id.uuidString) }
+        if let vehicle { json["vehicle_id"] = .string(vehicle.id.uuidString) }
+        if let resourceID { json["resource_id"] = .string(resourceID.uuidString) }
+        if isMobile {
+            json["service_address_line1"] = addressLine1.trimmedNonEmpty.map { AnyJSON.string($0) } ?? .null
+            json["service_address_line2"] = addressLine2.trimmedNonEmpty.map { AnyJSON.string($0) } ?? .null
+            json["service_city"] = city.trimmedNonEmpty.map { AnyJSON.string($0) } ?? .null
+            json["service_region"] = region.trimmedNonEmpty.map { AnyJSON.string($0) } ?? .null
+            json["service_postal_code"] = postalCode.trimmedNonEmpty.map { AnyJSON.string($0) } ?? .null
+        }
+        if let text = notes.trimmedNonEmpty { json["notes"] = .string(text) }
+        if let text = internalNotes.trimmedNonEmpty { json["internal_notes"] = .string(text) }
+        return json
+    }
+
+    /// The server's list of the first visits (nothing saved).
+    func loadRepeatPreview() async {
+        guard let shopID, createsSeries, repeatProblem == nil, customer != nil else {
+            repeatPreview = .idle
+            return
+        }
+        let series = seriesJSON
+        repeatPreview.beginLoading()
+        let result = await LoadState<[JobsSeriesOccurrence]>.result {
+            try await JobsSeriesService.preview(shopID: shopID, series: series, count: 6)
+        }
+        repeatPreview.apply(result)
+        if case .failed = result { repeatPreview = result }
+    }
+
+    /// Change key for the preview task (anything that moves the dates).
+    var repeatPreviewKey: String {
+        guard createsSeries else { return "off" }
+        let calendar = clock.calendar
+        return [
+            JobsSeriesDraft.dayString(start, calendar: calendar),
+            JobsSeriesDraft.timeString(start, calendar: calendar),
+            String(durationMinutes),
+            repeatDraft.rule.summary,
+            String(describing: repeatDraft.end),
+        ].joined(separator: "|")
     }
 
     func continueFromSchedule() {
@@ -584,12 +695,17 @@ final class NewJobModel {
     var hasStartedCreating: Bool { createdJob != nil }
 
     /// Creates the job (or finishes a partially created one). Returns the
-    /// job id when every step succeeded.
+    /// job id when every step succeeded. A repeating job is created in one
+    /// server call (the series and its first visits) and returns the first
+    /// visit.
     func create() async -> UUID? {
         guard !isCreating else { return nil }
         createError = nil
         isCreating = true
         defer { isCreating = false }
+        if createsSeries && createdJob == nil {
+            return await createSeries()
+        }
         do {
             let shopID = try requireShop()
             guard let customer else { throw AppError.invalidInput("Choose a customer.") }
@@ -649,6 +765,23 @@ final class NewJobModel {
             } else {
                 createError = text
             }
+            return nil
+        }
+    }
+
+    /// One atomic call: nothing is left half-created when it fails.
+    private func createSeries() async -> UUID? {
+        do {
+            let shopID = try requireShop()
+            guard customer != nil else { throw AppError.invalidInput("Choose a customer.") }
+            if let problem = repeatProblem { throw AppError.invalidInput(problem) }
+            let created = try await JobsSeriesService.create(shopID: shopID, series: seriesJSON)
+            guard let firstJobID = created.firstJobID else {
+                throw AppError.message("The repeating job was saved, but no visit falls in the next months. Check the repeat rule on the web app.")
+            }
+            return firstJobID
+        } catch {
+            createError = ErrorText.message(for: error)
             return nil
         }
     }

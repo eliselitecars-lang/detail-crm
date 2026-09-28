@@ -5,6 +5,7 @@ import {
   canDeactivateMember,
   CAPABILITIES,
   invitableRoles,
+  permissionContextOf,
   SHOP_ROLES,
   type Capability,
   type ShopRole,
@@ -33,6 +34,8 @@ const MATRIX: Record<Capability, [boolean, boolean, boolean, boolean]> = {
   'customers.view': [true, true, true, false],
   'customers.viewAssigned': [true, true, true, true],
   'customers.manage': [true, true, true, false],
+  'customers.merge': [true, true, false, false],
+  'import.run': [true, true, true, false],
   'catalog.view': [true, true, true, true],
   'catalog.manage': [true, true, true, false],
   'calendar.view': [true, true, true, true],
@@ -41,7 +44,9 @@ const MATRIX: Record<Capability, [boolean, boolean, boolean, boolean]> = {
   'jobs.manage': [true, true, true, false],
   'jobs.progress': [true, true, true, true],
   'jobs.moveStatusBackward': [true, true, true, false],
+  'jobs.shareReport': [true, true, true, false],
   'blockedTimes.manage': [true, true, true, false],
+  'calendarFeed.own': [true, true, true, true],
   'quotes.view': [true, true, true, false],
   'quotes.manage': [true, true, true, false],
   'invoices.view': [true, true, true, false],
@@ -55,11 +60,19 @@ const MATRIX: Record<Capability, [boolean, boolean, boolean, boolean]> = {
   'memberships.manage': [true, true, true, false],
   'cards.view': [true, true, true, false],
   'cards.charge': [true, true, true, false],
+  'giftCards.view': [true, true, true, false],
+  'giftCards.manage': [true, true, true, false],
+  'giftCards.adjust': [true, true, false, false],
   'reports.view': [true, true, true, false],
   'reports.viewOwn': [true, true, true, true],
   'messages.inbox': [true, true, true, false],
   'messages.sendJobUpdates': [true, true, true, true],
   'campaigns.manage': [true, true, true, false],
+  'webhooks.manage': [true, true, false, false],
+  'tasks.own': [true, true, true, true],
+  'tasks.manage': [true, true, true, false],
+  'inventory.view': [true, true, true, false],
+  'inventory.manage': [true, true, true, false],
   'timeclock.own': [true, true, true, true],
   'timeclock.viewAll': [true, true, true, false],
   'timeclock.editAll': [true, true, true, false],
@@ -85,6 +98,30 @@ describe('capability matrix (SPEC §3)', () => {
     expect(can(ctx('technician', true), 'payments.view')).toBe(false);
     expect(can(ctx('technician', true), 'payments.refund')).toBe(false);
     expect(can(ctx('technician', true), 'cards.charge')).toBe(false);
+  });
+
+  it('lets technicians share job reports only when the shop allows it', () => {
+    expect(can(ctx('technician'), 'jobs.shareReport')).toBe(false);
+    expect(can({ ...ctx('technician'), techsCanShareReports: true }, 'jobs.shareReport')).toBe(
+      true,
+    );
+    expect(can({ ...ctx('manager'), techsCanShareReports: false }, 'jobs.shareReport')).toBe(true);
+    // the report flag never widens payment access
+    expect(can({ ...ctx('technician'), techsCanShareReports: true }, 'payments.collect')).toBe(
+      false,
+    );
+  });
+
+  it('builds the context from a membership', () => {
+    expect(
+      permissionContextOf({
+        role: 'technician',
+        shop: { techs_can_collect_payments: true, techs_can_share_reports: true },
+      }),
+    ).toEqual({ role: 'technician', techsCanCollectPayments: true, techsCanShareReports: true });
+    expect(
+      permissionContextOf({ role: 'manager', shop: { techs_can_collect_payments: false } }),
+    ).toEqual({ role: 'manager', techsCanCollectPayments: false, techsCanShareReports: false });
   });
 
   it('denies everything without a context', () => {

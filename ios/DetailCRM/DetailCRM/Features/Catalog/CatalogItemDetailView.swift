@@ -5,7 +5,8 @@
 //  One catalog item: details, prices per vehicle category (base price =
 //  no category) and, for managers and above, two simple editors — the
 //  item's basics and its prices. Prices are entered by staff and stored
-//  as integer cents; the server prices jobs from these rows.
+//  as integer cents; the server prices jobs from these rows. Managers also
+//  see the item's maintenance follow-ups (P-4, read-only).
 //
 
 import SwiftUI
@@ -20,6 +21,7 @@ struct CatalogItemDetailView: View {
     @State private var state: LoadState<CatalogSnapshot>
     @State private var editingBasics = false
     @State private var editingPrices = false
+    @State private var followups: LoadState<[OpsServiceFollowup]> = .idle
 
     init(itemID: UUID, snapshot: CatalogSnapshot?, onChanged: @escaping () async -> Void) {
         self.itemID = itemID
@@ -39,6 +41,9 @@ struct CatalogItemDetailView: View {
                     snapshot: snapshot,
                     currencyCode: appState.currencyCode,
                     canEdit: appState.can(.editCatalog),
+                    showsFollowups: showsFollowups(item),
+                    followups: followups,
+                    retryFollowups: { await loadFollowups() },
                     editBasics: { editingBasics = true },
                     editPrices: { editingPrices = true }
                 )
@@ -66,7 +71,21 @@ struct CatalogItemDetailView: View {
         .task {
             if state.value == nil { await load() }
         }
-        .refreshable { await load() }
+        .task(id: itemID) { await loadFollowups() }
+        .refreshable {
+            await load()
+            await loadFollowups()
+        }
+    }
+
+    /// Maintenance follow-ups (P-4): managers+, services / packages / add-ons.
+    private func showsFollowups(_ item: CatalogItem) -> Bool {
+        (appState.role?.isManagerOrAbove ?? false) && item.kind != .product
+    }
+
+    private func loadFollowups() async {
+        guard appState.role?.isManagerOrAbove ?? false else { return }
+        await OpsServiceFollowupsSection.load(into: $followups, shopID: appState.shop?.id, serviceID: itemID)
     }
 
     private func load() async {
@@ -95,6 +114,10 @@ private struct CatalogItemDetailList: View {
     let snapshot: CatalogSnapshot
     let currencyCode: String
     let canEdit: Bool
+    /// Maintenance follow-ups (P-4): managers+, services / packages / add-ons.
+    let showsFollowups: Bool
+    let followups: LoadState<[OpsServiceFollowup]>
+    let retryFollowups: () async -> Void
     let editBasics: () -> Void
     let editPrices: () -> Void
 
@@ -138,6 +161,9 @@ private struct CatalogItemDetailList: View {
                 Text("Details")
             }
             CatalogPricesSection(item: item, snapshot: snapshot, currencyCode: currencyCode, canEdit: canEdit, editPrices: editPrices)
+            if showsFollowups {
+                OpsServiceFollowupsSection(state: followups, retry: retryFollowups)
+            }
             Section {
                 CatalogWebNote(canEdit: canEdit)
                     .listRowBackground(Color.clear)

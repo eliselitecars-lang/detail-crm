@@ -104,6 +104,64 @@ enum InvoiceService {
         var savedCards: [SavedCard]
         /// The customer's pay-link token (manager+ only; nil otherwise).
         var linkToken: UUID?
+        /// The jobs this invoice bills, in billing order (P-7). One for a
+        /// job's own invoice, 2+ for a grouped (fleet) invoice; empty for an
+        /// invoice without a job or when they can't be read.
+        var billedJobs: [BilledJob] = []
+        /// Vehicles named on the lines (and the billed jobs), by id.
+        var vehicles: [UUID: QuoteVehicleRef] = [:]
+
+        /// Several jobs on one invoice: lines are shown per job.
+        var isGrouped: Bool { billedJobs.count > 1 }
+
+        /// A payment the balance doesn't count yet (card attempt or a bank /
+        /// pay-later payment still settling).
+        var hasPaymentInFlight: Bool { payments.contains { $0.isInFlight } }
+
+        /// Bank debit / pay-later payments still settling.
+        var processingPayments: [Payment] { payments.filter { $0.status == .processing } }
+    }
+
+    /// Links of an invoice to the jobs it bills (server-maintained).
+    // table: invoice_jobs
+    struct InvoiceJobLink: Codable, Hashable, Sendable {
+        var jobID: UUID
+        var voided: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case jobID = "job_id"
+            case voided
+        }
+
+        static let selectColumns = "job_id,voided"
+    }
+
+    /// A job billed by the invoice (number, date and vehicle for headings).
+    // table: jobs
+    struct BilledJob: Codable, Identifiable, Hashable, Sendable {
+        var id: UUID
+        var number: Int
+        var status: JobStatus
+        var vehicleID: UUID?
+        var scheduledStart: Date?
+        var completedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case number
+            case status
+            case vehicleID = "vehicle_id"
+            case scheduledStart = "scheduled_start"
+            case completedAt = "completed_at"
+        }
+
+        static let selectColumns = "id,number,status,vehicle_id,scheduled_start,completed_at"
+
+        /// "Job #1042"
+        var title: String { "Job #\(number)" }
+
+        /// When the work happened (completed, else scheduled).
+        var workDate: Date? { completedAt ?? scheduledStart }
     }
 
     static func detail(
@@ -127,10 +185,64 @@ enum InvoiceService {
             // A failure here must not hide the invoice itself.
             token = try? await linkToken(invoiceID: invoiceID)
         }
+        // Job headings and vehicle names are extras: a failure (or RLS
+        // hiding them from a technician) leaves the plain line list.
+        let jobs = (try? await billedJobs(shopID: shopID, invoice: invoice)) ?? []
+        var vehicleIDs = Set(lines.compactMap { $0.vehicleID })
+        for job in jobs {
+            if let vehicleID = job.vehicleID { vehicleIDs.insert(vehicleID) }
+        }
+        let vehicles = (try? await vehicleRefs(shopID: shopID, ids: Array(vehicleIDs))) ?? [:]
         return DetailData(
             invoice: invoice, lines: lines, payments: payments, customer: customer,
-            savedCards: cards, linkToken: token
+            savedCards: cards, linkToken: token, billedJobs: jobs, vehicles: vehicles
         )
+    }
+
+    /// The jobs the invoice bills, ordered like its lines (scheduled start,
+    /// then number). Voided links are left out unless the invoice itself is
+    /// void (then they show what it billed).
+    static func billedJobs(shopID: UUID, invoice: Invoice) async throws -> [BilledJob] {
+        let links: [InvoiceJobLink] = try await Supa.client
+            .from("invoice_jobs")
+            .select(InvoiceJobLink.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("invoice_id", value: invoice.id.uuidString)
+            .execute()
+            .value
+        var ids = links.filter { invoice.status == .void || !$0.voided }.map { $0.jobID }
+        if ids.isEmpty, let jobID = invoice.jobID { ids = [jobID] }
+        guard !ids.isEmpty else { return [] }
+        let jobs: [BilledJob] = try await Supa.client
+            .from("jobs")
+            .select(BilledJob.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .in("id", values: ids.map { $0.uuidString })
+            .execute()
+            .value
+        return jobs.sorted { lhs, rhs in
+            switch (lhs.scheduledStart, rhs.scheduledStart) {
+            case let (l?, r?) where l != r: return l < r
+            case (nil, _?): return false
+            case (_?, nil): return true
+            default: return lhs.number < rhs.number
+            }
+        }
+    }
+
+    /// Vehicle names for a set of ids (one query).
+    static func vehicleRefs(shopID: UUID, ids: [UUID]) async throws -> [UUID: QuoteVehicleRef] {
+        guard !ids.isEmpty else { return [:] }
+        let rows: [QuoteVehicleRef] = try await Supa.client
+            .from("vehicles")
+            .select(QuoteVehicleRef.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .in("id", values: Array(ids.prefix(200)).map { $0.uuidString })
+            .execute()
+            .value
+        var map: [UUID: QuoteVehicleRef] = [:]
+        for row in rows { map[row.id] = row }
+        return map
     }
 
     static func invoice(shopID: UUID, invoiceID: UUID) async throws -> Invoice {
@@ -181,10 +293,18 @@ enum InvoiceService {
     }
 
     /// A card attempt the server still counts as in flight (a PaymentSheet
-    /// that was opened but not finished): it blocks cash payments for the
-    /// balance and voiding until `PaymentService.cancelOpenPayments`.
+    /// or Tap to Pay attempt that was opened but not finished): it blocks
+    /// cash payments for the balance and voiding until
+    /// `PaymentService.cancelOpenPayments`.
     static func hasOpenCardAttempt(_ payments: [Payment]) -> Bool {
         payments.contains { $0.status == .pending && $0.isCard }
+    }
+
+    /// Money still settling on the invoice (bank debit / pay later): it
+    /// can't be cancelled from the app, and the balance can't be collected
+    /// twice meanwhile.
+    static func processingCents(_ payments: [Payment]) -> Int {
+        payments.filter { $0.status == .processing }.reduce(0) { $0 + $1.amountCents }
     }
 
     // MARK: - Actions

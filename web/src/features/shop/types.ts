@@ -12,6 +12,8 @@ export const shopSummarySchema = z.object({
   brand_color: z.string().nullable(),
   business_type: z.enum(['fixed', 'mobile', 'both']),
   techs_can_collect_payments: z.boolean(),
+  /** Optional so older cached rows / fixtures without the column read as false. */
+  techs_can_share_reports: z.boolean().optional(),
   tax_rate_bps: z.number(),
 });
 
@@ -19,7 +21,7 @@ export type ShopSummary = z.infer<typeof shopSummarySchema>;
 
 /** Columns selected for ShopSummary (keep in sync with the schema above). */
 export const SHOP_SUMMARY_COLUMNS =
-  'id, name, slug, timezone, currency, logo_path, brand_color, business_type, techs_can_collect_payments, tax_rate_bps';
+  'id, name, slug, timezone, currency, logo_path, brand_color, business_type, techs_can_collect_payments, techs_can_share_reports, tax_rate_bps';
 
 export const membershipRowSchema = z.object({
   id: z.string(),

@@ -6,15 +6,19 @@
 import {
   useInfiniteQuery,
   useMutation,
+  useQuery,
   useQueryClient,
   type InfiniteData,
 } from '@tanstack/react-query';
+import { z } from 'zod';
 import { useToast } from '@/components/ui';
-import { unwrap } from '@/lib/db';
-import { toAppError } from '@/lib/errors';
-import { shellKeys } from '@/lib/queryKeys';
+import { unwrap, unwrapRequired } from '@/lib/db';
+import { AppError, toAppError } from '@/lib/errors';
+import { meKey, shellKeys, shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import type { Row } from '@/lib/db';
+import { toEdgeError } from '@/features/quotes/shared/edge';
+import type { NotificationKind } from './links';
 
 export type NotificationRow = Pick<
   Row<'notifications'>,
@@ -170,5 +174,110 @@ export function useDismissNotification(shopId: string, userId: string) {
       queryClient.setQueryData<NotificationPages>(notificationKeys.read(shopId, userId), drop);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: notificationKeys.all(shopId) }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Push notifications (iPhone app): per-member preferences (0081/0082)
+// ---------------------------------------------------------------------------
+
+export type PushPrefs = Pick<Row<'member_notification_prefs'>, 'push_kinds' | 'muted_until'>;
+
+export const pushPrefsKeys = {
+  prefs: (shopId: string, memberId: string) => shopKey(shopId, 'notification-prefs', memberId),
+  devices: (userId: string) => meKey(userId, 'push-devices'),
+};
+
+/** The member's own row; null = never saved (every kind is pushed, no mute). */
+export function usePushPrefs(shopId: string, memberId: string) {
+  return useQuery({
+    queryKey: pushPrefsKeys.prefs(shopId, memberId),
+    queryFn: async (): Promise<PushPrefs | null> =>
+      unwrap(
+        await supabase
+          .from('member_notification_prefs')
+          .select('push_kinds, muted_until')
+          .eq('shop_id', shopId)
+          .eq('member_id', memberId)
+          .maybeSingle(),
+      ),
+  });
+}
+
+/** How many iPhones the user has turned notifications on for (own rows only). */
+export function usePushDeviceCount(userId: string) {
+  return useQuery({
+    queryKey: pushPrefsKeys.devices(userId),
+    enabled: userId !== '',
+    queryFn: async (): Promise<number> => {
+      const result = await supabase
+        .from('device_push_tokens')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .is('disabled_at', null);
+      if (result.error) throw toAppError(result.error);
+      return result.count ?? 0;
+    },
+  });
+}
+
+export interface SavePushPrefsInput {
+  pushKinds: NotificationKind[];
+  /** ISO instant, or null for no mute. */
+  mutedUntil: string | null;
+}
+
+export function useSavePushPrefs(shopId: string, memberId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ pushKinds, mutedUntil }: SavePushPrefsInput): Promise<PushPrefs> => {
+      const row = unwrapRequired(
+        await supabase.rpc('set_notification_prefs', {
+          p_shop_id: shopId,
+          p_push_kinds: pushKinds,
+          ...(mutedUntil ? { p_muted_until: mutedUntil } : {}),
+        }),
+        'push setting',
+      );
+      return { push_kinds: row.push_kinds, muted_until: row.muted_until };
+    },
+    onSuccess: (prefs) => {
+      queryClient.setQueryData(pushPrefsKeys.prefs(shopId, memberId), prefs);
+    },
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: pushPrefsKeys.prefs(shopId, memberId) }),
+  });
+}
+
+const sendTestSchema = z.object({
+  sent: z.number().int(),
+  failed: z.number().int(),
+  invalid_tokens: z.number().int(),
+});
+
+/** push → send_test: a test notification to the caller's own iPhones only. */
+export function useSendTestPush(shopId: string, userId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      let response: Awaited<ReturnType<typeof supabase.functions.invoke<unknown>>>;
+      try {
+        response = await supabase.functions.invoke<unknown>('push', {
+          body: { action: 'send_test', shop_id: shopId },
+        });
+      } catch (error) {
+        throw await toEdgeError(error);
+      }
+      if (response.error) throw await toEdgeError(response.error);
+      const parsed = sendTestSchema.safeParse(response.data);
+      if (!parsed.success) {
+        throw new AppError('The server sent an unexpected response. Please try again.', {
+          kind: 'server',
+          cause: parsed.error,
+        });
+      }
+      return parsed.data;
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: pushPrefsKeys.devices(userId) }),
   });
 }

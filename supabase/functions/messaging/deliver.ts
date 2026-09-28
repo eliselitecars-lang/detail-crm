@@ -7,7 +7,9 @@
  *          launch -> cancelled (the claim only re-checks hard opt-outs)
  *   send   SMS via Twilio (from = the shop's number returned by the claim,
  *          only if the platform provisioned that number for the shop, see
- *          sender.ts; StatusCallback = messaging?action=twilio_status) or
+ *          sender.ts; sent as MessagingServiceSid instead of From when the
+ *          claim carries the number's Messaging Service, 0089;
+ *          StatusCallback = messaging?action=twilio_status) or
  *          email via Resend (from = EMAIL_FROM relabelled with the shop name,
  *          reply-to = shop email, idempotency key = message id; marketing
  *          mail — campaigns and follow_up, the rows with an unsubscribe
@@ -74,6 +76,11 @@ export interface ClaimedMessage {
   template_key: string | null;
   /** Marketing email only: the credential of its unsubscribe link (never the message id). */
   unsubscribe_token: string | null;
+  /**
+   * SMS only: the Twilio Messaging Service of the shop's sending number
+   * (numbers bought through sms-provisioning, 0089); absent/null otherwise.
+   */
+  messaging_service_sid?: string | null;
 }
 
 export type SendOutcome =
@@ -152,9 +159,13 @@ export async function sendClaimed(svc: Services, msg: ClaimedMessage): Promise<S
       if (!sender.ok) {
         return { status: sender.retry ? "queued" : "failed", error: sender.reason };
       }
+      // A provisioned number sends through its Messaging Service (the A2P /
+      // toll-free registration is attached to the service); the recorded
+      // sender stays the shop's number.
+      const service = msg.messaging_service_sid;
       const sent = await sendSms(svc.env.twilio(), {
         to: msg.to_address,
-        from: msg.from_address,
+        from: service && /^MG[0-9a-fA-F]{32}$/.test(service) ? service : msg.from_address,
         body: msg.body,
         statusCallback: twilioStatusCallbackUrl(svc),
       }, svc.fetch);
@@ -655,6 +666,17 @@ export async function claimOne(
   }
 
   const fromAddress = msg.channel === "sms" ? shopRow.sms_from_number : msg.from_address;
+  // Same as the claim: an SMS goes through the number's Messaging Service
+  // when the platform provisioned one (0089).
+  let messagingServiceSid: string | null = null;
+  if (msg.channel === "sms" && fromAddress) {
+    const { data: number, error: numberError } = await svc.admin.from("shop_sms_numbers")
+      .select("messaging_service_sid").eq("shop_id", shopId).eq("phone_number", fromAddress)
+      .maybeSingle();
+    if (numberError) throw new DbError("shop_sms_numbers lookup", numberError);
+    messagingServiceSid =
+      (number as { messaging_service_sid: string | null } | null)?.messaging_service_sid ?? null;
+  }
   const { data: updated, error: updateError } = await svc.admin.from("messages")
     .update({
       status: "sending",
@@ -687,6 +709,7 @@ export async function claimOne(
       campaign_id: msg.campaign_id,
       template_key: msg.template_key,
       unsubscribe_token: msg.unsubscribe_token ?? null,
+      messaging_service_sid: messagingServiceSid,
     },
   };
 }

@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute, shopValue } from '@/test/render';
 import {
@@ -56,7 +56,20 @@ function setup(
   resources: unknown[] = [],
   categories: unknown[] = [{ id: 'cat-1', name: 'Car', sort: 1 }],
 ) {
-  const rpc: Record<string, unknown> = { shop_team: TEAM, price_services: PRICING };
+  const rpc: Record<string, unknown> = {
+    shop_team: TEAM,
+    price_services: PRICING,
+    job_series_preview: [
+      { seq: 1, starts_at: '2026-09-28T14:00:00Z', ends_at: '2026-09-28T16:00:00Z' },
+      { seq: 2, starts_at: '2026-10-12T14:00:00Z', ends_at: '2026-10-12T16:00:00Z' },
+    ],
+    create_job_series: {
+      series_id: 'series-1',
+      jobs_created: 6,
+      first_job_id: 'job-first',
+      generated_through: '2026-12-07',
+    },
+  };
   supabase.rpc.mockImplementation((...args: unknown[]) =>
     createBuilder({ data: rpc[String(args[0])] ?? null }),
   );
@@ -157,6 +170,8 @@ describe('NewJobPage', () => {
       // the calendar selection's end wins over the summed service time
       scheduled_end: '2026-09-28T16:00:00.000Z',
       location_type: 'shop',
+      // credited to the member creating it unless changed (P-12)
+      sold_by_member_id: 'member-1',
     });
     expect(job).not.toHaveProperty('total_cents');
     expect(builders.job_line_items?.[0]?.insert).toHaveBeenCalledWith([
@@ -264,5 +279,79 @@ describe('NewJobPage', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe('/app/jobs/job-new'));
     const insert = builders.jobs?.find((b) => b.insert.mock.calls.length > 0)?.insert;
     expect(insert?.mock.calls[0]?.[0]).toMatchObject({ resource_id: 'res-2' });
+  });
+
+  it('creates a repeating job with create_job_series after previewing the visits', async () => {
+    const { user, router } = setup(
+      '/app/jobs/new?start=2026-09-28T14:00:00.000Z&end=2026-09-28T16:00:00.000Z',
+    );
+    await user.type(screen.getByRole('combobox', { name: /Customer/ }), 'Jane');
+    await user.click(await screen.findByRole('option', { name: /Jane Doe/ }));
+    await user.click(await screen.findByRole('radio', { name: /2021 Honda Civic/ }));
+    await user.click(await screen.findByRole('checkbox', { name: /Full detail/ }));
+    await user.click(screen.getByRole('checkbox', { name: /Repeat this job/ }));
+
+    const repeat = screen.getByRole('region', { name: 'Repeat' });
+    // Sep 28, 2026 is a Monday: the weekday chip starts on
+    expect(within(repeat).getByRole('button', { name: 'Monday' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await user.selectOptions(within(repeat).getByLabelText('Repeat every'), '2');
+    await user.click(within(repeat).getByRole('radio', { name: 'After a number of visits' }));
+    await user.clear(within(repeat).getByLabelText(/Number of visits/));
+    await user.type(within(repeat).getByLabelText(/Number of visits/), '6');
+    // deposits and sold-by are per visit, not on the repeat
+    expect(screen.queryByLabelText('Deposit required')).not.toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'job_series_preview',
+        expect.objectContaining({
+          p_shop_id: 'shop-1',
+          p_series: expect.objectContaining({ interval: 2, max_occurrences: 6 }),
+        }),
+      ),
+    );
+    expect(await within(repeat).findByText('Mon, Oct 12, 2026')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Create repeating job' }));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/app/jobs/job-first'));
+    expect(supabase.rpc).toHaveBeenCalledWith('create_job_series', {
+      p_shop_id: 'shop-1',
+      p_series: expect.objectContaining({
+        customer_id: 'cust-1',
+        vehicle_id: 'veh-1',
+        freq: 'week',
+        interval: 2,
+        by_weekday: [1],
+        start_date: '2026-09-28',
+        local_start: '09:00',
+        duration_minutes: 120,
+        max_occurrences: 6,
+        until_date: null,
+        template_lines: [{ service_id: 'svc-1', quantity: 1 }],
+        location_type: 'shop',
+      }),
+    });
+    // never priced on the client, never a plain job insert
+    const series = (supabase.rpc.mock.calls as unknown[][]).find(
+      (c) => c[0] === 'create_job_series',
+    );
+    expect(JSON.stringify(series)).not.toContain('price');
+    expect(builders.jobs).toBeUndefined();
+  });
+
+  it('needs a service before a job can repeat', async () => {
+    const { user } = setup('/app/jobs/new?start=2026-09-28T14:00:00.000Z');
+    await user.type(screen.getByRole('combobox', { name: /Customer/ }), 'Jane');
+    await user.click(await screen.findByRole('option', { name: /Jane Doe/ }));
+    await user.click(await screen.findByRole('radio', { name: /2021 Honda Civic/ }));
+    await user.click(screen.getByRole('checkbox', { name: /Repeat this job/ }));
+    await user.click(screen.getByRole('button', { name: 'Create repeating job' }));
+    expect(
+      await screen.findByText('Add at least one service to repeat a job.'),
+    ).toBeInTheDocument();
+    expect(supabase.rpc).not.toHaveBeenCalledWith('create_job_series', expect.anything());
   });
 });

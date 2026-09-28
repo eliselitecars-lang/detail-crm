@@ -68,6 +68,20 @@ enum JobOpsService {
     }
 
     /// Manager+.
+    /// Flags an item as required for completion, or not (managers+; the
+    /// server refuses technicians).
+    static func setChecklistItemRequired(shopID: UUID, itemID: UUID, required: Bool) async throws -> JobChecklistItem {
+        try await Supa.client
+            .from("job_checklist_items")
+            .update(["required": AnyJSON.bool(required)])
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: itemID.uuidString)
+            .select(JobChecklistItem.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
     static func deleteChecklistItem(shopID: UUID, itemID: UUID) async throws {
         try await Supa.client
             .from("job_checklist_items")
@@ -113,10 +127,12 @@ enum JobOpsService {
     static func photoItems(shopID: UUID, jobID: UUID) async throws -> [JobPhotoItem] {
         let rows = try await photos(shopID: shopID, jobID: jobID)
         guard !rows.isEmpty else { return [] }
-        let paths = rows.map(\.storagePath)
+        // Images show themselves; videos show their poster frame (if any).
+        let paths: [String?] = rows.map { $0.isVideo ? $0.posterPath : $0.storagePath }
         // Sign concurrently; keep the original order.
         let urls: [Int: URL] = await withTaskGroup(of: (Int, URL?).self) { group in
             for (index, path) in paths.enumerated() {
+                guard let path else { continue }
                 group.addTask {
                     let url = try? await signedURL(bucket: photosBucket, path: path)
                     return (index, url)
@@ -172,7 +188,75 @@ enum JobOpsService {
             .eq("shop_id", value: photo.shopID.uuidString)
             .eq("id", value: photo.id.uuidString)
             .execute()
-        await removeQuietly(bucket: photosBucket, path: photo.storagePath)
+        // A video's file and poster are queued for removal by the server.
+        if !photo.isVideo {
+            await removeQuietly(bucket: photosBucket, path: photo.storagePath)
+        }
+    }
+
+    // MARK: - Videos (P-30) and customer visibility (P-8)
+
+    static let mediaBucket = "job-media"
+
+    /// Records an uploaded video (the file is already in job-media and the
+    /// poster in job-photos; the server checks both exist).
+    static func insertVideo(
+        shopID: UUID,
+        jobID: UUID,
+        storagePath: String,
+        posterPath: String?,
+        durationSeconds: Int,
+        kind: JobPhotoKind
+    ) async throws -> JobPhoto {
+        var row: [String: AnyJSON] = [
+            "shop_id": .string(shopID.uuidString),
+            "job_id": .string(jobID.uuidString),
+            "storage_path": .string(storagePath),
+            "kind": .string(kind.rawValue),
+            "media_type": .string("video"),
+            "bucket": .string(mediaBucket),
+            "duration_seconds": .integer(min(600, max(1, durationSeconds))),
+        ]
+        row["poster_path"] = posterPath.map { AnyJSON.string($0) } ?? .null
+        return try await Supa.client
+            .from("job_photos")
+            .insert(row)
+            .select(JobPhoto.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Uploads a video's poster frame next to the job's photos. The name
+    /// is fixed per upload, so a retry after the video row failed to save
+    /// overwrites the copy it already sent (upsert; the uploader may update
+    /// its own object) instead of failing with 409 and losing the poster.
+    static func uploadPoster(shopID: UUID, jobID: UUID, name: String, jpegData: Data) async throws -> String {
+        let path = "\(shopID.uuidString.lowercased())/\(jobID.uuidString.lowercased())/\(name)"
+        try await Supa.client.storage
+            .from(photosBucket)
+            .upload(path, data: jpegData, options: FileOptions(contentType: "image/jpeg", upsert: true))
+        return path
+    }
+
+    /// A short-lived link to play a video.
+    static func videoURL(_ photo: JobPhoto) async throws -> URL {
+        try await signedURL(bucket: photo.storageBucket, path: photo.storagePath)
+    }
+
+    /// Shows or hides photos on the customer's job report (staff on the
+    /// job). Returns how many changed.
+    @discardableResult
+    static func setPhotoVisibility(photoIDs: [UUID], visible: Bool) async throws -> Int {
+        guard !photoIDs.isEmpty else { return 0 }
+        let params: [String: AnyJSON] = [
+            "p_photo_ids": .array(photoIDs.prefix(200).map { AnyJSON.string($0.uuidString) }),
+            "p_visible": .bool(visible),
+        ]
+        return try await Supa.client
+            .rpc("set_job_photo_visibility", params: params)
+            .execute()
+            .value
     }
 
     /// Uploads a JPEG into the job's photo folder and returns its path.

@@ -126,6 +126,9 @@ struct JobChecklistItem: Codable, Identifiable, Hashable, Sendable {
     var doneAt: Date?
     var doneBy: UUID?
     var templateID: UUID?
+    /// Must be done before the job can be completed (P-11; copied from the
+    /// template, or flagged by a manager). Only managers change it.
+    var required: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -136,11 +139,13 @@ struct JobChecklistItem: Codable, Identifiable, Hashable, Sendable {
         case doneAt = "done_at"
         case doneBy = "done_by"
         case templateID = "template_id"
+        case required
     }
 
-    static let selectColumns = "id,shop_id,job_id,label,sort,done_at,done_by,template_id"
+    static let selectColumns = "id,shop_id,job_id,label,sort,done_at,done_by,template_id,required"
 
     var isDone: Bool { doneAt != nil }
+    var isRequired: Bool { required ?? false }
 }
 
 /// A checklist template managers can apply to a job.
@@ -167,6 +172,14 @@ struct JobPhoto: Codable, Identifiable, Hashable, Sendable {
     var caption: String?
     var uploadedBy: UUID?
     var createdAt: Date
+    /// Shown on the customer's job report (P-8) when its kind is included.
+    var customerVisible: Bool?
+    /// `image` (bucket job-photos) or `video` (bucket job-media, P-30).
+    var mediaType: String?
+    var bucket: String?
+    var durationSeconds: Int?
+    /// Video poster frame (a JPEG in job-photos).
+    var posterPath: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -177,12 +190,33 @@ struct JobPhoto: Codable, Identifiable, Hashable, Sendable {
         case caption
         case uploadedBy = "uploaded_by"
         case createdAt = "created_at"
+        case customerVisible = "customer_visible"
+        case mediaType = "media_type"
+        case bucket
+        case durationSeconds = "duration_seconds"
+        case posterPath = "poster_path"
     }
 
-    static let selectColumns = "id,shop_id,job_id,storage_path,kind,caption,uploaded_by,created_at"
+    static let selectColumns = [
+        "id", "shop_id", "job_id", "storage_path", "kind", "caption", "uploaded_by", "created_at",
+        "customer_visible", "media_type", "bucket", "duration_seconds", "poster_path",
+    ].joined(separator: ",")
+
+    var isVideo: Bool { mediaType == "video" }
+    var isCustomerVisible: Bool { customerVisible ?? false }
+    /// The bucket holding `storage_path`.
+    var storageBucket: String { bucket ?? (isVideo ? "job-media" : "job-photos") }
+
+    /// "1:05".
+    var durationText: String? {
+        guard let durationSeconds else { return nil }
+        return String(format: "%d:%02d", durationSeconds / 60, durationSeconds % 60)
+    }
 }
 
-/// A photo with a short-lived signed URL for display (nil when signing failed).
+/// A photo or video with a short-lived signed URL for display: the image
+/// itself, or a video's poster frame (nil when signing failed). A video's
+/// own URL is signed when it is played.
 struct JobPhotoItem: Identifiable, Hashable, Sendable {
     var photo: JobPhoto
     var url: URL?

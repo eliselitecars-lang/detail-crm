@@ -69,7 +69,11 @@ enum CalendarPalette {
     /// Accent for an event: the first assigned member's calendar color,
     /// muted for busy blocks / blocked time, danger for cancelled/no-show.
     static func color(for event: CalendarEvent, memberColors: [UUID: String]) -> Color {
-        if event.isBlockedTime || event.isBusyBlock {
+        if let kind = event.blockKind {
+            if let hex = event.color, let color = Color(hexString: hex) { return color }
+            return kindColor(kind)
+        }
+        if event.isBusyBlock {
             return Theme.textTertiary
         }
         if let status = event.status, status.isSideExit {
@@ -84,14 +88,30 @@ enum CalendarPalette {
     }
 }
 
+extension CalendarPalette {
+    /// Default colour of an event kind without its own colour.
+    static func kindColor(_ kind: JobsCalendarEvent.Kind) -> Color {
+        switch kind {
+        case .closed, .timeOff: return Theme.textTertiary
+        case .meeting: return Theme.glacier
+        case .consultation: return Theme.success
+        case .reminder: return Theme.warning
+        case .other: return Theme.textSecondary
+        }
+    }
+}
+
 // MARK: - Accessibility
 
 enum CalendarAccessibility {
 
     static func label(for event: CalendarEvent, clock: ShopClock) -> String {
         var parts: [String] = [event.displayTitle, CalendarFormat.timeRange(event, clock: clock)]
-        if event.isBlockedTime {
-            parts.insert("Blocked time", at: 0)
+        if let kind = event.blockKind {
+            parts.insert(kind.displayName, at: 0)
+        }
+        if event.isSeriesJob {
+            parts.append("Repeating job")
         }
         if let status = event.status, event.isOpenableJob {
             parts.append(status.displayName)

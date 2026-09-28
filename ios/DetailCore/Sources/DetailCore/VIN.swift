@@ -72,6 +72,84 @@ public enum VIN {
         return seventhIsLetter ? base + 30 : base
     }
 
+    // MARK: - Scanning
+
+    /// 17-character VIN candidates in scanned text or a barcode payload,
+    /// best first: candidates whose check digit matches come before the
+    /// rest, then in reading order; duplicates are dropped.
+    ///
+    /// Door-jamb Code 39 labels often prefix the VIN with `I` (import) or a
+    /// quantity marker, so an 18-character run is also tried without its
+    /// first or last character. `O`/`Q`/`I` inside a run are read as the
+    /// digits `0`/`0`/`1` (VINs never use those letters; OCR confuses them).
+    public static func candidates(in text: String) -> [String] {
+        var runs: [String] = []
+        var current = ""
+        for character in text.uppercased() {
+            if character.isASCII && (character.isLetter || character.isNumber) {
+                current.append(character)
+            } else if character == "-" {
+                // A dash inside a printed VIN is ignored. (Spaces end a run;
+                // a VIN printed in groups is caught by the whole-text pass.)
+                continue
+            } else {
+                flush(&current, into: &runs)
+            }
+        }
+        flush(&current, into: &runs)
+
+        var found: [String] = []
+        /// Adds a candidate; `verifiedOnly` keeps it only when its check
+        /// digit matches (sliding windows over longer runs would otherwise
+        /// offer many look-alike strings).
+        func consider(_ raw: String, verifiedOnly: Bool = false) {
+            let fixed = String(raw.map { character -> Character in
+                switch character {
+                case "O", "Q": return "0"
+                case "I": return "1"
+                default: return character
+                }
+            })
+            guard fixed.count == 17, validate(fixed, requireCheckDigit: verifiedOnly) == .valid else { return }
+            if !found.contains(fixed) { found.append(fixed) }
+        }
+        for run in runs where run.count >= 17 {
+            if run.count == 17 {
+                consider(run)
+            } else if run.count == 18 {
+                consider(String(run.dropFirst()))
+                consider(String(run.dropLast()))
+            }
+            let characters = Array(run)
+            for start in 0...(characters.count - 17) {
+                consider(String(characters[start..<(start + 17)]), verifiedOnly: true)
+            }
+        }
+        // A VIN printed in groups ("1HG CM826 33A 004352"): consecutive
+        // words on one line that add up to exactly 17 characters.
+        for line in text.uppercased().split(whereSeparator: \.isNewline) {
+            let words = line
+                .split(whereSeparator: { !($0.isASCII && ($0.isLetter || $0.isNumber)) && $0 != "-" })
+                .map { $0.filter { $0 != "-" } }
+            for first in words.indices {
+                var joined = ""
+                for word in words[first...] {
+                    joined += word
+                    if joined.count >= 17 { break }
+                }
+                if joined.count == 17 { consider(joined) }
+            }
+        }
+
+        let verified = found.filter { isValid($0, requireCheckDigit: true) }
+        return verified + found.filter { !verified.contains($0) }
+    }
+
+    private static func flush(_ current: inout String, into runs: inout [String]) {
+        if !current.isEmpty { runs.append(current) }
+        current = ""
+    }
+
     // MARK: - Tables
 
     static let weights: [Int] = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]

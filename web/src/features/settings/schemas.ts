@@ -154,6 +154,26 @@ export const bookingSchema = z
     bookingMessage: zOptionalText(5000),
     cancellationPolicy: zOptionalText(5000),
     cancelHours: zIntText('Cancellation window', 0, 8760),
+    maxConcurrentShop: zOptionalPositiveIntText('In-shop limit', 100),
+    maxConcurrentMobile: zOptionalPositiveIntText('Mobile limit', 100),
+    countMemberAvailability: z.boolean(),
+    allowMultiDay: z.boolean(),
+    multiDayMaxDays: zIntText('Longest booking', 2, 7),
+    quoteSelfSchedule: z.boolean(),
+    metaPixelId: z
+      .string()
+      .trim()
+      .refine((v) => v === '' || /^[0-9]{5,20}$/.test(v), 'A Meta Pixel ID is 5–20 digits.')
+      .transform((v) => (v === '' ? null : v)),
+    ga4MeasurementId: z
+      .string()
+      .trim()
+      .transform((v) => v.toUpperCase())
+      .refine(
+        (v) => v === '' || /^G-[A-Z0-9]{4,16}$/.test(v),
+        'A GA4 measurement ID looks like G-XXXXXXXXXX.',
+      )
+      .transform((v) => (v === '' ? null : v)),
   })
   .superRefine((v, ctx) => {
     const lead = joinMinutes(v.leadTimeValue, v.leadTimeUnit);
@@ -209,6 +229,7 @@ export const taxesSchema = z.object({
   invoiceTerms: zOptionalText(20000),
   invoiceDueDays: zIntText('Payment due', 0, 365),
   techsCanCollectPayments: z.boolean(),
+  techsCanShareReports: z.boolean(),
 });
 export type TaxesInput = z.input<typeof taxesSchema>;
 export type TaxesValues = z.output<typeof taxesSchema>;
@@ -219,16 +240,45 @@ export type TaxesValues = z.output<typeof taxesSchema>;
 
 const TIME_RE = /^\d{2}:\d{2}$/;
 
+export const EVENT_KINDS = [
+  'closed',
+  'time_off',
+  'meeting',
+  'consultation',
+  'reminder',
+  'other',
+] as const;
+export const REPEAT_FREQS = ['', 'day', 'week', 'month'] as const;
+export const REPEAT_ENDS = ['never', 'until', 'count'] as const;
+
+/** blocked_times.recurrence (calendar_recurrence_valid, 0050). */
+export interface RecurrenceRule {
+  freq: 'day' | 'week' | 'month';
+  interval?: number;
+  by_weekday?: number[];
+  until_date?: string;
+  count?: number;
+}
+
 export function blockedTimeSchema(timeZone: string) {
   return z
     .object({
+      kind: z.enum(EVENT_KINDS),
       memberId: z.string(),
+      title: zOptionalText(120),
       allDay: z.boolean(),
       startDate: z.string().refine(isLocalDate, 'Choose a start date.'),
       startTime: z.string(),
       endDate: z.string().refine(isLocalDate, 'Choose an end date.'),
       endTime: z.string(),
       reason: zOptionalText(500),
+      affectsCapacity: z.boolean(),
+      repeat: z.enum(REPEAT_FREQS),
+      interval: z.string(),
+      weekdays: z.array(z.number().int().min(0).max(6)),
+      repeatEnd: z.enum(REPEAT_ENDS),
+      untilDate: z.string(),
+      count: z.string(),
     })
     .superRefine((v, ctx) => {
       if (!v.allDay) {
@@ -247,14 +297,59 @@ export function blockedTimeSchema(timeZone: string) {
           message: 'End must be after the start.',
         });
       }
+      if (v.kind === 'time_off' && v.memberId === '') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['memberId'],
+          message: 'Choose who is off.',
+        });
+      }
+      if (v.repeat !== '') {
+        const interval = Number(v.interval.trim());
+        if (!/^\d+$/.test(v.interval.trim()) || interval < 1 || interval > 12) {
+          ctx.addIssue({ code: 'custom', path: ['interval'], message: 'Use 1 to 12.' });
+        }
+        if (v.repeat === 'week' && v.weekdays.length === 0) {
+          ctx.addIssue({ code: 'custom', path: ['weekdays'], message: 'Choose at least one day.' });
+        }
+        if (v.repeatEnd === 'until') {
+          if (!isLocalDate(v.untilDate)) {
+            ctx.addIssue({ code: 'custom', path: ['untilDate'], message: 'Choose the last date.' });
+          } else if (isLocalDate(v.startDate) && v.untilDate < v.startDate) {
+            ctx.addIssue({
+              code: 'custom',
+              path: ['untilDate'],
+              message: 'The repeat must end on or after the first date.',
+            });
+          }
+        }
+        if (v.repeatEnd === 'count') {
+          const count = Number(v.count.trim());
+          if (!/^\d+$/.test(v.count.trim()) || count < 1 || count > 500) {
+            ctx.addIssue({ code: 'custom', path: ['count'], message: 'Use 1 to 500 times.' });
+          }
+        }
+      }
     })
     .transform((v) => {
       const range = blockedRange(v, timeZone);
+      let recurrence: RecurrenceRule | null = null;
+      if (v.repeat !== '') {
+        recurrence = { freq: v.repeat, interval: Number(v.interval.trim()) };
+        if (v.repeat === 'week') recurrence.by_weekday = [...new Set(v.weekdays)].sort();
+        if (v.repeatEnd === 'until') recurrence.until_date = v.untilDate;
+        if (v.repeatEnd === 'count') recurrence.count = Number(v.count.trim());
+      }
       return {
-        member_id: v.memberId === '' ? null : v.memberId,
+        kind: v.kind,
+        member_id: v.kind === 'closed' || v.memberId === '' ? null : v.memberId,
+        title: v.title,
         starts_at: range?.startsAt ?? '',
         ends_at: range?.endsAt ?? '',
         reason: v.reason,
+        // closures and time off always take capacity
+        affects_capacity: v.kind === 'closed' || v.kind === 'time_off' ? true : v.affectsCapacity,
+        recurrence,
       };
     });
 }
@@ -328,8 +423,38 @@ export function couponSchema(timeZone: string) {
       maxRedemptions: zOptionalPositiveIntText('Limit'),
       onlineOnly: z.boolean(),
       active: z.boolean(),
+      limitServices: z.boolean(),
+      serviceIds: z.array(z.string()),
+      minSubtotalCents: z.number().int().nullable(),
+      oncePerCustomer: z.boolean(),
+      customerId: z.string().nullable(),
+      newCustomersOnly: z.boolean(),
     })
     .superRefine((v, ctx) => {
+      if (v.limitServices && v.serviceIds.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['serviceIds'],
+          message: 'Choose at least one service.',
+        });
+      }
+      if (v.limitServices && v.serviceIds.length > 100) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['serviceIds'],
+          message: 'Choose up to 100 services.',
+        });
+      }
+      if (v.minSubtotalCents !== null && v.minSubtotalCents < 0) {
+        ctx.addIssue({ code: 'custom', path: ['minSubtotalCents'], message: 'Use $0 or more.' });
+      }
+      if (v.customerId !== null && v.newCustomersOnly) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['newCustomersOnly'],
+          message: 'A coupon for one customer can’t also be for new customers only.',
+        });
+      }
       if (v.kind === 'percent') {
         const bps = parsePercentToBps(v.percent);
         if (bps === null || bps <= 0) {
@@ -374,6 +499,12 @@ export function couponSchema(timeZone: string) {
       max_redemptions: v.maxRedemptions,
       online_only: v.onlineOnly,
       active: v.active,
+      service_ids: v.limitServices ? v.serviceIds : null,
+      min_subtotal_cents:
+        v.minSubtotalCents === null || v.minSubtotalCents === 0 ? null : v.minSubtotalCents,
+      once_per_customer: v.oncePerCustomer,
+      customer_id: v.customerId,
+      new_customers_only: v.newCustomersOnly,
     }));
 }
 export type CouponFormInput = z.input<ReturnType<typeof couponSchema>>;

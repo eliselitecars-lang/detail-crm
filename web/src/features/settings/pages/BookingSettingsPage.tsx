@@ -69,11 +69,22 @@ function toInput(s: BookingSettings): BookingInput {
     bookingMessage: s.booking_message ?? '',
     cancellationPolicy: s.cancellation_policy ?? '',
     cancelHours: String(s.allow_client_cancel_hours),
+    maxConcurrentShop: s.max_concurrent_shop === null ? '' : String(s.max_concurrent_shop),
+    maxConcurrentMobile: s.max_concurrent_mobile === null ? '' : String(s.max_concurrent_mobile),
+    countMemberAvailability: s.count_member_availability,
+    allowMultiDay: s.allow_multi_day,
+    multiDayMaxDays: String(s.multi_day_max_days),
+    quoteSelfSchedule: s.quote_self_schedule,
+    metaPixelId: s.meta_pixel_id ?? '',
+    ga4MeasurementId: s.ga4_measurement_id ?? '',
   };
 }
 
 function BookingForm({ settings, canEdit }: { settings: BookingSettings; canEdit: boolean }) {
   const toast = useToast();
+  const { shop } = useShop();
+  const offersShop = shop.business_type !== 'mobile';
+  const offersMobile = shop.business_type !== 'fixed';
   const update = useUpdateBookingSettings();
   const {
     register,
@@ -89,6 +100,7 @@ function BookingForm({ settings, canEdit }: { settings: BookingSettings; canEdit
   const depositType = useWatch({ control, name: 'depositType' });
   const postalText = useWatch({ control, name: 'postalCodes' });
   const postalCount = parsePostalCodes(postalText).length;
+  const allowMultiDay = useWatch({ control, name: 'allowMultiDay' });
 
   const onSubmit = handleSubmit(async (v) => {
     const leadMinutes = joinMinutes(v.leadTimeValue, v.leadTimeUnit) ?? 0;
@@ -108,6 +120,14 @@ function BookingForm({ settings, canEdit }: { settings: BookingSettings; canEdit
         booking_message: v.bookingMessage,
         cancellation_policy: v.cancellationPolicy,
         allow_client_cancel_hours: v.cancelHours,
+        max_concurrent_shop: v.maxConcurrentShop,
+        max_concurrent_mobile: v.maxConcurrentMobile,
+        count_member_availability: v.countMemberAvailability,
+        allow_multi_day: v.allowMultiDay,
+        multi_day_max_days: v.multiDayMaxDays,
+        quote_self_schedule: v.quoteSelfSchedule,
+        meta_pixel_id: v.metaPixelId,
+        ga4_measurement_id: v.ga4MeasurementId,
       });
       reset(toInput(saved));
       toast.success('Booking settings saved');
@@ -142,6 +162,19 @@ function BookingForm({ settings, canEdit }: { settings: BookingSettings; canEdit
                 <Switch
                   label="Confirm bookings automatically"
                   description="Off: new bookings arrive as requests you approve. On: they go straight onto the schedule."
+                  checked={field.value}
+                  onCheckedChange={field.onChange}
+                  disabled={!canEdit}
+                />
+              )}
+            />
+            <Controller
+              control={control}
+              name="quoteSelfSchedule"
+              render={({ field }) => (
+                <Switch
+                  label="Customers can schedule approved quotes"
+                  description="After approving a quote online, the customer picks a time (and pays any deposit) using the rules below. You can turn it off per quote."
                   checked={field.value}
                   onCheckedChange={field.onChange}
                   disabled={!canEdit}
@@ -203,6 +236,64 @@ function BookingForm({ settings, canEdit }: { settings: BookingSettings; canEdit
             >
               <Input inputMode="numeric" {...register('maxConcurrent')} />
             </FormField>
+            {offersShop && shop.business_type === 'both' && (
+              <FormField
+                label="In-shop jobs at the same time"
+                error={errors.maxConcurrentShop?.message}
+                help="Optional lower limit for jobs at your shop (bays). Empty = the overall limit."
+              >
+                <Input inputMode="numeric" {...register('maxConcurrentShop')} />
+              </FormField>
+            )}
+            {offersMobile && shop.business_type === 'both' && (
+              <FormField
+                label="Mobile jobs at the same time"
+                error={errors.maxConcurrentMobile?.message}
+                help="Optional lower limit for jobs at customers’ addresses (vans). Empty = the overall limit."
+              >
+                <Input inputMode="numeric" {...register('maxConcurrentMobile')} />
+              </FormField>
+            )}
+            <div className="sm:col-span-2">
+              <Controller
+                control={control}
+                name="countMemberAvailability"
+                render={({ field }) => (
+                  <Switch
+                    label="Count technicians’ availability"
+                    description="Also limit bookings to the number of team members who take online bookings and aren’t off or busy (set per member in Team)."
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    disabled={!canEdit}
+                  />
+                )}
+              />
+            </div>
+            <div className="flex flex-col gap-3 sm:col-span-2">
+              <Controller
+                control={control}
+                name="allowMultiDay"
+                render={({ field }) => (
+                  <Switch
+                    label="Allow multi-day bookings"
+                    description="A service longer than the opening hours left that day (e.g. a coating) continues the next open day instead of being unbookable."
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    disabled={!canEdit}
+                  />
+                )}
+              />
+              {allowMultiDay && (
+                <FormField
+                  label="Longest booking (days)"
+                  error={errors.multiDayMaxDays?.message}
+                  help="2–7 days."
+                  className="max-w-xs"
+                >
+                  <Input inputMode="numeric" {...register('multiDayMaxDays')} />
+                </FormField>
+              )}
+            </div>
             <FormField
               label="Service area postal codes"
               error={errors.postalCodes?.message}
@@ -279,6 +370,34 @@ function BookingForm({ settings, canEdit }: { settings: BookingSettings; canEdit
               </div>
             )}
           </div>
+        </SectionCard>
+
+        <SectionCard
+          title="Tracking"
+          description="Measure your ads: your public booking page loads these tags only when you fill them in. They see page views, the start of a booking and each booking with its value (Google Analytics also sees deposits paid online) — we never give them names, emails, phone numbers or booking links."
+        >
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField
+              label="Meta (Facebook) Pixel ID"
+              error={errors.metaPixelId?.message}
+              help="Digits only, from Meta Events Manager."
+            >
+              <Input inputMode="numeric" autoComplete="off" {...register('metaPixelId')} />
+            </FormField>
+            <FormField
+              label="Google Analytics 4 measurement ID"
+              error={errors.ga4MeasurementId?.message}
+              help="Looks like G-XXXXXXXXXX (Admin → Data streams)."
+            >
+              <Input autoComplete="off" className="uppercase" {...register('ga4MeasurementId')} />
+            </FormField>
+          </div>
+          <p className="text-muted mt-3 text-xs">
+            Adding these tags lets Meta or Google set cookies on your booking page; mention them in
+            your website’s privacy policy. In Meta Events Manager, keep “Automatic advanced
+            matching” off for this pixel: it lets Meta pick up the contact details customers type
+            into the booking form.
+          </p>
         </SectionCard>
 
         <SectionCard title="Messages & cancellations">

@@ -154,6 +154,8 @@ struct NewJobScheduleStep: View {
                     .foregroundStyle(Theme.textTertiary)
                 JobDivider()
                 NewJobAvailabilityPanel(model: model)
+                JobDivider()
+                JobsRepeatPickerSection(model: model)
             } else {
                 Text("The job is saved as a request without a time. Schedule it from the job later.")
                     .font(Theme.Typography.footnote)
@@ -401,7 +403,9 @@ struct NewJobReviewStep: View {
 
     private var whenText: String {
         if model.scheduleLater { return "Request — not scheduled" }
-        return JobsFormatting.scheduleText(start: model.start, end: model.end, clock: model.clock)
+        let first = JobsFormatting.scheduleText(start: model.start, end: model.end, clock: model.clock)
+        guard model.createsSeries else { return first }
+        return first + " · " + model.repeatDraft.rule.summary
     }
 
     private var whereText: String {
@@ -440,9 +444,15 @@ struct NewJobReviewStep: View {
             AsyncButton(style: .themePrimary) {
                 await onCreate()
             } label: {
-                Text(model.hasStartedCreating ? "Retry" : "Create job")
+                Text(model.hasStartedCreating ? "Retry" : (model.createsSeries ? "Create repeating job" : "Create job"))
             }
-            .disabled(model.customer == nil)
+            .disabled(model.customer == nil || model.repeatProblem != nil)
+            if model.createsSeries {
+                Text("Every visit gets the chosen services at the customer's prices when it's created; a membership discount applies automatically.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

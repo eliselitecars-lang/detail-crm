@@ -77,7 +77,17 @@ describe('PrivacyPage', () => {
   it('names the providers, the opt-outs and account deletion', () => {
     renderPage('privacy', UNSET);
     const text = document.body.textContent ?? '';
-    for (const provider of ['Supabase', 'Stripe', 'Twilio', 'Resend', 'Cloudflare', 'Apple']) {
+    for (const provider of [
+      'Supabase',
+      'Stripe',
+      'Twilio',
+      'Resend',
+      'Cloudflare',
+      'Apple',
+      'Google Fonts',
+      'OpenStreetMap',
+      'NHTSA',
+    ]) {
       expect(text).toContain(provider);
     }
     expect(text).toContain('Reply STOP');
@@ -86,6 +96,18 @@ describe('PrivacyPage', () => {
     expect(text).toContain('More › Your account');
     expect(text).toContain('transfer ownership of the shop or delete it');
     expect(text).toContain('We do not sell personal information');
+  });
+
+  it('says what a shop’s own Meta Pixel / Google Analytics tag receives, and where it runs', () => {
+    renderPage('privacy', UNSET);
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('neither app contains our own advertising or analytics trackers');
+    expect(text).toContain('Meta or Google receive, as the shop’s providers');
+    expect(text).toContain('The tags run on no other page');
+    expect(text).toContain('automatic advanced matching');
+    // Location from the iPhone app: stamped on clock-in/out only, never sent from the day map.
+    expect(text).toContain('the day map shows your own position on your device');
+    expect(text).toContain('Clocking in or out in the web app records no location');
   });
 
   it('uses neutral wording when the operator details are not configured', () => {

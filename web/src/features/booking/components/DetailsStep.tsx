@@ -1,26 +1,20 @@
 import { Tag, X } from 'lucide-react';
 import { useState } from 'react';
-import {
-  Button,
-  Checkbox,
-  FormField,
-  Input,
-  PhoneInput,
-  RadioGroup,
-  Textarea,
-} from '@/components/ui';
+import { CustomFieldInputs } from '@/components/customFields';
+import { Button, Checkbox, FormField, Input, PhoneInput, Textarea } from '@/components/ui';
+import type { CustomFieldDraft } from '@/lib/customFields';
 import { errorMessage, sentenceCase } from '@/lib/errors';
 import { formatCents } from '@/lib/money';
 import { Banner } from '@/features/public-docs/shared/PublicPage';
-import { useValidateCoupon, type ShopProfile } from '../api';
+import { usePricePreview, useValidateCoupon, type BookingQuestion, type ShopProfile } from '../api';
 import {
+  answersFor,
   COUPON_RE,
   isNanpCountry,
   locationFor,
   validateDetails,
   type DetailsInput,
   type FieldErrors,
-  type LocationChoice,
 } from '../model';
 import { StepFrame } from './StepFrame';
 
@@ -31,6 +25,12 @@ export function DetailsStep({
   onChange,
   itemIds,
   categoryId,
+  linkToken,
+  questions,
+  answers,
+  onAnswersChange,
+  couponPrefill,
+  couponChecking = false,
   notice,
   onBack,
   onContinue,
@@ -43,23 +43,43 @@ export function DetailsStep({
   itemIds: string[];
   /** null when the shop has no vehicle categories. */
   categoryId: string | null;
+  linkToken: string | null;
+  /** The shop's booking questions for the chosen location. */
+  questions: readonly BookingQuestion[];
+  answers: CustomFieldDraft;
+  onAnswersChange: (next: CustomFieldDraft) => void;
+  /**
+   * A code from the link (?coupon=) the wizard has not applied yet: shown in
+   * the input while it is checked, and kept there when it was rejected or
+   * could not be checked.
+   */
+  couponPrefill: string;
+  /** The wizard is checking couponPrefill right now. */
+  couponChecking?: boolean;
   notice: string | null;
   onBack: () => void;
   onContinue: () => void;
 }) {
   const [errors, setErrors] = useState<FieldErrors<keyof DetailsInput>>({});
   const [submitted, setSubmitted] = useState(false);
-  const [codeInput, setCodeInput] = useState(value.couponCode);
+  const [codeInput, setCodeInput] = useState(value.couponCode || couponPrefill);
   const [codeError, setCodeError] = useState<string | null>(null);
+  const [answerErrors, setAnswerErrors] = useState<Record<string, string>>({});
   const coupon = useValidateCoupon(slug);
   const currency = profile.currency;
   const businessType = profile.business_type;
-  const mobile = locationFor(value, businessType) === 'mobile';
+  const location = locationFor(value, businessType);
+  const mobile = location === 'mobile';
 
   const update = (patch: Partial<DetailsInput>) => {
     const next = { ...value, ...patch };
     onChange(next);
     if (submitted) setErrors(validateDetails(next, businessType, profile.country));
+  };
+
+  const updateAnswers = (next: CustomFieldDraft) => {
+    onAnswersChange(next);
+    if (submitted) setAnswerErrors(answersFor(questions, next).errors);
   };
 
   const applyCoupon = () => {
@@ -70,14 +90,27 @@ export function DetailsStep({
     }
     setCodeError(null);
     coupon.mutate(
-      { serviceIds: itemIds, vehicleCategoryId: categoryId, code },
+      {
+        serviceIds: itemIds,
+        vehicleCategoryId: categoryId,
+        code,
+        locationType: location,
+        linkToken,
+      },
       {
         onSuccess: (preview) => {
           if (preview.valid) {
             update({ couponCode: preview.code ?? code });
           } else {
             update({ couponCode: '' });
-            setCodeError(sentenceCase(preview.message ?? 'This coupon code is not valid'));
+            setCodeError(
+              [
+                sentenceCase(preview.message ?? 'This coupon code is not valid'),
+                preview.restrictions_text,
+              ]
+                .filter(Boolean)
+                .join('. '),
+            );
           }
         },
       },
@@ -94,14 +127,31 @@ export function DetailsStep({
   const next = () => {
     setSubmitted(true);
     const found = validateDetails(value, businessType, profile.country);
+    const answerProblems = answersFor(questions, answers).errors;
     setErrors(found);
-    if (Object.keys(found).length === 0) onContinue();
+    setAnswerErrors(answerProblems);
+    if (Object.keys(found).length === 0 && Object.keys(answerProblems).length === 0) onContinue();
   };
 
+  // The applied code's discount (also when the wizard applied a code from the link).
+  const applied = usePricePreview(
+    slug,
+    value.couponCode !== ''
+      ? {
+          serviceIds: itemIds,
+          vehicleCategoryId: categoryId,
+          code: value.couponCode,
+          locationType: location,
+          linkToken,
+        }
+      : null,
+  );
   const preview =
     coupon.data?.valid && coupon.data.code?.toLowerCase() === value.couponCode.toLowerCase()
       ? coupon.data
-      : null;
+      : applied.data?.valid
+        ? applied.data
+        : null;
 
   return (
     <StepFrame
@@ -163,19 +213,6 @@ export function DetailsStep({
         />
       </div>
 
-      {businessType === 'both' && (
-        <RadioGroup<LocationChoice>
-          label="Where should we do the work?"
-          value={value.locationType}
-          onChange={(locationType) => update({ locationType })}
-          options={[
-            { value: 'shop', label: 'At the shop', description: 'Drop off your vehicle with us' },
-            { value: 'mobile', label: 'At my location', description: 'We come to you' },
-          ]}
-          variant="cards"
-          orientation="horizontal"
-        />
-      )}
       {mobile && (
         <fieldset className="flex flex-col gap-4">
           <legend className="text-ink mb-1 text-sm font-semibold">Service address</legend>
@@ -226,6 +263,20 @@ export function DetailsStep({
               />
             </FormField>
           </div>
+        </fieldset>
+      )}
+
+      {questions.length > 0 && (
+        <fieldset className="flex flex-col gap-3">
+          <legend className="text-ink mb-1 text-sm font-semibold">A few questions</legend>
+          <CustomFieldInputs
+            fields={questions}
+            value={answers}
+            onChange={updateAnswers}
+            errors={answerErrors}
+            showRequired
+            columns={2}
+          />
         </fieldset>
       )}
 
@@ -282,12 +333,13 @@ export function DetailsStep({
                 }}
                 maxLength={40}
                 autoComplete="off"
+                disabled={couponChecking}
                 className="min-w-0 flex-1"
               />
               <Button
                 variant="secondary"
-                onClick={applyCoupon}
-                loading={coupon.isPending}
+                onClick={() => applyCoupon()}
+                loading={coupon.isPending || couponChecking}
                 disabled={codeInput.trim() === ''}
               >
                 Apply

@@ -69,4 +69,4 @@ export function operatorNameStart(operator: LegalOperator): string {
 }
 
 /** When the text was last changed (update together with the wording in content.tsx). */
-export const LEGAL_LAST_UPDATED = { iso: '2026-09-27', label: 'September 27, 2026' } as const;
+export const LEGAL_LAST_UPDATED = { iso: '2026-09-28', label: 'September 28, 2026' } as const;

@@ -5,7 +5,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PostgrestError } from '@supabase/supabase-js';
-import { unwrap, unwrapRequired } from '@/lib/db';
+import { unwrap, unwrapRequired, type Row } from '@/lib/db';
 import { AppError, toAppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
@@ -303,10 +303,21 @@ export function useChecklistTemplates() {
 
 // ------------------------------------------------------------- services
 
+/** Columns added after the first release are optional here, so older forms keep the server defaults. */
+type ServiceOptionalColumns =
+  'commission_kind' | 'commission_value' | 'min_before_photos' | 'min_after_photos';
+
 export type ServiceColumns = Omit<
   ServiceRow,
-  'id' | 'shop_id' | 'created_at' | 'updated_at' | 'archived_at' | 'image_path'
->;
+  | 'id'
+  | 'shop_id'
+  | 'created_at'
+  | 'updated_at'
+  | 'archived_at'
+  | 'image_path'
+  | ServiceOptionalColumns
+> &
+  Partial<Pick<ServiceRow, ServiceOptionalColumns>>;
 
 export function useCreateService() {
   const { shopId } = useShop();
@@ -599,14 +610,16 @@ export interface ChecklistTemplateInput {
   name: string;
   serviceId: string | null;
   items: ChecklistItemPayload[];
+  /** Items must be ticked before the job can be completed (P-11). */
+  required: boolean;
 }
 
 export function useSaveChecklistTemplate() {
   const { shopId } = useShop();
   const invalidate = useInvalidateCatalog();
   return useMutation({
-    mutationFn: async ({ id, name, serviceId, items }: ChecklistTemplateInput) => {
-      const values = { name, service_id: serviceId, items };
+    mutationFn: async ({ id, name, serviceId, items, required }: ChecklistTemplateInput) => {
+      const values = { name, service_id: serviceId, items, required };
       if (id) {
         const rows = listOf(
           await supabase
@@ -639,6 +652,289 @@ export function useDeleteChecklistTemplate() {
           .select('id'),
       );
       if (rows.length === 0) throw notUpdated('checklist');
+    },
+    onSettled: invalidate,
+  });
+}
+
+// ------------------------------------------------ follow-ups (P-4, 0081/0086)
+
+export type ServiceFollowupRow = Row<'service_followups'>;
+
+export const followupKeys = {
+  list: (shopId: string, serviceId: string) =>
+    [...catalogKeys.all(shopId), 'followups', serviceId] as const,
+  switches: (shopId: string) => [...catalogKeys.all(shopId), 'followup-switches'] as const,
+};
+
+/** A service's follow-up messages (managers only: RLS). */
+export function useServiceFollowups(serviceId: string, enabled = true) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: followupKeys.list(shopId, serviceId),
+    enabled,
+    queryFn: async (): Promise<ServiceFollowupRow[]> =>
+      listOf(
+        await supabase
+          .from('service_followups')
+          .select('*')
+          .eq('shop_id', shopId)
+          .eq('service_id', serviceId)
+          .order('offset_days')
+          .order('sort')
+          .order('created_at'),
+      ),
+  });
+}
+
+/**
+ * The shop-wide on/off switch per channel: each channel's `service_followup`
+ * message template (seeded off). Follow-ups on a channel go out only while it
+ * is enabled.
+ */
+export function useFollowupSwitches(enabled = true) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: followupKeys.switches(shopId),
+    enabled,
+    queryFn: async (): Promise<Record<'sms' | 'email', boolean>> => {
+      const rows = listOf(
+        await supabase
+          .from('message_templates')
+          .select('channel, enabled')
+          .eq('shop_id', shopId)
+          .eq('key', 'service_followup'),
+      );
+      return {
+        sms: rows.some((r) => r.channel === 'sms' && r.enabled),
+        email: rows.some((r) => r.channel === 'email' && r.enabled),
+      };
+    },
+  });
+}
+
+export interface FollowupInput {
+  id?: string;
+  channel: 'sms' | 'email';
+  offsetDays: number;
+  subject: string | null;
+  body: string;
+  enabled: boolean;
+}
+
+export function useSaveFollowup(serviceId: string) {
+  const { shopId } = useShop();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, channel, offsetDays, subject, body, enabled }: FollowupInput) => {
+      const values = {
+        channel,
+        offset_days: offsetDays,
+        subject: channel === 'email' ? subject : null,
+        body,
+        enabled,
+      };
+      if (id) {
+        const rows = listOf(
+          await supabase
+            .from('service_followups')
+            .update(values)
+            .eq('shop_id', shopId)
+            .eq('id', id)
+            .select('id'),
+        );
+        if (rows.length === 0) throw notUpdated('follow-up');
+      } else {
+        unwrap(
+          await supabase
+            .from('service_followups')
+            .insert({ ...values, shop_id: shopId, service_id: serviceId }),
+        );
+      }
+    },
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: followupKeys.list(shopId, serviceId) }),
+  });
+}
+
+export function useToggleFollowup(serviceId: string) {
+  const { shopId } = useShop();
+  const queryClient = useQueryClient();
+  const key = followupKeys.list(shopId, serviceId);
+  return useMutation({
+    mutationFn: async ({ id, enabled }: { id: string; enabled: boolean }) => {
+      const rows = listOf(
+        await supabase
+          .from('service_followups')
+          .update({ enabled })
+          .eq('shop_id', shopId)
+          .eq('id', id)
+          .select('id'),
+      );
+      if (rows.length === 0) throw notUpdated('follow-up');
+    },
+    // Local, reversible, non-money: optimistic switch with rollback.
+    onMutate: async ({ id, enabled }) => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<ServiceFollowupRow[]>(key);
+      queryClient.setQueryData<ServiceFollowupRow[]>(key, (rows) =>
+        rows?.map((r) => (r.id === id ? { ...r, enabled } : r)),
+      );
+      return { previous };
+    },
+    onError: (_error, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(key, context.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+  });
+}
+
+export function useDeleteFollowup(serviceId: string) {
+  const { shopId } = useShop();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const rows = listOf(
+        await supabase
+          .from('service_followups')
+          .delete()
+          .eq('shop_id', shopId)
+          .eq('id', id)
+          .select('id'),
+      );
+      if (rows.length === 0) throw notUpdated('follow-up');
+    },
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: followupKeys.list(shopId, serviceId) }),
+  });
+}
+
+// ------------------------------------------- consumables (P-28, 0071/0077)
+
+export type ConsumableRow = Pick<
+  Row<'service_consumables'>,
+  'id' | 'product_id' | 'vehicle_category_id' | 'quantity'
+>;
+export type ProductOption = Pick<
+  Row<'products'>,
+  'id' | 'name' | 'unit' | 'sku' | 'active' | 'archived_at'
+>;
+
+export const consumableKeys = {
+  list: (shopId: string, serviceId: string) =>
+    [...catalogKeys.all(shopId), 'consumables', serviceId] as const,
+};
+
+export function useServiceConsumables(serviceId: string, enabled = true) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: consumableKeys.list(shopId, serviceId),
+    enabled,
+    queryFn: async (): Promise<ConsumableRow[]> =>
+      listOf(
+        await supabase
+          .from('service_consumables')
+          .select('id, product_id, vehicle_category_id, quantity')
+          .eq('shop_id', shopId)
+          .eq('service_id', serviceId)
+          .order('created_at'),
+      ),
+  });
+}
+
+/** Products for the consumables picker (inventory is managers only). */
+export function useProductOptions(enabled = true) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: [...shopKey(shopId, 'inventory'), 'options'] as const,
+    enabled,
+    queryFn: async (): Promise<ProductOption[]> =>
+      listOf(
+        await supabase
+          .from('products')
+          .select('id, name, unit, sku, active, archived_at')
+          .eq('shop_id', shopId)
+          .order('name'),
+      ),
+  });
+}
+
+export interface ConsumableInput {
+  id?: string;
+  productId: string;
+  vehicleCategoryId: string | null;
+  quantity: number;
+}
+
+export function useSaveConsumable(serviceId: string) {
+  const { shopId } = useShop();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, productId, vehicleCategoryId, quantity }: ConsumableInput) => {
+      const values = {
+        product_id: productId,
+        vehicle_category_id: vehicleCategoryId,
+        quantity,
+      };
+      if (id) {
+        const rows = listOf(
+          await supabase
+            .from('service_consumables')
+            .update(values)
+            .eq('shop_id', shopId)
+            .eq('id', id)
+            .select('id'),
+        );
+        if (rows.length === 0) throw notUpdated('material');
+      } else {
+        unwrap(
+          await supabase
+            .from('service_consumables')
+            .insert({ ...values, shop_id: shopId, service_id: serviceId }),
+        );
+      }
+    },
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: consumableKeys.list(shopId, serviceId) }),
+  });
+}
+
+export function useDeleteConsumable(serviceId: string) {
+  const { shopId } = useShop();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const rows = listOf(
+        await supabase
+          .from('service_consumables')
+          .delete()
+          .eq('shop_id', shopId)
+          .eq('id', id)
+          .select('id'),
+      );
+      if (rows.length === 0) throw notUpdated('material');
+    },
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: consumableKeys.list(shopId, serviceId) }),
+  });
+}
+
+// --------------------------------------- category bookable weekdays (P-17)
+
+export function useSaveCategoryWeekdays() {
+  const { shopId } = useShop();
+  const invalidate = useInvalidateCatalog();
+  return useMutation({
+    mutationFn: async ({ id, weekdays }: { id: string; weekdays: number[] | null }) => {
+      const rows = listOf(
+        await supabase
+          .from('service_categories')
+          .update({ bookable_weekdays: weekdays })
+          .eq('shop_id', shopId)
+          .eq('id', id)
+          .select('id'),
+      );
+      if (rows.length === 0) throw notUpdated('category');
     },
     onSettled: invalidate,
   });

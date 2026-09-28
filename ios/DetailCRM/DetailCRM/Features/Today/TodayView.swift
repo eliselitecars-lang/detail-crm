@@ -9,6 +9,10 @@
 //  address + Maps) and their jobs today. Everything is in the SHOP time
 //  zone and every figure comes from the server (`dashboard_summary`,
 //  `calendar_events`); the server also scopes what each role receives.
+//  Realtime changes to jobs, payments, time entries and notifications
+//  refresh the screen; the map button opens today's mobile route. Under
+//  the greeting: the shop's subscription status line when there is one
+//  (BillingNoticeBanner — neutral text only, never blocks the screen).
 //
 
 import SwiftUI
@@ -17,19 +21,29 @@ import DetailCore
 struct TodayView: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(JobsRealtimeHub.self) private var realtime
 
     @State private var state: LoadState<TodaySnapshot> = .idle
     @State private var unreadNotifications = 0
     @State private var declining: DashboardSummaryBookingRequest?
     @State private var confirmation: ConfirmationRequest?
+    @State private var billingNotice: ShopEntitlement.Notice?
 
     var body: some View {
         LoadStateView(state, loadingLabel: "Loading your day…", retry: { await load() }) { snapshot in
-            TodayContent(snapshot: snapshot, context: context, actions: actions)
+            TodayContent(snapshot: snapshot, context: context, actions: actions, billingNotice: billingNotice)
         }
         .screenBackground()
         .navigationTitle("Today")
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink {
+                    JobsDayMapView(day: appState.clock.startOfDay(Date()))
+                } label: {
+                    Image(systemName: "map")
+                }
+                .accessibilityLabel("Map of today's mobile jobs")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink {
                     NotificationsView()
@@ -40,12 +54,27 @@ struct TodayView: View {
             }
         }
         .task { await load() }
+        .billingNotice($billingNotice, shopID: appState.shop?.id)
+        // Live updates (debounced per table by the hub).
+        .onChange(of: realtimeKey) { _, _ in
+            Task { await load() }
+        }
         .sheet(item: $declining) { request in
             TodayDeclineSheet(request: request) { reason in
                 await decline(request, reason: reason)
             }
         }
         .confirmation($confirmation)
+    }
+
+    /// Moves whenever something Today shows changed elsewhere.
+    private var realtimeKey: [Int] {
+        [
+            realtime.revision(.jobs),
+            realtime.revision(.payments),
+            realtime.revision(.timeEntries),
+            realtime.revision(.notifications),
+        ]
     }
 
     // MARK: - Context & actions
@@ -161,11 +190,16 @@ struct TodayView: View {
 
     // MARK: - Shift clock
 
+    /// Starts the shift with the device location when the member allows it
+    /// (P-24, same as the Time Clock screen); without one the punch still
+    /// goes through.
     private func clockIn() async {
         do {
             let shopID = try appState.requireShopID()
-            try await DashboardService.clockIn(shopID: shopID)
-            toasts.show("Clocked in")
+            let locator = OpsClockLocationProvider.shared
+            let spot = await locator.currentSpot()
+            _ = try await TimeClockService.clockIn(shopID: shopID, jobID: nil, location: spot)
+            toasts.show(locator.punchMessage("Clocked in.", spot: spot))
         } catch {
             toasts.showError(error)
         }
@@ -182,11 +216,15 @@ struct TodayView: View {
         }
     }
 
+    /// Ends the shift (and any job clock; the server stamps the same
+    /// location on both).
     private func clockOut() async {
         do {
             let shopID = try appState.requireShopID()
-            try await DashboardService.clockOut(shopID: shopID)
-            toasts.show("Clocked out")
+            let locator = OpsClockLocationProvider.shared
+            let spot = await locator.currentSpot()
+            _ = try await TimeClockService.clockOut(shopID: shopID, kind: .shift, location: spot)
+            toasts.show(locator.punchMessage("Clocked out.", spot: spot))
         } catch {
             toasts.showError(error)
         }
@@ -202,11 +240,18 @@ private struct TodayContent: View {
     let snapshot: TodaySnapshot
     let context: TodayContext
     let actions: TodayActions
+    let billingNotice: ShopEntitlement.Notice?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
                 AnyView(TodayGreeting(context: context))
+                if let billingNotice {
+                    AnyView(
+                        BillingNoticeBanner(notice: billingNotice, clock: context.clock)
+                            .cardStyle(padding: Theme.Spacing.md)
+                    )
+                }
                 if snapshot.summary.isOwnScope {
                     AnyView(TodayTechnicianSections(snapshot: snapshot, context: context, actions: actions))
                 } else {

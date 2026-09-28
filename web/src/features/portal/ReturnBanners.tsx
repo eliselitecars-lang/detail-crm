@@ -38,6 +38,7 @@ export function ReturnBanners({ userId, shopName }: { userId: string; shopName: 
     if (initial.membership !== 'active' || userId === '') return;
     const timer = setTimeout(() => {
       void queryClient.invalidateQueries({ queryKey: portalKeys.overview(userId) });
+      void queryClient.invalidateQueries({ queryKey: portalKeys.memberships(userId) });
     }, MEMBERSHIP_REFRESH_MS);
     return () => clearTimeout(timer);
   }, [initial.membership, userId, queryClient]);

@@ -16,6 +16,9 @@ export const ENV_NAMES = [
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
   "STRIPE_PUBLISHABLE_KEY",
+  // Platform (non-Connect) webhook endpoint of the billing-webhook function:
+  // shop subscription billing. Only needed once billing is turned on.
+  "STRIPE_BILLING_WEBHOOK_SECRET",
   "PLATFORM_FEE_BPS",
   "TWILIO_ACCOUNT_SID",
   "TWILIO_AUTH_TOKEN",
@@ -26,6 +29,17 @@ export const ENV_NAMES = [
   // Optional.
   "CORS_ALLOWED_ORIGINS",
   "FUNCTIONS_PUBLIC_URL",
+  // Optional: APNs push for the staff iPhone app (push function; unset = no pushes).
+  "APNS_KEY_ID",
+  "APNS_TEAM_ID",
+  "APNS_PRIVATE_KEY",
+  "APNS_TOPIC",
+  // Optional feature flags (unset = off): self-serve SMS numbers (sms-provisioning).
+  "SMS_PROVISIONING_ENABLED",
+  // Optional (unset = off): Stripe Tax on shop subscription Checkout (billing).
+  "BILLING_AUTOMATIC_TAX",
+  "TWILIO_ISV_ENABLED",
+  "TWILIO_PRIMARY_CUSTOMER_PROFILE_SID",
 ] as const;
 
 export type EnvName = typeof ENV_NAMES[number];
@@ -80,6 +94,17 @@ export interface TwilioEnv {
 export interface ResendEnv {
   apiKey: string;
   from: string;
+}
+
+export interface ApnsEnv {
+  /** 10-character key id of the APNs auth key (.p8). */
+  keyId: string;
+  /** 10-character Apple Developer team id. */
+  teamId: string;
+  /** PKCS#8 PEM of the .p8 key (literal "\n" sequences are accepted). */
+  privateKeyPem: string;
+  /** apns-topic: the iPhone app's bundle id. */
+  topic: string;
 }
 
 const MIN_CRON_SECRET_LENGTH = 24;
@@ -171,6 +196,19 @@ export class Env {
     return secret;
   }
 
+  /**
+   * Signing secret of the PLATFORM webhook endpoint (billing-webhook: shop
+   * subscription billing). A different endpoint, so a different secret, from
+   * the Connect endpoint's STRIPE_WEBHOOK_SECRET.
+   */
+  stripeBillingWebhookSecret(): string {
+    const secret = this.required("STRIPE_BILLING_WEBHOOK_SECRET");
+    if (!/^whsec_[A-Za-z0-9+/=_-]+$/.test(secret)) {
+      throw new EnvError("STRIPE_BILLING_WEBHOOK_SECRET", "invalid", "expected whsec_ secret");
+    }
+    return secret;
+  }
+
   /** Platform application fee in basis points (0–10000). Unset = 0. */
   platformFeeBps(): number {
     const raw = this.optional("PLATFORM_FEE_BPS");
@@ -223,6 +261,86 @@ export class Env {
       );
     }
     return secret;
+  }
+
+  /**
+   * APNs provider credentials (push function). Every variable is required
+   * once push is used; EnvError names the missing or malformed one.
+   */
+  apns(): ApnsEnv {
+    const keyId = this.required("APNS_KEY_ID");
+    if (!/^[A-Z0-9]{10}$/.test(keyId)) {
+      throw new EnvError("APNS_KEY_ID", "invalid", "expected the 10-character key id");
+    }
+    const teamId = this.required("APNS_TEAM_ID");
+    if (!/^[A-Z0-9]{10}$/.test(teamId)) {
+      throw new EnvError("APNS_TEAM_ID", "invalid", "expected the 10-character team id");
+    }
+    // Secrets are often stored on one line: accept literal "\n" separators.
+    const privateKeyPem = this.required("APNS_PRIVATE_KEY").replace(/\\n/g, "\n");
+    if (
+      !/^-----BEGIN PRIVATE KEY-----\s*[A-Za-z0-9+/=\s]+-----END PRIVATE KEY-----$/.test(
+        privateKeyPem,
+      )
+    ) {
+      throw new EnvError(
+        "APNS_PRIVATE_KEY",
+        "invalid",
+        "expected the PEM contents of the .p8 file (BEGIN PRIVATE KEY)",
+      );
+    }
+    const topic = this.required("APNS_TOPIC");
+    if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(topic)) {
+      throw new EnvError("APNS_TOPIC", "invalid", "expected the app's bundle id");
+    }
+    return { keyId, teamId, privateKeyPem, topic };
+  }
+
+  /** A feature flag: on only when the variable is exactly "true" (case-insensitive). */
+  flag(name: "SMS_PROVISIONING_ENABLED" | "TWILIO_ISV_ENABLED" | "BILLING_AUTOMATIC_TAX"): boolean {
+    return this.optional(name)?.toLowerCase() === "true";
+  }
+
+  /** Self-serve SMS numbers (the platform Twilio account can buy numbers). */
+  smsProvisioningEnabled(): boolean {
+    return this.flag("SMS_PROVISIONING_ENABLED");
+  }
+
+  /**
+   * Stripe Tax on shop subscription Checkout (billing): the platform Stripe
+   * account must have Stripe Tax set up. Off unless exactly "true".
+   */
+  billingAutomaticTax(): boolean {
+    return this.flag("BILLING_AUTOMATIC_TAX");
+  }
+
+  /** A2P 10DLC registration (the platform Twilio account is an approved ISV). */
+  twilioIsvEnabled(): boolean {
+    return this.flag("TWILIO_ISV_ENABLED");
+  }
+
+  /** The ISV's primary Trust Hub customer profile (BU...), required for 10DLC. */
+  twilioPrimaryCustomerProfileSid(): string {
+    const sid = this.required("TWILIO_PRIMARY_CUSTOMER_PROFILE_SID");
+    if (!/^BU[0-9a-fA-F]{32}$/.test(sid)) {
+      throw new EnvError(
+        "TWILIO_PRIMARY_CUSTOMER_PROFILE_SID",
+        "invalid",
+        "expected BU followed by 32 hex chars",
+      );
+    }
+    return sid;
+  }
+
+  /**
+   * Public origin of the Supabase API (storage links handed to browsers):
+   * FUNCTIONS_PUBLIC_URL without "/functions/v1" when it is set (tunnels,
+   * the local stack), else SUPABASE_URL.
+   */
+  publicSupabaseUrl(): string {
+    const functions = this.functionsPublicUrl();
+    const stripped = functions.replace(/\/functions\/v1$/, "");
+    return stripped === functions ? this.supabase().url : stripped;
   }
 
   /** Extra browser origins allowed by CORS (comma-separated exact origins). */

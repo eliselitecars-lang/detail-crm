@@ -161,6 +161,7 @@ export type NewJobFields = Pick<
   | 'discount_kind'
   | 'discount_value'
   | 'deposit_required_cents'
+  | 'sold_by_member_id'
 >;
 
 export interface CreateJobInput {
@@ -172,12 +173,15 @@ export interface CreateJobInput {
 /** Progress of a (possibly partially failed) creation; pass it back to retry. */
 export interface CreateJobProgress {
   jobId: string | null;
+  /** "Sold by: Nobody" applied (see createJobStaged). */
+  soldBySaved: boolean;
   linesSaved: boolean;
   assignmentsSaved: boolean;
 }
 
 export const EMPTY_PROGRESS: CreateJobProgress = {
   jobId: null,
+  soldBySaved: false,
   linesSaved: false,
   assignmentsSaved: false,
 };
@@ -225,6 +229,29 @@ export async function createJobStaged(
     } catch (error) {
       throw new CreateJobError(
         `The job couldn’t be created: ${causeMessage(error)}`,
+        progress,
+        error,
+      );
+    }
+  }
+  if (!progress.soldBySaved) {
+    // jobs_60_sold_by_default (0065) credits the creating member when a staff
+    // job is inserted without a seller, so "Nobody" is applied afterwards,
+    // as the job page's Sold-by field does.
+    try {
+      if (input.job.sold_by_member_id === null) {
+        unwrap(
+          await supabase
+            .from('jobs')
+            .update({ sold_by_member_id: null })
+            .eq('shop_id', shopId)
+            .eq('id', jobId),
+        );
+      }
+      progress.soldBySaved = true;
+    } catch (error) {
+      throw new CreateJobError(
+        `The job was created, but “Sold by: Nobody” couldn’t be saved: ${causeMessage(error)}`,
         progress,
         error,
       );

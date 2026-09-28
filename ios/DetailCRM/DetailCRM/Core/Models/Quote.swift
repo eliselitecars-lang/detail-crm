@@ -65,6 +65,14 @@ struct Quote: Codable, Identifiable, Hashable, Sendable {
     var expiredAt: Date?
     var convertedAt: Date?
     var convertedJobID: UUID?
+    /// The proposal option the customer chose (P-15); nil until then (the
+    /// lowest-sort option is counted meanwhile).
+    var selectedOptionID: UUID?
+    /// The customer may schedule this quote online once approved (P-16;
+    /// the shop's booking settings must allow it too).
+    var selfSchedule: Bool
+    /// When the customer scheduled it on the quote page (server-set).
+    var selfScheduledAt: Date?
     var createdAt: Date
     var updatedAt: Date
 
@@ -96,6 +104,9 @@ struct Quote: Codable, Identifiable, Hashable, Sendable {
         case expiredAt = "expired_at"
         case convertedAt = "converted_at"
         case convertedJobID = "converted_job_id"
+        case selectedOptionID = "selected_option_id"
+        case selfSchedule = "self_schedule"
+        case selfScheduledAt = "self_scheduled_at"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -106,6 +117,7 @@ struct Quote: Codable, Identifiable, Hashable, Sendable {
         "subtotal_cents", "discount_cents", "tax_cents", "total_cents", "public_token",
         "sent_at", "viewed_at", "approved_at", "approved_by_name", "declined_at",
         "declined_reason", "expired_at", "converted_at", "converted_job_id",
+        "selected_option_id", "self_schedule", "self_scheduled_at",
         "created_at", "updated_at",
     ].joined(separator: ",")
 
@@ -119,6 +131,23 @@ struct Quote: Codable, Identifiable, Hashable, Sendable {
     var canReviseToDraft: Bool {
         status == .sent || status == .viewed || status == .approved
             || status == .declined || status == .expired
+    }
+
+    /// The option the quote's totals count: the customer's choice, else the
+    /// first option (lowest sort) — `quote_effective_option` on the server.
+    func effectiveOptionID(options: [MoneyQuoteOption]) -> UUID? {
+        if let selectedOptionID, options.contains(where: { $0.id == selectedOptionID }) {
+            return selectedOptionID
+        }
+        return MoneyQuoteOption.ordered(options).first?.id
+    }
+
+    /// Whether a line counts toward the quote total: shared or of the
+    /// effective option, and (for optional upsells) picked.
+    func counts(_ line: QuoteLineItem, effectiveOptionID: UUID?) -> Bool {
+        guard !line.isOptional || line.isSelected else { return false }
+        guard let optionID = line.optionID else { return true }
+        return optionID == effectiveOptionID
     }
 }
 
@@ -144,6 +173,13 @@ struct QuoteLineItem: Codable, Identifiable, Hashable, Sendable {
     var sort: Int
     /// Generated column: round(quantity × unit price) − discount.
     var totalCents: Int?
+    /// The quote's document discount applies to this line (default true).
+    var discountEligible: Bool
+    /// The proposal option this line belongs to; nil = shared by every option.
+    var optionID: UUID?
+    /// A preset fee line (`shop_fees`), added with `add_fee_line`.
+    var feeID: UUID?
+    var membershipID: UUID?
     var createdAt: Date
     var updatedAt: Date
 
@@ -164,6 +200,10 @@ struct QuoteLineItem: Codable, Identifiable, Hashable, Sendable {
         case isSelected = "selected"
         case sort
         case totalCents = "total_cents"
+        case discountEligible = "discount_eligible"
+        case optionID = "option_id"
+        case feeID = "fee_id"
+        case membershipID = "membership_id"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -171,7 +211,8 @@ struct QuoteLineItem: Codable, Identifiable, Hashable, Sendable {
     static let selectColumns = [
         "id", "shop_id", "quote_id", "service_id", "vehicle_id", "name", "description",
         "quantity", "unit_price_cents", "discount_cents", "taxable", "duration_minutes",
-        "optional", "selected", "sort", "total_cents", "created_at", "updated_at",
+        "optional", "selected", "sort", "total_cents", "discount_eligible", "option_id",
+        "fee_id", "membership_id", "created_at", "updated_at",
     ].joined(separator: ",")
 }
 
@@ -383,6 +424,21 @@ struct QuoteDraftLine: Hashable, Sendable {
     var isSelected: Bool = false
     /// Informational note from pricing (e.g. "Included with … membership").
     var pricingNote: String?
+    /// The builder option (`MoneyQuoteOption.Draft.localID`) this line
+    /// belongs to; nil = shared by every option.
+    var optionLocalID: UUID?
+    /// A preset fee line. New fee lines are added by `add_fee_line` on save,
+    /// so the server prices them.
+    var feeID: UUID?
+    /// A new fee line nobody edited yet: saved exactly as the server adds it
+    /// (only its place and option are set afterwards).
+    var feeIsPristine: Bool = false
+    /// Kept from the saved line (the server's value); preview only.
+    var discountEligible: Bool = true
+    /// The option the saved row is on right now (nil = shared, or not
+    /// saved yet). A save uses it to take kept lines off an option before
+    /// that option is deleted (the delete cascades to its lines).
+    var savedOptionID: UUID?
 
     init(
         id: UUID? = nil,
@@ -396,7 +452,10 @@ struct QuoteDraftLine: Hashable, Sendable {
         durationMinutes: Int = 0,
         isOptional: Bool = false,
         isSelected: Bool = false,
-        pricingNote: String? = nil
+        pricingNote: String? = nil,
+        optionLocalID: UUID? = nil,
+        feeID: UUID? = nil,
+        discountEligible: Bool = true
     ) {
         self.id = id
         self.serviceID = serviceID
@@ -410,9 +469,24 @@ struct QuoteDraftLine: Hashable, Sendable {
         self.isOptional = isOptional
         self.isSelected = isSelected
         self.pricingNote = pricingNote
+        self.optionLocalID = optionLocalID
+        self.feeID = feeID
+        self.discountEligible = discountEligible
     }
 
-    init(line: QuoteLineItem) {
+    /// A new line for a preset fee (priced by the server when saved).
+    init(fee: JobsShopFee, optionLocalID: UUID?) {
+        self.init(
+            name: fee.name,
+            unitPriceCents: fee.amountCents,
+            taxable: fee.taxable,
+            optionLocalID: optionLocalID,
+            feeID: fee.id
+        )
+        self.feeIsPristine = true
+    }
+
+    init(line: QuoteLineItem, optionLocalID: UUID?) {
         self.init(
             id: line.id,
             serviceID: line.serviceID,
@@ -424,8 +498,12 @@ struct QuoteDraftLine: Hashable, Sendable {
             taxable: line.taxable,
             durationMinutes: line.durationMinutes,
             isOptional: line.isOptional,
-            isSelected: line.isSelected
+            isSelected: line.isSelected,
+            optionLocalID: optionLocalID,
+            feeID: line.feeID,
+            discountEligible: line.discountEligible
         )
+        self.savedOptionID = line.optionID
     }
 
     /// For the preview only: optional lines count only when selected, the
@@ -437,7 +515,8 @@ struct QuoteDraftLine: Hashable, Sendable {
             discountCents: discountCents,
             taxable: taxable,
             isOptional: isOptional,
-            isSelected: isOptional ? isSelected : true
+            isSelected: isOptional ? isSelected : true,
+            discountEligible: discountEligible
         )
     }
 }
@@ -461,14 +540,40 @@ struct QuoteDraft: Hashable, Sendable {
     var taxRateBps: Int = 0
     /// Line ids that were saved when editing began (to delete removed ones).
     var originalLineIDs: [UUID] = []
+    /// Proposal options (P-15), in display order; empty = a plain quote.
+    var options: [MoneyQuoteOption.Draft] = []
+    /// Option ids that were saved when editing began (to delete removed ones).
+    var originalOptionIDs: [UUID] = []
+    /// The customer's choice (saved quotes), kept for the preview.
+    var selectedOptionID: UUID?
+    /// Ids of option / line inserts whose outcome is unknown (the request
+    /// failed, perhaps after the server committed it). The next save checks
+    /// which exist before inserting anything, so a retry never duplicates.
+    var unconfirmedInsertIDs: Set<UUID> = []
 
     init() {}
 
-    init(quote: Quote, lines: [QuoteLineItem], customer: QuoteCustomerRef?, vehicle: QuoteVehicleRef?) {
+    init(
+        quote: Quote,
+        lines: [QuoteLineItem],
+        options: [MoneyQuoteOption] = [],
+        customer: QuoteCustomerRef?,
+        vehicle: QuoteVehicleRef?
+    ) {
         self.quoteID = quote.id
         self.customer = customer
         self.vehicle = vehicle
-        self.lines = lines.map { QuoteDraftLine(line: $0) }
+        let drafts = MoneyQuoteOption.ordered(options).map { MoneyQuoteOption.Draft(option: $0) }
+        var localByID: [UUID: UUID] = [:]
+        for draft in drafts {
+            if let id = draft.id { localByID[id] = draft.localID }
+        }
+        self.options = drafts
+        self.originalOptionIDs = drafts.compactMap { $0.id }
+        self.selectedOptionID = quote.selectedOptionID
+        self.lines = lines.map { line in
+            QuoteDraftLine(line: line, optionLocalID: line.optionID.flatMap { localByID[$0] })
+        }
         self.discountKind = quote.discountKind
         self.discountValue = quote.discountValue
         self.validUntil = quote.validUntil
@@ -479,12 +584,258 @@ struct QuoteDraft: Hashable, Sendable {
         self.originalLineIDs = lines.map { $0.id }
     }
 
-    /// Client-side estimate for the builder (labelled as such in the UI).
+    /// The option the quote total counts (the customer's choice, else the
+    /// first option); nil for a quote without options.
+    var effectiveOptionLocalID: UUID? {
+        if let selectedOptionID, let chosen = options.first(where: { $0.id == selectedOptionID }) {
+            return chosen.localID
+        }
+        return options.first?.localID
+    }
+
+    /// Lines shown for one builder segment: the shared lines (nil) or one
+    /// option's own lines.
+    func lines(inSegment optionLocalID: UUID?) -> [QuoteDraftLine] {
+        lines.filter { $0.optionLocalID == optionLocalID }
+    }
+
+    /// Client-side estimate for the builder (labelled as such in the UI):
+    /// shared lines plus the counted option's lines, like the server.
     var previewTotals: DocumentTotals {
-        DocumentTotals(
-            lines: lines.map { $0.totalsLine },
+        previewTotals(forOption: effectiveOptionLocalID)
+    }
+
+    /// Estimate for one option (shared lines + that option's lines, same
+    /// discount and tax). With no options every line is shared.
+    func previewTotals(forOption optionLocalID: UUID?) -> DocumentTotals {
+        let counted = lines.filter { $0.optionLocalID == nil || $0.optionLocalID == optionLocalID }
+        return DocumentTotals(
+            lines: counted.map { $0.totalsLine },
             discount: discountKind.documentDiscount(value: discountValue),
             taxRateBps: taxRateBps
         )
+    }
+}
+
+// MARK: - Saving the draft (retry-safe)
+
+extension QuoteDraft {
+
+    /// The requests one save makes against one quote. QuoteService supplies
+    /// the Supabase ones; keeping them apart lets the order and the
+    /// bookkeeping in `applyEdits(using:)` be exercised without a server.
+    struct SaveRequests {
+        /// Of `ids`, the quote's options that exist.
+        var existingOptionIDs: (_ ids: [UUID]) async throws -> Set<UUID>
+        /// Of `ids`, the quote's lines that exist, with their option.
+        var existingLines: (_ ids: [UUID]) async throws -> [SavedLineRef]
+        var deleteLines: (_ ids: [UUID]) async throws -> Void
+        var deleteOptions: (_ ids: [UUID]) async throws -> Void
+        var updateOption: (_ id: UUID, _ option: MoneyQuoteOption.Draft, _ sort: Int) async throws -> Void
+        /// Inserts an option with the id chosen here.
+        var insertOption: (_ id: UUID, _ option: MoneyQuoteOption.Draft, _ sort: Int) async throws -> Void
+        /// Updates a saved line. `placementOnly` writes just its sort and
+        /// option (a preset-fee line nobody edited keeps the server's
+        /// pricing).
+        var updateLine: (_ id: UUID, _ line: QuoteDraftLine, _ sort: Int, _ optionID: UUID?, _ placementOnly: Bool) async throws -> Void
+        /// Inserts custom lines (one request) with the ids chosen here.
+        var insertLines: (_ lines: [NewLine]) async throws -> Void
+        /// `add_fee_line`: the server adds and prices the fee; returns the
+        /// new line's id.
+        var addFeeLine: (_ feeID: UUID) async throws -> UUID
+        /// Writes the quote's own fields.
+        var updateQuote: () async throws -> Void
+    }
+
+    /// A saved line found while confirming an uncertain insert.
+    struct SavedLineRef: Hashable, Sendable {
+        var id: UUID
+        var optionID: UUID?
+    }
+
+    /// A custom line to insert.
+    struct NewLine: Hashable, Sendable {
+        var id: UUID
+        var line: QuoteDraftLine
+        var sort: Int
+        var optionID: UUID?
+    }
+
+    /// Saved lines the builder removed.
+    var removedLineIDs: [UUID] {
+        let kept = Set(lines.compactMap { $0.id })
+        return originalLineIDs.filter { !kept.contains($0) }
+    }
+
+    /// Saved options the builder removed.
+    var removedOptionIDs: [UUID] {
+        let kept = Set(options.compactMap { $0.id })
+        return originalOptionIDs.filter { !kept.contains($0) }
+    }
+
+    /// Brings the server in line with the draft, one request at a time, and
+    /// records every row it creates or deletes in the draft as it goes
+    /// (ids, `originalLineIDs` / `originalOptionIDs`). When a request fails
+    /// the draft still says what is on the server, so saving it again
+    /// finishes the job instead of adding the same options and lines twice.
+    ///
+    /// Order: removed lines go first, then the removed options (kept lines
+    /// are taken off them first, as deleting an option deletes its lines),
+    /// so a replaced option never trips the 4-option limit; then options,
+    /// saved lines, the quote, new lines and new fee lines.
+    mutating func applyEdits(using requests: SaveRequests) async throws {
+        try await confirmUncertainInserts(using: requests)
+
+        let removedLines = removedLineIDs
+        if !removedLines.isEmpty {
+            try await requests.deleteLines(removedLines)
+            let gone = Set(removedLines)
+            originalLineIDs.removeAll { gone.contains($0) }
+        }
+
+        // Lines (by localID) already written with their final place.
+        var placed = Set<UUID>()
+        let removedOptions = removedOptionIDs
+        if !removedOptions.isEmpty {
+            let gone = Set(removedOptions)
+            let savedOptionIDs = savedOptionIDsByLocalID
+            for index in lines.indices {
+                let line = lines[index]
+                guard let id = line.id, let current = line.savedOptionID, gone.contains(current) else { continue }
+                // Its option is saved (or it becomes shared): final place.
+                // Its option is new: shared until that option exists.
+                let target = line.optionLocalID.flatMap { savedOptionIDs[$0] }
+                try await requests.updateLine(id, line, index + 1, target, line.feeIsPristine)
+                lines[index].savedOptionID = target
+                if line.optionLocalID == nil || target != nil {
+                    placed.insert(line.localID)
+                }
+            }
+            try await requests.deleteOptions(removedOptions)
+            originalOptionIDs.removeAll { gone.contains($0) }
+        }
+
+        for index in options.indices {
+            let option = options[index]
+            if let id = option.id {
+                try await requests.updateOption(id, option, index + 1)
+            } else {
+                let id = option.localID
+                unconfirmedInsertIDs.insert(id)
+                try await requests.insertOption(id, option, index + 1)
+                unconfirmedInsertIDs.remove(id)
+                options[index].id = id
+                originalOptionIDs.append(id)
+            }
+        }
+        let optionIDs = savedOptionIDsByLocalID
+
+        // Lines carry no vehicle of their own (the quote's applies), so they
+        // go before the quote: a customer change can't trip the "line
+        // vehicle belongs to the customer" check.
+        for index in lines.indices {
+            let line = lines[index]
+            guard let id = line.id, !placed.contains(line.localID) else { continue }
+            let optionID = line.optionLocalID.flatMap { optionIDs[$0] }
+            try await requests.updateLine(id, line, index + 1, optionID, line.feeIsPristine)
+            lines[index].savedOptionID = optionID
+        }
+
+        try await requests.updateQuote()
+
+        var inserts: [NewLine] = []
+        for (index, line) in lines.enumerated() where line.id == nil && line.feeID == nil {
+            inserts.append(NewLine(
+                id: line.localID,
+                line: line,
+                sort: index + 1,
+                optionID: line.optionLocalID.flatMap { optionIDs[$0] }
+            ))
+        }
+        if !inserts.isEmpty {
+            let ids = inserts.map { $0.id }
+            unconfirmedInsertIDs.formUnion(ids)
+            try await requests.insertLines(inserts)
+            unconfirmedInsertIDs.subtract(ids)
+            let byID = Dictionary(inserts.map { ($0.id, $0.optionID) }, uniquingKeysWith: { first, _ in first })
+            for index in lines.indices where lines[index].id == nil && lines[index].feeID == nil {
+                let id = lines[index].localID
+                guard let optionID = byID[id] else { continue }
+                lines[index].id = id
+                lines[index].savedOptionID = optionID
+                originalLineIDs.append(id)
+            }
+        }
+
+        // Preset fees are added (and priced) by the server, then placed.
+        for index in lines.indices {
+            guard lines[index].id == nil, let feeID = lines[index].feeID else { continue }
+            let id = try await requests.addFeeLine(feeID)
+            lines[index].id = id
+            lines[index].savedOptionID = nil
+            originalLineIDs.append(id)
+            let line = lines[index]
+            let optionID = line.optionLocalID.flatMap { optionIDs[$0] }
+            try await requests.updateLine(id, line, index + 1, optionID, line.feeIsPristine)
+            lines[index].savedOptionID = optionID
+        }
+    }
+
+    /// Saved option ids by builder `localID`.
+    private var savedOptionIDsByLocalID: [UUID: UUID] {
+        var ids: [UUID: UUID] = [:]
+        for option in options {
+            if let id = option.id { ids[option.localID] = id }
+        }
+        return ids
+    }
+
+    /// Marks the uncertain inserts that did reach the server as saved (rows
+    /// the builder no longer has are then deleted like any removed row).
+    private mutating func confirmUncertainInserts(using requests: SaveRequests) async throws {
+        guard !unconfirmedInsertIDs.isEmpty else { return }
+        let ids = Array(unconfirmedInsertIDs)
+        let foundOptions = try await requests.existingOptionIDs(ids)
+        let foundLines = try await requests.existingLines(ids)
+        for id in foundOptions {
+            if let index = options.firstIndex(where: { $0.id == nil && $0.localID == id }) {
+                options[index].id = id
+            }
+            if !originalOptionIDs.contains(id) { originalOptionIDs.append(id) }
+        }
+        for found in foundLines {
+            if let index = lines.firstIndex(where: { $0.id == nil && $0.localID == found.id }) {
+                lines[index].id = found.id
+                lines[index].savedOptionID = found.optionID
+            }
+            if !originalLineIDs.contains(found.id) { originalLineIDs.append(found.id) }
+        }
+        unconfirmedInsertIDs = []
+    }
+
+    /// Takes what a failed save recorded (quote id, saved rows) into this
+    /// draft, matching options and lines by `localID`, so the next save
+    /// continues where that one stopped. Edits made meanwhile are kept.
+    mutating func adoptSaveProgress(from saved: QuoteDraft) {
+        quoteID = saved.quoteID
+        originalLineIDs = saved.originalLineIDs
+        originalOptionIDs = saved.originalOptionIDs
+        unconfirmedInsertIDs = saved.unconfirmedInsertIDs
+        var optionIDs: [UUID: UUID] = [:]
+        for option in saved.options {
+            if let id = option.id { optionIDs[option.localID] = id }
+        }
+        for index in options.indices where options[index].id == nil {
+            options[index].id = optionIDs[options[index].localID]
+        }
+        var savedLines: [UUID: QuoteDraftLine] = [:]
+        for line in saved.lines {
+            savedLines[line.localID] = line
+        }
+        for index in lines.indices {
+            guard let savedLine = savedLines[lines[index].localID], let id = savedLine.id else { continue }
+            lines[index].id = id
+            lines[index].savedOptionID = savedLine.savedOptionID
+        }
     }
 }

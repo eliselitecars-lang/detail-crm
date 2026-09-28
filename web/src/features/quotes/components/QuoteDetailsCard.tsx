@@ -1,9 +1,17 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { Button, DateInput, FormField, SectionCard, Textarea, useToast } from '@/components/ui';
+import {
+  Button,
+  DateInput,
+  FormField,
+  SectionCard,
+  Switch,
+  Textarea,
+  useToast,
+} from '@/components/ui';
 import { formatLocalDate, isLocalDate } from '@/lib/dates';
 import { formatPhone } from '@/lib/phone';
-import { useUpdateQuote, type QuotePatch, type QuoteRow } from '../api';
+import { useSelfScheduleSettings, useUpdateQuote, type QuotePatch, type QuoteRow } from '../api';
 import type { PickerCustomer } from '../shared/api';
 import { VehicleSelect } from '../shared/CustomerPicker';
 import { customerName } from '../shared/format';
@@ -168,6 +176,7 @@ export function QuoteDetailsCard({ quote, customer, editable, today }: QuoteDeta
             onChange={(event) => setDraft({ ...draft, internalNotes: event.target.value })}
           />
         </FormField>
+        <SelfScheduleSwitch quote={quote} canChange={editable || quote.status === 'approved'} />
         {tooLong && (
           <p role="alert" className="text-danger-ink text-sm">
             Notes and terms are limited to 20,000 characters.
@@ -175,5 +184,54 @@ export function QuoteDetailsCard({ quote, customer, editable, today }: QuoteDeta
         )}
       </div>
     </SectionCard>
+  );
+}
+
+/**
+ * Per-quote opt-out of customer self-scheduling (quotes.self_schedule). Saved
+ * at once; works on approved quotes too (the customer's page offers times
+ * only while the quote is approved and every switch is on).
+ */
+function SelfScheduleSwitch({ quote, canChange }: { quote: QuoteRow; canChange: boolean }) {
+  const toast = useToast();
+  const update = useUpdateQuote(quote.id);
+  const settings = useSelfScheduleSettings();
+  const shopOn = settings.data?.quoteSelfSchedule === true && settings.data.bookingEnabled;
+  const converted = quote.status === 'converted';
+
+  const toggle = async (next: boolean) => {
+    try {
+      await update.mutateAsync({ self_schedule: next });
+      toast.success(
+        next ? 'The customer can pick a time once approved' : 'Online scheduling turned off',
+      );
+    } catch (error) {
+      toast.error(error);
+    }
+  };
+
+  let description: string;
+  if (converted) {
+    description = quote.self_scheduled_at
+      ? 'The customer picked a time for this quote.'
+      : 'This quote was converted to a job.';
+  } else if (settings.isPending) {
+    description = 'Checking your booking settings…';
+  } else if (!shopOn) {
+    description =
+      'Off for your shop: turn on online booking and “Customers can schedule approved quotes” in Settings → Booking.';
+  } else {
+    description =
+      'After approving, the customer picks a time on the quote page and pays any deposit.';
+  }
+
+  return (
+    <Switch
+      checked={quote.self_schedule}
+      onCheckedChange={(next) => void toggle(next)}
+      disabled={!canChange || converted || update.isPending}
+      label="Let the customer pick a time"
+      description={description}
+    />
   );
 }

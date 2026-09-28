@@ -61,4 +61,57 @@ enum CalendarService {
             .value
         return rows.filter { $0.active }
     }
+
+    // MARK: - Calendar events (blocked_times, managers+)
+
+    /// One event row (its repeat rule and customer link included).
+    static func calendarEvent(shopID: UUID, id: UUID) async throws -> JobsCalendarEvent {
+        let rows: [JobsCalendarEvent] = try await Supa.client
+            .from("blocked_times")
+            .select(JobsCalendarEvent.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: id.uuidString)
+            .limit(1)
+            .execute()
+            .value
+        guard let row = rows.first else { throw AppError.notFound("That event") }
+        return row
+    }
+
+    /// Creates (`id` nil) or updates an event. `fields` holds the columns
+    /// to write (kind, title, times, member, customer, capacity, colour,
+    /// recurrence); the server validates the combination.
+    @discardableResult
+    static func saveCalendarEvent(shopID: UUID, id: UUID?, fields: [String: AnyJSON]) async throws -> JobsCalendarEvent {
+        if let id {
+            return try await Supa.client
+                .from("blocked_times")
+                .update(fields)
+                .eq("shop_id", value: shopID.uuidString)
+                .eq("id", value: id.uuidString)
+                .select(JobsCalendarEvent.selectColumns)
+                .single()
+                .execute()
+                .value
+        }
+        var row = fields
+        row["shop_id"] = .string(shopID.uuidString)
+        return try await Supa.client
+            .from("blocked_times")
+            .insert(row)
+            .select(JobsCalendarEvent.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    /// Deletes an event (every occurrence of a repeating one).
+    static func deleteCalendarEvent(shopID: UUID, id: UUID) async throws {
+        try await Supa.client
+            .from("blocked_times")
+            .delete(returning: .minimal)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: id.uuidString)
+            .execute()
+    }
 }

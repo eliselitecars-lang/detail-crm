@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Constants } from '@/lib/database.types';
 import type { MessageTemplate } from '../api';
 import {
   draftFromRow,
@@ -6,10 +7,15 @@ import {
   offsetDraftFrom,
   offsetError,
   patchFor,
+  reminderOffsetsOf,
+  remindersError,
+  remindersFromDrafts,
+  remindersPatch,
   validateDraft,
 } from './drafts';
 import {
   describeOffset,
+  describeReminders,
   offsetFromInput,
   placeholdersFor,
   previewVars,
@@ -85,8 +91,56 @@ describe('template meta', () => {
   it('covers every template key exactly once', () => {
     const keys = TEMPLATE_KEYS.map((m) => m.key);
     expect(new Set(keys).size).toBe(keys.length);
-    expect(keys).toHaveLength(13);
+    expect([...keys].sort()).toEqual([...Constants.public.Enums.message_template_key].sort());
     expect(templateMeta('invite').channels).toEqual(['email']);
+    expect(templateMeta('gift_card_delivery').channels).toEqual(['email']);
+    expect(templateMeta('service_followup').switchOnly).toBe(true);
+    expect(templateMeta('appointment_reminder').multipleReminders).toBe(true);
+  });
+
+  it('lists the placeholders each key can use', () => {
+    const names = (key: Parameters<typeof placeholdersFor>[0]) =>
+      placeholdersFor(key).map((p) => p.name);
+    expect(names('quote_reminder')).toEqual(
+      expect.arrayContaining(['quote_number', 'quote_total', 'valid_until', 'quote_link']),
+    );
+    expect(names('invoice_overdue')).toEqual(
+      expect.arrayContaining(['invoice_number', 'due_date', 'days_overdue', 'invoice_link']),
+    );
+    expect(names('deposit_reminder')).toEqual(
+      expect.arrayContaining(['deposit_due', 'deposit_link', 'job_date']),
+    );
+    expect(names('job_report')).toContain('report_link');
+    expect(names('booking_confirmed')).toContain('rebook_link');
+    expect(names('gift_card_delivery')).not.toContain('balance');
+  });
+
+  it('keeps several reminders nearest-first and stores one reminder the old way', () => {
+    const reminder = templateMeta('appointment_reminder');
+    const drafts = [
+      { base: null, value: '2', unit: 'hours' as const },
+      { base: null, value: '2', unit: 'days' as const },
+    ];
+    expect(remindersFromDrafts(reminder, drafts)).toEqual([-120, -2880]);
+    expect(remindersPatch([-2880, -120])).toEqual({
+      offset_minutes: -120,
+      reminder_offsets_minutes: [-120, -2880],
+    });
+    expect(remindersPatch([-1440])).toEqual({
+      offset_minutes: -1440,
+      reminder_offsets_minutes: null,
+    });
+    expect(remindersError(reminder, [...drafts, drafts[0]!])).toBe(
+      'Each reminder needs a different time.',
+    );
+    expect(remindersError(reminder, [])).toBe('Add at least one reminder.');
+    expect(
+      reminderOffsetsOf([{ offset_minutes: -60, reminder_offsets_minutes: [-2880, -60] }]),
+    ).toEqual([-60, -2880]);
+    expect(reminderOffsetsOf([{ offset_minutes: -1440, reminder_offsets_minutes: null }])).toEqual([
+      -1440,
+    ]);
+    expect(describeReminders([-120, -2880])).toBe('2 days and 2 hours before the appointment');
   });
 
   it('converts offsets to the stored sign and bounds', () => {
@@ -134,6 +188,7 @@ const row = (over: Partial<MessageTemplate> = {}): MessageTemplate => ({
   body: 'Hi {{customer_first_name}}',
   enabled: true,
   offset_minutes: null,
+  reminder_offsets_minutes: null,
   updated_at: '2026-01-01T00:00:00Z',
   ...over,
 });

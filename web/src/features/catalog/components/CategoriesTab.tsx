@@ -1,9 +1,10 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { ArrowDown, ArrowUp, FolderTree, Pencil, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, CalendarDays, FolderTree, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import {
   Button,
+  Checkbox,
   ConfirmDialog,
   Dialog,
   EmptyState,
@@ -15,11 +16,21 @@ import {
   SectionCard,
   useToast,
 } from '@/components/ui';
-import { useCategories, useDeleteCategory, useReorder, useSaveCategory, useServices } from '../api';
+import {
+  useCategories,
+  useDeleteCategory,
+  useReorder,
+  useSaveCategory,
+  useSaveCategoryWeekdays,
+  useServices,
+} from '../api';
 import {
   categoryFormSchema,
+  describeWeekdays,
   moveItem,
   resequence,
+  WEEKDAY_LONG,
+  weekdaysValue,
   type CategoryFormInput,
   type CategoryRow,
 } from '../model';
@@ -32,6 +43,7 @@ export function CategoriesTab({ canManage }: { canManage: boolean }) {
   const remove = useDeleteCategory();
   const [editing, setEditing] = useState<CategoryRow | 'new' | null>(null);
   const [deleting, setDeleting] = useState<CategoryRow | null>(null);
+  const [scheduling, setScheduling] = useState<CategoryRow | null>(null);
 
   const list = categories.data ?? [];
   /** Item count label; never "0 items" just because services haven't loaded. */
@@ -95,7 +107,12 @@ export function CategoriesTab({ canManage }: { canManage: boolean }) {
               <li key={category.id} className="flex items-center gap-3 px-4 py-3 sm:px-5">
                 <div className="min-w-0 flex-1">
                   <p className="text-ink truncate font-medium">{category.name}</p>
-                  <p className="text-muted text-xs">{countLabel(category.id)}</p>
+                  <p className="text-muted text-xs">
+                    {countLabel(category.id)}
+                    {(category.bookable_weekdays ?? null) !== null && (
+                      <> · Online booking: {describeWeekdays(category.bookable_weekdays)}</>
+                    )}
+                  </p>
                 </div>
                 {canManage && (
                   <div className="flex shrink-0 items-center gap-0.5">
@@ -112,6 +129,12 @@ export function CategoriesTab({ canManage }: { canManage: boolean }) {
                       size="sm"
                       disabled={index === list.length - 1 || reorder.isPending}
                       onClick={() => move(index, 1)}
+                    />
+                    <IconButton
+                      label={`Online booking days for ${category.name}`}
+                      icon={<CalendarDays className="size-4" />}
+                      size="sm"
+                      onClick={() => setScheduling(category)}
                     />
                     <IconButton
                       label={`Rename ${category.name}`}
@@ -158,6 +181,9 @@ export function CategoriesTab({ canManage }: { canManage: boolean }) {
           nextSort={lastSort + 10}
           onClose={() => setEditing(null)}
         />
+      )}
+      {scheduling !== null && (
+        <WeekdaysDialog category={scheduling} onClose={() => setScheduling(null)} />
       )}
       <ConfirmDialog
         open={deleting !== null}
@@ -233,6 +259,70 @@ function CategoryDialog({
           </Button>
         </div>
       </form>
+    </Dialog>
+  );
+}
+
+/** Weekdays on which this category's services can START online (P-17). */
+function WeekdaysDialog({ category, onClose }: { category: CategoryRow; onClose: () => void }) {
+  const toast = useToast();
+  const save = useSaveCategoryWeekdays();
+  const [selected, setSelected] = useState<Set<number>>(
+    () => new Set(category.bookable_weekdays ?? [0, 1, 2, 3, 4, 5, 6]),
+  );
+  const toggle = (day: number, on: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(day);
+      else next.delete(day);
+      return next;
+    });
+
+  const submit = async () => {
+    try {
+      await save.mutateAsync({ id: category.id, weekdays: weekdaysValue(selected) });
+      toast.success('Booking days saved', category.name);
+      onClose();
+    } catch (error) {
+      toast.error(error);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      dismissible={!save.isPending}
+      title={`Online booking days · ${category.name}`}
+      description="Customers booking online can only start services of this category on the days ticked. Staff can still schedule them any day."
+      size="sm"
+      footer={
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button variant="secondary" onClick={onClose} disabled={save.isPending}>
+            Cancel
+          </Button>
+          <Button loading={save.isPending} onClick={() => void submit()}>
+            Save days
+          </Button>
+        </div>
+      }
+    >
+      <fieldset className="flex flex-col gap-2">
+        <legend className="sr-only">Bookable days</legend>
+        {WEEKDAY_LONG.map((label, day) => (
+          <Checkbox
+            key={label}
+            checked={selected.has(day)}
+            onChange={(event) => toggle(day, event.target.checked)}
+            label={label}
+          />
+        ))}
+      </fieldset>
+      {selected.size === 0 && (
+        <p className="text-warning-ink mt-3 text-sm" role="status">
+          With no days ticked, services of this category can’t be booked online at all.
+        </p>
+      )}
     </Dialog>
   );
 }

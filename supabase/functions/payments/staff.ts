@@ -11,12 +11,15 @@
  *   setup_card         manager+ (SetupIntent for PaymentSheet setup mode)
  *   setup_card_link    manager+ (Checkout setup-mode link to text/email)
  *   remove_saved_card  manager+ (detach in Stripe, then drop from the CRM)
- *   refund             owner/admin (card payments; cash etc. use refund_manual_payment)
+ *   refund             owner/admin (Stripe payments: card, card_present,
+ *                      ach_debit, bnpl; cash etc. use refund_manual_payment)
+ *   terminal_payment_intent  same callers as payment_sheet (terminal.ts):
+ *                      a card_present intent for Tap to Pay / a reader
  *
- * Every PaymentIntent, SetupIntent and Checkout Session is card-only
- * (payment_method_types ['card']): the CRM records card payments (brand /
- * last4) and its money guards assume a card settles at once, so a bank
- * debit that clears days later is never offered.
+ * The staff intents and SetupIntents are card-only (payment_method_types
+ * ['card'], or ['card_present'] in person): a sheet, a saved card or a
+ * reader settles at once. Bank debits and pay-later are offered only on the
+ * public Checkout links (public.ts, P-31).
  */
 import { z } from "zod";
 import {
@@ -44,14 +47,16 @@ import {
   expireOpenSessions,
   findAccount,
   IDEMPOTENCY_WINDOW_MS,
-  INVOICE_COLUMNS,
+  invoiceJobIds,
   type InvoiceRow,
   isInvalidRequest,
+  liveInvoiceForJob,
   loadAccount,
   loadCustomer,
   loadInvoice,
   loadShop,
   metadata,
+  payableBalance,
   paymentInProgress,
   platformFee,
   requestedAmount,
@@ -59,6 +64,7 @@ import {
   rpcError,
   type Services,
   sessionFor,
+  type ShopRow,
 } from "./lib.ts";
 import { settleInvoice, settleJob, settlePending, sweepStale } from "./settle.ts";
 
@@ -156,6 +162,23 @@ async function requireTechCollection(s: Services, shopId: string): Promise<void>
   }
 }
 
+/**
+ * Someone who may collect in this shop at all (no invoice yet): manager+,
+ * or a technician while the shop lets technicians collect. Used to set up a
+ * card reader (terminal_location / terminal_connection_token); every
+ * payment still checks the invoice (requireCollector).
+ */
+export async function requireShopCollector(
+  s: Services,
+  req: Request,
+  shopId: string,
+): Promise<Membership> {
+  const caller = await requireUser(req, { admin: s.admin });
+  const membership = await requireShopRole(s.admin, caller, shopId, ROLES.anyStaff);
+  if (!hasRole(membership, ROLES.managerPlus)) await requireTechCollection(s, shopId);
+  return membership;
+}
+
 interface JobRow {
   id: string;
   shop_id: string;
@@ -229,21 +252,76 @@ async function supersedePayLinks(
     s,
     account,
     customerId,
-    sessionFor.invoiceOrDeposit(invoice.shop_id, invoice),
+    sessionFor.invoiceOrDeposit(invoice.shop_id, invoice, await invoiceJobIds(s.admin, invoice)),
     undefined,
     { refuseCompleted: true },
   );
 }
 
 // ---------------------------------------------------------------------------
-// payment_sheet
+// payment_sheet / terminal_payment_intent (intents a device confirms)
 // ---------------------------------------------------------------------------
 
-export async function paymentSheet(
+/**
+ * The two ways a device collects an invoice payment: the iOS PaymentSheet
+ * (card entered / wallet, card-not-present) and Stripe Terminal (Tap to Pay
+ * on iPhone or a reader, card_present). They share every money rule; only
+ * the intent's payment method type, the saved-card customer (sheet,
+ * manager+) and the idempotency scope differ.
+ */
+export type DeviceChannel = "sheet" | "terminal";
+
+export interface DeviceIntentInput {
+  shop_id: string;
+  invoice_id: string;
+  amount_cents?: number;
+  tip_cents?: number;
+  request_nonce?: string;
+}
+
+export interface DeviceIntent {
+  membership: Membership;
+  shop: ShopRow;
+  account: AccountRow;
+  invoice: InvoiceRow;
+  intent: Stripe.PaymentIntent & { client_secret: string };
+  stripeCustomer: string | null;
+  amount: number;
+  tip: number;
+  part: string;
+}
+
+const CHANNEL = {
+  sheet: {
+    scope: "payment_sheet",
+    source: "payment_sheet",
+    method: "card",
+    types: ["card"],
+  },
+  terminal: {
+    scope: "terminal_intent",
+    source: "terminal",
+    method: "card_present",
+    types: ["card_present"],
+  },
+} as const;
+
+/**
+ * Opens (or, for a retry of the same request, hands back) the device's
+ * PaymentIntent for `amount_cents` (default: what can be paid now) plus a
+ * bounded tip, after settling the invoice's earlier attempts (latest wins)
+ * and expiring its open pay / deposit links, and records the pending payment
+ * row. Money in flight (an attempt processing, ACH clearing) is never
+ * charged twice: 409 payment_in_progress, or the amount is bounded by what
+ * is not already on its way.
+ */
+export async function openDeviceIntent(
   s: Services,
   req: Request,
-  input: z.output<typeof paymentSheetInput>,
-): Promise<Record<string, unknown>> {
+  input: DeviceIntentInput,
+  channel: DeviceChannel,
+): Promise<DeviceIntent> {
+  const how = CHANNEL[channel];
   const { membership, invoice: requested } = await requireCollector(
     s,
     req,
@@ -252,8 +330,8 @@ export async function paymentSheet(
   );
   // Saved cards are manager+ (SPEC §3): only they get the customer on the
   // sheet. A technician's sheet takes a new card and cannot list, charge or
-  // detach the customer's saved ones.
-  const withCustomer = hasRole(membership, ROLES.managerPlus);
+  // detach the customer's saved ones. A reader never uses saved cards.
+  const withCustomer = channel === "sheet" && hasRole(membership, ROLES.managerPlus);
   assertPayable(requested);
   const shop = await loadShop(s.admin, requested.shop_id);
   const account = await loadAccount(s.admin, shop.id);
@@ -267,9 +345,10 @@ export async function paymentSheet(
   const part = requestPart(input.request_nonce, s.now);
 
   const keyFor = async (invoice: InvoiceRow) => {
-    const balance = assertPayable(invoice);
+    // What can be paid now: the balance less ACH debits still clearing.
+    const balance = await payableBalance(s, invoice);
     const amount = requestedAmount(input.amount_cents, balance);
-    // Bounded by what this sheet collects, never the balance: a tip is
+    // Bounded by what this attempt collects, never the balance: a tip is
     // fee-free and never lowers the balance.
     const tip = boundedTip(input.tip_cents, amount);
     const total = chargeable(amount + tip, shop.currency);
@@ -280,13 +359,14 @@ export async function paymentSheet(
       tip,
       total,
       parts,
-      key: await idempotencyKey("payment_sheet", ...parts),
+      key: await idempotencyKey(how.scope, ...parts),
     };
   };
 
-  // Latest sheet wins: settle this invoice's earlier attempts first (an
-  // abandoned sheet would otherwise keep the invoice locked). The intent a
-  // retry of this same request created is handed back, not cancelled.
+  // Latest attempt wins: settle this invoice's earlier attempts first (an
+  // abandoned sheet or reader would otherwise keep the invoice locked). The
+  // intent a retry of this same request created is handed back, not
+  // cancelled.
   let invoice = requested;
   let request = await keyFor(invoice);
   const earlier = await settleInvoice(s, account, shop.id, invoice.id, {
@@ -301,16 +381,20 @@ export async function paymentSheet(
   if (earlier.in_progress > 0) throw paymentInProgress();
   // Latest attempt wins the other way too: the invoice's open pay links
   // (texted / emailed Checkout) are expired, so the customer cannot pay the
-  // same balance there while this sheet is open. A link paid just now -> 409.
+  // same balance there while this attempt is open. A link paid just now -> 409.
   await supersedePayLinks(s, account, invoice, stripeCustomer);
   const { amount, tip, total, parts } = request;
   const fee = platformFee(s.env, amount);
 
-  const intent = await freshIntent(s, account, parts, {
+  const intent = await freshIntent(s, account, how.scope, parts, {
     amount: total,
     currency: shop.currency,
     ...(stripeCustomer ? { customer: stripeCustomer } : {}),
-    payment_method_types: ["card"],
+    payment_method_types: [...how.types],
+    // In person: captured as soon as the reader confirms (no separate
+    // capture step; the pinned API version supports automatic capture for
+    // card_present).
+    ...(channel === "terminal" ? { capture_method: "automatic" as const } : {}),
     description: `${shop.name} invoice #${invoice.number}`,
     metadata: metadata({
       shop_id: shop.id,
@@ -319,24 +403,16 @@ export async function paymentSheet(
       customer_id: invoice.customer_id,
       kind: "payment",
       tip_cents: tip,
-      source: "payment_sheet",
+      source: how.source,
+      channel: channel === "terminal" ? "terminal" : null,
       member_id: membership.id,
       request_key: request.key,
     }),
     ...(fee ? { application_fee_amount: fee } : {}),
   });
-  const ephemeral = stripeCustomer
-    ? await ephemeralKey(
-      s,
-      account,
-      stripeCustomer,
-      input.ephemeral_key_api_version ?? STRIPE_API_VERSION,
-      part,
-    )
-    : null;
 
-  // Shows as pending on the invoice until the webhook settles it, the sheet
-  // is cancelled (cancel_open_payments) or the sweep abandons it.
+  // Shows as pending on the invoice until the webhook settles it, the
+  // attempt is cancelled (cancel_open_payments) or the sweep abandons it.
   await recordStripePayment(s, {
     p_shop_id: shop.id,
     p_payment_intent_id: intent.id,
@@ -344,11 +420,30 @@ export async function paymentSheet(
     p_amount_cents: amount,
     p_tip_cents: tip,
     p_kind: "payment",
-    p_method: "card",
+    p_method: how.method,
     p_invoice_id: invoice.id,
     p_customer_id: invoice.customer_id,
+    p_stripe_method_type: how.types[0],
   });
+  return { membership, shop, account, invoice, intent, stripeCustomer, amount, tip, part };
+}
 
+export async function paymentSheet(
+  s: Services,
+  req: Request,
+  input: z.output<typeof paymentSheetInput>,
+): Promise<Record<string, unknown>> {
+  const opened = await openDeviceIntent(s, req, input, "sheet");
+  const { account, intent, stripeCustomer } = opened;
+  const ephemeral = stripeCustomer
+    ? await ephemeralKey(
+      s,
+      account,
+      stripeCustomer,
+      input.ephemeral_key_api_version ?? STRIPE_API_VERSION,
+      opened.part,
+    )
+    : null;
   return {
     payment_intent_id: intent.id,
     payment_intent_client_secret: intent.client_secret,
@@ -357,15 +452,15 @@ export async function paymentSheet(
       : {}),
     publishable_key: s.env.stripe().publishableKey,
     stripe_account_id: account.stripe_account_id,
-    amount_cents: amount,
-    tip_cents: tip,
-    currency: shop.currency,
+    amount_cents: opened.amount,
+    tip_cents: opened.tip,
+    currency: opened.shop.currency,
   };
 }
 
 /**
- * Creates the sheet's PaymentIntent and returns it only while it is really
- * unconfirmed. Stripe replays the FIRST response stored under a key
+ * Creates the sheet's (or reader's) PaymentIntent and returns it only while
+ * it is really unconfirmed. Stripe replays the FIRST response stored under a key
  * (creation-time state) for 24 hours, so a replay never shows that the
  * intent was cancelled since (a newer sheet, cancel_open_payments, a pay
  * link) or paid: the intent is re-read after every create. A cancelled one
@@ -375,6 +470,7 @@ export async function paymentSheet(
 async function freshIntent(
   s: Services,
   account: AccountRow,
+  scope: string,
   parts: ReadonlyArray<string | number>,
   params: Stripe.PaymentIntentCreateParams,
 ): Promise<Stripe.PaymentIntent & { client_secret: string }> {
@@ -383,7 +479,7 @@ async function freshIntent(
     const created = await s.stripe.paymentIntents.create(
       params,
       onAccount(account.stripe_account_id, {
-        idempotencyKey: await idempotencyKey("payment_sheet", ...parts, ...chain),
+        idempotencyKey: await idempotencyKey(scope, ...parts, ...chain),
       }),
     );
     const intent = await s.stripe.paymentIntents.retrieve(
@@ -444,7 +540,11 @@ export async function cancelOpenPayments(
       s,
       account,
       customer.stripe_customer_id,
-      sessionFor.invoiceOrDeposit(invoice.shop_id, invoice),
+      sessionFor.invoiceOrDeposit(
+        invoice.shop_id,
+        invoice,
+        await invoiceJobIds(s.admin, invoice),
+      ),
     )
     : [];
   return {
@@ -465,15 +565,8 @@ async function cancelOpenJobPayments(
   jobId: string,
 ): Promise<Record<string, unknown>> {
   const job = await requireJobCollector(s, req, shopId, jobId);
-  const { data, error } = await s.admin
-    .from("invoices")
-    .select(INVOICE_COLUMNS)
-    .eq("shop_id", job.shop_id)
-    .eq("job_id", job.id)
-    .neq("status", "void")
-    .maybeSingle();
-  if (error) throw dbFailure("job invoice lookup", error);
-  const invoice = data as InvoiceRow | null;
+  // The job's live invoice, single or grouped (P-7).
+  const invoice = await liveInvoiceForJob(s.admin, job.shop_id, job.id);
   const released = { invoice_id: invoice?.id ?? null, job_id: job.id };
   const account = await findAccount(s.admin, job.shop_id);
   if (!account) return { ...released, ...NOTHING_RELEASED };
@@ -483,7 +576,7 @@ async function cancelOpenJobPayments(
   const settled = await settleJob(s, account, job.shop_id, job.id);
   const customer = await loadCustomer(s.admin, job.shop_id, job.customer_id);
   const match = invoice
-    ? sessionFor.invoiceOrDeposit(job.shop_id, { id: invoice.id, job_id: job.id })
+    ? sessionFor.invoiceOrDeposit(job.shop_id, invoice, [job.id])
     : sessionFor.deposit(job.shop_id, job.id);
   const expired = customer.stripe_customer_id
     ? await expireOpenSessions(s, account, customer.stripe_customer_id, match)
@@ -514,6 +607,12 @@ interface SavedCard {
   stripe_payment_method_id: string;
   brand: string | null;
   last4: string | null;
+  /**
+   * The Stripe customer the card is attached to (P-20): a card moved to this
+   * customer by a merge stays on the merged customer's Stripe customer, and
+   * Stripe only charges it there. Null on rows saved before the column.
+   */
+  stripe_customer_id: string | null;
 }
 
 async function savedCard(
@@ -524,7 +623,7 @@ async function savedCard(
 ): Promise<SavedCard> {
   let query = s.admin
     .from("customer_payment_methods")
-    .select("stripe_payment_method_id, brand, last4")
+    .select("stripe_payment_method_id, brand, last4, stripe_customer_id")
     .eq("shop_id", shopId)
     .eq("customer_id", customerId);
   query = paymentMethodId
@@ -597,12 +696,15 @@ export async function chargeSavedCard(
   const earlier = await settleInvoice(s, account, shop.id, invoice.id);
   if (earlier.in_progress > 0) throw paymentInProgress();
   if (earlier.succeeded > 0) invoice = await loadInvoice(s.admin, shop.id, invoice.id);
-  const balance = assertPayable(invoice);
+  // The balance less ACH debits still clearing toward it.
+  const balance = await payableBalance(s, invoice);
   const amount = requestedAmount(input.amount_cents, balance);
   chargeable(amount, shop.currency);
   const customer = await loadCustomer(s.admin, shop.id, invoice.customer_id);
   const card = await savedCard(s, shop.id, customer.id, input.payment_method_id);
-  if (!customer.stripe_customer_id) {
+  // The card's own Stripe customer (a merged-in card keeps its original one).
+  const cardOwner = card.stripe_customer_id ?? customer.stripe_customer_id;
+  if (!cardOwner) {
     throw errors.unprocessable("This customer has no saved card.", { reason: "no_saved_card" });
   }
   // An open pay link could otherwise be paid for the same balance.
@@ -618,6 +720,7 @@ export async function chargeSavedCard(
     p_customer_id: invoice.customer_id,
     p_card_brand: card.brand,
     p_card_last4: card.last4,
+    p_stripe_method_type: "card",
   };
 
   let intent: Stripe.PaymentIntent;
@@ -626,7 +729,7 @@ export async function chargeSavedCard(
       {
         amount,
         currency: shop.currency,
-        customer: customer.stripe_customer_id,
+        customer: cardOwner,
         payment_method: card.stripe_payment_method_id,
         off_session: true,
         confirm: true,
@@ -750,16 +853,20 @@ export async function removeSavedCard(
   const customer = await loadCustomer(s.admin, input.shop_id, input.customer_id);
   const { data, error } = await s.admin
     .from("customer_payment_methods")
-    .select("stripe_payment_method_id")
+    .select("stripe_payment_method_id, stripe_customer_id")
     .eq("shop_id", customer.shop_id)
     .eq("customer_id", customer.id)
     .eq("stripe_payment_method_id", input.payment_method_id)
     .maybeSingle();
   if (error) throw dbFailure("customer_payment_methods lookup", error);
   if (!data) return { removed: false };
+  // The Stripe customer the card is attached to: a card moved by a customer
+  // merge (P-20) stays on the duplicate's Stripe customer.
+  const owner = (data as { stripe_customer_id: string | null }).stripe_customer_id ??
+    customer.stripe_customer_id;
 
   const account = await findAccount(s.admin, customer.shop_id);
-  if (account) await detachCard(s, account, customer.stripe_customer_id, input.payment_method_id);
+  if (account) await detachCard(s, account, owner, input.payment_method_id);
   const removed = await removeCardRow(s, customer.shop_id, input.payment_method_id);
   s.log.info("saved_card_removed", {
     shop_id: customer.shop_id,
@@ -939,6 +1046,9 @@ interface PaymentRow {
   stripe_payment_intent_id: string | null;
 }
 
+/** Payment methods whose money Stripe holds (0061 payments_card_via_stripe). */
+const STRIPE_METHODS: ReadonlySet<string> = new Set(["card", "card_present", "ach_debit", "bnpl"]);
+
 /** Refund statuses that returned nothing to the customer. */
 const DEAD_REFUND = new Set(["failed", "canceled"]);
 
@@ -992,8 +1102,9 @@ export async function refund(
   const payment = data as PaymentRow | null;
   if (!payment) throw errors.notFound("Payment not found.");
   const paymentIntentId = payment.stripe_payment_intent_id;
-  if (!paymentIntentId || !["card", "card_present"].includes(payment.method)) {
-    throw errors.unprocessable("Only card payments are refunded through Stripe.", {
+  if (!paymentIntentId || !STRIPE_METHODS.has(payment.method)) {
+    // (the reason keeps its original name: it is a client contract)
+    throw errors.unprocessable("Only payments taken through Stripe are refunded here.", {
       reason: "not_a_card_payment",
     });
   }

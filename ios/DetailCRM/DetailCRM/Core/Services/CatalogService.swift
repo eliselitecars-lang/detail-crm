@@ -146,4 +146,20 @@ enum CatalogService {
                 .execute()
         }
     }
+
+    // MARK: - Service follow-ups (P-4)
+
+    /// The maintenance follow-ups of one service (managers+; others get an
+    /// empty list from RLS), in the shop's order.
+    static func serviceFollowups(shopID: UUID, serviceID: UUID) async throws -> [OpsServiceFollowup] {
+        try await Supa.client
+            .from("service_followups")
+            .select(OpsServiceFollowup.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("service_id", value: serviceID.uuidString)
+            .order("sort", ascending: true)
+            .order("offset_days", ascending: true)
+            .execute()
+            .value
+    }
 }

@@ -10,6 +10,8 @@ import { z } from 'zod';
 import { useShop, useShopContext } from '@/features/shop/shopContext';
 import type { BusinessHoursRow } from '@/features/shop/businessHours';
 import { replaceBusinessHours } from '@/features/shop/onboarding/api';
+import type { Json } from '@/lib/database.types';
+import type { RecurrenceRule } from './schemas';
 import { unwrap, unwrapRequired, type InsertRow, type Row, type UpdateRow } from '@/lib/db';
 import { AppError, edgeFunctionError, errorMessage, toAppError } from '@/lib/errors';
 import { EdgeFunctionError, invokeEdge } from '@/features/quotes/shared/edge';
@@ -67,6 +69,12 @@ export const dependentKeys = {
   coupons: (shopId: string) => shopKey(shopId, 'catalog', 'coupons'),
   messageTemplates: (shopId: string) => shopKey(shopId, 'messages', 'templates'),
   messagePreviews: (shopId: string) => shopKey(shopId, 'messages', 'preview'),
+  /**
+   * Quote / deposit / invoice follow-up status cards (followupKeys.all in
+   * features/quotes/shared/followups): whether a follow-up is on depends on
+   * Settings -> Follow-ups and on its template's channels.
+   */
+  documentFollowups: (shopId: string) => shopKey(shopId, 'followups'),
 };
 
 type QueryClient = ReturnType<typeof useQueryClient>;
@@ -80,7 +88,7 @@ function invalidateAll(queryClient: QueryClient, keys: readonly (readonly unknow
 // ---------------------------------------------------------------------------
 
 const SHOP_COLUMNS =
-  'id, name, slug, email, phone, website, address_line1, address_line2, city, region, postal_code, country, timezone, currency, logo_path, brand_color, business_type, tax_rate_bps, techs_can_collect_payments, review_url, quote_terms, invoice_terms, invoice_due_days, sms_from_number, updated_at';
+  'id, name, slug, email, phone, website, address_line1, address_line2, city, region, postal_code, country, timezone, currency, logo_path, brand_color, business_type, tax_rate_bps, techs_can_collect_payments, techs_can_share_reports, review_url, quote_terms, invoice_terms, invoice_due_days, sms_from_number, updated_at';
 
 export type ShopSettings = Pick<
   Row<'shops'>,
@@ -103,6 +111,7 @@ export type ShopSettings = Pick<
   | 'business_type'
   | 'tax_rate_bps'
   | 'techs_can_collect_payments'
+  | 'techs_can_share_reports'
   | 'review_url'
   | 'quote_terms'
   | 'invoice_terms'
@@ -321,21 +330,35 @@ export function useShopMembers() {
 
 export type BlockedTime = Pick<
   Row<'blocked_times'>,
-  'id' | 'member_id' | 'starts_at' | 'ends_at' | 'reason'
+  | 'id'
+  | 'member_id'
+  | 'starts_at'
+  | 'ends_at'
+  | 'reason'
+  | 'kind'
+  | 'title'
+  | 'customer_id'
+  | 'affects_capacity'
+  | 'color'
+  | 'recurrence'
 >;
+export type CalendarEventKind = Row<'blocked_times'>['kind'];
+
+const BLOCKED_COLUMNS =
+  'id, member_id, starts_at, ends_at, reason, kind, title, customer_id, affects_capacity, color, recurrence';
 
 export function useBlockedTimes(showPast: boolean) {
   const { shopId } = useShop();
   return useQuery({
     queryKey: settingsKeys.blocked(shopId, showPast),
     queryFn: async (): Promise<BlockedTime[]> => {
-      let query = supabase
-        .from('blocked_times')
-        .select('id, member_id, starts_at, ends_at, reason')
-        .eq('shop_id', shopId);
+      let query = supabase.from('blocked_times').select(BLOCKED_COLUMNS).eq('shop_id', shopId);
       query = showPast
         ? query.order('starts_at', { ascending: false })
-        : query.gte('ends_at', new Date().toISOString()).order('starts_at');
+        : // repeating events stay listed while they may still occur
+          query
+            .or(`ends_at.gte.${new Date().toISOString()},recurrence.not.is.null`)
+            .order('starts_at');
       return unwrapList(await query.limit(500));
     },
   });
@@ -347,13 +370,21 @@ export interface BlockedTimeInput {
   starts_at: string;
   ends_at: string;
   reason: string | null;
+  kind?: CalendarEventKind;
+  title?: string | null;
+  affects_capacity?: boolean;
+  recurrence?: RecurrenceRule | null;
 }
 
 export function useSaveBlockedTime() {
   const { shopId } = useShop();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, ...values }: BlockedTimeInput): Promise<void> => {
+    mutationFn: async ({ id, recurrence, ...rest }: BlockedTimeInput): Promise<void> => {
+      const values = {
+        ...rest,
+        ...(recurrence === undefined ? {} : { recurrence: recurrence as Json | null }),
+      };
       if (id) {
         unwrap(
           await supabase.from('blocked_times').update(values).eq('id', id).eq('shop_id', shopId),
@@ -618,6 +649,11 @@ export type Coupon = Pick<
   | 'redemptions'
   | 'online_only'
   | 'active'
+  | 'service_ids'
+  | 'min_subtotal_cents'
+  | 'once_per_customer'
+  | 'customer_id'
+  | 'new_customers_only'
 >;
 export type CouponKind = Row<'coupons'>['kind'];
 
@@ -630,9 +666,11 @@ export function useCoupons() {
         await supabase
           .from('coupons')
           .select(
-            'id, code, description, kind, value, starts_at, ends_at, max_redemptions, redemptions, online_only, active',
+            'id, code, description, kind, value, starts_at, ends_at, max_redemptions, redemptions, online_only, active, service_ids, min_subtotal_cents, once_per_customer, customer_id, new_customers_only',
           )
           .eq('shop_id', shopId)
+          // customers' personal referral codes are managed by the referral programme
+          .is('referrer_customer_id', null)
           .order('active', { ascending: false })
           .order('code'),
       ),
@@ -689,12 +727,21 @@ export function useDeleteCoupon() {
 
 export type MessageTemplate = Pick<
   Row<'message_templates'>,
-  'id' | 'key' | 'channel' | 'subject' | 'body' | 'enabled' | 'offset_minutes' | 'updated_at'
+  | 'id'
+  | 'key'
+  | 'channel'
+  | 'subject'
+  | 'body'
+  | 'enabled'
+  | 'offset_minutes'
+  | 'reminder_offsets_minutes'
+  | 'updated_at'
 >;
 export type TemplateKey = Row<'message_templates'>['key'];
 export type TemplateChannel = Row<'message_templates'>['channel'];
 
-const TEMPLATE_COLUMNS = 'id, key, channel, subject, body, enabled, offset_minutes, updated_at';
+const TEMPLATE_COLUMNS =
+  'id, key, channel, subject, body, enabled, offset_minutes, reminder_offsets_minutes, updated_at';
 
 export function useMessageTemplates() {
   const { shopId } = useShop();
@@ -739,6 +786,8 @@ export interface TemplatePatch {
   body?: string;
   enabled?: boolean;
   offset_minutes?: number | null;
+  /** appointment_reminder: 2–3 offsets (null = one reminder at offset_minutes). */
+  reminder_offsets_minutes?: number[] | null;
 }
 
 /** Plus the inbox's template list and rendered previews (messages/…). */
@@ -747,6 +796,7 @@ function invalidateTemplates(queryClient: QueryClient, shopId: string) {
     settingsKeys.templates(shopId),
     dependentKeys.messageTemplates(shopId),
     dependentKeys.messagePreviews(shopId),
+    dependentKeys.documentFollowups(shopId),
   ]);
 }
 

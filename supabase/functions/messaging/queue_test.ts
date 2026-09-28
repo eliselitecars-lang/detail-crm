@@ -92,6 +92,29 @@ Deno.test("process_queue: sends SMS via Twilio from the shop number with a statu
   assert(db.requests.filter((r) => r.kind === "rpc").every((r) => r.role === "service_role"));
 });
 
+Deno.test("process_queue: a provisioned number sends with MessagingServiceSid instead of From", async () => {
+  const msg = queuedMessage({ body: "Reminder: tomorrow at 9" });
+  const { db, handler } = setup({ messages: [msg] });
+  const service = `MG${"ab".repeat(16)}`;
+  db.seed("shop_sms_numbers", [{
+    phone_number: SHOP_NUMBER,
+    shop_id: SHOP,
+    messaging_service_sid: service,
+  }]);
+  const summary = await responseJson<QueueRunSummary>(await handler(cron()));
+  assertEquals(summary.sent, 1);
+  const call = db.http.callsTo("POST", TWILIO_MESSAGES_URL)[0];
+  assertEquals(call?.form.get("MessagingServiceSid"), service);
+  assertEquals(call?.form.get("From"), null);
+  assertMatch(call?.form.get("StatusCallback") ?? "", /action=twilio_status/);
+  // The sender binding is still checked against the shop's number.
+  assertEquals(
+    db.http.callsTo("GET", TWILIO_NUMBERS_URL)[0]?.url.searchParams.get("PhoneNumber"),
+    SHOP_NUMBER,
+  );
+  assertEquals(message(db, String(msg.id)).from_address, SHOP_NUMBER);
+});
+
 Deno.test("process_queue: emails via Resend as the shop, reply-to shop, message-id idempotency", async () => {
   const msg = queuedMessage({
     channel: "email",

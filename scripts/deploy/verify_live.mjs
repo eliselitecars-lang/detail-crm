@@ -11,8 +11,11 @@
 //   SUPABASE_ANON_KEY        anon/publishable key; fetched with the access token when unset
 //   SUPABASE_SERVICE_ROLE_KEY optional: bucket settings + platform_config checks
 //   SUPABASE_ACCESS_TOKEN    optional: Management API checks (Auth config,
-//                            deployed verify_jwt, cron jobs); with
+//                            deployed verify_jwt, cron jobs, billing config); with
 //                            VERIFY_WITH_SERVICE_KEY=1 it also fetches the service key
+//   BILLING_ENABLED / BILLING_TRIAL_DAYS  optional: the deploy's billing inputs; when
+//                            set, the project's billing config must match, and with
+//                            BILLING_ENABLED=true the billing webhook secret must be set
 //
 // Exit 1 when any check FAILs. KNOWN = a documented open defect
 // (scripts/stack/README.md "Known issues"): reported, not a failure unless --strict.
@@ -257,8 +260,18 @@ for (const f of FUNCTIONS) {
       assert(r.status < 500, show(r));
       return 'HTTP 401 (gateway)';
     });
+  } else if (f.name === 'calendar-feed') {
+    // GET-only (calendar apps): a request without a token is the function's own 400.
+    await check('fn calendar-feed: verify_jwt=false — a GET without a token is 400 validation_failed', async () => {
+      const r = await http('GET', `${FN}/calendar-feed`);
+      if (r.status === 401 && !r.json?.request_id) {
+        throw new Error(`${show(r)} — the gateway demands a JWT: deployed with verify_jwt=true, so calendar apps cannot subscribe. Redeploy with --no-verify-jwt.`);
+      }
+      envelope(r, 400, 'validation_failed');
+      return `validation_failed (${r.json.request_id.slice(0, 8)}…)`;
+    });
   } else {
-    const expected = f.name === 'stripe-webhook' ? 'invalid_signature' : 'unknown_action';
+    const expected = f.name === 'stripe-webhook' || f.name === 'billing-webhook' ? 'invalid_signature' : 'unknown_action';
     await check(`fn ${f.name}: verify_jwt=false — answers callers without a JWT with its envelope (400 ${expected})`, async () => {
       const r = await http('POST', `${FN}/${f.name}`, { body: {} });
       if (r.status === 401 && !r.json?.request_id) {
@@ -303,6 +316,46 @@ if (has('stripe-webhook')) {
     return 'invalid_signature';
   });
 }
+const BILLING_ON = env.BILLING_ENABLED?.trim().toLowerCase() === 'true';
+if (has('billing')) {
+  await check('fn billing: plans without a user session is 401 unauthorized (checked in the function)', async () => {
+    const r = await http('POST', `${FN}/billing`, { headers: anonH, body: { action: 'plans' } });
+    envelope(r, 401, 'unauthorized');
+    return 'unauthorized';
+  });
+  await check('fn billing: a client-sent price on checkout is 400 validation_failed', async () => {
+    const r = await http('POST', `${FN}/billing`, {
+      headers: anonH,
+      body: { action: 'checkout', shop_id: randomUUID(), plan_id: randomUUID(), price: 'price_verify_live' },
+    });
+    envelope(r, 400, 'validation_failed');
+    return 'validation_failed';
+  });
+  await check('fn billing: sync_plans without x-cron-secret is 401 (CRON_SECRET configured)', async () => {
+    const r = await http('POST', `${FN}/billing`, { headers: anonH, body: { action: 'sync_plans' } });
+    envelope(r, 401, 'unauthorized');
+    return 'unauthorized';
+  });
+}
+if (has('billing-webhook')) {
+  const fakeEvent = () => JSON.stringify({ id: `evt_verify${randomUUID().replace(/-/g, '')}`, object: 'event', type: 'invoice.paid', data: { object: {} } });
+  await check('fn billing-webhook: an unsigned request is 400 invalid_signature', async () => {
+    const r = await http('POST', `${FN}/billing-webhook`, { raw: fakeEvent(), headers: { 'content-type': 'application/json' } });
+    envelope(r, 400, 'invalid_signature');
+    return 'invalid_signature';
+  });
+  await check('fn billing-webhook: a forged signature is 400 invalid_signature (STRIPE_BILLING_WEBHOOK_SECRET configured)', async () => {
+    const r = await http('POST', `${FN}/billing-webhook`, {
+      raw: fakeEvent(),
+      headers: { 'content-type': 'application/json', 'stripe-signature': `t=${Math.floor(Date.now() / 1000)},v1=${'0'.repeat(64)}` },
+    });
+    if (r.status === 500 && r.json?.code === 'server_misconfigured' && !BILLING_ON) {
+      return skip('STRIPE_BILLING_WEBHOOK_SECRET is not set (fine while BILLING_ENABLED is not true)');
+    }
+    envelope(r, 400, 'invalid_signature');
+    return 'invalid_signature';
+  });
+}
 if (has('messaging')) {
   await check('fn messaging: process_queue without x-cron-secret is 401 (CRON_SECRET configured)', async () => {
     const r = await http('POST', `${FN}/messaging`, { headers: anonH, body: { action: 'process_queue' } });
@@ -328,6 +381,14 @@ if (has('messaging')) {
 if (has('storage-purge')) {
   await check('fn storage-purge: purge without x-cron-secret is 401 (CRON_SECRET configured)', async () => {
     const r = await http('POST', `${FN}/storage-purge`, { headers: anonH, body: { action: 'purge' } });
+    envelope(r, 401, 'unauthorized');
+    return 'unauthorized';
+  });
+}
+for (const [name, action] of [['push', 'process_queue'], ['webhooks', 'deliver'], ['sms-provisioning', 'refresh_status']]) {
+  if (!has(name)) continue;
+  await check(`fn ${name}: ${action} without x-cron-secret is 401 (CRON_SECRET configured)`, async () => {
+    const r = await http('POST', `${FN}/${name}`, { headers: anonH, body: { action } });
     envelope(r, 401, 'unauthorized');
     return 'unauthorized';
   });
@@ -436,6 +497,23 @@ await check('management: platform setup — app_base_url and cron jobs', async (
   const missing = CRON_JOBS.filter((j) => !active.includes(j));
   assert(missing.length === 0, `cron jobs missing/inactive: ${missing.join(', ')}`);
   return `app_base_url ok, ${CRON_JOBS.length} jobs active`;
+});
+
+await check('management: billing config (set_billing_config) matches BILLING_ENABLED / BILLING_TRIAL_DAYS', async () => {
+  if (!TOKEN || !REF) return skip('no SUPABASE_ACCESS_TOKEN');
+  const rows = await mgmt('POST', `/v1/projects/${REF}/database/query`, {
+    query: "select key, value from public.platform_config where key in ('billing_enabled', 'billing_trial_days') order by key",
+  });
+  const by = Object.fromEntries((Array.isArray(rows) ? rows : []).map((r) => [r.key, r.value]));
+  const enabled = String(by.billing_enabled ?? '').toLowerCase() === 'true';
+  const days = Number(by.billing_trial_days ?? 0);
+  if (env.BILLING_ENABLED?.trim()) {
+    assert(enabled === BILLING_ON, `billing is ${enabled ? 'ON' : 'off'} in the project but BILLING_ENABLED=${env.BILLING_ENABLED.trim()} (run the deploy's platform setup)`);
+  }
+  if (env.BILLING_TRIAL_DAYS?.trim()) {
+    assert(days === Number(env.BILLING_TRIAL_DAYS.trim()), `the project's trial is ${days} day(s) but BILLING_TRIAL_DAYS=${env.BILLING_TRIAL_DAYS.trim()}`);
+  }
+  return `billing ${enabled ? 'ON' : 'off'}, trial ${days} day(s)`;
 });
 
 // ---------------------------------------------------------------- report

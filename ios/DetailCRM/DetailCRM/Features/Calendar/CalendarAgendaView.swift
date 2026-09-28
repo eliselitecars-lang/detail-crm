@@ -15,6 +15,8 @@ struct CalendarAgendaView: View {
     let clock: ShopClock
     let memberColors: [UUID: String]
     let onRefresh: () async -> Void
+    /// Opens a calendar event (managers+); nil = events aren't tappable.
+    var onOpenEvent: ((CalendarEvent) -> Void)? = nil
 
     var body: some View {
         if days.isEmpty {
@@ -22,7 +24,7 @@ struct CalendarAgendaView: View {
                 EmptyStateView(
                     systemImage: "calendar",
                     title: "Nothing scheduled",
-                    message: "No jobs or blocked time in these two weeks."
+                    message: "No jobs or events in these two weeks."
                 )
                 .frame(minHeight: 320)
             }
@@ -32,7 +34,7 @@ struct CalendarAgendaView: View {
                 ForEach(days) { day in
                     Section {
                         ForEach(day.events, id: \.key) { event in
-                            CalendarAgendaRowLink(event: event, clock: clock, memberColors: memberColors)
+                            CalendarAgendaRowLink(event: event, clock: clock, memberColors: memberColors, onOpenEvent: onOpenEvent)
                                 .themedRow()
                         }
                     } header: {
@@ -69,12 +71,20 @@ private struct CalendarAgendaRowLink: View {
     let event: CalendarEvent
     let clock: ShopClock
     let memberColors: [UUID: String]
+    let onOpenEvent: ((CalendarEvent) -> Void)?
 
     var body: some View {
         if event.isOpenableJob {
             NavigationLink(value: AppRoute.job(event.id)) {
                 CalendarAgendaRow(event: event, clock: clock, memberColors: memberColors)
             }
+        } else if event.isBlockedTime, let onOpenEvent {
+            Button {
+                onOpenEvent(event)
+            } label: {
+                CalendarAgendaRow(event: event, clock: clock, memberColors: memberColors)
+            }
+            .buttonStyle(.plain)
         } else {
             CalendarAgendaRow(event: event, clock: clock, memberColors: memberColors)
         }
@@ -99,14 +109,18 @@ struct CalendarAgendaRow: View {
                     .font(Theme.Typography.footnote.weight(.semibold))
                     .foregroundStyle(Theme.textSecondary)
                 HStack(spacing: Theme.Spacing.xs) {
-                    if event.isBlockedTime {
-                        Image(systemName: "nosign")
+                    if let kind = event.blockKind {
+                        Image(systemName: kind.systemImage)
+                            .foregroundStyle(CalendarPalette.color(for: event, memberColors: memberColors))
+                            .accessibilityHidden(true)
+                    } else if event.isSeriesJob {
+                        Image(systemName: "repeat")
                             .foregroundStyle(Theme.textTertiary)
                             .accessibilityHidden(true)
                     }
                     Text(event.displayTitle)
                         .font(Theme.Typography.bodyEmphasis)
-                        .foregroundStyle(event.isOpenableJob ? Theme.textPrimary : Theme.textSecondary)
+                        .foregroundStyle(event.isOpenableJob || event.isForegroundEvent ? Theme.textPrimary : Theme.textSecondary)
                         .lineLimit(2)
                 }
                 detailLines
@@ -125,10 +139,16 @@ struct CalendarAgendaRow: View {
 
     @ViewBuilder
     private var detailLines: some View {
-        if event.isBlockedTime {
-            Text(event.memberID == nil ? "Whole shop" : "One team member")
+        if let kind = event.blockKind {
+            Text(blockDetail(kind))
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.textTertiary)
+            if let customer = event.customerName?.trimmedNonEmpty {
+                Label(customer, systemImage: "person")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1)
+            }
         } else if event.isBusyBlock {
             Text("Another team member's job")
                 .font(Theme.Typography.caption)
@@ -153,10 +173,15 @@ struct CalendarAgendaRow: View {
                     .lineLimit(1)
             }
             if let number = event.jobNumber {
-                Text(verbatim: "Job #" + String(number))
+                Text(verbatim: "Job #" + String(number) + (event.isSeriesJob ? " · repeating" : ""))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary)
             }
         }
+    }
+
+    private func blockDetail(_ kind: JobsCalendarEvent.Kind) -> String {
+        let who = event.memberID == nil ? "Whole shop" : "One team member"
+        return kind.displayName + " · " + who
     }
 }

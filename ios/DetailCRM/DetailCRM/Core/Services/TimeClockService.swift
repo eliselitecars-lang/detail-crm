@@ -3,7 +3,8 @@
 //  DetailCRM
 //
 //  Clocking in/out (`clock_in` / `clock_out` RPCs — the server stamps the
-//  time, enforces one open entry per kind and job assignment) and the
+//  time, enforces one open entry per kind and job assignment, and stores
+//  the device location the app sends, P-24) and the
 //  timesheet reads/edits managers make directly on `time_entries` (RLS:
 //  managers+ insert/update/delete; technicians read their own rows).
 //
@@ -16,17 +17,25 @@ enum TimeClockService {
 
     // MARK: - Clock in / out (self)
 
-    /// Starts a shift (no job) or a job timer (`jobID` set).
-    static func clockIn(shopID: UUID, jobID: UUID?) async throws -> TimeEntry {
+    /// Starts a shift (no job) or a job timer (`jobID` set). `location` is
+    /// the device's position when the member allowed it (P-24); the server
+    /// stores it on the entry as evidence.
+    static func clockIn(shopID: UUID, jobID: UUID?, location: TimeEntry.Spot? = nil) async throws -> TimeEntry {
         struct Params: Encodable {
             let p_shop_id: UUID
             let p_job_id: UUID?
             let p_kind: String
+            let p_lat: Double?
+            let p_lng: Double?
+            let p_accuracy_m: Double?
         }
         let params = Params(
             p_shop_id: shopID,
             p_job_id: jobID,
-            p_kind: (jobID == nil ? TimeEntryKind.shift : TimeEntryKind.job).rawValue
+            p_kind: (jobID == nil ? TimeEntryKind.shift : TimeEntryKind.job).rawValue,
+            p_lat: location?.latitude,
+            p_lng: location?.longitude,
+            p_accuracy_m: location?.accuracyMeters
         )
         do {
             return try await Supa.client
@@ -38,15 +47,26 @@ enum TimeClockService {
         }
     }
 
-    /// Ends the open entry of `kind`. Ending a shift also ends a job timer.
-    static func clockOut(shopID: UUID, kind: TimeEntryKind) async throws -> TimeEntry {
+    /// Ends the open entry of `kind`. Ending a shift also ends a job timer
+    /// (the server stamps the same location on both).
+    static func clockOut(shopID: UUID, kind: TimeEntryKind, location: TimeEntry.Spot? = nil) async throws -> TimeEntry {
         struct Params: Encodable {
             let p_shop_id: UUID
             let p_kind: String
+            let p_lat: Double?
+            let p_lng: Double?
+            let p_accuracy_m: Double?
         }
+        let params = Params(
+            p_shop_id: shopID,
+            p_kind: kind.rawValue,
+            p_lat: location?.latitude,
+            p_lng: location?.longitude,
+            p_accuracy_m: location?.accuracyMeters
+        )
         do {
             return try await Supa.client
-                .rpc("clock_out", params: Params(p_shop_id: shopID, p_kind: kind.rawValue))
+                .rpc("clock_out", params: params)
                 .execute()
                 .value
         } catch {

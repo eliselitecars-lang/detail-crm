@@ -16,6 +16,10 @@
 //  Leaving without paying calls `cancel_open_payments`, so the pending
 //  attempt doesn't block a cash payment or a void until the sweep.
 //
+//  In person (P-6, only when Config.plist turns it on): Tap to Pay on
+//  iPhone (MoneyTapToPayButton) or a Bluetooth card reader
+//  (MoneyReaderPickerView) take the same amount and tip.
+//
 
 import SwiftUI
 import StripePaymentSheet
@@ -62,6 +66,7 @@ struct InvoiceCollectCardSheet: View {
     @State private var errorText: String?
     @State private var didSetUp = false
     @State private var nonce = MoneyEdge.newNonce()
+    @State private var showingReaderPicker = false
 
     var body: some View {
         NavigationStack {
@@ -104,6 +109,16 @@ struct InvoiceCollectCardSheet: View {
             // With an open attempt, leave through Cancel so it is released.
             .interactiveDismissDisabled(isConfirming || isReleasing || hasOpenAttempt)
             .onAppear(perform: setUp)
+            .sheet(isPresented: $showingReaderPicker) {
+                MoneyReaderPickerView(
+                    invoice: invoice,
+                    amountCents: amountCents,
+                    tipCents: tipCents,
+                    entryProblem: tipProblem,
+                    onFinished: onFinished,
+                    onDone: { dismiss() }
+                )
+            }
         }
     }
 
@@ -152,7 +167,42 @@ struct InvoiceCollectCardSheet: View {
             } label: {
                 Label("Continue to card entry", systemImage: "creditcard")
             }
+            if AppConfig.tapToPayEnabled || AppConfig.terminalBluetoothEnabled {
+                inPersonOptions
+            }
         }
+    }
+
+    /// Tap to Pay on iPhone / a Bluetooth reader (switched on in Config.plist).
+    private var inPersonOptions: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            Text("Or take the card in person")
+                .font(Theme.Typography.footnote.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+            if AppConfig.tapToPayEnabled {
+                MoneyTapToPayButton(
+                    invoice: invoice,
+                    amountCents: amountCents,
+                    tipCents: tipCents,
+                    entryProblem: tipProblem,
+                    onFinished: onFinished,
+                    onDone: { dismiss() }
+                )
+            }
+            if AppConfig.terminalBluetoothEnabled {
+                Button {
+                    showingReaderPicker = true
+                } label: {
+                    Label("Use a card reader", systemImage: "creditcard.viewfinder")
+                }
+                .buttonStyle(.themeSecondary)
+            }
+        }
+    }
+
+    /// A custom tip that isn't a readable amount.
+    private var tipProblem: String? {
+        tipPreset == .custom && customTipCents == nil ? "Enter the tip as an amount, e.g. 10.00." : nil
     }
 
     // MARK: Ready

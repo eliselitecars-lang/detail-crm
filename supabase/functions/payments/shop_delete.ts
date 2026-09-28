@@ -229,6 +229,15 @@ export async function deleteShop(
   if (account) {
     const settled = await settleShop(s, account, shop.id);
     if (settled.in_progress > 0) throw paymentInProgress();
+    // An ACH debit still clearing (P-31) settles days later: wait for it.
+    const clearing = await s.admin
+      .from("payments")
+      .select("id")
+      .eq("shop_id", shop.id)
+      .eq("status", "processing")
+      .limit(1);
+    if (clearing.error) throw dbFailure("processing payments lookup", clearing.error);
+    if ((clearing.data ?? []).length > 0) throw paymentInProgress();
     sessionsExpired = await expireShopSessions(s, account, shop.id);
   }
   const membershipsCancelled = await cancelMemberships(s, account, shop.id);

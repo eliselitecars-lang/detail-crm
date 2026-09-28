@@ -16,6 +16,8 @@ struct InvoiceManualPaymentSheet: View {
     let invoice: Invoice
     /// An unfinished card attempt is pending; it's cancelled first.
     let hasOpenCardAttempt: Bool
+    /// Bank / pay-later money still clearing (counts against the balance).
+    var processingCents: Int = 0
     let onFinished: () async -> Void
 
     @Environment(AppState.self) private var appState
@@ -64,6 +66,12 @@ struct InvoiceManualPaymentSheet: View {
                 if hasOpenCardAttempt {
                     InlineMessage(
                         text: "A card payment was started on this invoice but not finished. Recording this payment cancels it.",
+                        kind: .info
+                    )
+                }
+                if processingCents > 0 {
+                    InlineMessage(
+                        text: "\(Money.format(cents: processingCents, currencyCode: currencyCode)) is still clearing by bank or pay-later payment, so at most \(Money.format(cents: max(0, invoice.balanceCents - processingCents), currencyCode: currencyCode)) can be recorded now.",
                         kind: .info
                     )
                 }
@@ -570,9 +578,7 @@ struct InvoiceRefundSheet: View {
                     placeholder: "0.00",
                     text: $amountText,
                     kind: .money,
-                    hint: payment.isCard
-                        ? "Stripe returns it to the customer's card. The amount is refunded first, then the tip."
-                        : "Records money you handed back. Nothing is sent to the customer's bank."
+                    hint: refundHint
                 )
                 if let errorText {
                     InlineMessage(text: errorText)
@@ -599,6 +605,21 @@ struct InvoiceRefundSheet: View {
 
     private var currencyCode: String { appState.currencyCode }
 
+    private var refundHint: String {
+        switch payment.method {
+        case .card, .cardPresent:
+            return "Stripe returns it to the customer's card. The amount is refunded first, then the tip."
+        case .achDebit:
+            return "Stripe returns it to the customer's bank account (this can take several business days)."
+        case .bnpl:
+            return "Stripe returns it through the customer's pay-later provider."
+        case .giftCard:
+            return "The amount goes back onto the gift card or store credit it was paid with."
+        case .cash, .check, .bankTransfer, .other:
+            return "Records money you handed back. Nothing is sent to the customer's bank."
+        }
+    }
+
     private func submit() async {
         errorText = nil
         guard let amount = Money.parseCents(amountText, currencyCode: currencyCode), amount > 0 else {
@@ -610,7 +631,7 @@ struct InvoiceRefundSheet: View {
             return
         }
         do {
-            if payment.isCard {
+            if payment.isStripeBacked {
                 let shopID = try appState.requireShopID()
                 _ = try await PaymentService.refundCardPayment(
                     shopID: shopID,

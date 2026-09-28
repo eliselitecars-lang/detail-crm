@@ -9,13 +9,16 @@ import { jobKeys, useJob, type JobDetail } from './api';
 import { ActivityCard, NotesCard } from './components/detail/ActivityNotesCards';
 import { AssignmentsCard } from './components/detail/AssignmentsCard';
 import { ChecklistCard } from './components/detail/ChecklistCard';
+import { DocumentsCard } from './components/detail/DocumentsCard';
 import { FormsCard } from './components/detail/FormsCard';
 import { InspectionsCard } from './components/detail/InspectionsCard';
+import { JobCustomDataCard } from './components/detail/JobCustomDataCard';
 import { LineItemsCard } from './components/detail/LineItemsCard';
 import { MessagesCard } from './components/detail/MessagesCard';
 import { MoneyCard } from './components/detail/MoneyCard';
 import { CustomerCard, VehicleCard } from './components/detail/PeopleCards';
 import { PhotosCard } from './components/detail/PhotosCard';
+import { ReportCard } from './components/detail/ReportCard';
 import { ScheduleCard } from './components/detail/ScheduleCard';
 import { StatusControl } from './components/detail/StatusControl';
 import { TimeCard } from './components/detail/TimeCard';
@@ -107,12 +110,15 @@ function JobView({ job }: { job: JobDetail }) {
           <PhotosCard jobId={job.id} />
           <InspectionsCard job={job} />
           <FormsCard job={job} />
+          <DocumentsCard jobId={job.id} />
         </div>
         <div className="flex min-w-0 flex-col gap-4">
           <CustomerCard job={job} />
           <VehicleCard job={job} />
+          <JobCustomDataCard job={job} />
           {canSeeMoney && <MoneyCard job={job} />}
-          <AssignmentsCard jobId={job.id} />
+          <ReportCard job={job} />
+          <AssignmentsCard job={job} />
           <TimeCard job={job} />
           <MessagesCard job={job} />
           <NotesCard job={job} />

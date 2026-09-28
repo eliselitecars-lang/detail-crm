@@ -20,7 +20,12 @@ enum AppConfig {
             let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
             let dict = plist as? [String: Any]
         else { return [:] }
-        return dict.compactMapValues { $0 as? String }
+        // Flags may be typed as <true/> / <false/> as well as strings.
+        return dict.compactMapValues { raw in
+            if let text = raw as? String { return text }
+            if let flag = raw as? Bool { return flag ? "YES" : "NO" }
+            return nil
+        }
     }()
 
     static var supabaseURLString: String { value("SUPABASE_URL") }
@@ -48,6 +53,20 @@ enum AppConfig {
         return url
     }
 
+    /// Tap to Pay on iPhone (Stripe Terminal). Ships `NO`: turning it on
+    /// also needs Apple's proximity-reader entitlement (ios/README.md). The
+    /// payment screens additionally check that the device supports it.
+    static var tapToPayEnabled: Bool { flag("TAP_TO_PAY_ENABLED") }
+
+    /// Stripe Bluetooth card readers (Stripe Terminal). Ships `NO`.
+    static var terminalBluetoothEnabled: Bool { flag("TERMINAL_BLUETOOTH_ENABLED") }
+
+    /// `YES` / `true` / `1` (any case) switch a flag on; anything else,
+    /// including a missing key, leaves it off.
+    static func isEnabledFlag(_ raw: String) -> Bool {
+        ["yes", "true", "1"].contains(raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
     /// Supabase URL + anon key are required for the app to function at all.
     static var isConfigured: Bool {
         supabaseURL != nil && !isPlaceholder(supabaseAnonKey)
@@ -63,5 +82,9 @@ enum AppConfig {
 
     private static func value(_ key: String) -> String {
         (values[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func flag(_ key: String) -> Bool {
+        isEnabledFlag(value(key))
     }
 }

@@ -163,6 +163,9 @@ enum PaymentService {
         var methodRows: [PaymentsLedgerMethodRow]
         /// More (older) payments in the range beyond the rows loaded.
         var hasMore: Bool = false
+        /// Bank debit / pay-later payments still settling (any date): they
+        /// count once Stripe confirms them, so they are listed apart.
+        var processing: [Payment] = []
 
         /// Appends the next page of rows (the summary covers the whole range).
         func appending(_ page: LedgerPage) -> LedgerData {
@@ -208,13 +211,43 @@ enum PaymentService {
             .value
         let counted = method.map { wanted in rows.filter { $0.method == wanted } } ?? rows
 
+        // Settling payments are an extra: a failure leaves the ledger as is.
+        var processing: [Payment] = []
+        var customers = page.customers
+        if let settling = try? await processingPayments(shopID: shopID, method: method) {
+            processing = settling
+            let missing = settling.map { $0.customerID }.filter { customers[$0] == nil }
+            if let more = try? await customerRefs(shopID: shopID, ids: missing) {
+                customers.merge(more) { current, _ in current }
+            }
+        }
+
         return LedgerData(
             payments: page.payments,
-            customers: page.customers,
+            customers: customers,
             summary: PaymentsLedgerSummary(rows: counted),
             methodRows: rows,
-            hasMore: page.hasMore
+            hasMore: page.hasMore,
+            processing: processing
         )
+    }
+
+    /// Payments Stripe is still settling (`processing`: bank debits and
+    /// pay-later), newest first.
+    static func processingPayments(shopID: UUID, method: PaymentMethod?) async throws -> [Payment] {
+        var query = Supa.client
+            .from("payments")
+            .select(Payment.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("status", value: PaymentStatus.processing.rawValue)
+        if let method {
+            query = query.eq("method", value: method.rawValue)
+        }
+        return try await query
+            .order("created_at", ascending: false)
+            .limit(50)
+            .execute()
+            .value
     }
 
     /// One page of received payments in [start, end), newest first.
@@ -331,6 +364,7 @@ enum PaymentService {
 
     /// Owner/admin: money handed back for a manual payment
     /// (`refund_manual_payment`; refunded from the amount first, then tip).
+    /// For a gift card payment the amount goes back onto the card.
     static func refundManualPayment(paymentID: UUID, amountCents: Int) async throws -> Payment {
         struct Params: Encodable {
             let p_payment_id: UUID
@@ -464,8 +498,9 @@ enum PaymentService {
         return try await MoneyEdge.invoke("payments", body: body)
     }
 
-    /// Owner/admin: refunds a card payment through Stripe (full refundable
-    /// amount when `amountCents` is nil).
+    /// Owner/admin: refunds a Stripe payment (card, in person, bank debit
+    /// or pay later) through Stripe (full refundable amount when
+    /// `amountCents` is nil).
     static func refundCardPayment(shopID: UUID, paymentID: UUID, amountCents: Int?) async throws -> MoneyRefundResult {
         struct Body: Encodable {
             let action = "refund"

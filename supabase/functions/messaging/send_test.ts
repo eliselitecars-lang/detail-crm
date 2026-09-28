@@ -67,6 +67,25 @@ Deno.test("send: manager free-form SMS is queued as the caller and delivered imm
   ]);
 });
 
+Deno.test("send: a provisioned number sends through its Messaging Service (0089)", async () => {
+  const { db, handler } = setup();
+  const service = `MG${"0".repeat(31)}1`;
+  db.seed("shop_sms_numbers", [{
+    phone_number: SHOP_NUMBER,
+    shop_id: SHOP,
+    messaging_service_sid: service,
+  }]);
+  const res = await handler(
+    sendRequest("tok-manager", { customer_id: CUSTOMER, channel: "sms", body: "On our way" }),
+  );
+  const out = await responseJson<SendResponse>(res);
+  assertEquals(out.status, "sent");
+  const call = db.http.callsTo("POST", TWILIO_MESSAGES_URL)[0];
+  assertEquals([call?.form.get("MessagingServiceSid"), call?.form.get("From")], [service, null]);
+  // The message still records the shop's number as its sender.
+  assertEquals(message(db, out.message_id).from_address, SHOP_NUMBER);
+});
+
 Deno.test("send: free-form email with subject", async () => {
   const { db, handler } = setup();
   const out = await responseJson<SendResponse>(

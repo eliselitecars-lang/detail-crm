@@ -29,6 +29,28 @@
 --   detail-crm-storage-purge    every 15 min   POST storage-purge {"action":"purge"}
 --                                              (removes the stored files of deleted shops,
 --                                              jobs, inspections and forms; migration 0025)
+--   detail-crm-push             every minute   POST push {"action":"process_queue"}
+--                                              (APNs pushes of new staff notifications,
+--                                              migration 0082; a no-op until the APNS_*
+--                                              function secrets are set)
+--   detail-crm-webhooks         every minute   POST webhooks {"action":"deliver"}
+--                                              (signed outbound webhook deliveries and
+--                                              their retries, migration 0089)
+--   detail-crm-sms-status       every 30 min   POST sms-provisioning {"action":"refresh_status"}
+--                                              (toll-free / 10DLC verification progress of
+--                                              self-serve numbers; a no-op while
+--                                              SMS_PROVISIONING_ENABLED is off)
+--   detail-crm-generate-series  daily 07:15    public.generate_series_jobs()
+--                               UTC            (extends recurring job series to their
+--                                              horizon, migration 0051)
+--   detail-crm-billing-sync-plans  daily 06:35  POST billing {"action":"sync_plans"}
+--                               UTC            (shop subscription plans from the platform
+--                                              Stripe account's Products/Prices; product/price
+--                                              webhooks resync sooner. Harmless while billing
+--                                              is off: docs/BILLING.md)
+--
+-- Document follow-ups, per-service follow-ups and task reminders ride on
+-- detail-crm-run-automations (enqueue_due_automations); they need no job.
 --
 -- Re-run this file after every release that adds or changes a job above:
 -- it is idempotent (each job is unscheduled, then scheduled again), so a
@@ -121,7 +143,9 @@ $setup$;
 select cron.unschedule(j.jobid)
   from cron.job j
  where j.jobname in ('detail-crm-process-queue', 'detail-crm-run-automations', 'detail-crm-expire-quotes',
-                     'detail-crm-sweep-payment-sheets', 'detail-crm-storage-purge');
+                     'detail-crm-sweep-payment-sheets', 'detail-crm-storage-purge', 'detail-crm-push',
+                     'detail-crm-webhooks', 'detail-crm-sms-status', 'detail-crm-generate-series',
+                     'detail-crm-billing-sync-plans');
 
 -- Send queued messages. The function drains up to 200 messages within ~45 s
 -- per call; overlapping runs are safe (claim_queued_messages skips locked rows).
@@ -198,6 +222,95 @@ select cron.schedule(
   $job$
 );
 
+-- Push new staff notifications to the iPhone app through APNs. Each run
+-- drains the queue for up to ~25 s; overlapping runs are safe
+-- (claim_push_batch skips locked rows and pushes each notification once).
+select cron.schedule(
+  'detail-crm-push',
+  '* * * * *',
+  $job$
+  select net.http_post(
+    url := (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.name = 'detail_crm_functions_url') || '/push',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-cron-secret', (select s.decrypted_secret from vault.decrypted_secrets s
+                         where s.name = 'detail_crm_cron_secret')),
+    body := '{"action":"process_queue"}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $job$
+);
+
+-- Deliver outbound webhooks (signed POSTs to the shops' endpoints) and their
+-- retries. Each run works for up to ~40 s; claim_webhook_deliveries skips
+-- locked rows and re-queues deliveries a crashed run left behind.
+select cron.schedule(
+  'detail-crm-webhooks',
+  '* * * * *',
+  $job$
+  select net.http_post(
+    url := (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.name = 'detail_crm_functions_url') || '/webhooks',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-cron-secret', (select s.decrypted_secret from vault.decrypted_secrets s
+                         where s.name = 'detail_crm_cron_secret')),
+    body := '{"action":"deliver"}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $job$
+);
+
+-- Poll Twilio for the toll-free / 10DLC verification of self-serve numbers
+-- (the settings page shows the result; owners/admins are notified).
+select cron.schedule(
+  'detail-crm-sms-status',
+  '*/30 * * * *',
+  $job$
+  select net.http_post(
+    url := (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.name = 'detail_crm_functions_url') || '/sms-provisioning',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-cron-secret', (select s.decrypted_secret from vault.decrypted_secrets s
+                         where s.name = 'detail_crm_cron_secret')),
+    body := '{"action":"refresh_status"}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $job$
+);
+
+-- Generate the upcoming occurrences of recurring job series (the series RPCs
+-- generate the first ones; this keeps every active series filled to its
+-- horizon).
+select cron.schedule(
+  'detail-crm-generate-series',
+  '15 7 * * *',
+  $job$ select public.generate_series_jobs(); $job$
+);
+
+-- Mirror the shop subscription plans (platform Stripe Products marked
+-- detailcrm_plan=true and their recurring Prices) into platform_plans. The
+-- billing-webhook resyncs on every product/price event; this daily run is the
+-- safety net for a missed or out-of-order event.
+select cron.schedule(
+  'detail-crm-billing-sync-plans',
+  '35 6 * * *',
+  $job$
+  select net.http_post(
+    url := (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.name = 'detail_crm_functions_url') || '/billing',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-cron-secret', (select s.decrypted_secret from vault.decrypted_secrets s
+                         where s.name = 'detail_crm_cron_secret')),
+    body := '{"action":"sync_plans"}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $job$
+);
+
 -- ---------------------------------------------------------------------------
 -- Verify
 -- ---------------------------------------------------------------------------
@@ -206,7 +319,7 @@ select cron.schedule(
 --   select j.jobname, d.status, d.return_message, d.start_time
 --     from cron.job_run_details d join cron.job j using (jobid)
 --    where j.jobname like 'detail-crm-%' order by d.start_time desc limit 20;
---   -- HTTP results of process_queue (kept ~6 h by pg_net):
+--   -- HTTP results of the function jobs (kept ~6 h by pg_net):
 --   select id, status_code, content, created from net._http_response order by created desc limit 10;
 --   -- 401 => the Vault secret and the CRON_SECRET function secret differ.
 --

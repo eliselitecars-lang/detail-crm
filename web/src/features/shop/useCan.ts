@@ -1,4 +1,4 @@
-import { can, type Capability } from './permissions';
+import { can, permissionContextOf, type Capability } from './permissions';
 import { useShopContext } from './shopContext';
 
 /**
@@ -8,8 +8,5 @@ import { useShopContext } from './shopContext';
 export function useCan(capability: Capability): boolean {
   const { membership } = useShopContext();
   if (!membership) return false;
-  return can(
-    { role: membership.role, techsCanCollectPayments: membership.shop.techs_can_collect_payments },
-    capability,
-  );
+  return can(permissionContextOf(membership), capability);
 }

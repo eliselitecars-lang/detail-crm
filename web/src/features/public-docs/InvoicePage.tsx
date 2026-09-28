@@ -1,24 +1,29 @@
-import { CreditCard, Printer, RefreshCw } from 'lucide-react';
+import { CreditCard, FileDown, Gift, Landmark, Printer, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
   Button,
+  buttonClasses,
   Card,
   FormField,
+  Input,
   KeyValueList,
   MoneyInput,
   RadioGroup,
   SectionCard,
   StatusBadge,
 } from '@/components/ui';
-import { formatDate, formatDateTime } from '@/lib/dates';
+import { formatDate, formatDateTime, formatLocalDate } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
 import { formatCents } from '@/lib/money';
+import { publicPdfUrl } from '@/features/quotes/shared/pdf';
 import {
   PAID_POLL_ATTEMPTS,
   useInvoiceCheckout,
   usePublicInvoice,
+  useRedeemInvoiceGiftCard,
+  type GiftCardResult,
   type InvoiceDocument,
   type InvoicePayment,
 } from './api';
@@ -91,6 +96,8 @@ function InvoiceDocumentView({
   const vehicle = vehicleLabel(doc.vehicle);
   const shopAddress = addressLines(shop);
   const canPayOnline = invoice.payable && invoice.card_payments_enabled && !paidReturn;
+  const pdfUrl = publicPdfUrl('invoice', token);
+  const grouped = doc.jobs.length > 1;
 
   const totals = [
     ...standardTotals(invoice),
@@ -129,13 +136,26 @@ function InvoiceDocumentView({
             .filter(Boolean)
             .join(' · ')}
           actions={
-            <Button
-              variant="secondary"
-              leadingIcon={<Printer className="size-4" aria-hidden="true" />}
-              onClick={() => window.print()}
-            >
-              Print
-            </Button>
+            <>
+              <Button
+                variant="secondary"
+                leadingIcon={<Printer className="size-4" aria-hidden="true" />}
+                onClick={() => window.print()}
+              >
+                Print
+              </Button>
+              {pdfUrl && (
+                <a
+                  href={pdfUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={buttonClasses({ variant: 'secondary' })}
+                >
+                  <FileDown className="size-4" aria-hidden="true" />
+                  Download PDF
+                </a>
+              )}
+            </>
           }
         />
 
@@ -184,15 +204,22 @@ function InvoiceDocumentView({
                 {doc.job.scheduled_start ? ` · ${formatDate(doc.job.scheduled_start, tz)}` : ''}
               </p>
             )}
+            {grouped && (
+              <p className="text-muted text-sm">{doc.jobs.length} appointments on this invoice</p>
+            )}
             {vehicle && <p className="text-muted text-sm">{vehicle}</p>}
           </div>
         </Card>
 
-        <SectionCard title="Items" flush>
-          <div className="px-4 sm:px-5">
-            <LineList lines={doc.line_items} currency={currency} label="Invoice items" />
-          </div>
-        </SectionCard>
+        {grouped ? (
+          <GroupedItems doc={doc} />
+        ) : (
+          <SectionCard title="Items" flush>
+            <div className="px-4 sm:px-5">
+              <LineList lines={doc.line_items} currency={currency} label="Invoice items" />
+            </div>
+          </SectionCard>
+        )}
 
         <Card padded>
           <TotalsList currency={currency} rows={totals} />
@@ -204,8 +231,36 @@ function InvoiceDocumentView({
           )}
         </Card>
 
+        {invoice.processing_cents > 0 && invoice.status !== 'void' && (
+          <Banner tone="info" title="A bank payment is clearing">
+            <span className="inline-flex items-start gap-1.5">
+              <Landmark className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <span>
+                {formatCents(invoice.processing_cents, { currency })} is on its way from your bank.
+                It counts toward the balance once it clears, which can take a few business days
+                {invoice.payable ? '.' : ' — there’s nothing more to pay for now.'}
+              </span>
+            </span>
+          </Banner>
+        )}
+
+        {!paidReturn && invoice.status !== 'void' && (
+          <GiftCardPanel
+            token={token}
+            currency={currency}
+            redeemable={invoice.gift_card_redeemable}
+          />
+        )}
+
         {canPayOnline && (
-          <PayPanel token={token} balanceCents={invoice.balance_cents} currency={currency} />
+          <PayPanel
+            token={token}
+            // What checkout charges (payments edge payableBalance): the balance
+            // less bank payments still clearing toward it.
+            balanceCents={Math.max(0, invoice.balance_cents - invoice.processing_cents)}
+            clearing={invoice.processing_cents > 0}
+            currency={currency}
+          />
         )}
         {invoice.payable && !invoice.card_payments_enabled && (
           <Banner tone="info" title="Online payment isn’t available">
@@ -305,10 +360,14 @@ const TIP_OPTIONS: { value: TipChoice; label: string }[] = [
 function PayPanel({
   token,
   balanceCents,
+  clearing,
   currency,
 }: {
   token: string;
+  /** The amount checkout charges: the balance less payments still clearing. */
   balanceCents: number;
+  /** A bank payment is clearing, so the amount is less than the balance due. */
+  clearing: boolean;
   currency: string;
 }) {
   const checkout = useInvoiceCheckout(token);
@@ -373,7 +432,11 @@ function PayPanel({
         )}
         <KeyValueList
           items={[
-            { key: 'balance', label: 'Balance', value: formatCents(balanceCents, { currency }) },
+            {
+              key: 'balance',
+              label: clearing ? 'Left to pay (after the clearing payment)' : 'Balance',
+              value: formatCents(balanceCents, { currency }),
+            },
             {
               key: 'tip',
               label: 'Tip',
@@ -396,12 +459,162 @@ function PayPanel({
   );
 }
 
+/** A grouped invoice's lines under one heading per appointment (server line order). */
+function GroupedItems({ doc }: { doc: InvoiceDocument }) {
+  const currency = doc.shop.currency;
+  const other = doc.line_items.filter(
+    (line) => line.job_number === null || !doc.jobs.some((j) => j.number === line.job_number),
+  );
+  return (
+    <SectionCard title="Items" flush>
+      <div className="flex flex-col px-4 sm:px-5">
+        {doc.jobs.map((job) => {
+          const lines = doc.line_items.filter((line) => line.job_number === job.number);
+          if (lines.length === 0) return null;
+          const title = [
+            `Appointment #${job.number}`,
+            job.vehicle_label,
+            job.date ? formatLocalDate(job.date) : null,
+          ]
+            .filter(Boolean)
+            .join(' · ');
+          return (
+            <section
+              key={job.number}
+              aria-label={title}
+              className="border-line border-b last:border-b-0"
+            >
+              <h3 className="text-muted pt-3 text-xs font-semibold tracking-wide uppercase">
+                {title}
+              </h3>
+              <LineList lines={lines} currency={currency} label={title} />
+            </section>
+          );
+        })}
+        {other.length > 0 && (
+          <section aria-label="Other items">
+            <h3 className="text-muted pt-3 text-xs font-semibold tracking-wide uppercase">
+              Other items
+            </h3>
+            <LineList lines={other} currency={currency} label="Other items" />
+          </section>
+        )}
+      </div>
+    </SectionCard>
+  );
+}
+
+/**
+ * Pay from a gift card or store credit code (public_redeem_gift_card). Stays
+ * mounted after a redemption so its confirmation remains visible when the
+ * invoice can no longer take gift cards (paid, or no usable cards left).
+ */
+function GiftCardPanel({
+  token,
+  currency,
+  redeemable,
+}: {
+  token: string;
+  currency: string;
+  redeemable: boolean;
+}) {
+  const redeem = useRedeemInvoiceGiftCard(token);
+  const [code, setCode] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<GiftCardResult | null>(null);
+
+  const apply = () => {
+    setResult(null);
+    if (code.trim().length < 4) {
+      setError('Enter the code from your gift card.');
+      return;
+    }
+    setError(null);
+    redeem.mutate(
+      { code: code.trim(), amountCents: null },
+      {
+        onSuccess: (answer) => {
+          setResult(answer);
+          if (answer.redeemed) setCode('');
+        },
+      },
+    );
+  };
+
+  const applied =
+    result?.redeemed === true ? (
+      <Banner tone="success" title="Gift card applied">
+        {formatCents(result.amount_cents, { currency })} was paid from card …{result.last4}
+        {result.remaining_cents !== null
+          ? `. ${formatCents(result.remaining_cents, { currency })} is left on the card.`
+          : '.'}
+      </Banner>
+    ) : null;
+
+  if (!redeemable) return applied;
+
+  return (
+    <SectionCard
+      title={
+        <span className="inline-flex items-center gap-2">
+          <Gift className="text-muted size-4" aria-hidden="true" />
+          Pay with a gift card
+        </span>
+      }
+      description="The card’s balance is applied to this invoice, up to the amount due."
+      className="print:hidden"
+    >
+      <form
+        noValidate
+        className="flex flex-col gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          apply();
+        }}
+      >
+        <FormField label="Gift card code" error={error}>
+          <Input
+            value={code}
+            autoComplete="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            maxLength={40}
+            className="font-mono uppercase"
+            onChange={(event) => setCode(event.target.value)}
+          />
+        </FormField>
+        {redeem.isError && (
+          <Banner tone="danger" title="Couldn’t use the gift card">
+            {errorMessage(redeem.error)}
+          </Banner>
+        )}
+        {applied}
+        {result && !result.redeemed && (
+          <Banner tone="warning" title="That code didn’t work">
+            {result.message
+              ? `${result.message.charAt(0).toUpperCase()}${result.message.slice(1)}.`
+              : 'Check the code and try again.'}
+          </Banner>
+        )}
+        <div className="flex justify-end">
+          <Button type="submit" variant="money" loading={redeem.isPending}>
+            Apply gift card
+          </Button>
+        </div>
+      </form>
+    </SectionCard>
+  );
+}
+
 const METHOD_LABELS: Record<InvoicePayment['method'], string> = {
   card: 'Card',
   card_present: 'Card (in person)',
   cash: 'Cash',
   check: 'Check',
   bank_transfer: 'Bank transfer',
+  gift_card: 'Gift card / credit',
+  ach_debit: 'Bank debit (ACH)',
+  bnpl: 'Pay later',
   other: 'Other',
 };
 

@@ -4,9 +4,11 @@
 //
 //  Reports for a shop-timezone date range. Owners, admins and managers
 //  see revenue (chart + table), payments by method, sales by service,
-//  team, outstanding invoices (aging) and customers. Technicians see only
-//  their own team row (hours, jobs, commission) — the server returns
-//  nothing else to them.
+//  team, outstanding invoices (aging), customers, lead sources and quote
+//  conversion (P-33); owners and admins open any member's earnings by job
+//  (P-12). Technicians see only their own earnings (hours, jobs, pay,
+//  commission, tips) with a per-job breakdown — the server returns nothing
+//  else to them.
 //
 //  Every amount comes from the report RPCs; the app only formats them.
 //  Each card loads independently so one failure doesn't hide the rest.
@@ -24,6 +26,8 @@ struct ReportsSnapshot {
     var team: LoadState<[ReportTeamRow]> = .idle
     var outstanding: LoadState<ReportOutstanding> = .idle
     var customers: LoadState<ReportCustomers> = .idle
+    var leadSources: LoadState<[OpsLeadSourceRow]> = .idle
+    var quoteConversion: LoadState<OpsQuoteConversion> = .idle
 }
 
 enum ReportsLoader {
@@ -56,6 +60,12 @@ enum ReportsLoader {
             async let customers = LoadState<ReportCustomers>.result {
                 try await ReportService.customers(shopID: shopID, from: from, to: to)
             }
+            async let leadSources = LoadState<[OpsLeadSourceRow]>.result {
+                try await ReportService.leadSources(shopID: shopID, from: from, to: to)
+            }
+            async let quoteConversion = LoadState<OpsQuoteConversion>.result {
+                try await ReportService.quoteConversion(shopID: shopID, from: from, to: to)
+            }
             snapshot.revenue = await revenue
             snapshot.revenueTotals = await revenueTotals
             snapshot.payments = await payments
@@ -63,6 +73,8 @@ enum ReportsLoader {
             snapshot.team = await team
             snapshot.outstanding = await outstanding
             snapshot.customers = await customers
+            snapshot.leadSources = await leadSources
+            snapshot.quoteConversion = await quoteConversion
         } else {
             snapshot.team = await LoadState<[ReportTeamRow]>.result {
                 try await ReportService.team(shopID: shopID, from: from, to: to)
@@ -117,11 +129,20 @@ struct ReportsView: View {
             ))
             AnyView(ReportsPaymentsCard(state: snapshot.payments, currencyCode: currency, retry: { await load() }))
             AnyView(ReportsServicesCard(state: snapshot.services, currencyCode: currency, retry: { await load() }))
-            AnyView(ReportsTeamCard(state: snapshot.team, currencyCode: currency, ownOnly: false, retry: { await load() }))
+            AnyView(ReportsTeamCard(
+                state: snapshot.team,
+                currencyCode: currency,
+                ownOnly: false,
+                range: range,
+                canOpenEarnings: appState.role?.isAdminOrAbove ?? false,
+                retry: { await load() }
+            ))
             AnyView(ReportsOutstandingCard(state: snapshot.outstanding, clock: clock, currencyCode: currency, retry: { await load() }))
             AnyView(ReportsCustomersCard(state: snapshot.customers, clock: clock, currencyCode: currency, retry: { await load() }))
+            AnyView(OpsLeadSourcesCard(state: snapshot.leadSources, currencyCode: currency, retry: { await load() }))
+            AnyView(OpsQuoteConversionCard(state: snapshot.quoteConversion, currencyCode: currency, retry: { await load() }))
         } else {
-            AnyView(ReportsTeamCard(state: snapshot.team, currencyCode: currency, ownOnly: true, retry: { await load() }))
+            AnyView(OpsEarningsCard(state: snapshot.team, range: range, currencyCode: currency, retry: { await load() }))
         }
     }
 
@@ -143,6 +164,8 @@ struct ReportsView: View {
             next.team = .loading
             next.outstanding = .loading
             next.customers = .loading
+            next.leadSources = .loading
+            next.quoteConversion = .loading
             snapshot = next
         }
         let fresh = await ReportsLoader.load(shopID: shopID, range: range, clock: clock, includeShopReports: includeShopReports)
@@ -155,6 +178,8 @@ struct ReportsView: View {
         merged.team.apply(fresh.team)
         merged.outstanding.apply(fresh.outstanding)
         merged.customers.apply(fresh.customers)
+        merged.leadSources.apply(fresh.leadSources)
+        merged.quoteConversion.apply(fresh.quoteConversion)
         if !rangeChanged, let message = firstError(fresh) {
             toasts.show(message, style: .error)
         }
@@ -165,6 +190,7 @@ struct ReportsView: View {
     private func firstError(_ fresh: ReportsSnapshot) -> String? {
         fresh.revenue.errorMessage ?? fresh.revenueTotals.errorMessage ?? fresh.payments.errorMessage ?? fresh.services.errorMessage
             ?? fresh.team.errorMessage ?? fresh.outstanding.errorMessage ?? fresh.customers.errorMessage
+            ?? fresh.leadSources.errorMessage ?? fresh.quoteConversion.errorMessage
     }
 }
 

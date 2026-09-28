@@ -87,18 +87,39 @@ describe('compensation', () => {
     expect(formatCompensation({ hourly_rate_cents: 0, commission_bps: 1050 }, 'usd')).toBe(
       '10.5% commission',
     );
+    expect(
+      formatCompensation(
+        { hourly_rate_cents: 0, commission_bps: 0, sales_commission_bps: 500 },
+        'usd',
+      ),
+    ).toBe('5% on sales');
   });
 
   it('parses the form to integer cents and bps', () => {
-    expect(compensationFormSchema.parse({ hourlyRateCents: 2500, commission: '12.5' })).toEqual({
+    expect(
+      compensationFormSchema.parse({
+        hourlyRateCents: 2500,
+        commission: '12.5',
+        salesCommission: '3',
+      }),
+    ).toEqual({
       hourlyRateCents: 2500,
       commission: 1250,
+      salesCommission: 300,
     });
     expect(
-      compensationFormSchema.safeParse({ hourlyRateCents: 2500, commission: '120' }).success,
+      compensationFormSchema.safeParse({
+        hourlyRateCents: 2500,
+        commission: '120',
+        salesCommission: '0',
+      }).success,
     ).toBe(false);
     expect(
-      compensationFormSchema.safeParse({ hourlyRateCents: 12.5, commission: '0' }).success,
+      compensationFormSchema.safeParse({
+        hourlyRateCents: 12.5,
+        commission: '0',
+        salesCommission: '0',
+      }).success,
     ).toBe(false);
   });
 

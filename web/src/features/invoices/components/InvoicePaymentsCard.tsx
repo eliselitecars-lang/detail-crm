@@ -61,6 +61,11 @@ export function InvoicePaymentsCard({ invoiceId, currency, timezone }: InvoicePa
                       {formatDateTime(payment.paid_at ?? payment.created_at, timezone)}
                     </time>
                   </p>
+                  {payment.status === 'processing' && (
+                    <p className="text-muted mt-0.5 text-xs">
+                      Still clearing with the bank; it counts toward the balance once it succeeds.
+                    </p>
+                  )}
                   {payment.note && (
                     <p className="text-muted mt-0.5 text-xs break-words">{payment.note}</p>
                   )}

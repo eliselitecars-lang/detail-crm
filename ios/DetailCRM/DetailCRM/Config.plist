@@ -16,5 +16,14 @@
 	     and the Privacy Policy / Terms of Service rows (<url>/privacy, /terms). -->
 	<key>WEB_APP_URL</key>
 	<string>YOUR_WEB_APP_URL</string>
+	<!-- In-person card payments ship switched off. TAP_TO_PAY_ENABLED needs
+	     Apple's Tap to Pay on iPhone entitlement in DetailCRM.entitlements
+	     first (ios/README.md); TERMINAL_BLUETOOTH_ENABLED shows Stripe
+	     Bluetooth card readers. Both also need Stripe Terminal on the
+	     connected account. YES / NO. -->
+	<key>TAP_TO_PAY_ENABLED</key>
+	<string>NO</string>
+	<key>TERMINAL_BLUETOOTH_ENABLED</key>
+	<string>NO</string>
 </dict>
 </plist>

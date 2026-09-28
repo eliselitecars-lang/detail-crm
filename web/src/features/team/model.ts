@@ -68,23 +68,32 @@ export interface Compensation {
   member_id: string;
   hourly_rate_cents: number;
   commission_bps: number;
+  /** Commission on jobs they sold (jobs.sold_by_member_id), P-12. */
+  sales_commission_bps: number;
 }
 
 export function formatCompensation(
-  comp: Pick<Compensation, 'hourly_rate_cents' | 'commission_bps'> | undefined,
+  comp:
+    | (Pick<Compensation, 'hourly_rate_cents' | 'commission_bps'> &
+        Partial<Pick<Compensation, 'sales_commission_bps'>>)
+    | undefined,
   currency: string,
 ): string {
-  if (!comp || (comp.hourly_rate_cents === 0 && comp.commission_bps === 0)) return 'Not set';
+  const sales = comp?.sales_commission_bps ?? 0;
+  if (!comp || (comp.hourly_rate_cents === 0 && comp.commission_bps === 0 && sales === 0))
+    return 'Not set';
   const parts: string[] = [];
   if (comp.hourly_rate_cents > 0)
     parts.push(`${formatCents(comp.hourly_rate_cents, { currency })}/hr`);
   if (comp.commission_bps > 0) parts.push(`${formatBps(comp.commission_bps)} commission`);
+  if (sales > 0) parts.push(`${formatBps(sales)} on sales`);
   return parts.join(' · ');
 }
 
 export const compensationFormSchema = z.object({
   hourlyRateCents: zCents.max(100_000_00, 'That rate looks too high.'),
   commission: zPercentBps(100),
+  salesCommission: zPercentBps(100),
 });
 export type CompensationFormInput = z.input<typeof compensationFormSchema>;
 export type CompensationFormOutput = z.output<typeof compensationFormSchema>;

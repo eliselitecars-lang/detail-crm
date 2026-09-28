@@ -1,6 +1,16 @@
-import { Banknote, Copy, CreditCard, Hourglass, MoreHorizontal, Send } from 'lucide-react';
+import {
+  Banknote,
+  Copy,
+  CreditCard,
+  FileDown,
+  Hourglass,
+  Landmark,
+  MoreHorizontal,
+  Send,
+} from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Badge,
   Button,
@@ -16,26 +26,34 @@ import {
   type DropdownMenuEntry,
 } from '@/components/ui';
 import { formatLocalDate, shopToday, utcToShopLocal } from '@/lib/dates';
+import { formatCents } from '@/lib/money';
 import { useRealtime } from '@/lib/useRealtime';
 import { useCan } from '@/features/shop/useCan';
 import { useShop } from '@/features/shop/shopContext';
 import { useCustomer, useCustomerVehicles } from '@/features/quotes/shared/api';
 import { DiscountEditor } from '@/features/quotes/shared/DiscountEditor';
-import { copyText, publicDocUrl } from '@/features/quotes/shared/format';
+import { useAddFeeLine } from '@/features/quotes/shared/fees';
+import { FollowupStatusCard } from '@/features/quotes/shared/FollowupStatusCard';
+import { copyText, publicDocUrl, vehicleLabel } from '@/features/quotes/shared/format';
 import { LineItemsEditor } from '@/features/quotes/shared/LineItemsEditor';
 import type { DocLine } from '@/features/quotes/shared/lines';
+import { useStaffPdf } from '@/features/quotes/shared/pdf';
 import { SendDocumentDialog } from '@/features/quotes/shared/SendDocumentDialog';
 import { TotalsCard } from '@/features/quotes/shared/TotalsCard';
 import {
   areInvoiceLinesEditable,
   cancelOpenPaymentsSummary,
   invoiceKeys,
+  collectibleCents,
+  inFlightCents,
+  isCardAttemptInFlight,
   isInvoiceOverdue,
-  isPaymentInFlight,
   isPaymentInProgressError,
+  processingCents,
   useCancelOpenPayments,
   useDeleteInvoice,
   useInvoice,
+  useInvoiceJobs,
   useInvoiceLineMutations,
   useInvoiceLinkToken,
   useInvoiceLines,
@@ -79,9 +97,10 @@ export default function InvoiceDetailPage() {
 type Pending = 'send' | 'record' | 'charge' | 'void' | 'delete' | 'cancelOpen' | null;
 
 function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[] }) {
-  const { timezone, currency } = useShop();
+  const { shopId, timezone, currency } = useShop();
   const toast = useToast();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const canManage = useCan('invoices.manage');
   const canViewList = useCan('invoices.view');
   const canCollect = useCan('payments.collect');
@@ -96,6 +115,11 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   const remove = useDeleteInvoice();
   const cancelOpen = useCancelOpenPayments(invoice.id);
   const payments = useInvoicePayments(invoice.id);
+  const invoiceJobs = useInvoiceJobs(invoice.id);
+  const pdf = useStaffPdf();
+  const addFee = useAddFeeLine('invoice', invoice.id, () =>
+    queryClient.invalidateQueries({ queryKey: invoiceKeys.all(shopId) }),
+  );
   const [pending, setPending] = useState<Pending>(null);
   const [voidReason, setVoidReason] = useState('');
   /** The server refused a change because a card payment is in flight. */
@@ -107,12 +131,37 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   const linkToken = useInvoiceLinkToken(invoice.id, canManage);
   const link = linkToken.data ? publicDocUrl('invoice', linkToken.data) : null;
   const isVoid = invoice.status === 'void';
+  // Bank / pay-later money still clearing: not in the balance yet, but it
+  // must not be collected twice (the server applies the same rule).
+  const clearingCents = processingCents(payments.data ?? []);
+  const coveredByClearing = clearingCents > 0 && clearingCents >= invoice.balance_cents;
   const payable =
-    (invoice.status === 'open' || invoice.status === 'partially_paid') && invoice.balance_cents > 0;
+    (invoice.status === 'open' || invoice.status === 'partially_paid') &&
+    invoice.balance_cents > 0 &&
+    !coveredByClearing;
   const overdue = isInvoiceOverdue(invoice);
   const linesEditable = canManage && areInvoiceLinesEditable(invoice);
   const firstVehicle = vehicles.data?.find((v) => v.category_id) ?? null;
-  const paymentInFlight = (payments.data ?? []).some((p) => isPaymentInFlight(p));
+  const paymentInFlight = (payments.data ?? []).some((p) => isCardAttemptInFlight(p));
+  // record_manual_payment / redeem_gift_card take at most the balance less all
+  // money in flight (clearing bank payments and card attempts under an hour old).
+  const heldCents = inFlightCents(payments.data ?? []);
+  const billedJobs = (invoiceJobs.data ?? []).filter((row) => !row.voided || isVoid);
+  const grouped = invoice.job_id === null && billedJobs.length > 1;
+  const jobTitle = (jobId: string) => {
+    const row = billedJobs.find((r) => r.job_id === jobId);
+    if (!row?.job) return 'Other lines';
+    const vehicle = vehicles.data?.find((v) => v.id === row.job?.vehicle_id);
+    return vehicle ? `Job #${row.job.number} · ${vehicleLabel(vehicle)}` : `Job #${row.job.number}`;
+  };
+
+  const downloadPdf = async () => {
+    try {
+      await pdf.mutateAsync({ kind: 'invoice', id: invoice.id, number: invoice.number });
+    } catch (error) {
+      toast.error(error);
+    }
+  };
   const canCancelOpen = canManage && !isVoid;
   const showHold = canCancelOpen && (paymentInFlight || heldByPayment);
 
@@ -145,7 +194,15 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
     else toast.error('Couldn’t copy the link', link);
   };
 
-  const menu: DropdownMenuEntry[] = [];
+  const menu: DropdownMenuEntry[] = [
+    {
+      key: 'pdf',
+      label: 'Download PDF',
+      icon: <FileDown className="size-4" aria-hidden="true" />,
+      disabled: pdf.isPending,
+      onSelect: () => void downloadPdf(),
+    },
+  ];
   if (
     canCancelOpen &&
     (invoice.status === 'open' || invoice.status === 'partially_paid' || showHold)
@@ -277,6 +334,20 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
         </div>
       )}
 
+      {clearingCents > 0 && !isVoid && (
+        <div
+          role="status"
+          className="bg-primary-soft text-primary-ink rounded-card mb-4 flex gap-3 px-4 py-3 text-sm"
+        >
+          <Landmark className="size-5 shrink-0" aria-hidden="true" />
+          <p>
+            {formatCents(clearingCents, { currency })} paid by bank debit or pay-later is still
+            clearing. It counts toward the balance once it succeeds
+            {coveredByClearing ? ', so nothing more needs to be collected for now' : ''}.
+          </p>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="flex min-w-0 flex-col gap-4 lg:col-span-2">
           <LineItemsEditor
@@ -293,6 +364,18 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
             onAdd={(drafts) => holdAware(lineMutations.add.mutateAsync(drafts))}
             onUpdate={(id, patch) => holdAware(lineMutations.update.mutateAsync({ id, patch }))}
             onRemove={(id) => holdAware(lineMutations.remove.mutateAsync(id))}
+            onAddFee={(feeId) => holdAware(addFee.mutateAsync(feeId))}
+            documentDiscounted={invoice.discount_cents > 0}
+            {...(canManage ? { vehicles: vehicles.data ?? [] } : {})}
+            {...(grouped
+              ? {
+                  grouping: {
+                    keyOf: (line: DocLine) => line.job_id,
+                    titleOf: jobTitle,
+                    order: billedJobs.map((row) => row.job_id),
+                  },
+                }
+              : {})}
           />
           <InvoicePaymentsCard invoiceId={invoice.id} currency={currency} timezone={timezone} />
         </div>
@@ -320,7 +403,16 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
             timezone={timezone}
             today={today}
             editable={canManage && !isVoid}
+            jobs={billedJobs}
           />
+          {canManage && (invoice.status === 'open' || invoice.status === 'partially_paid') && (
+            <FollowupStatusCard
+              kind="invoice"
+              documentId={invoice.id}
+              timezone={timezone}
+              noun="invoice"
+            />
+          )}
           {(canManage || invoice.discount_kind !== 'none') && (
             <DiscountEditor
               kind={invoice.discount_kind}
@@ -358,7 +450,9 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
         onClose={() => setPending(null)}
         invoiceId={invoice.id}
         invoiceNumber={invoice.number}
-        balanceCents={invoice.balance_cents}
+        customerId={invoice.customer_id}
+        balanceCents={collectibleCents(invoice.balance_cents, heldCents)}
+        heldCents={heldCents}
         currency={currency}
       />
       {canCharge && (
@@ -368,7 +462,8 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
           invoiceId={invoice.id}
           invoiceNumber={invoice.number}
           customerId={invoice.customer_id}
-          balanceCents={invoice.balance_cents}
+          balanceCents={collectibleCents(invoice.balance_cents, clearingCents)}
+          heldCents={clearingCents}
           currency={currency}
           onTextPayLink={() => setPending('send')}
         />

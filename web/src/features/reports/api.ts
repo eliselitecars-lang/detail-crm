@@ -13,6 +13,12 @@ import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
 import {
   customersReportSchema,
+  giftCardsReportSchema,
+  jobProfitRowSchema,
+  leadSourceRowSchema,
+  memberEarningsRowSchema,
+  quoteConversionSchema,
+  serviceProfitRowSchema,
   outstandingReportSchema,
   paymentsRowSchema,
   revenueRowSchema,
@@ -20,6 +26,12 @@ import {
   salesRowSchema,
   teamRowSchema,
   type CustomersReport,
+  type GiftCardsReport,
+  type JobProfitRow,
+  type LeadSourceRow,
+  type MemberEarningsRow,
+  type QuoteConversion,
+  type ServiceProfitRow,
   type OutstandingReport,
   type PaymentsRow,
   type RevenueRow,
@@ -44,6 +56,18 @@ export const reportKeys = {
   customers: (shopId: string, range: DateRange) =>
     [...reportKeys.all(shopId), 'customers', range.from, range.to] as const,
   outstanding: (shopId: string) => [...reportKeys.all(shopId), 'outstanding'] as const,
+  earnings: (shopId: string, memberId: string, range: DateRange) =>
+    [...reportKeys.all(shopId), 'earnings', memberId, range.from, range.to] as const,
+  giftCards: (shopId: string, range: DateRange) =>
+    [...reportKeys.all(shopId), 'gift-cards', range.from, range.to] as const,
+  jobProfit: (shopId: string, range: DateRange) =>
+    [...reportKeys.all(shopId), 'job-profit', range.from, range.to] as const,
+  serviceProfit: (shopId: string, range: DateRange) =>
+    [...reportKeys.all(shopId), 'service-profit', range.from, range.to] as const,
+  leadSources: (shopId: string, range: DateRange) =>
+    [...reportKeys.all(shopId), 'lead-sources', range.from, range.to] as const,
+  quoteConversion: (shopId: string, range: DateRange) =>
+    [...reportKeys.all(shopId), 'quote-conversion', range.from, range.to] as const,
 };
 
 function parse<T>(schema: z.ZodType<T>, data: unknown): T {
@@ -223,6 +247,126 @@ export function useOutstandingReport({ enabled = true }: Options = {}) {
       parse(
         outstandingReportSchema,
         unwrap(await supabase.rpc('report_outstanding', { p_shop_id: shopId })),
+      ),
+  });
+}
+
+/** One member's completed jobs with their share, commissions and tips (0065). */
+export function useMemberEarnings(
+  memberId: string,
+  range: DateRange,
+  { enabled = true }: Options = {},
+) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: reportKeys.earnings(shopId, memberId, range),
+    enabled,
+    queryFn: async (): Promise<MemberEarningsRow[]> =>
+      parse(
+        z.array(memberEarningsRowSchema),
+        unwrap(
+          await supabase.rpc('report_member_earnings', {
+            p_shop_id: shopId,
+            p_member_id: memberId,
+            p_from: range.from,
+            p_to: range.to,
+          }),
+        ) ?? [],
+      ),
+  });
+}
+
+export function useGiftCardsReport(range: DateRange, { enabled = true }: Options = {}) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: reportKeys.giftCards(shopId, range),
+    enabled,
+    queryFn: async (): Promise<GiftCardsReport> =>
+      parse(
+        giftCardsReportSchema,
+        unwrap(
+          await supabase.rpc('report_gift_cards', {
+            p_shop_id: shopId,
+            p_from: range.from,
+            p_to: range.to,
+          }),
+        ),
+      ),
+  });
+}
+
+export function useJobProfitReport(range: DateRange, { enabled = true }: Options = {}) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: reportKeys.jobProfit(shopId, range),
+    enabled,
+    queryFn: async (): Promise<JobProfitRow[]> =>
+      parse(
+        z.array(jobProfitRowSchema),
+        unwrap(
+          await supabase.rpc('report_job_profit', {
+            p_shop_id: shopId,
+            p_from: range.from,
+            p_to: range.to,
+          }),
+        ) ?? [],
+      ),
+  });
+}
+
+export function useServiceProfitReport(range: DateRange, { enabled = true }: Options = {}) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: reportKeys.serviceProfit(shopId, range),
+    enabled,
+    queryFn: async (): Promise<ServiceProfitRow[]> =>
+      parse(
+        z.array(serviceProfitRowSchema),
+        unwrap(
+          await supabase.rpc('report_service_profit', {
+            p_shop_id: shopId,
+            p_from: range.from,
+            p_to: range.to,
+          }),
+        ) ?? [],
+      ),
+  });
+}
+
+export function useLeadSourcesReport(range: DateRange, { enabled = true }: Options = {}) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: reportKeys.leadSources(shopId, range),
+    enabled,
+    queryFn: async (): Promise<LeadSourceRow[]> =>
+      parse(
+        z.array(leadSourceRowSchema),
+        unwrap(
+          await supabase.rpc('report_lead_sources', {
+            p_shop_id: shopId,
+            p_from: range.from,
+            p_to: range.to,
+          }),
+        ) ?? [],
+      ),
+  });
+}
+
+export function useQuoteConversionReport(range: DateRange, { enabled = true }: Options = {}) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: reportKeys.quoteConversion(shopId, range),
+    enabled,
+    queryFn: async (): Promise<QuoteConversion> =>
+      parse(
+        quoteConversionSchema,
+        unwrap(
+          await supabase.rpc('report_quote_conversion', {
+            p_shop_id: shopId,
+            p_from: range.from,
+            p_to: range.to,
+          }),
+        ),
       ),
   });
 }

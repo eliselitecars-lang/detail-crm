@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { REPO_ROOT } from '../lib/config.mjs';
 import { applyHeaderRules, parseHeadersFile, startStaticServer } from '../lib/static_server.mjs';
-import { buildCsp, buildHeadersFile, buildRedirectsFile, cspHash, EMPTY_STYLE_HASH, generate, inlineHashes, KNOWN_EXTERNAL } from '../web_headers.mjs';
+import { buildCsp, buildHeadersFile, buildRedirectsFile, cspHash, EMPTY_STYLE_HASH, generate, inlineHashes, KNOWN_EXTERNAL, TRACKING_SOURCES } from '../web_headers.mjs';
 
 const SB = 'https://abcdefghijklmnopqrst.supabase.co';
 const THEME = "(function(){document.documentElement.dataset.theme='light'})();";
@@ -43,7 +43,8 @@ describe('CSP', () => {
     const d = Object.fromEntries(csp.split('; ').map((p) => [p.split(' ')[0], p.split(' ').slice(1)]));
     assert.deepEqual(d['script-src'], ["'self'", "'sha256-x'"]);
     assert.deepEqual(d['connect-src'], ["'self'", SB, 'wss://abcdefghijklmnopqrst.supabase.co', 'https://vpic.nhtsa.dot.gov']);
-    assert.deepEqual(d['img-src'], ["'self'", 'data:', 'blob:', SB]);
+    assert.deepEqual(d['img-src'], ["'self'", 'data:', 'blob:', SB, 'https://tile.openstreetmap.org']);
+    assert.deepEqual(d['media-src'], ["'self'", 'blob:', SB]);
     assert.deepEqual(d['style-src'], ["'self'", 'https://fonts.googleapis.com', EMPTY_STYLE_HASH]);
     assert.deepEqual(d['font-src'], ["'self'", 'https://fonts.gstatic.com', 'data:']);
     assert.deepEqual(d['frame-ancestors'], ["'none'"]);
@@ -93,6 +94,38 @@ describe('_headers (Cloudflare Pages semantics)', () => {
     assert.equal(embedCsp.replace("frame-ancestors *", "frame-ancestors 'none'"), csp);
     const limited = buildHeadersFile({ supabaseUrl: SB, html: HTML, embedPaths: ['/book/*'], embedAncestors: 'https://shop.example.com' });
     assert.match(effective(limited.text, '/book/x')['content-security-policy'], /frame-ancestors https:\/\/shop\.example\.com$/);
+  });
+
+  test('tracking paths: only /book/* and /booking/* may load the shop Meta Pixel / GA4 tag', () => {
+    const t = buildHeadersFile({ supabaseUrl: SB, html: HTML, trackingPaths: ['/book/*', '/booking/*'] });
+    const d = Object.fromEntries(t.trackingCsp.split('; ').map((p) => [p.split(' ')[0], p.split(' ').slice(1)]));
+    assert.deepEqual(d['script-src'], ["'self'", cspHash(THEME), ...TRACKING_SOURCES['script-src']]);
+    assert.ok(d['connect-src'].includes('https://*.google-analytics.com'));
+    assert.ok(d['img-src'].includes('https://www.facebook.com'));
+    assert.deepEqual(d['frame-ancestors'], ["'none'"]);
+    assert.ok(!/unsafe-/.test(t.trackingCsp));
+    for (const path of ['/book/shine', '/booking/0f0e']) {
+      const h = effective(t.text, path);
+      assert.equal(h['content-security-policy'], t.trackingCsp, path);
+      assert.equal(h['x-frame-options'], 'DENY', path);
+    }
+    for (const path of ['/app', '/login', '/lead/tok', '/q/tok', '/portal']) {
+      assert.equal(effective(t.text, path)['content-security-policy'], t.csp, path);
+    }
+    assert.ok(!t.csp.includes('facebook'), 'the default policy never allows tracking');
+    // Embed + tracking on the same path: one framed policy that also allows the tags.
+    const both = buildHeadersFile({ supabaseUrl: SB, html: HTML, embedPaths: ['/book/*', '/lead/*'], trackingPaths: ['/book/*'] });
+    const book = effective(both.text, '/book/shine');
+    assert.match(book['content-security-policy'], /connect\.facebook\.net/);
+    assert.match(book['content-security-policy'], /frame-ancestors \*$/);
+    assert.equal(book['x-frame-options'], undefined);
+    const lead = effective(both.text, '/lead/tok');
+    assert.equal(lead['content-security-policy'], both.embedCsp);
+    assert.ok(!lead['content-security-policy'].includes('facebook'));
+    assert.deepEqual(parseHeadersFile(both.text).invalid, []);
+    for (const p of ['/*', '/app/*', '/lead/*', '/portal']) {
+      assert.throws(() => buildHeadersFile({ supabaseUrl: SB, html: HTML, trackingPaths: [p] }), /only allowed/);
+    }
   });
 
   test('refuses embed paths that would expose staff pages, and bad ancestors', () => {

@@ -3,8 +3,11 @@
 //  DetailCRM
 //
 //  The job screen: status + stepper, customer & vehicle, schedule and
-//  crew, services with server totals, the money picture, checklist,
-//  photos, inspections, forms, customer texts, notes and activity.
+//  crew (with the repeat rule of a recurring visit), job details (custom
+//  fields), services with server totals, the money picture, checklist,
+//  photos and videos, the customer job report, inspections, documents,
+//  forms, customer texts, notes and activity. Realtime changes to the job
+//  refresh it.
 //
 //  Every section is its own view behind an AnyView seam (deep generic view
 //  types on big screens overflow the stack at runtime). Sheets are driven
@@ -26,6 +29,10 @@ enum JobDetailSheet: Identifiable, Hashable {
     case internalNotes
     case inspection(UUID)
     case form(UUID)
+    /// The server refused to start / complete: what is missing (P-11).
+    case completionBlockers(JobStatus, String)
+    /// Publish / send the customer job report (P-8).
+    case report
 
     var id: String {
         switch self {
@@ -38,6 +45,8 @@ enum JobDetailSheet: Identifiable, Hashable {
         case .internalNotes: return "notes"
         case .inspection(let id): return "inspection-" + id.uuidString
         case .form(let id): return "form-" + id.uuidString
+        case .completionBlockers(let status, _): return "blockers-" + status.rawValue
+        case .report: return "report"
         }
     }
 }
@@ -47,6 +56,8 @@ struct JobDetailView: View {
 
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(\.dismiss) private var dismiss
+    @Environment(JobsRealtimeHub.self) private var realtime
     @State private var model: JobDetailModel
     @State private var sheet: JobDetailSheet?
     @State private var confirmation: ConfirmationRequest?
@@ -76,6 +87,15 @@ struct JobDetailView: View {
         .confirmation($confirmation)
         .navigationDestination(item: $openedInvoiceID) { invoiceID in
             InvoiceDetailView(invoiceID: invoiceID)
+        }
+        .onChange(of: model.jobRemoved) { _, removed in
+            // A series edit replaced or removed this visit.
+            if removed { dismiss() }
+        }
+        // Someone else changed a job (Realtime): refresh this one quietly.
+        .onChange(of: realtime.revision(.jobs)) { _, _ in
+            guard model.detail.value != nil, sheet == nil else { return }
+            Task { await model.loadDetail() }
         }
     }
 
@@ -118,11 +138,14 @@ struct JobDetailView: View {
                     headerSection(snapshot)
                     partiesSection(snapshot)
                     scheduleSection(snapshot)
+                    customDataSection
                     servicesSection(snapshot)
                     moneySection(snapshot)
                     checklistSection
                     photosSection
+                    reportSection
                     inspectionsSection(snapshot)
+                    documentsSection
                     formsSection
                     notesSection(snapshot)
                     activitySection(snapshot)
@@ -169,7 +192,9 @@ struct JobDetailView: View {
                 clock: appState.clock,
                 canEdit: permissions.canEditJob,
                 onEditDetails: { sheet = .editDetails },
-                onEditAssignees: { sheet = .assignees }
+                onEditAssignees: { sheet = .assignees },
+                series: model.series,
+                onEndSeries: permissions.canEditJob && snapshot.job.isSeriesOccurrence ? confirmEndSeries : nil
             )
         )
     }
@@ -197,8 +222,48 @@ struct JobDetailView: View {
                 job: snapshot.job,
                 currencyCode: appState.currencyCode,
                 retry: { await model.loadPayment() },
-                onCreateInvoice: { await createInvoice() }
+                onCreateInvoice: { await createInvoice() },
+                showsDepositFollowups: permissions.role.isManagerOrAbove
             )
+        )
+    }
+
+    private var customDataSection: AnyView {
+        AnyView(JobsCustomDataSection(model: model, canEdit: permissions.canEditJob))
+    }
+
+    private var documentsSection: AnyView {
+        AnyView(JobsDocumentsSection(model: model, permissions: permissions))
+    }
+
+    /// The customer job report (P-8): status and "Send report".
+    private var reportSection: AnyView {
+        guard permissions.canShareReport else { return AnyView(EmptyView()) }
+        let report = model.report.value ?? nil
+        return AnyView(
+            JobSectionCard("Customer report") {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    if let report {
+                        Label(
+                            report.firstViewedAt != nil ? "Shared · opened by the customer" : "Shared · not opened yet",
+                            systemImage: report.firstViewedAt != nil ? "eye" : "paperplane"
+                        )
+                        .font(Theme.Typography.subheadline)
+                        .foregroundStyle(Theme.textPrimary)
+                    } else {
+                        Text("Share before/after photos, inspections and files with the customer on one page.")
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button {
+                        sheet = .report
+                    } label: {
+                        Label(report == nil ? "Send report" : "Update or resend", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.themeSecondaryCompact)
+                }
+            }
         )
     }
 
@@ -271,6 +336,10 @@ struct JobDetailView: View {
             return AnyView(JobInspectionSheet(model: model, inspectionID: id))
         case .form(let id):
             return AnyView(JobFormSheet(model: model, submissionID: id))
+        case .completionBlockers(let target, let message):
+            return AnyView(JobsCompletionBlockersView(model: model, target: target, serverMessage: message))
+        case .report:
+            return AnyView(JobsReportShareSheet(model: model))
         }
     }
 
@@ -327,7 +396,39 @@ struct JobDetailView: View {
                 toasts.show("Job is now \(target.displayName.lowercased()).")
             }
         } catch {
+            await handleStatusError(error, target: target)
+        }
+    }
+
+    /// A completion-gate refusal opens the list of what's missing (with the
+    /// manager override); anything else is a toast.
+    private func handleStatusError(_ error: Error, target: JobStatus) async {
+        guard JobDetailModel.isCompletionGateError(error), JobsCompletionBlockers.isGated(target) else {
             toasts.showError(error)
+            return
+        }
+        let message = ErrorText.message(for: error)
+        if let blockers = try? await model.completionBlockers(), !blockers.blocks(target) {
+            // Something else refused the change; say what the server said.
+            toasts.show(message, style: .error, duration: .seconds(6))
+            return
+        }
+        sheet = .completionBlockers(target, message)
+    }
+
+    private func confirmEndSeries() {
+        confirmation = ConfirmationRequest(
+            title: "End the series after this visit?",
+            message: "Later visits that are still only scheduled are removed. Confirmed, paid or invoiced visits stay on the calendar.",
+            confirmTitle: "End series",
+            isDestructive: true
+        ) {
+            do {
+                let outcome = try await model.endSeriesAfterThis(clock: appState.clock)
+                toasts.show("Series ended. " + outcome.text(verb: "removed"), style: .info, duration: .seconds(6))
+            } catch {
+                toasts.showError(error)
+            }
         }
     }
 

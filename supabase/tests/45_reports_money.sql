@@ -113,8 +113,11 @@ select tests.eq(
     {"method":"cash","payments_count":3,"gross_cents":6000,"refunds_cents":3000,"net_cents":3000,"tips_cents":0,"tip_refunds_cents":500,"collected_cents":3000,"deposits_cents":3000,"memberships_cents":0,"disputes_lost_cents":0},
     {"method":"check","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0},
     {"method":"bank_transfer","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0},
-    {"method":"other","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0}]'::jsonb,
-  'payments by method (refunds, tips, tip refunds, pending/failed excluded)');
+    {"method":"other","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0},
+    {"method":"gift_card","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0},
+    {"method":"ach_debit","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0},
+    {"method":"bnpl","payments_count":0,"gross_cents":0,"refunds_cents":0,"net_cents":0,"tips_cents":0,"tip_refunds_cents":0,"collected_cents":0,"deposits_cents":0,"memberships_cents":0,"disputes_lost_cents":0}]'::jsonb,
+  'payments by method (refunds, tips, tip refunds, pending/failed excluded; one row per method incl. gift_card / ach_debit / bnpl, 0060)');
 select tests.eq((select sum(net_cents) from public.report_payments(tests.fx('rshop_a'), '2025-03-01', '2025-03-31')),
                 80749::numeric, 'payments report agrees with revenue');
 -- February: P1 card 21600 + 2000 tip, P2 cash 5000 deposit (Feb 28 local)

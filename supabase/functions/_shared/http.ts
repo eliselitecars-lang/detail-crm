@@ -13,7 +13,7 @@
 import { z } from "zod";
 import { corsHeaders, type CorsPolicy, corsPolicyFromEnv, preflightResponse } from "./cors.ts";
 import { type Env, env as defaultEnv, EnvError } from "./env.ts";
-import { type ErrorCode, HttpError, UpstreamError } from "./errors.ts";
+import { type ErrorCode, HttpError, subscriptionRefusalIn, UpstreamError } from "./errors.ts";
 import { requestIdFor } from "./ids.ts";
 import { type Logger, logger as defaultLogger } from "./log.ts";
 import { isStripeError, stripeErrorToHttpError } from "./stripe_errors.ts";
@@ -197,6 +197,11 @@ export function mapError(err: unknown): MappedError {
       unexpected: true,
     };
   }
+  // A database PT402 (the shop's subscription is inactive / seat limit) that
+  // a call site passed on wrapped in its own error: still 402, with the
+  // database's sentence, never a 500.
+  const refusal = subscriptionRefusalIn(err);
+  if (refusal) return { httpError: refusal, unexpected: false };
   return {
     httpError: new HttpError("internal_error", "Something went wrong. Please try again.", {
       cause: err,

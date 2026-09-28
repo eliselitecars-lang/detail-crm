@@ -28,6 +28,10 @@ struct Payment: Codable, Identifiable, Hashable, Sendable {
     /// Refunded part of the whole charge (amount first, then tip).
     var refundedCents: Int
     var stripePaymentIntentID: String?
+    /// Stripe's payment method type as the webhook saw it (`card`,
+    /// `us_bank_account`, `affirm`, `klarna`, `afterpay_clearpay`, `link`,
+    /// …); nil for manual and gift card payments.
+    var stripeMethodType: String?
     var cardBrand: String?
     var cardLast4: String?
     var note: String?
@@ -50,6 +54,7 @@ struct Payment: Codable, Identifiable, Hashable, Sendable {
         case tipCents = "tip_cents"
         case refundedCents = "refunded_cents"
         case stripePaymentIntentID = "stripe_payment_intent_id"
+        case stripeMethodType = "stripe_method_type"
         case cardBrand = "card_brand"
         case cardLast4 = "card_last4"
         case note
@@ -63,19 +68,84 @@ struct Payment: Codable, Identifiable, Hashable, Sendable {
     static let selectColumns = [
         "id", "shop_id", "invoice_id", "job_id", "customer_id", "membership_id", "kind",
         "method", "status", "amount_cents", "tip_cents", "refunded_cents",
-        "stripe_payment_intent_id", "card_brand", "card_last4", "note", "recorded_by",
-        "paid_at", "created_at", "updated_at",
+        "stripe_payment_intent_id", "stripe_method_type", "card_brand", "card_last4", "note",
+        "recorded_by", "paid_at", "created_at", "updated_at",
     ].joined(separator: ",")
 
     var isCard: Bool { method == .card || method == .cardPresent }
 
-    /// "Visa •••• 4242", or the method name.
+    /// Taken through Stripe (card, in person, bank debit, pay later): the
+    /// `payments` function refunds it through Stripe. Cash / check / bank
+    /// transfer / other and gift card payments are refunded by
+    /// `refund_manual_payment` (a gift card payment goes back onto the card).
+    var isStripeBacked: Bool {
+        switch method {
+        case .card, .cardPresent, .achDebit, .bnpl: return true
+        case .cash, .check, .bankTransfer, .other, .giftCard: return false
+        }
+    }
+
+    /// Money on its way that the balance doesn't count yet: an unfinished
+    /// card attempt (`pending`) or a bank debit / pay-later payment that
+    /// Stripe is still settling (`processing`, can take several days).
+    var isInFlight: Bool { status == .pending || status == .processing }
+
+    /// The server's `payment_in_flight` (0064), which caps what a gift card,
+    /// store credit or another payment may still apply: processing, or a
+    /// pending attempt opened within the last hour (older ones no longer
+    /// hold the balance).
+    func holdsBalance(at now: Date) -> Bool {
+        switch status {
+        case .processing: return true
+        case .pending: return createdAt > now.addingTimeInterval(-Self.pendingHoldSeconds)
+        default: return false
+        }
+    }
+
+    /// How long an unfinished attempt holds the balance (`payment_in_flight`).
+    static let pendingHoldSeconds: TimeInterval = 60 * 60
+
+    /// Money the server counts as on its way on these payments (amounts
+    /// without tips, like `payment_in_flight` sums).
+    static func inFlightCents(_ payments: [Payment], at now: Date) -> Int {
+        payments.filter { $0.holdsBalance(at: now) }.reduce(0) { $0 + $1.amountCents }
+    }
+
+    /// "Visa •••• 4242", "Bank debit (ACH)", "Klarna", or the method name.
     var methodLabel: String {
         if isCard, let last4 = cardLast4 {
             let brand = cardBrand.map { MoneyCardBrand.displayName($0) } ?? "Card"
             return "\(brand) •••• \(last4)"
         }
+        if method == .bnpl, let provider = Self.payLaterProviderName(stripeMethodType) {
+            return provider
+        }
         return method.displayName
+    }
+
+    /// The pay-later provider's name for a Stripe payment method type
+    /// ("Klarna", "Affirm", …), else nil.
+    static func payLaterProviderName(_ stripeMethodType: String?) -> String? {
+        switch stripeMethodType?.lowercased() {
+        case "affirm": return "Affirm"
+        case "klarna": return "Klarna"
+        case "afterpay_clearpay": return "Afterpay"
+        case "zip": return "Zip"
+        default: return nil
+        }
+    }
+
+    /// One line explaining a payment that is still settling, or nil.
+    var processingNote: String? {
+        guard status == .processing else { return nil }
+        switch method {
+        case .achDebit:
+            return "Bank payments take a few business days to clear. It counts toward the balance once the bank confirms it."
+        case .bnpl:
+            return "The pay-later provider is confirming this payment. It counts toward the balance once Stripe confirms it."
+        default:
+            return "Stripe is still confirming this payment. It counts toward the balance once it clears."
+        }
     }
 
     /// Amount + tip still refundable (for the refund sheet's default).

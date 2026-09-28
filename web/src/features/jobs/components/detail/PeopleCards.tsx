@@ -1,9 +1,9 @@
 import { Car, Mail, MapPin, MessageSquare, Phone, User } from 'lucide-react';
 import { Link } from 'react-router';
-import { Badge, KeyValueList, SectionCard } from '@/components/ui';
+import { Badge, FormField, KeyValueList, SectionCard, Select, useToast } from '@/components/ui';
 import { formatPhone, phoneHref } from '@/lib/phone';
 import { useCan } from '@/features/shop/useCan';
-import type { JobDetail } from '../../api';
+import { useUpdateJob, type JobDetail, type TeamMember } from '../../api';
 import { customerName, formatAddress, mapsUrl, vehicleLabel } from '../../model';
 
 const linkClass = 'text-primary-ink inline-flex items-center gap-1.5 text-sm hover:underline';
@@ -125,5 +125,42 @@ export function LocationLine({ job }: { job: JobDetail }) {
       {address}
       <span className="sr-only"> (opens maps in a new tab)</span>
     </a>
+  );
+}
+
+/**
+ * Who is credited with the sale (P-12, jobs.sold_by_member_id → sales
+ * commission). Managers change it; everyone else sees the name.
+ */
+export function SoldByField({ job, team }: { job: JobDetail; team: readonly TeamMember[] }) {
+  const canManage = useCan('jobs.manage');
+  const toast = useToast();
+  const update = useUpdateJob(job.id);
+  const current = team.find((m) => m.memberId === job.sold_by_member_id) ?? null;
+  if (!canManage) {
+    return (
+      <p className="text-muted text-sm">
+        Sold by <span className="text-ink">{current ? current.name : 'nobody'}</span>
+      </p>
+    );
+  }
+  const choices = team.filter((m) => m.active || m.memberId === job.sold_by_member_id);
+  return (
+    <FormField label="Sold by" help="Credited with the sale for sales commission.">
+      <Select
+        value={job.sold_by_member_id ?? ''}
+        disabled={update.isPending}
+        onChange={(e) =>
+          update
+            .mutateAsync({ sold_by_member_id: e.target.value || null })
+            .then(() => toast.success('Saved'))
+            .catch((error: unknown) => toast.error(error))
+        }
+        options={[
+          { value: '', label: 'Nobody' },
+          ...choices.map((m) => ({ value: m.memberId, label: m.name })),
+        ]}
+      />
+    </FormField>
   );
 }

@@ -1,18 +1,21 @@
-import { CalendarX2, ChevronLeft, ChevronRight, Globe } from 'lucide-react';
-import { Button, EmptyState, ErrorState, LoadingState } from '@/components/ui';
+import { CalendarDays, CalendarX2, ChevronLeft, ChevronRight, Globe } from 'lucide-react';
+import { Button, EmptyState, ErrorState, LoadingState, RadioGroup } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { addLocalDays, formatInTz, formatLocalDate, formatTime } from '@/lib/dates';
 import { Banner } from '@/features/public-docs/shared/PublicPage';
 import { timeZoneName } from '@/features/public-docs/shared/format';
-import { useAvailableSlots } from '../api';
+import { useAvailableSlots, type ShopProfile } from '../api';
 import {
   canGoToNextWeek,
   canGoToPreviousWeek,
+  describeBookableDays,
   groupSlotsByDay,
   lastBookableDate,
   previousWeekStart,
   weekWindow,
+  type LocationChoice,
   type SlotChoice,
+  type WeekdayRestriction,
 } from '../model';
 import { StepFrame } from './StepFrame';
 
@@ -22,6 +25,11 @@ export function TimeStep({
   maxDaysAhead,
   itemIds,
   categoryId,
+  businessType,
+  locationType,
+  onLocationChange,
+  linkToken,
+  restriction,
   weekStart,
   onWeekChange,
   slot,
@@ -37,6 +45,14 @@ export function TimeStep({
   itemIds: string[];
   /** null when the shop has no vehicle categories. */
   categoryId: string | null;
+  businessType: ShopProfile['business_type'];
+  /** Where the work happens; availability depends on it (per-location capacity). */
+  locationType: LocationChoice;
+  onLocationChange: (next: LocationChoice) => void;
+  /** Private booking link token, or null. */
+  linkToken: string | null;
+  /** Weekdays the chosen services' categories allow (null = every day). */
+  restriction: WeekdayRestriction | null;
   weekStart: string;
   onWeekChange: (start: string) => void;
   slot: SlotChoice | null;
@@ -52,6 +68,8 @@ export function TimeStep({
     vehicleCategoryId: categoryId,
     from: range.from,
     to: range.to,
+    locationType,
+    linkToken,
   });
   const lastDate = lastBookableDate(timeZone, maxDaysAhead);
   const days = slots.data ? groupSlotsByDay(slots.data, timeZone, range) : [];
@@ -73,6 +91,27 @@ export function TimeStep({
       continueDisabled={slot === null}
     >
       {notice && <Banner tone="warning" title={notice} />}
+      {businessType === 'both' && (
+        <RadioGroup<LocationChoice>
+          label="Where should we do the work?"
+          value={locationType}
+          onChange={onLocationChange}
+          options={[
+            { value: 'shop', label: 'At the shop', description: 'Drop off your vehicle with us' },
+            { value: 'mobile', label: 'At my location', description: 'We come to you' },
+          ]}
+          variant="cards"
+          orientation="horizontal"
+        />
+      )}
+      {restriction && (
+        <p className="text-muted flex items-start gap-1.5 text-sm">
+          <CalendarDays className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          {restriction.weekdays.length > 0
+            ? `${restriction.categories.join(' and ')} can be booked online on ${describeBookableDays(restriction.weekdays)}.`
+            : `${restriction.categories.join(' and ')} can’t be booked online together. Please call the shop, or choose different services.`}
+        </p>
+      )}
       <div className="flex items-center justify-between gap-2">
         <Button
           variant="secondary"

@@ -1,9 +1,11 @@
 import { Avatar, Checkbox, ErrorState, LoadingState, SectionCard, useToast } from '@/components/ui';
 import { ROLE_LABELS } from '@/features/shop/permissions';
 import { useCan } from '@/features/shop/useCan';
-import { useAssignments, useSetAssigned, useTeam } from '../../api';
+import { useAssignments, useSetAssigned, useTeam, type JobDetail } from '../../api';
+import { SoldByField } from './PeopleCards';
 
-export function AssignmentsCard({ jobId }: { jobId: string }) {
+export function AssignmentsCard({ job }: { job: JobDetail }) {
+  const jobId = job.id;
   const canManage = useCan('jobs.manage');
   const toast = useToast();
   const team = useTeam();
@@ -67,7 +69,14 @@ export function AssignmentsCard({ jobId }: { jobId: string }) {
 
   return (
     <SectionCard title="Team" level={3}>
-      {body()}
+      <div className="flex flex-col gap-4">
+        {body()}
+        {team.isSuccess && (
+          <div className="border-line border-t pt-3">
+            <SoldByField job={job} team={members} />
+          </div>
+        )}
+      </div>
     </SectionCard>
   );
 }

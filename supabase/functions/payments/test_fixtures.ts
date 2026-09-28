@@ -84,6 +84,16 @@ export interface FixtureOptions {
   paymentMethods?: Record<string, Row>;
   /** The handler's clock (default: NOW). Stripe objects created get it too. */
   now?: () => number;
+  /** Extra invoice_jobs rows (grouped invoices). */
+  invoiceJobs?: Row[];
+  /** shop_terminal_locations rows. */
+  terminalLocations?: Row[];
+  /** quotes rows (quote deposits). */
+  quotes?: Row[];
+  /** Extra invoices (e.g. a grouped invoice). */
+  extraInvoices?: Row[];
+  /** Extra jobs. */
+  extraJobs?: Row[];
 }
 
 export interface Fixture {
@@ -120,6 +130,38 @@ export function fixture(options: FixtureOptions = {}): Fixture {
   const rpcCalls: Fixture["rpcCalls"] = [];
   const record = (name: string, args: Record<string, unknown>) => rpcCalls.push({ name, args });
   const depositDue = options.depositDue ?? 5_000;
+  const invoices: Row[] = [
+    ...(options.extraInvoices ?? []),
+    {
+      id: INVOICE,
+      shop_id: SHOP,
+      number: 2001,
+      job_id: JOB,
+      customer_id: CUSTOMER,
+      status: "partially_paid",
+      balance_cents: 12_345,
+      public_token: INVOICE_TOKEN,
+      ...options.invoice,
+    },
+    {
+      id: OTHER_INVOICE,
+      shop_id: OTHER_SHOP,
+      number: 1,
+      job_id: null,
+      customer_id: OTHER_CUSTOMER,
+      status: "open",
+      balance_cents: 5_000,
+      public_token: "99999999-9999-4999-8999-000000000009",
+    },
+  ];
+  // 0063: every single-job invoice has its invoice_jobs row (voided with it).
+  const invoiceJobs: Row[] = invoices.filter((i) => i.job_id).map((i, n) => ({
+    id: `31000000-0000-4000-8000-00000000000${n + 1}`,
+    shop_id: i.shop_id,
+    invoice_id: i.id,
+    job_id: i.job_id,
+    voided: i.status === "void",
+  }));
 
   const db = new FakeSupabase({
     env: { PLATFORM_FEE_BPS: "250", ...options.env },
@@ -190,36 +232,18 @@ export function fixture(options: FixtureOptions = {}): Fixture {
         status: "scheduled",
         public_token: JOB_TOKEN,
         ...options.job,
-      }],
+      }, ...(options.extraJobs ?? [])],
       job_assignments: [{
         id: "30000000-0000-4000-8000-000000000001",
         shop_id: SHOP,
         job_id: JOB,
         member_id: MEMBERS.tech,
       }],
-      invoices: [
-        {
-          id: INVOICE,
-          shop_id: SHOP,
-          number: 2001,
-          job_id: JOB,
-          customer_id: CUSTOMER,
-          status: "partially_paid",
-          balance_cents: 12_345,
-          public_token: INVOICE_TOKEN,
-          ...options.invoice,
-        },
-        {
-          id: OTHER_INVOICE,
-          shop_id: OTHER_SHOP,
-          number: 1,
-          job_id: null,
-          customer_id: OTHER_CUSTOMER,
-          status: "open",
-          balance_cents: 5_000,
-          public_token: "99999999-9999-4999-8999-000000000009",
-        },
-      ],
+      invoices,
+      invoice_jobs: [...invoiceJobs, ...(options.invoiceJobs ?? [])],
+      shop_terminal_locations: options.terminalLocations ?? [],
+      gift_card_orders: [],
+      quotes: options.quotes ?? [],
       payments: [
         {
           id: PAYMENT,
@@ -490,17 +514,25 @@ function installStripe(
     found.status = "canceled";
     return jsonResponse({ id: params.id, object: "payment_intent", ...found });
   });
+  // Subscriptions changed through POST / DELETE: GET answers their current
+  // state (Stripe's), while a POST replays the first response stored under
+  // its idempotency key without applying the change again.
+  const subscriptionState = new Map<string, Row>();
+  const subscriptionReplays = new Map<string, Row>();
   http.on(
     "GET",
     `${STRIPE}/subscriptions/:id`,
-    (_req, { params }) =>
-      jsonResponse({
+    (_req, { params }) => {
+      const current = subscriptionState.get(params.id ?? "");
+      if (current) return jsonResponse({ ...current });
+      return jsonResponse({
         id: params.id,
         object: "subscription",
         status: subscriptions[params.id ?? ""] ?? "active",
         cancel_at_period_end: false,
         items: { object: "list", data: [] },
-      }),
+      });
+    },
   );
   http.on(
     "GET",
@@ -617,24 +649,37 @@ function installStripe(
     (_req, { params }) => jsonResponse({ id: params.id, object: "product" }),
   );
   http.on("POST", `${STRIPE}/products`, () => jsonResponse({ id: "prod_1New", object: "product" }));
-  const subscription = (id: string, status: string, atPeriodEnd: boolean) =>
-    jsonResponse({
+  const subscription = (id: string, status: string, atPeriodEnd: boolean): Row => {
+    const row = {
       id,
       object: "subscription",
       status,
       cancel_at_period_end: atPeriodEnd,
       items: { object: "list", data: [{ id: "si_1", current_period_end: 1_900_000_000 }] },
-    });
+    };
+    subscriptionState.set(id, row);
+    return { ...row };
+  };
   http.on(
     "POST",
     `${STRIPE}/subscriptions/:id`,
-    (_req, { params, call }) =>
-      subscription(params.id ?? "", "active", call.form.get("cancel_at_period_end") === "true"),
+    (_req, { params, call }) => {
+      const key = call.headers.get("idempotency-key") ?? "";
+      const replay = subscriptionReplays.get(key);
+      if (replay) return jsonResponse({ ...replay });
+      const row = subscription(
+        params.id ?? "",
+        "active",
+        call.form.get("cancel_at_period_end") === "true",
+      );
+      if (key) subscriptionReplays.set(key, row);
+      return jsonResponse(row);
+    },
   );
   http.on(
     "DELETE",
     `${STRIPE}/subscriptions/:id`,
-    (_req, { params }) => subscription(params.id ?? "", "canceled", false),
+    (_req, { params }) => jsonResponse(subscription(params.id ?? "", "canceled", false)),
   );
 }
 

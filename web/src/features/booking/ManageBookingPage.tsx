@@ -7,8 +7,8 @@ import {
   RefreshCw,
   XCircle,
 } from 'lucide-react';
-import { useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { useEffect, useState } from 'react';
+import { useParams, useSearchParams } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
   Badge,
@@ -48,9 +48,21 @@ import {
   useCancelBooking,
   useDepositCheckout,
   usePublicBooking,
+  useShopProfile,
   type BookingDocument,
 } from './api';
+import { BookingDocumentsCard } from './components/BookingDocumentsCard';
+import { BookingPageLink } from './components/BookingPageLink';
+import { PublicLink } from './components/PublicLink';
 import { showsBalance } from './model';
+import {
+  hasTracking,
+  initTracking,
+  stopTracking,
+  trackEvent,
+  useTrackingActive,
+  validTrackingIds,
+} from './tracking';
 
 export default function ManageBookingPage() {
   const { token } = useParams();
@@ -117,6 +129,8 @@ function BookingDocumentView({
       ? addressLines(booking.service_address ?? {})
       : addressLines(shop);
   const pendingForms = doc.forms.filter((f) => f.status === 'pending');
+  useDepositPurchaseEvent(token, doc, paidReturn);
+  const tracking = useTrackingActive();
 
   const totalRows = [
     ...standardTotals(totals),
@@ -137,7 +151,7 @@ function BookingDocumentView({
   ];
 
   return (
-    <PublicLayout shop={toBranding(shop)}>
+    <PublicLayout shop={toBranding(shop)} fullPageLinks={tracking}>
       <div className="flex flex-col gap-4 sm:gap-5">
         <DocumentTitle
           title={`Booking #${booking.number}`}
@@ -251,27 +265,29 @@ function BookingDocumentView({
                     </p>
                   </div>
                   {form.status === 'pending' ? (
-                    <Link
+                    <PublicLink
                       to={`/f/${form.token}`}
                       className={buttonClasses({ variant: 'primary', size: 'sm' })}
                     >
                       <FileSignature className="size-4" aria-hidden="true" />
                       {form.requires_signature ? 'Sign' : 'Review'}
                       <span className="sr-only"> {form.title}</span>
-                    </Link>
+                    </PublicLink>
                   ) : (
-                    <Link
+                    <PublicLink
                       to={`/f/${form.token}`}
                       className={buttonClasses({ variant: 'ghost', size: 'sm' })}
                     >
                       View<span className="sr-only"> {form.title}</span>
-                    </Link>
+                    </PublicLink>
                   )}
                 </li>
               ))}
             </ul>
           </SectionCard>
         )}
+
+        <BookingDocumentsCard token={token} timeZone={tz} />
 
         {doc.invoice && (
           <Card padded className="flex flex-wrap items-center justify-between gap-3">
@@ -283,7 +299,7 @@ function BookingDocumentView({
                   : `Total ${formatCents(doc.invoice.total_cents, { currency })}`}
               </p>
             </div>
-            <Link
+            <PublicLink
               to={`/i/${doc.invoice.token}`}
               className={buttonClasses({
                 variant: doc.invoice.balance_cents > 0 ? 'money' : 'secondary',
@@ -291,20 +307,20 @@ function BookingDocumentView({
             >
               <FileText className="size-4" aria-hidden="true" />
               {doc.invoice.balance_cents > 0 ? 'View & pay invoice' : 'View invoice'}
-            </Link>
+            </PublicLink>
           </Card>
         )}
 
         <CancellationCard token={token} doc={doc} />
 
         {closed && (
-          <Link
-            to={`/book/${shop.slug}`}
+          <BookingPageLink
+            slug={shop.slug}
             className={buttonClasses({ variant: 'secondary', className: 'self-start' })}
           >
             <CalendarPlus className="size-4" aria-hidden="true" />
             Book again
-          </Link>
+          </BookingPageLink>
         )}
       </div>
     </PublicLayout>
@@ -583,4 +599,44 @@ function CancellationCard({ token, doc }: { token: string; doc: BookingDocument 
       </Dialog>
     </SectionCard>
   );
+}
+
+const PURCHASE_SENT_KEY = 'detailcrm.booking.purchaseSent';
+
+/**
+ * GA4 'purchase' for a deposit paid through Stripe (the return to
+ * ?paid=1 once the webhook has recorded it), once per booking in this
+ * browser. Only the shop's GA4 tag is loaded here, with a page location that
+ * has no booking token; the Meta Pixel always reports the page URL, so it is
+ * never loaded on booking pages.
+ */
+function useDepositPurchaseEvent(token: string, doc: BookingDocument, paidReturn: boolean) {
+  const profile = useShopProfile(doc.shop.slug);
+  const ga4 = validTrackingIds(profile.data?.tracking).ga4MeasurementId;
+  const paid = paidReturn && doc.deposit.status === 'paid' && depositSettled(doc);
+  const amount = doc.deposit.paid_cents;
+  const currency = doc.shop.currency;
+  useEffect(() => {
+    if (!paid || !ga4 || amount <= 0) return;
+    const ids = { metaPixelId: null, ga4MeasurementId: ga4 };
+    if (!hasTracking(ids)) return;
+    let sent: string[] = [];
+    try {
+      const raw = sessionStorage.getItem(PURCHASE_SENT_KEY);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      sent = Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+    } catch {
+      sent = [];
+    }
+    if (sent.includes(token)) return;
+    initTracking(ids, { allowMeta: false });
+    // The only event on this page: stop the tag once it is sent, so it
+    // cannot record the token links or signed file links used next.
+    trackEvent('deposit_paid', { valueCents: amount, currency }, { onDelivered: stopTracking });
+    try {
+      sessionStorage.setItem(PURCHASE_SENT_KEY, JSON.stringify([...sent, token].slice(-20)));
+    } catch {
+      // Storage unavailable: the event may repeat on a reload, nothing else.
+    }
+  }, [paid, ga4, amount, currency, token]);
 }

@@ -7,8 +7,9 @@ import { useEffect, useEffectEvent } from 'react';
 import { shopKey, type QueryKey } from './queryKeys';
 import { supabase } from './supabase';
 
-/** Tables in the realtime publication (SPEC §4.7). */
-export type RealtimeTable = 'jobs' | 'messages' | 'notifications' | 'payments' | 'time_entries';
+/** Tables in the realtime publication (SPEC §4.7; tasks: 0081). */
+export type RealtimeTable =
+  'jobs' | 'messages' | 'notifications' | 'payments' | 'time_entries' | 'tasks';
 
 export type RealtimeEvent = 'INSERT' | 'UPDATE' | 'DELETE' | '*';
 

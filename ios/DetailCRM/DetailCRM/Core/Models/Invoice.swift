@@ -118,6 +118,14 @@ struct InvoiceLineItem: Codable, Identifiable, Hashable, Sendable {
     var sort: Int
     /// Generated column: round(quantity × unit price) − discount.
     var totalCents: Int?
+    /// The job this line bills (P-7): one of the invoice's jobs; on a
+    /// grouped (fleet) invoice the lines are shown per job.
+    var jobID: UUID?
+    /// The invoice's document discount applies to this line (default true).
+    var discountEligible: Bool
+    /// A preset fee line (`shop_fees`).
+    var feeID: UUID?
+    var membershipID: UUID?
     var createdAt: Date
     var updatedAt: Date
 
@@ -135,6 +143,10 @@ struct InvoiceLineItem: Codable, Identifiable, Hashable, Sendable {
         case taxable
         case sort
         case totalCents = "total_cents"
+        case jobID = "job_id"
+        case discountEligible = "discount_eligible"
+        case feeID = "fee_id"
+        case membershipID = "membership_id"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -142,7 +154,7 @@ struct InvoiceLineItem: Codable, Identifiable, Hashable, Sendable {
     static let selectColumns = [
         "id", "shop_id", "invoice_id", "service_id", "vehicle_id", "name", "description",
         "quantity", "unit_price_cents", "discount_cents", "taxable", "sort", "total_cents",
-        "created_at", "updated_at",
+        "job_id", "discount_eligible", "fee_id", "membership_id", "created_at", "updated_at",
     ].joined(separator: ",")
 }
 

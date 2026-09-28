@@ -30,11 +30,20 @@ const planSchema = z
       .number({ error: 'Enter a price.' })
       .int()
       .min(1, 'The price must be more than zero.'),
-    interval: z.enum(['month', 'year']),
+    interval: z.enum(['week', 'month', 'year']),
     interval_count: z.string(),
     included_service_ids: z.array(z.string()).max(100, 'Choose up to 100 services.'),
     discount: zPercentBps(100),
     active: z.boolean(),
+    online_joinable: z.boolean(),
+    uses_per_period: z
+      .string()
+      .trim()
+      .refine(
+        (v) => v === '' || (/^\d{1,3}$/.test(v) && Number(v) >= 1 && Number(v) <= 100),
+        'Enter a whole number from 1 to 100, or leave empty for unlimited.',
+      ),
+    terms: zOptionalText(5000),
   })
   .superRefine((value, ctx) => {
     const count = Number(value.interval_count);
@@ -47,6 +56,9 @@ const planSchema = z
     }
     if (value.interval === 'month' && !(Number.isInteger(count) && count >= 1 && count <= 12)) {
       ctx.addIssue({ code: 'custom', path: ['interval_count'], message: 'Choose 1 to 12 months.' });
+    }
+    if (value.interval === 'week' && !(Number.isInteger(count) && count >= 1 && count <= 4)) {
+      ctx.addIssue({ code: 'custom', path: ['interval_count'], message: 'Choose 1 to 4 weeks.' });
     }
   });
 
@@ -70,12 +82,24 @@ function defaults(plan: PlanRow | null): PlanFormInput {
     included_service_ids: plan?.included_service_ids ?? [],
     discount: plan ? bpsToPercentInput(plan.discount_bps) : '0',
     active: plan?.active ?? true,
+    online_joinable: plan?.online_joinable ?? false,
+    uses_per_period:
+      plan?.included_uses_per_period !== null && plan?.included_uses_per_period !== undefined
+        ? String(plan.included_uses_per_period)
+        : '',
+    terms: plan?.terms ?? '',
   };
 }
 
 const MONTH_OPTIONS = Array.from({ length: 12 }, (_, i) => ({
   value: String(i + 1),
   label: i === 0 ? 'Every month' : `Every ${i + 1} months`,
+}));
+
+/** membership_plans_interval_count: weekly plans bill every 1–4 weeks. */
+const WEEK_OPTIONS = Array.from({ length: 4 }, (_, i) => ({
+  value: String(i + 1),
+  label: i === 0 ? 'Every week' : `Every ${i + 1} weeks`,
 }));
 
 export function PlanDialog({ open, onClose, plan }: PlanDialogProps) {
@@ -123,6 +147,10 @@ function PlanForm({ plan, onClose }: { plan: PlanRow | null; onClose: () => void
           included_service_ids: values.included_service_ids,
           discount_bps: values.discount,
           active: values.active,
+          online_joinable: values.online_joinable,
+          included_uses_per_period:
+            values.uses_per_period === '' ? null : Number(values.uses_per_period),
+          terms: values.terms,
         },
       });
       toast.success(plan ? 'Plan saved' : 'Plan created');
@@ -167,6 +195,7 @@ function PlanForm({ plan, onClose }: { plan: PlanRow | null; onClose: () => void
               },
             })}
             options={[
+              { value: 'week', label: 'Weekly' },
               { value: 'month', label: 'Monthly' },
               { value: 'year', label: 'Yearly' },
             ]}
@@ -176,7 +205,13 @@ function PlanForm({ plan, onClose }: { plan: PlanRow | null; onClose: () => void
           <Select
             {...form.register('interval_count')}
             disabled={interval === 'year'}
-            options={interval === 'year' ? [{ value: '1', label: 'Every year' }] : MONTH_OPTIONS}
+            options={
+              interval === 'year'
+                ? [{ value: '1', label: 'Every year' }]
+                : interval === 'week'
+                  ? WEEK_OPTIONS
+                  : MONTH_OPTIONS
+            }
           />
         </FormField>
       </div>
@@ -252,6 +287,14 @@ function PlanForm({ plan, onClose }: { plan: PlanRow | null; onClose: () => void
         )}
       />
 
+      <FormField
+        label="Included visits per billing period"
+        error={errors.uses_per_period?.message}
+        help="How many times members may use the included services each period. Leave empty for unlimited."
+      >
+        <Input inputMode="numeric" className="max-w-40" {...form.register('uses_per_period')} />
+      </FormField>
+
       <Controller
         control={form.control}
         name="active"
@@ -264,6 +307,25 @@ function PlanForm({ plan, onClose }: { plan: PlanRow | null; onClose: () => void
           />
         )}
       />
+      <Controller
+        control={form.control}
+        name="online_joinable"
+        render={({ field }) => (
+          <Switch
+            checked={field.value}
+            onCheckedChange={field.onChange}
+            label="Sell online"
+            description="Customers can join from your public membership page and pay with a card. Needs Stripe connected."
+          />
+        )}
+      />
+      <FormField
+        label="Terms"
+        error={errors.terms?.message}
+        help="Shown on the join page (cancellation, what’s included)."
+      >
+        <Textarea rows={3} {...form.register('terms')} />
+      </FormField>
 
       <div className="flex flex-wrap justify-end gap-2">
         <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>

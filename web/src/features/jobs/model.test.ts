@@ -5,6 +5,10 @@ import {
   clampUnit,
   customerName,
   DEFAULT_JOB_FILTERS,
+  describeFollowup,
+  formatVideoLength,
+  gateBlockers,
+  isGatedMove,
   formatAddress,
   formatDuration,
   formLink,
@@ -270,5 +274,71 @@ describe('movedLineOrder', () => {
     expect(movedLineOrder(rows, 0, -1)).toBeNull();
     expect(movedLineOrder(rows, 2, 1)).toBeNull();
     expect(movedLineOrder([], 0, 1)).toBeNull();
+  });
+});
+
+describe('completion gates (P-11)', () => {
+  const state = {
+    open_required_items: [
+      { id: 'i1', label: 'Vacuum interior' },
+      { id: 'i2', label: 'Tire shine' },
+    ],
+    before_photos: { required: 2, have: 0 },
+    after_photos: { required: 3, have: 1 },
+  };
+
+  it('gates completing and starting, never backward moves', () => {
+    expect(isGatedMove('in_progress', 'completed')).toBe(true);
+    expect(isGatedMove('confirmed', 'in_progress')).toBe(true);
+    expect(isGatedMove('completed', 'in_progress')).toBe(false);
+    expect(isGatedMove('scheduled', 'confirmed')).toBe(false);
+  });
+
+  it('lists what blocks the move, like the server does', () => {
+    expect(gateBlockers(state, 'in_progress', 'completed')).toEqual([
+      { key: 'checklist', text: 'Required checklist items not done: Vacuum interior, Tire shine' },
+      { key: 'after_photos', text: '3 “after” photos needed (1 so far)' },
+    ]);
+    expect(gateBlockers(state, 'scheduled', 'in_progress')).toEqual([
+      { key: 'before_photos', text: '2 “before” photos needed (0 so far)' },
+    ]);
+    expect(
+      gateBlockers(
+        {
+          open_required_items: [],
+          before_photos: { required: 0, have: 0 },
+          after_photos: { required: 1, have: 1 },
+        },
+        'in_progress',
+        'completed',
+      ),
+    ).toEqual([]);
+    expect(gateBlockers(state, 'completed', 'in_progress')).toEqual([]);
+  });
+});
+
+describe('deposit follow-ups and videos', () => {
+  const status = { enabled: true, paused: false, attempts_sent: 1, max_attempts: 3, next_at: null };
+
+  it('describes the reminder state in the shop zone', () => {
+    expect(describeFollowup({ ...status, enabled: false }, 'America/Chicago')).toBe(
+      'Automatic deposit reminders are off.',
+    );
+    expect(describeFollowup({ ...status, paused: true }, 'America/Chicago')).toBe(
+      'Deposit reminders are paused · 1 of 3 sent.',
+    );
+    expect(
+      describeFollowup({ ...status, next_at: '2026-10-06T15:00:00Z' }, 'America/Chicago'),
+    ).toBe('Next reminder Tue, Oct 6, 2026 · 10:00 AM · 1 of 3 sent.');
+    expect(describeFollowup({ ...status, attempts_sent: 3 }, 'America/Chicago')).toBe(
+      'All deposit reminders sent (3 of 3 sent).',
+    );
+    expect(describeFollowup(status, 'America/Chicago')).toBe('No deposit reminder is scheduled.');
+  });
+
+  it('formats video lengths', () => {
+    expect(formatVideoLength(65)).toBe('1:05');
+    expect(formatVideoLength(null)).toBeNull();
+    expect(formatVideoLength(0)).toBeNull();
   });
 });

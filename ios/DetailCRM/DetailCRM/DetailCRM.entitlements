@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Push notifications (APNs). Xcode's archive export rewrites this to
+	     "production" for TestFlight / App Store builds. The App ID needs the
+	     Push Notifications capability (docs/LAUNCH.md).
+	     Tap to Pay on iPhone: once Apple grants the entitlement, add
+	     <key>com.apple.developer.proximity-reader.payment.acceptance</key><true/>
+	     here and set TAP_TO_PAY_ENABLED to YES in Config.plist (ios/README.md). -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

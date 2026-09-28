@@ -45,6 +45,12 @@ export function jobDetailRow(overrides: Partial<JobDetail> = {}): JobDetail {
     cancel_reason: null,
     reminder_sent_at: null,
     review_requested_at: null,
+    series_id: null,
+    series_seq: null,
+    series_detached: false,
+    custom_data: {},
+    sold_by_member_id: null,
+    deposit_followups_paused: false,
     customer: {
       id: 'cust-1',
       first_name: 'Jane',

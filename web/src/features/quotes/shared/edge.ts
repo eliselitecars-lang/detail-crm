@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { AppError, edgeFunctionError, type AppErrorOptions } from '@/lib/errors';
 import { supabase } from '@/lib/supabase';
 
-export type EdgeFunctionName = 'payments' | 'messaging' | 'account';
+export type EdgeFunctionName = 'payments' | 'messaging' | 'account' | 'pdf';
 
 export class EdgeFunctionError extends AppError {
   /** Stable edge error code (`payment_failed`, `unprocessable`, `conflict`…). */
@@ -96,4 +96,29 @@ export async function invokeEdge<S extends z.ZodType>(
     });
   }
   return parsed.data;
+}
+
+/**
+ * Invokes `fn` with `{ action, ...params }` for a binary answer (the pdf
+ * function's application/pdf). Throws EdgeFunctionError on any failure,
+ * including a body that is not a file.
+ */
+export async function invokeEdgeBlob(
+  fn: EdgeFunctionName,
+  action: string,
+  params: Record<string, unknown>,
+): Promise<Blob> {
+  let response: Awaited<ReturnType<typeof supabase.functions.invoke<unknown>>>;
+  try {
+    response = await supabase.functions.invoke<unknown>(fn, { body: { action, ...params } });
+  } catch (error) {
+    throw await toEdgeError(error);
+  }
+  if (response.error) throw await toEdgeError(response.error);
+  if (!(response.data instanceof Blob)) {
+    throw new EdgeFunctionError('The server sent an unexpected response. Please try again.', {
+      kind: 'server',
+    });
+  }
+  return response.data;
 }

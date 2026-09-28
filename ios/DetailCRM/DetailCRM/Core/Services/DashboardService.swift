@@ -3,10 +3,11 @@
 //  DetailCRM
 //
 //  Today tab: `dashboard_summary`, online booking requests (approve /
-//  decline), the next job's location, and the compact shift clock
-//  (`clock_in` / `clock_out`, 0024). Every rule — who may approve, status
-//  transitions, clock overlaps — is enforced by RLS, triggers and RPCs;
-//  these calls only ask.
+//  decline), the next job's location, and the open time entries behind
+//  the compact shift clock (the punches themselves go through
+//  TimeClockService so they carry the device location, P-24). Every rule —
+//  who may approve, status transitions, clock overlaps — is enforced by
+//  RLS, triggers and RPCs; these calls only ask.
 //
 
 import Foundation
@@ -201,25 +202,6 @@ enum DashboardService {
             .eq("member_id", value: memberID.uuidString)
             .is("clock_out", value: nil)
             .order("clock_in", ascending: true)
-            .execute()
-            .value
-    }
-
-    /// Starts the caller's shift (`clock_in`, kind shift, source app).
-    @discardableResult
-    static func clockIn(shopID: UUID) async throws -> DashboardSummaryTimeEntry {
-        try await Supa.client
-            .rpc("clock_in", params: ["p_shop_id": shopID.uuidString])
-            .execute()
-            .value
-    }
-
-    /// Ends the caller's shift (`clock_out`); the server also closes any
-    /// open job clock.
-    @discardableResult
-    static func clockOut(shopID: UUID) async throws -> DashboardSummaryTimeEntry {
-        try await Supa.client
-            .rpc("clock_out", params: ["p_shop_id": shopID.uuidString])
             .execute()
             .value
     }

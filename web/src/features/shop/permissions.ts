@@ -34,6 +34,8 @@ export interface PermissionContext {
   role: ShopRole;
   /** shops.techs_can_collect_payments */
   techsCanCollectPayments: boolean;
+  /** shops.techs_can_share_reports (missing = false) */
+  techsCanShareReports?: boolean;
 }
 
 type Rule = readonly ShopRole[] | ((ctx: PermissionContext) => boolean);
@@ -43,6 +45,8 @@ const OWNER_ADMIN: readonly ShopRole[] = ['owner', 'admin'];
 const MANAGERS: readonly ShopRole[] = ['owner', 'admin', 'manager'];
 const techWhenAllowed = (ctx: PermissionContext) =>
   ctx.role !== 'technician' || ctx.techsCanCollectPayments;
+const techWhenSharingAllowed = (ctx: PermissionContext) =>
+  ctx.role !== 'technician' || ctx.techsCanShareReports === true;
 
 /**
  * Capability → who has it. Keys are `<area>.<action>`; "Assigned"/"Own"
@@ -72,6 +76,9 @@ export const CAPABILITIES = {
   'customers.view': MANAGERS, // full list
   'customers.viewAssigned': ALL, // technicians: only customers on their assigned jobs
   'customers.manage': MANAGERS,
+  'customers.merge': OWNER_ADMIN,
+  // CSV import of customers / vehicles / services (exports follow the list permissions)
+  'import.run': MANAGERS,
 
   // Catalog
   'catalog.view': ALL,
@@ -84,7 +91,11 @@ export const CAPABILITIES = {
   'jobs.manage': MANAGERS, // create, edit, reschedule, assign, line items
   'jobs.progress': ALL, // forward status, checklist, photos, inspections, forms (assigned for techs)
   'jobs.moveStatusBackward': MANAGERS,
+  // Customer job reports (/r/<token>): technicians only on assigned jobs, when the shop allows it
+  'jobs.shareReport': techWhenSharingAllowed,
   'blockedTimes.manage': MANAGERS,
+  // Personal iCal feed of one's own jobs (managers may include every job)
+  'calendarFeed.own': ALL,
 
   // Quotes, invoices, payments, memberships
   'quotes.view': MANAGERS,
@@ -100,6 +111,9 @@ export const CAPABILITIES = {
   'memberships.manage': MANAGERS,
   'cards.view': MANAGERS,
   'cards.charge': MANAGERS,
+  'giftCards.view': MANAGERS,
+  'giftCards.manage': MANAGERS, // issue, redeem
+  'giftCards.adjust': OWNER_ADMIN, // adjust balance, void
 
   // Reports
   'reports.view': MANAGERS,
@@ -109,6 +123,15 @@ export const CAPABILITIES = {
   'messages.inbox': MANAGERS,
   'messages.sendJobUpdates': ALL, // templated "on my way" / "job complete" on assigned jobs
   'campaigns.manage': MANAGERS,
+  'webhooks.manage': OWNER_ADMIN,
+
+  // Staff tasks / internal reminders
+  'tasks.own': ALL, // tasks assigned to or created by the member
+  'tasks.manage': MANAGERS, // every task of the shop
+
+  // Inventory & consumables
+  'inventory.view': MANAGERS,
+  'inventory.manage': MANAGERS,
 
   // Time clock
   'timeclock.own': ALL,
@@ -120,6 +143,18 @@ export const CAPABILITIES = {
 } as const satisfies Record<string, Rule>;
 
 export type Capability = keyof typeof CAPABILITIES;
+
+/** The permission context of a membership (shop flags included). */
+export function permissionContextOf(membership: {
+  role: ShopRole;
+  shop: { techs_can_collect_payments: boolean; techs_can_share_reports?: boolean | undefined };
+}): PermissionContext {
+  return {
+    role: membership.role,
+    techsCanCollectPayments: membership.shop.techs_can_collect_payments,
+    techsCanShareReports: membership.shop.techs_can_share_reports === true,
+  };
+}
 
 export function can(ctx: PermissionContext | null | undefined, capability: Capability): boolean {
   if (!ctx) return false;

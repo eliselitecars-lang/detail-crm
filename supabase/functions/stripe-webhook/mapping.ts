@@ -13,7 +13,13 @@
  *   customer_id    uuid   optional linkage (saved cards, payments)
  *   membership_id  uuid   optional linkage (memberships / subscriptions)
  *   kind           "deposit" | "payment"   (membership is implied by membership_id)
+ *                  | "gift_card"           (an online gift card sale, never a payments row)
+ *   gift_card_order_id  uuid  the gift_card_orders row of a gift card sale
  *   tip_cents      integer string, the tip included in the charged amount
+ *   channel        "terminal" on Stripe Terminal / Tap to Pay intents (informational)
+ *   source         the payments action that created the object (payment_sheet,
+ *                  terminal, invoice_checkout, ...); payment_sheet and terminal
+ *                  intents stay confirmable after a decline
  *
  * Anything without our `shop_id` (charges the shop made in its own
  * Dashboard, subscription-invoice PaymentIntents, other platforms' objects)
@@ -23,7 +29,8 @@ import type { Stripe } from "../_shared/stripe.ts";
 import { isUuid } from "../_shared/ids.ts";
 
 export type PaymentKind = "deposit" | "payment" | "membership";
-export type PaymentMethodKind = "card" | "card_present";
+/** payment_method values Stripe-backed rows may carry (0061 payments_card_via_stripe). */
+export type PaymentMethodKind = "card" | "card_present" | "ach_debit" | "bnpl";
 export type MembershipStatus = "incomplete" | "active" | "past_due" | "cancelled";
 
 type Metadata = Readonly<Record<string, string | undefined>> | null | undefined;
@@ -39,6 +46,11 @@ export interface CrmMetadata {
   customerId: string | null;
   membershipId: string | null;
   kind: PaymentKind;
+  /**
+   * An online gift card sale (kind "gift_card" with a gift_card_order_id):
+   * recorded with gift_card_order_paid, never as a payments row.
+   */
+  giftCardOrderId: string | null;
   /** Tip requested in metadata (validated integer >= 0; bounded by `splitTip`). */
   tipCents: number;
   /** Malformed values that were dropped (logged, never fatal). */
@@ -63,15 +75,20 @@ export function readMetadata(md: Metadata): CrmMetadata {
   const jobId = uuidField(md, "job_id", problems);
   const customerId = uuidField(md, "customer_id", problems);
   const membershipId = uuidField(md, "membership_id", problems);
+  const orderId = uuidField(md, "gift_card_order_id", problems);
 
   let kind: PaymentKind = "payment";
+  let giftCardOrderId: string | null = null;
   const rawKind = md?.kind;
   if (membershipId !== null) {
     kind = "membership";
   } else if (rawKind === "deposit" || rawKind === "payment") {
     kind = rawKind;
+  } else if (rawKind === "gift_card") {
+    if (orderId !== null) giftCardOrderId = orderId;
+    else problems.push("kind gift_card without a gift_card_order_id");
   } else if (rawKind !== undefined && rawKind !== "") {
-    problems.push("kind is not deposit/payment (or membership without membership_id)");
+    problems.push("kind is not deposit/payment/gift_card (or membership without membership_id)");
   }
 
   let tipCents = 0;
@@ -83,7 +100,17 @@ export function readMetadata(md: Metadata): CrmMetadata {
       problems.push("tip_cents is not a whole number of cents");
     }
   }
-  return { shopId, invoiceId, jobId, customerId, membershipId, kind, tipCents, problems };
+  return {
+    shopId,
+    invoiceId,
+    jobId,
+    customerId,
+    membershipId,
+    kind,
+    giftCardOrderId,
+    tipCents,
+    problems,
+  };
 }
 
 /**
@@ -238,19 +265,106 @@ export function chargeCard(charge: Stripe.Charge | null | undefined): CardDetail
   }
 }
 
-/** Stripe charge payment method types we store as a card row. */
-const CARD_TYPES = new Set(["card", "card_present", "interac_present"]);
+// ---------------------------------------------------------------------------
+// Payment method types (P-31): Stripe's type -> our payment_method
+// ---------------------------------------------------------------------------
+
+/** Stripe types whose money is a card (wallets and Link pay with a card). */
+const CARD_TYPES = new Set(["card", "link", "apple_pay", "google_pay"]);
+/** In-person card types (Stripe Terminal / Tap to Pay). */
+const IN_PERSON_TYPES = new Set(["card_present", "interac_present"]);
+/** US bank debits (ACH): processing for days before the money settles. */
+const BANK_DEBIT_TYPES = new Set(["us_bank_account"]);
+/** Buy-now-pay-later providers: the shop is paid in full, the customer pays the provider. */
+const BNPL_TYPES = new Set([
+  "affirm",
+  "afterpay_clearpay",
+  "klarna",
+  "zip",
+  "sunbit",
+  "scalapay",
+  "alma",
+  "billie",
+]);
+
+const STRIPE_TYPE_RE = /^[a-z][a-z0-9_]{0,39}$/;
 
 /**
- * The charge's payment method type when it is NOT a card (e.g.
- * us_bank_account, cashapp, klarna), else null. The payments table only
- * allows card / card_present on Stripe rows (0012 payments_card_via_stripe),
- * so such a charge is still stored as `card`; callers flag it on the row.
+ * Our payment_method for a Stripe payment method type, or null for a type
+ * the CRM has no method for (e.g. cashapp, paypal: such a charge is stored
+ * as `card` and flagged on the row, see `unmappedMethodType`).
  */
-export function nonCardMethodType(charge: Stripe.Charge | null | undefined): string | null {
+export function methodForStripeType(type: string | null | undefined): PaymentMethodKind | null {
+  if (typeof type !== "string") return null;
+  if (CARD_TYPES.has(type)) return "card";
+  if (IN_PERSON_TYPES.has(type)) return "card_present";
+  if (BANK_DEBIT_TYPES.has(type)) return "ach_debit";
+  if (BNPL_TYPES.has(type)) return "bnpl";
+  return null;
+}
+
+/** A Stripe payment method type as stored in payments.stripe_method_type (null when malformed). */
+export function cleanStripeType(type: unknown): string | null {
+  return typeof type === "string" && STRIPE_TYPE_RE.test(type) ? type : null;
+}
+
+/**
+ * The Stripe payment method type actually used: the charge's
+ * payment_method_details.type, else the intent's (expanded) payment method,
+ * else its only allowed type. Null while the customer has not chosen one
+ * (a Checkout intent with several allowed types and no charge yet).
+ */
+export function stripeMethodTypeOf(
+  charge: Stripe.Charge | null | undefined,
+  pi?: Pick<Stripe.PaymentIntent, "payment_method" | "payment_method_types"> | null,
+): string | null {
+  const fromCharge = cleanStripeType(charge?.payment_method_details?.type);
+  if (fromCharge) return fromCharge;
+  const pm = pi?.payment_method;
+  if (pm && typeof pm === "object") {
+    const fromPm = cleanStripeType(pm.type);
+    if (fromPm) return fromPm;
+  }
+  const types = pi?.payment_method_types ?? [];
+  return types.length === 1 ? cleanStripeType(types[0]) : null;
+}
+
+/**
+ * The charge's payment method type when the CRM has no payment_method for it
+ * (e.g. cashapp, paypal; "other" when malformed), else null. Such a charge
+ * is stored as `card` (the only generic Stripe method) with a note.
+ */
+export function unmappedMethodType(charge: Stripe.Charge | null | undefined): string | null {
   const type: unknown = charge?.payment_method_details?.type;
-  if (typeof type !== "string" || CARD_TYPES.has(type)) return null;
-  return /^[a-z][a-z0-9_]{0,39}$/.test(type) ? type : "other";
+  if (typeof type !== "string") return null;
+  const clean = cleanStripeType(type);
+  if (!clean) return "other";
+  return methodForStripeType(clean) ? null : clean;
+}
+
+/** What a charge records on the payment row: method + the card / bank account's brand and last4. */
+export interface ChargeMethod {
+  method: PaymentMethodKind;
+  brand: string | null;
+  last4: string | null;
+}
+
+/**
+ * The payment row's method and display details from a charge: cards and
+ * in-person cards carry brand/last4, a US bank debit its account's last4
+ * (no brand), pay-later nothing. Null when the charge has no details or its
+ * type has no CRM method.
+ */
+export function chargeMethod(charge: Stripe.Charge | null | undefined): ChargeMethod | null {
+  const card = chargeCard(charge);
+  if (card) return { method: card.method, brand: card.brand, last4: card.last4 };
+  const details = charge?.payment_method_details;
+  const method = methodForStripeType(details?.type);
+  if (!details || !method) return null;
+  if (method === "ach_debit") {
+    return { method, brand: null, last4: cleanLast4(details.us_bank_account?.last4) };
+  }
+  return { method, brand: null, last4: null };
 }
 
 /** Card details from a PaymentMethod (null when it is not a card). */
@@ -260,16 +374,40 @@ export function paymentMethodCard(pm: Stripe.PaymentMethod | null | undefined): 
 }
 
 /**
- * Our `payment_method` for a PaymentIntent before a charge exists: in-person
- * (Terminal) intents only allow card_present.
+ * Our `payment_method` for a PaymentIntent before a charge exists: the
+ * expanded payment method's type when known, else in-person (Terminal)
+ * intents that only allow card_present / interac_present, or the only
+ * allowed type (ACH / pay-later); anything else is a card.
  */
 export function intentMethod(
-  pi: Pick<Stripe.PaymentIntent, "payment_method_types">,
+  pi: Pick<Stripe.PaymentIntent, "payment_method_types"> & {
+    payment_method?: Stripe.PaymentIntent["payment_method"];
+  },
 ): PaymentMethodKind {
+  const pm = pi.payment_method;
+  if (pm && typeof pm === "object") {
+    const chosen = methodForStripeType(pm.type);
+    if (chosen) return chosen;
+  }
   const types = pi.payment_method_types ?? [];
-  const inPerson = types.some((t) => t === "card_present" || t === "interac_present");
-  const online = types.some((t) => t !== "card_present" && t !== "interac_present");
-  return inPerson && !online ? "card_present" : "card";
+  if (types.length > 0 && types.every((t) => IN_PERSON_TYPES.has(t))) return "card_present";
+  if (types.length === 1) {
+    const only = methodForStripeType(types[0]);
+    if (only === "ach_debit" || only === "bnpl") return only;
+  }
+  return "card";
+}
+
+/**
+ * Whether the intent saves the payment method for later off-session use:
+ * `setup_future_usage` on the intent, or on its card options (the Checkout
+ * Sessions set it there so ACH / pay-later stay available, P-31).
+ */
+export function intentSavesCard(
+  pi: Pick<Stripe.PaymentIntent, "setup_future_usage" | "payment_method_options">,
+): boolean {
+  return Boolean(pi.setup_future_usage) ||
+    Boolean(pi.payment_method_options?.card?.setup_future_usage);
 }
 
 /** PaymentIntent statuses in which the intent can still be confirmed. */
@@ -279,19 +417,22 @@ const CONFIRMABLE = new Set([
   "requires_action",
 ]);
 
+/** payments actions whose intents a device confirms (and can confirm again after a decline). */
+export const DEVICE_INTENT_SOURCES: ReadonlySet<string> = new Set(["payment_sheet", "terminal"]);
+
 /**
- * A declined PaymentSheet intent is NOT finished: Stripe returns it to
- * requires_payment_method and the sheet still on screen can confirm it with
- * another card. Such a decline is recorded as `pending` (an open attempt),
- * so payment_sheet supersession, cancel_open_payments and the stale-sheet
- * sweep (which settle pending rows) still cancel it in Stripe. Other flows
- * keep `failed`: Checkout Sessions cancel their intent when they expire, and
- * charge_saved_card intents are confirmed server-side only.
+ * A declined PaymentSheet (or Terminal / Tap to Pay) intent is NOT finished:
+ * Stripe returns it to requires_payment_method and the sheet or reader still
+ * on screen can confirm it with another card. Such a decline is recorded as
+ * `pending` (an open attempt), so supersession, cancel_open_payments and the
+ * stale-sheet sweep (which settle pending rows) still cancel it in Stripe.
+ * Other flows keep `failed`: Checkout Sessions cancel their intent when they
+ * expire, and charge_saved_card intents are confirmed server-side only.
  */
 export function isReconfirmableSheetIntent(
   pi: Pick<Stripe.PaymentIntent, "status" | "metadata">,
 ): boolean {
-  return pi.metadata?.source === "payment_sheet" && CONFIRMABLE.has(pi.status);
+  return DEVICE_INTENT_SOURCES.has(pi.metadata?.source ?? "") && CONFIRMABLE.has(pi.status);
 }
 
 // ---------------------------------------------------------------------------
@@ -344,16 +485,17 @@ const PRICE_RE = /^price_[A-Za-z0-9]+$/;
 export interface SubscriptionTerms {
   priceId: string;
   amountCents: number;
-  interval: "month" | "year";
+  interval: "week" | "month" | "year";
   intervalCount: number;
 }
 
 /**
  * The subscription's billing terms, recorded on the membership (0011) so the
  * CRM shows what Stripe actually charges even after the plan's price
- * changed. Only a single-item subscription with a whole-cent monthly / yearly
- * price within Stripe's limits (the database's) maps; anything else (several
- * items, metered or decimal prices, day/week intervals) is null and the
+ * changed. Only a single-item subscription with a whole-cent weekly /
+ * monthly / yearly price within the database's limits (week 1..12, month
+ * 1..36, year 1..3; 0069 memberships_interval_count) maps; anything else
+ * (several items, metered or decimal prices, day intervals) is null and the
  * recorded terms are left alone.
  */
 export function subscriptionTerms(sub: Stripe.Subscription): SubscriptionTerms | null {
@@ -368,8 +510,9 @@ export function subscriptionTerms(sub: Stripe.Subscription): SubscriptionTerms |
   if (typeof unit !== "number" || !Number.isSafeInteger(unit) || unit <= 0) return null;
   if (!Number.isSafeInteger(quantity) || quantity < 1) return null;
   if (!Number.isSafeInteger(count) || count < 1) return null;
-  let interval: "month" | "year";
-  if (price.recurring?.interval === "month" && count <= 36) interval = "month";
+  let interval: "week" | "month" | "year";
+  if (price.recurring?.interval === "week" && count <= 12) interval = "week";
+  else if (price.recurring?.interval === "month" && count <= 36) interval = "month";
   else if (price.recurring?.interval === "year" && count <= 3) interval = "year";
   else return null;
   const amount = unit * quantity;

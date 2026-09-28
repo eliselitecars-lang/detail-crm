@@ -122,6 +122,15 @@ struct JobLineRow: View {
         if !line.taxable {
             parts.append("not taxed")
         }
+        if line.feeID != nil {
+            parts.append("fee")
+        }
+        if line.membershipID != nil {
+            parts.append("membership")
+        }
+        if line.discountEligible == false {
+            parts.append("no job discount")
+        }
         return parts.joined(separator: " · ")
     }
 }
@@ -133,6 +142,8 @@ struct JobMoneySection: View {
     let currencyCode: String
     let retry: () async -> Void
     let onCreateInvoice: () async -> Void
+    /// Managers see the automatic deposit reminders (P-3).
+    var showsDepositFollowups: Bool = false
 
     var body: some View {
         JobSectionCard("Payment") {
@@ -144,6 +155,10 @@ struct JobMoneySection: View {
                         currencyCode: currencyCode,
                         onCreateInvoice: onCreateInvoice
                     )
+                    if showsDepositFollowups && summary.depositDueCents > 0 {
+                        JobDivider()
+                        JobsDepositFollowupRow(jobID: job.id)
+                    }
                 } else {
                     JobEmptyLine(text: "No payment information yet.", systemImage: "creditcard")
                 }
@@ -220,6 +235,14 @@ struct JobMoneySummaryView: View {
             }
             .buttonStyle(.plain)
             .accessibilityHint("Opens the invoice to collect payment or send it")
+            if summary.isOnGroupedInvoice, let count = summary.invoiceJobCount {
+                Text("Billed together with \(count - 1) other job\(count == 2 ? "" : "s") on this invoice; the balance is the invoice's.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if summary.isOnGroupedInvoice {
+            JobEmptyLine(text: "This job is billed on a grouped invoice with other jobs.", systemImage: "doc.on.doc")
         } else if job.status == .cancelled || job.status == .noShow {
             JobEmptyLine(text: "No invoice. This job was \(job.status.displayName.lowercased()).", systemImage: "doc.plaintext")
         } else {

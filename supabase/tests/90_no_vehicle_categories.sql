@@ -74,9 +74,9 @@ select tests.ok(to_regprocedure('public.get_available_slots(text, uuid[], date, 
                 'get_available_slots(slug, services, from, to, category = null, now = now())');
 select tests.ok(to_regprocedure('public.price_services(uuid, uuid, uuid[], uuid, uuid)') is not null,
                 'price_services(shop, customer, services, category = null, vehicle = null)');
-select tests.eq((select pronargdefaults from pg_proc where oid = 'public.public_validate_coupon(text, text, uuid[], uuid, timestamptz)'::regprocedure),
-                2::smallint, 'public_validate_coupon: category and now default');
+select tests.eq((select pronargdefaults from pg_proc where oid = 'public.public_validate_coupon(text, text, uuid[], uuid, timestamptz, uuid, public.location_type, uuid, text)'::regprocedure),
+                6::smallint, 'public_validate_coupon: category, now, link token, location type, vehicle and start (0062) default');
 select tests.ok(has_function_privilege('anon', 'public.get_available_slots(text, uuid[], date, date, uuid, timestamptz)', 'execute')
-                and has_function_privilege('anon', 'public.public_validate_coupon(text, text, uuid[], uuid, timestamptz)', 'execute')
+                and has_function_privilege('anon', 'public.public_validate_coupon(text, text, uuid[], uuid, timestamptz, uuid, public.location_type, uuid, text)', 'execute')
                 and not has_function_privilege('anon', 'public.price_services(uuid, uuid, uuid[], uuid, uuid)', 'execute'),
                 'grants follow the new signatures');

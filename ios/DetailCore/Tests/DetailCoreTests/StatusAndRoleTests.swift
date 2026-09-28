@@ -101,9 +101,11 @@ final class JobStatusTests: XCTestCase {
         XCTAssertEqual(InvoiceStatus.allCases.map(\.rawValue),
                        ["draft", "open", "partially_paid", "paid", "void"])
         XCTAssertEqual(PaymentStatus.allCases.map(\.rawValue),
-                       ["pending", "succeeded", "failed", "cancelled", "refunded", "partially_refunded"])
+                       ["pending", "succeeded", "failed", "cancelled", "refunded", "partially_refunded", "processing"])
         XCTAssertEqual(PaymentMethod.allCases.map(\.rawValue),
-                       ["card", "card_present", "cash", "check", "bank_transfer", "other"])
+                       ["card", "card_present", "cash", "check", "bank_transfer", "other", "gift_card", "ach_debit", "bnpl"])
+        XCTAssertFalse(PaymentStatus.processing.countsTowardPaid)
+        XCTAssertFalse(PaymentMethod.manualMethods.contains(.giftCard))
         XCTAssertEqual(MembershipStatus.allCases.map(\.rawValue),
                        ["incomplete", "active", "past_due", "cancelled"])
         XCTAssertTrue(InvoiceStatus.partiallyPaid.acceptsPayment)
@@ -152,6 +154,13 @@ final class CapabilityTests: XCTestCase {
         XCTAssertTrue(ShopRole.admin.can(.refundPayments))
         XCTAssertFalse(ShopRole.manager.can(.refundPayments))
         XCTAssertFalse(ShopRole.manager.can(.voidInvoices))
+    }
+
+    func testTechnicianReportSharingDependsOnShopPolicy() {
+        XCTAssertTrue(ShopRole.manager.can(.shareJobReports))
+        XCTAssertFalse(ShopRole.technician.can(.shareJobReports))
+        XCTAssertTrue(ShopRole.technician.can(.shareJobReports, policy: ShopPolicy(techsCanShareReports: true)))
+        XCTAssertFalse(ShopRole.technician.can(.collectPaymentOnAssignedJob, policy: ShopPolicy(techsCanShareReports: true)))
     }
 
     func testTechnicianCollectionDependsOnShopPolicy() {

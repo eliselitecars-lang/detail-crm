@@ -17,7 +17,7 @@ import {
   TimeInput,
   useToast,
 } from '@/components/ui';
-import { shopToday, utcToShopLocal } from '@/lib/dates';
+import { isLocalDate, shopToday, utcToShopLocal } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
 import { useShop } from '@/features/shop/shopContext';
 import {
@@ -28,6 +28,7 @@ import {
   useVehicleCategories,
   type LineDraft,
 } from './api';
+import { RepeatFields, SeriesPreview } from './components/RepeatFields';
 import { CustomerSection } from './components/new/CustomerSection';
 import { ServicesSection } from './components/new/ServicesSection';
 import { VehicleSection } from './components/new/VehicleSection';
@@ -49,6 +50,15 @@ import {
   type CreateJobProgress,
   type CustomerOption,
 } from './newJobApi';
+import {
+  defaultRepeatDraft,
+  localWeekday,
+  repeatRuleFields,
+  SERIES_LIMITS,
+  spanMinutes,
+  type RepeatDraft,
+} from './series';
+import { useCreateSeries } from './seriesApi';
 
 function isoParam(params: URLSearchParams, key: string): string | null {
   const value = params.get(key);
@@ -56,7 +66,7 @@ function isoParam(params: URLSearchParams, key: string): string | null {
 }
 
 export default function NewJobPage() {
-  const { timezone, shop } = useShop();
+  const { timezone, shop, memberId } = useShop();
   const toast = useToast();
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -83,11 +93,18 @@ export default function NewJobPage() {
   });
 
   const [vehicleId, setVehicleId] = useState<string | null>(null);
+  /** The picked vehicle's own size (repeating jobs are priced from it). */
+  const [vehicleSize, setVehicleSize] = useState<string | null>(null);
   const [categoryId, setCategoryId] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [applyMemberDiscount, setApplyMemberDiscount] = useState(true);
   const [mode, setMode] = useState<'now' | 'later'>('now');
   const [start, setStart] = useState<LocalDateTime>(initialSchedule.start);
+  const [repeat, setRepeat] = useState(false);
+  const [repeatDraft, setRepeatDraft] = useState<RepeatDraft>(() =>
+    defaultRepeatDraft(initialSchedule.start.date),
+  );
+  const [soldBy, setSoldBy] = useState(memberId);
   const [endOverride, setEndOverride] = useState<LocalDateTime | null>(initialSchedule.end);
   const [location, setLocation] = useState<LocationType>(
     shop.business_type === 'mobile' ? 'mobile' : 'shop',
@@ -116,6 +133,8 @@ export default function NewJobPage() {
   const resources = useResources();
   const team = useTeam();
   const create = useCreateJob();
+  const createSeries = useCreateSeries();
+  const repeating = repeat && mode === 'now';
 
   // A shop without vehicle sizes prices every service at its base price.
   const noSizes = categories.isSuccess && categories.data.length === 0;
@@ -139,9 +158,22 @@ export default function NewJobPage() {
   const autoEnd = addMinutesLocal(start, minutes > 0 ? minutes : 60, timezone);
   const end = endOverride ?? autoEnd ?? start;
 
+  /** A new start date moves the default weekday of a weekly repeat with it. */
+  const changeStartDate = (date: string) => {
+    const previous = start.date;
+    setStart((s) => ({ ...s, date }));
+    if (!isLocalDate(date) || !isLocalDate(previous)) return;
+    setRepeatDraft((d) =>
+      d.weekdays.length === 1 && d.weekdays[0] === localWeekday(previous)
+        ? { ...d, weekdays: [localWeekday(date)] }
+        : d,
+    );
+  };
+
   const changeCustomer = (next: CustomerOption | null) => {
     setPicked(next);
     setVehicleId(null);
+    setVehicleSize(null);
     if (next && location === 'mobile' && !address.line1) {
       setAddress({
         line1: next.address_line1 ?? '',
@@ -208,14 +240,91 @@ export default function NewJobPage() {
         discount_kind: useDiscount ? 'percent' : 'none',
         discount_value: useDiscount ? suggested : 0,
         deposit_required_cents: deposit ?? 0,
+        sold_by_member_id: soldBy || null,
       },
       lines: drafts,
       assigneeIds: assignees,
     };
   };
 
+  /** The live rule + first visit, for the preview (null while incomplete). */
+  const repeatPreview = (): Record<string, unknown> | null => {
+    if (!repeating) return null;
+    const rule = repeatRuleFields(repeatDraft, start.date);
+    const times = scheduleToUtc(start, end, timezone);
+    if ('error' in rule || 'error' in times) return null;
+    const minutes = spanMinutes(times.start, times.end);
+    if (minutes === null || minutes < SERIES_LIMITS.durationMin) return null;
+    return { ...rule, start_date: start.date, local_start: start.time, duration_minutes: minutes };
+  };
+
+  /** create_job_series payload (P-1), or a message saying what is missing. */
+  const buildSeries = (): Record<string, unknown> | string => {
+    if (!customer) return 'Choose a customer.';
+    if (selected.length === 0) return 'Add at least one service to repeat a job.';
+    if (selected.length > SERIES_LIMITS.templateLinesMax) {
+      return 'A repeating job can list at most 30 services.';
+    }
+    if (!noSizes && !vehicleSize) {
+      return 'Repeating jobs are priced from the vehicle’s size: choose a vehicle that has a size.';
+    }
+    const times = scheduleToUtc(start, end, timezone);
+    if ('error' in times) return times.error;
+    const minutes = spanMinutes(times.start, times.end);
+    if (minutes === null || minutes < SERIES_LIMITS.durationMin) {
+      return 'Each visit must last at least 15 minutes.';
+    }
+    const rule = repeatRuleFields(repeatDraft, start.date);
+    if ('error' in rule) return rule.error;
+    const mobile = location === 'mobile';
+    const text = (v: string) => (mobile && v.trim() ? v.trim() : null);
+    return {
+      customer_id: customer.id,
+      ...(vehicleId ? { vehicle_id: vehicleId } : {}),
+      location_type: location,
+      service_address_line1: text(address.line1),
+      service_address_line2: text(address.line2),
+      service_city: text(address.city),
+      service_region: text(address.region),
+      service_postal_code: text(address.postal),
+      ...(resourceValue ? { resource_id: resourceValue } : {}),
+      ...rule,
+      start_date: start.date,
+      local_start: start.time,
+      duration_minutes: minutes,
+      template_lines: selected.map((id) => ({ service_id: id, quantity: 1 })),
+      assignee_member_ids: assignees,
+      notes: notes.trim() || null,
+      internal_notes: internalNotes.trim() || null,
+    };
+  };
+
+  const submitSeries = async () => {
+    const payload = buildSeries();
+    if (typeof payload === 'string') {
+      setFormError(payload);
+      return;
+    }
+    try {
+      const result = await createSeries.mutateAsync(payload);
+      toast.success(
+        'Repeating job created',
+        result.jobs_created === 1
+          ? '1 visit scheduled.'
+          : `${result.jobs_created} visits scheduled.`,
+      );
+      await navigate(result.first_job_id ? `/app/jobs/${result.first_job_id}` : '/app/calendar');
+    } catch (error) {
+      setFormError(errorMessage(error));
+    }
+  };
+
   const submit = async () => {
     setFormError(null);
+    if (repeating && !committed) {
+      await submitSeries();
+      return;
+    }
     const input = committed ?? buildInput();
     if (typeof input === 'string') {
       setFormError(input);
@@ -271,6 +380,7 @@ export default function NewJobPage() {
               categories={categories.data ?? []}
               onVehicle={(v) => {
                 setVehicleId(v?.id ?? null);
+                setVehicleSize(v?.category_id ?? null);
                 if (v?.category_id) setCategoryId(v.category_id);
               }}
               onCategory={setCategoryId}
@@ -306,7 +416,7 @@ export default function NewJobPage() {
                     <FormField label="Start date" required>
                       <DateInput
                         value={start.date}
-                        onChange={(e) => setStart((s) => ({ ...s, date: e.target.value }))}
+                        onChange={(e) => changeStartDate(e.target.value)}
                       />
                     </FormField>
                     <FormField label="Start time" required>
@@ -338,6 +448,30 @@ export default function NewJobPage() {
                       </Button>
                     )}
                   </p>
+                  <Checkbox
+                    label="Repeat this job"
+                    description="Regular visits, such as a maintenance wash every two weeks."
+                    checked={repeat}
+                    onChange={(e) => setRepeat(e.target.checked)}
+                  />
+                  {repeating && (
+                    <section
+                      aria-label="Repeat"
+                      className="border-line flex flex-col gap-4 border-l-2 pl-4"
+                    >
+                      <RepeatFields
+                        draft={repeatDraft}
+                        onChange={setRepeatDraft}
+                        anchorDate={start.date}
+                      />
+                      <SeriesPreview payload={repeatPreview()} timezone={timezone} />
+                      <p className="text-muted text-xs">
+                        Each visit is priced from your catalog when it’s created, with membership
+                        discounts applied. Deposits and other discounts are set on individual
+                        visits.
+                      </p>
+                    </section>
+                  )}
                 </>
               )}
             </div>
@@ -461,6 +595,18 @@ export default function NewJobPage() {
                     ))
                   )}
                 </fieldset>
+                {!repeating && (
+                  <FormField label="Sold by" help="Credited with the sale for sales commission.">
+                    <Select
+                      value={soldBy}
+                      onChange={(e) => setSoldBy(e.target.value)}
+                      options={[
+                        { value: '', label: 'Nobody' },
+                        ...activeTeam.map((m) => ({ value: m.memberId, label: m.name })),
+                      ]}
+                    />
+                  </FormField>
+                )}
               </div>
             </SectionCard>
             <SectionCard title="Notes & deposit" level={3}>
@@ -481,9 +627,11 @@ export default function NewJobPage() {
                     onChange={(e) => setInternalNotes(e.target.value)}
                   />
                 </FormField>
-                <FormField label="Deposit required" help="Optional.">
-                  <MoneyInput value={deposit} onChange={setDeposit} />
-                </FormField>
+                {!repeating && (
+                  <FormField label="Deposit required" help="Optional.">
+                    <MoneyInput value={deposit} onChange={setDeposit} />
+                  </FormField>
+                )}
               </div>
             </SectionCard>
           </fieldset>
@@ -510,8 +658,13 @@ export default function NewJobPage() {
                 </div>
               </div>
             )}
-            <Button type="submit" size="lg" loading={create.isPending} fullWidth>
-              {partial ? 'Retry saving' : 'Create job'}
+            <Button
+              type="submit"
+              size="lg"
+              loading={create.isPending || createSeries.isPending}
+              fullWidth
+            >
+              {partial ? 'Retry saving' : repeating ? 'Create repeating job' : 'Create job'}
             </Button>
             <Link to="/app/jobs" className={buttonClasses({ variant: 'ghost', fullWidth: true })}>
               Cancel

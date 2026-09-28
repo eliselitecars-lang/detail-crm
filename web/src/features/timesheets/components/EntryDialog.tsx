@@ -24,9 +24,11 @@ import {
   entryFormSchema,
   entryFormTimes,
   entryFormToWrite,
+  geoStamp,
   type TimeEntry,
   type TimeEntryKind,
 } from '../model';
+import { GeoLinks } from './GeoLinks';
 
 type FormInput = z.input<typeof entryFormSchema>;
 type FormOutput = z.output<typeof entryFormSchema>;
@@ -144,6 +146,15 @@ export function EntryDialog({ entry, members, defaultMemberId, onClose }: EntryD
           >
             {errorMessage(save.error)}
           </p>
+        )}
+        {entry && (geoStamp(entry, 'in') || geoStamp(entry, 'out')) && (
+          <div className="bg-surface-2 rounded-control flex flex-col gap-1 px-3 py-2">
+            <p className="text-muted text-xs">
+              Recorded by the iPhone app when the member clocked in or out. Locations can’t be
+              edited.
+            </p>
+            <GeoLinks entry={entry} />
+          </div>
         )}
         <div className="grid gap-4 sm:grid-cols-2">
           <FormField label="Team member" error={errors.memberId?.message} required>

@@ -16,7 +16,7 @@ import { formatCents } from '@/lib/money';
 import { EdgeFunctionError } from '@/features/quotes/shared/edge';
 import { newRequestNonce } from '@/features/quotes/shared/format';
 import { brandLabel } from '@/features/payments/paymentFormat';
-import { useChargeSavedCard, useSavedCards } from '../api';
+import { collectibleHelp, useChargeSavedCard, useSavedCards } from '../api';
 
 export interface ChargeCardDialogProps {
   open: boolean;
@@ -24,7 +24,10 @@ export interface ChargeCardDialogProps {
   invoiceId: string;
   invoiceNumber: number;
   customerId: string;
+  /** What the charge may take: the balance less bank payments still clearing (payments edge payableBalance). */
   balanceCents: number;
+  /** Clearing money already subtracted from balanceCents (shown in the help text). */
+  heldCents?: number;
   currency: string;
   /** Opens the send dialog so the customer can pay (and authenticate) online. */
   onTextPayLink: () => void;
@@ -48,6 +51,7 @@ function ChargeCardForm({
   invoiceId,
   customerId,
   balanceCents,
+  heldCents = 0,
   currency,
   onTextPayLink,
 }: ChargeCardDialogProps) {
@@ -65,7 +69,9 @@ function ChargeCardForm({
     amount === null || amount <= 0
       ? 'Enter an amount greater than zero.'
       : amount > balanceCents
-        ? `The amount can’t be more than the balance due (${formatCents(balanceCents, { currency })}).`
+        ? heldCents > 0
+          ? `The amount can’t be more than ${formatCents(balanceCents, { currency })} (the balance due less payments still clearing).`
+          : `The amount can’t be more than the balance due (${formatCents(balanceCents, { currency })}).`
         : undefined;
 
   const submit = async () => {
@@ -170,7 +176,7 @@ function ChargeCardForm({
         label="Amount"
         required
         error={amount === null ? undefined : amountError}
-        help={`Balance due: ${formatCents(balanceCents, { currency })}`}
+        help={collectibleHelp(balanceCents, heldCents, currency)}
       >
         <MoneyInput value={amount} onChange={setAmount} />
       </FormField>

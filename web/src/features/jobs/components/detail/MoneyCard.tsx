@@ -12,13 +12,20 @@ import {
   MoneyInput,
   SectionCard,
   StatusBadge,
+  Switch,
   useToast,
 } from '@/components/ui';
 import { formatCents } from '@/lib/money';
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import { useUpdateJob, type JobDetail } from '../../api';
-import { useCreateInvoice, usePaymentSummary } from '../../fieldApi';
+import {
+  useCreateInvoice,
+  useDepositFollowup,
+  usePaymentSummary,
+  useSetDepositFollowupsPaused,
+} from '../../fieldApi';
+import { describeFollowup } from '../../model';
 
 /**
  * Deposit and invoice panel. Every amount is read from job_payment_summary
@@ -111,6 +118,7 @@ export function MoneyCard({ job }: { job: JobDetail }) {
               },
             ]}
           />
+          {canManage && (s?.deposit_due_cents ?? 0) > 0 && <DepositFollowups jobId={job.id} />}
           {hasInvoice && s.invoice_id ? (
             <div className="border-line flex flex-wrap items-center justify-between gap-2 border-t pt-3">
               <span className="flex items-center gap-2 text-sm">
@@ -139,6 +147,47 @@ export function MoneyCard({ job }: { job: JobDetail }) {
       )}
       {editingDeposit && <DepositDialog job={job} onClose={() => setEditingDeposit(false)} />}
     </SectionCard>
+  );
+}
+
+/** Automatic deposit reminders (P-3): status + pause, managers+. */
+function DepositFollowups({ jobId }: { jobId: string }) {
+  const { timezone } = useShop();
+  const toast = useToast();
+  const canSettings = useCan('settings.view');
+  const status = useDepositFollowup(jobId, true);
+  const pause = useSetDepositFollowupsPaused(jobId);
+  if (status.isPending) return null;
+  if (status.isError) {
+    return <ErrorState compact error={status.error} onRetry={() => void status.refetch()} />;
+  }
+  const s = status.data;
+  return (
+    <div className="bg-surface-2 rounded-control flex flex-col gap-2 px-3 py-2 text-sm">
+      <p className="text-ink" role="status">
+        {describeFollowup(s, timezone)}{' '}
+        {!s.enabled && canSettings && (
+          <Link to="/app/settings/followups" className="text-primary-ink underline">
+            Set up reminders
+          </Link>
+        )}
+      </p>
+      {s.enabled && (
+        <Switch
+          label="Pause reminders for this job"
+          checked={s.paused}
+          disabled={pause.isPending}
+          onCheckedChange={(paused) =>
+            pause
+              .mutateAsync(paused)
+              .then(() =>
+                toast.success(paused ? 'Deposit reminders paused' : 'Deposit reminders on'),
+              )
+              .catch((error: unknown) => toast.error(error))
+          }
+        />
+      )}
+    </div>
   );
 }
 

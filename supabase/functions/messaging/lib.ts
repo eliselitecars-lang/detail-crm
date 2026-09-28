@@ -4,7 +4,7 @@
 import type { ActionContext } from "../_shared/actions.ts";
 import type { Env } from "../_shared/env.ts";
 import { PROVIDER_TIMEOUT_MS, withTimeout } from "../_shared/fetch_timeout.ts";
-import { HttpError } from "../_shared/errors.ts";
+import { HttpError, subscriptionRefusal } from "../_shared/errors.ts";
 import type { Logger } from "../_shared/log.ts";
 import { adminClient, type SupabaseClient } from "../_shared/supabase.ts";
 import type { SenderCheck } from "./sender.ts";
@@ -70,7 +70,9 @@ export class DbError extends Error {
   readonly code: string | null;
 
   constructor(operation: string, error: PgError) {
-    super(`${operation} failed${error.code ? ` (${error.code})` : ""}: ${error.message ?? ""}`);
+    super(`${operation} failed${error.code ? ` (${error.code})` : ""}: ${error.message ?? ""}`, {
+      cause: error,
+    });
     this.name = "DbError";
     this.code = error.code ?? null;
   }
@@ -79,8 +81,12 @@ export class DbError extends Error {
 /**
  * Maps a refused staff RPC to a stable HttpError. The SQL message is only
  * logged (as the cause); clients get our generic wording and branch on code.
+ * The one exception is PT402 (the shop's subscription is inactive, 0102):
+ * `402 payment_required` with the database's neutral sentence.
  */
 export function rpcRefusal(operation: string, error: PgError): Error {
+  const paused = subscriptionRefusal(error);
+  if (paused) return paused;
   switch (error.code) {
     case "42501":
       return new HttpError("forbidden", "Your role does not allow this message.", { cause: error });

@@ -5,10 +5,13 @@ import {
   Clock,
   CreditCard,
   FileText,
+  Gift,
   LayoutDashboard,
+  ListTodo,
   Megaphone,
   MessagesSquare,
   Package,
+  PackageSearch,
   Receipt,
   Repeat,
   Settings,
@@ -57,6 +60,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     items: [
       { label: 'Jobs', to: '/app/jobs', icon: ClipboardList, anyOf: ['jobs.viewAssigned'] },
       { label: 'Customers', to: '/app/customers', icon: Users, anyOf: ['customers.view'] },
+      { label: 'Tasks', to: '/app/tasks', icon: ListTodo, anyOf: ['tasks.own'] },
     ],
   },
   {
@@ -66,6 +70,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       { label: 'Invoices', to: '/app/invoices', icon: Receipt, anyOf: ['invoices.view'] },
       { label: 'Payments', to: '/app/payments', icon: CreditCard, anyOf: ['payments.view'] },
       { label: 'Memberships', to: '/app/memberships', icon: Repeat, anyOf: ['memberships.view'] },
+      { label: 'Gift cards', to: '/app/gift-cards', icon: Gift, anyOf: ['giftCards.view'] },
     ],
   },
   {
@@ -84,6 +89,12 @@ export const NAV_GROUPS: readonly NavGroup[] = [
         icon: BarChart3,
         anyOf: ['reports.view', 'reports.viewOwn'],
       },
+      {
+        label: 'Inventory',
+        to: '/app/inventory',
+        icon: PackageSearch,
+        anyOf: ['inventory.view'],
+      },
     ],
   },
   {
@@ -97,7 +108,13 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     label: 'Setup',
     items: [
       { label: 'Catalog', to: '/app/catalog', icon: Package, anyOf: ['catalog.view'] },
-      { label: 'Settings', to: '/app/settings', icon: Settings, anyOf: ['settings.view'] },
+      {
+        label: 'Settings',
+        to: '/app/settings',
+        icon: Settings,
+        // technicians: their personal calendar feed
+        anyOf: ['settings.view', 'calendarFeed.own'],
+      },
     ],
   },
 ];

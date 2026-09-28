@@ -340,6 +340,24 @@ describe('QuoteDetailPage', () => {
     expect(await screen.findByText('Duplicated as quote #1001')).toBeInTheDocument();
   });
 
+  it('keeps preset fee lines tied to their fee when duplicating', async () => {
+    const { user } = setup(quoteRow(), [
+      quoteLineRow(),
+      quoteLineRow({ id: 'line-fee', service_id: null, name: 'Travel fee', fee_id: 'fee-1' }),
+    ]);
+    setTableResult('shops', { data: { tax_rate_bps: 925 } });
+    await user.click(await screen.findByRole('button', { name: 'More quote actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Duplicate' }));
+    await waitFor(() =>
+      expect(
+        builders.quote_line_items?.find((b) => b.insert.mock.calls.length > 0)?.insert,
+      ).toHaveBeenCalledWith([
+        expect.objectContaining({ name: 'Full detail', fee_id: null }),
+        expect.objectContaining({ name: 'Travel fee', fee_id: 'fee-1' }),
+      ]),
+    );
+  });
+
   it('removes the new draft when its lines fail to copy', async () => {
     const { user } = setup();
     await screen.findByRole('list', { name: 'Line items' });

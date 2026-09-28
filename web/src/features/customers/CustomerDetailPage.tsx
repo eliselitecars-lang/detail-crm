@@ -4,6 +4,7 @@ import {
   Briefcase,
   FileText,
   Mail,
+  Merge,
   MessageSquare,
   MessagesSquare,
   Pencil,
@@ -32,13 +33,16 @@ import { toAppError } from '@/lib/errors';
 import { phoneHref } from '@/lib/phone';
 import { useCustomer, useSetCustomerArchived } from './api';
 import { CustomerFormDialog } from './components/CustomerFormDialog';
+import { DocumentsTab } from './components/DocumentsTab';
 import { InvoicesTab, JobsTab, MembershipsTab, QuotesTab } from './components/HistoryTabs';
+import { MergeCustomerDialog } from './components/MergeCustomerDialog';
 import { OverviewTab } from './components/OverviewTab';
 import { SavedCardsTab } from './components/SavedCardsTab';
 import { VehiclesTab } from './components/VehiclesTab';
 import { customerName, LIFECYCLE_LABELS, type CustomerRow } from './model';
 
-type TabValue = 'overview' | 'vehicles' | 'jobs' | 'quotes' | 'invoices' | 'memberships' | 'cards';
+type TabValue =
+  'overview' | 'vehicles' | 'jobs' | 'quotes' | 'invoices' | 'memberships' | 'cards' | 'documents';
 
 export default function CustomerDetailPage() {
   const { customerId = '' } = useParams();
@@ -84,12 +88,15 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
   const canInvoices = useCan('invoices.view');
   const canMemberships = useCan('memberships.view');
   const canCards = useCan('cards.view');
+  const canMerge = useCan('customers.merge');
   const [editing, setEditing] = useState(false);
+  const [merging, setMerging] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const setArchived = useSetCustomerArchived(shopId);
 
   const name = customerName(customer);
   const archived = customer.archived_at !== null;
+  const merged = Boolean(customer.merged_into_id);
   const tel = phoneHref(customer.phone);
   const sms = phoneHref(customer.phone, 'sms');
 
@@ -126,6 +133,12 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
       label: 'Saved cards',
       content: <SavedCardsTab customer={customer} />,
     });
+  if (canManage)
+    items.push({
+      value: 'documents',
+      label: 'Files',
+      content: <DocumentsTab customerId={customer.id} archivedCustomer={archived} />,
+    });
 
   const requested = params.get('tab');
   const tab: TabValue = items.find((i) => i.value === requested)?.value ?? 'overview';
@@ -155,11 +168,13 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
             <Badge tone={customer.lifecycle === 'lead' ? 'warning' : 'neutral'}>
               {LIFECYCLE_LABELS[customer.lifecycle]}
             </Badge>
-            {archived && <Badge>Archived</Badge>}
+            {archived && !merged && <Badge>Archived</Badge>}
+            {merged && <Badge>Merged</Badge>}
           </>
         }
         actions={
-          canManage && (
+          canManage &&
+          !merged && (
             <>
               <Button
                 variant="secondary"
@@ -189,10 +204,22 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
                   Archive
                 </Button>
               )}
+              {canMerge && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  leadingIcon={<Merge className="size-4" aria-hidden="true" />}
+                  onClick={() => setMerging(true)}
+                >
+                  Merge into…
+                </Button>
+              )}
             </>
           )
         }
       />
+
+      {customer.merged_into_id && <MergedBanner targetId={customer.merged_into_id} />}
 
       <nav aria-label="Quick actions" className="mb-5 flex flex-wrap gap-2">
         {tel && (
@@ -246,6 +273,13 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
       />
 
       {editing && <CustomerFormDialog open customer={customer} onClose={() => setEditing(false)} />}
+      {canMerge && !merged && (
+        <MergeCustomerDialog
+          open={merging}
+          onClose={() => setMerging(false)}
+          source={{ id: customer.id, name }}
+        />
+      )}
       <ConfirmDialog
         open={confirmArchive}
         onClose={() => setConfirmArchive(false)}
@@ -256,5 +290,38 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
         confirmLabel="Archive customer"
       />
     </>
+  );
+}
+
+/** A merged duplicate: everything now lives on the customer it was merged into. */
+function MergedBanner({ targetId }: { targetId: string }) {
+  const { shopId } = useShop();
+  const target = useCustomer(shopId, targetId);
+  return (
+    <p
+      role="status"
+      className="bg-warning-soft text-warning-ink rounded-card mb-5 flex flex-wrap items-center gap-2 px-4 py-3 text-sm"
+    >
+      <Merge className="size-4 shrink-0" aria-hidden="true" />
+      <span>
+        This customer was merged into{' '}
+        {target.data ? (
+          <Link
+            to={`/app/customers/${targetId}`}
+            className="font-medium underline underline-offset-2"
+          >
+            {customerName(target.data)}
+          </Link>
+        ) : (
+          <Link
+            to={`/app/customers/${targetId}`}
+            className="font-medium underline underline-offset-2"
+          >
+            another customer
+          </Link>
+        )}
+        . Their records moved there.
+      </span>
+    </p>
   );
 }

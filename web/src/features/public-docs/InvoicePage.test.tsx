@@ -68,6 +68,32 @@ describe('InvoicePage', () => {
     expect(supabase.functions.invoke).not.toHaveBeenCalled();
   });
 
+  it('charges and tips on the balance less a bank payment still clearing', async () => {
+    mockRpc({
+      public_get_invoice: { data: invoiceFixture({ processing_cents: 8000, payable: true }) },
+    });
+    checkoutOk();
+    vi.spyOn(navigation, 'assign').mockImplementation(() => undefined);
+    const { user } = render();
+    expect(await screen.findByText('A bank payment is clearing')).toBeInTheDocument();
+    expect(screen.getByText('Left to pay (after the clearing payment)')).toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: /20%/ }));
+    await user.click(screen.getByRole('button', { name: 'Pay $120.00 + $24.00 tip' }));
+    await waitFor(() => expect(supabase.functions.invoke).toHaveBeenCalled());
+    const body = (supabase.functions.invoke.mock.calls[0]?.[1] as { body: Record<string, unknown> })
+      .body;
+    expect(body).toMatchObject({ action: 'invoice_checkout', tip_cents: 2400 });
+  });
+
+  it('bounds a custom tip to the amount being paid when a payment is clearing', async () => {
+    mockRpc({
+      public_get_invoice: { data: invoiceFixture({ processing_cents: 8000, payable: true }) },
+    });
+    const { user } = render();
+    await user.click(await screen.findByRole('radio', { name: /Custom/ }));
+    expect(screen.getByText('Up to $120.00')).toBeInTheDocument();
+  });
+
   it('shows the edge function’s message when checkout is refused', async () => {
     mockRpc({ public_get_invoice: { data: invoiceFixture() } });
     supabase.functions.invoke.mockResolvedValue({

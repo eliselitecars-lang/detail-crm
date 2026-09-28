@@ -1,15 +1,25 @@
 import {
   BellOff,
+  CalendarClock,
   CalendarPlus,
   CalendarX,
   Check,
   CheckCheck,
   CircleDollarSign,
+  ClipboardCheck,
   FileCheck,
   FileX,
+  Gift,
   Info,
+  ListTodo,
   MessageSquare,
+  MessageSquareWarning,
+  PackageMinus,
   PenLine,
+  UserPlus,
+  Users,
+  Webhook,
+  Wrench,
   X,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -40,6 +50,7 @@ import {
   useUnreadNotifications,
   type NotificationRow,
 } from './api';
+import { PushPrefsCard } from './components/PushPrefsCard';
 import { KIND_LABELS, notificationLink, type NotificationKind } from './links';
 
 const KIND_ICONS: Record<NotificationKind, ReactNode> = {
@@ -51,6 +62,17 @@ const KIND_ICONS: Record<NotificationKind, ReactNode> = {
   inbound_message: <MessageSquare aria-hidden="true" />,
   form_signed: <PenLine aria-hidden="true" />,
   general: <Info aria-hidden="true" />,
+  gift_card_purchased: <Gift aria-hidden="true" />,
+  membership_joined: <Users aria-hidden="true" />,
+  low_stock: <PackageMinus aria-hidden="true" />,
+  inspection_acknowledged: <ClipboardCheck aria-hidden="true" />,
+  job_assigned: <Wrench aria-hidden="true" />,
+  job_rescheduled: <CalendarClock aria-hidden="true" />,
+  new_lead: <UserPlus aria-hidden="true" />,
+  task_assigned: <ListTodo aria-hidden="true" />,
+  task_due: <ListTodo aria-hidden="true" />,
+  sms_number_status: <MessageSquareWarning aria-hidden="true" />,
+  webhook_failing: <Webhook aria-hidden="true" />,
 };
 
 export default function NotificationsPage() {
@@ -92,7 +114,7 @@ export default function NotificationsPage() {
     <>
       <PageHeader
         title="Notifications"
-        description="Bookings, payments, quote responses, messages and signed forms."
+        description="Bookings, payments, quote responses, messages, tasks and signed forms."
         actions={
           <Button
             variant="secondary"
@@ -165,6 +187,8 @@ export default function NotificationsPage() {
             </>
           )}
         </SectionCard>
+
+        <PushPrefsCard />
       </div>
     </>
   );

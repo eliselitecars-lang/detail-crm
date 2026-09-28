@@ -1,9 +1,11 @@
-import { CircleX, FileCheck2 } from 'lucide-react';
+import { CircleX, FileCheck2, FileDown, Printer } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-import { useParams } from 'react-router';
+import { useParams, useSearchParams } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
+  Badge,
   Button,
+  buttonClasses,
   Card,
   Checkbox,
   Dialog,
@@ -14,10 +16,20 @@ import {
   Textarea,
   useToast,
 } from '@/components/ui';
+import { cn } from '@/lib/cn';
 import { formatDate, formatDateTime, formatLocalDate } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
 import { formatCents } from '@/lib/money';
-import { usePublicQuote, useRespondQuote, type QuoteDocument, type QuoteLine } from './api';
+import { publicPdfUrl } from '@/features/quotes/shared/pdf';
+import {
+  PAID_POLL_ATTEMPTS,
+  usePublicQuote,
+  useRespondQuote,
+  type QuoteDocument,
+  type QuoteLine,
+  type QuoteOption,
+} from './api';
+import { QuoteSchedulePanel, QuoteScheduledPanel } from './components/QuoteSchedule';
 import { LineList, LineRow, TotalsList } from './shared/DocumentLines';
 import { personName } from './shared/format';
 import { Banner, DocumentTitle, PublicError, PublicLoading } from './shared/PublicPage';
@@ -31,7 +43,10 @@ export default function QuotePage() {
 }
 
 function QuoteView({ token }: { token: string }) {
-  const query = usePublicQuote(token);
+  const [params] = useSearchParams();
+  const paidReturn = params.get('paid') === '1';
+  const canceledReturn = params.get('canceled') === '1';
+  const { query, loads } = usePublicQuote(token, { pollForDeposit: paidReturn });
   if (query.isPending) return <PublicLoading label="Loading quote…" />;
   if (query.isError) {
     return (
@@ -43,22 +58,76 @@ function QuoteView({ token }: { token: string }) {
       />
     );
   }
-  return <QuoteDocumentView token={token} doc={query.data} />;
+  const schedule = query.data.self_schedule;
+  const depositSettled = !schedule.payment_pending && (schedule.deposit_due_cents ?? 0) <= 0;
+  return (
+    <QuoteDocumentView
+      token={token}
+      doc={query.data}
+      paidReturn={paidReturn}
+      pollingDone={depositSettled || loads >= PAID_POLL_ATTEMPTS}
+      canceledReturn={canceledReturn}
+      refreshing={query.isFetching}
+      onRefresh={() => void query.refetch()}
+    />
+  );
 }
 
-function QuoteDocumentView({ token, doc }: { token: string; doc: QuoteDocument }) {
-  const { shop, quote } = doc;
+/** Lines of one option (or the shared ones, optionId null), split into required / optional. */
+function linesOf(lines: readonly QuoteLine[], optionId: string | null) {
+  const own = lines.filter((l) => l.option_id === optionId);
+  return { required: own.filter((l) => !l.optional), optional: own.filter((l) => l.optional) };
+}
+
+function QuoteDocumentView({
+  token,
+  doc,
+  paidReturn,
+  pollingDone,
+  canceledReturn,
+  refreshing,
+  onRefresh,
+}: {
+  token: string;
+  doc: QuoteDocument;
+  paidReturn: boolean;
+  /** Back from Stripe: the deposit settled, or the page stopped re-checking. */
+  pollingDone: boolean;
+  canceledReturn: boolean;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const { shop, quote, options } = doc;
   const currency = shop.currency;
   const tz = shop.timezone;
-  const required = doc.line_items.filter((l) => !l.optional);
-  const optional = doc.line_items.filter((l) => l.optional);
+  const hasOptions = quote.has_options && options.length > 0;
+  const canRespond = quote.can_respond;
+  // The server's selected_option_id falls back to the first option (0067
+  // quote_effective_option), so it is the customer's choice only once the
+  // quote was accepted; a declined or expired quote has no choice to show.
+  const acceptedOption =
+    hasOptions && (quote.status === 'approved' || quote.status === 'converted')
+      ? quote.selected_option_id
+      : null;
+  const [chosenOption, setChosenOption] = useState<string | null>(() =>
+    // An accepted quote shows the customer's choice; an open one starts unchosen.
+    canRespond ? null : acceptedOption,
+  );
   const [picked, setPicked] = useState<ReadonlySet<string>>(
-    () => new Set(optional.filter((l) => l.selected).map((l) => l.id)),
+    () => new Set(doc.line_items.filter((l) => l.optional && l.selected).map((l) => l.id)),
   );
   const customer = personName(doc.customer);
   const vehicle = vehicleLabel(doc.vehicle);
-  const canRespond = quote.can_respond;
+  const shared = linesOf(doc.line_items, null);
+  // Optional add-ons on offer: shared ones plus those of the chosen option.
+  const optional = hasOptions
+    ? [...shared.optional, ...(chosenOption ? linesOf(doc.line_items, chosenOption).optional : [])]
+    : shared.optional;
   const selectionChanged = optional.some((l) => l.selected !== picked.has(l.id));
+  const totalsOption = hasOptions ? (options.find((o) => o.id === chosenOption) ?? null) : null;
+  const totals = totalsOption ?? quote;
+  const pdfUrl = publicPdfUrl('quote', token);
+  const schedule = doc.self_schedule;
 
   const toggle = (id: string, on: boolean) =>
     setPicked((prev) => {
@@ -70,7 +139,8 @@ function QuoteDocumentView({ token, doc }: { token: string; doc: QuoteDocument }
 
   return (
     <PublicLayout shop={toBranding(shop)}>
-      <div className="flex flex-col gap-4 sm:gap-5">
+      {/* Printable: actions/banners are print:hidden; every option prints. */}
+      <div className="flex flex-col gap-4 sm:gap-5 print:gap-3 print:text-black print:[&_*]:shadow-none print:[&>*]:break-inside-avoid">
         <DocumentTitle
           title={`Quote #${quote.number}`}
           badge={<StatusBadge kind="quote" status={quote.status} />}
@@ -81,15 +151,59 @@ function QuoteDocumentView({ token, doc }: { token: string; doc: QuoteDocument }
           ]
             .filter(Boolean)
             .join(' · ')}
+          actions={
+            <>
+              <Button
+                variant="secondary"
+                leadingIcon={<Printer className="size-4" aria-hidden="true" />}
+                onClick={() => window.print()}
+              >
+                Print
+              </Button>
+              {pdfUrl && (
+                <a
+                  href={pdfUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={buttonClasses({ variant: 'secondary' })}
+                >
+                  <FileDown className="size-4" aria-hidden="true" />
+                  Download PDF
+                </a>
+              )}
+            </>
+          }
         />
 
         <QuoteStateBanner doc={doc} />
 
-        <SectionCard title="Quote items" flush>
-          <div className="px-4 sm:px-5">
-            <LineList lines={required} currency={currency} label="Quote items" />
-          </div>
-        </SectionCard>
+        {hasOptions ? (
+          <>
+            {(shared.required.length > 0 || !canRespond) && (
+              <SectionCard title="Included in every option" flush>
+                <div className="px-4 sm:px-5">
+                  <LineList
+                    lines={shared.required}
+                    currency={currency}
+                    label="Included in every option"
+                  />
+                </div>
+              </SectionCard>
+            )}
+            <OptionCards
+              doc={doc}
+              chosen={chosenOption}
+              answeredChoice={canRespond ? null : acceptedOption}
+              onChoose={canRespond ? setChosenOption : null}
+            />
+          </>
+        ) : (
+          <SectionCard title="Quote items" flush>
+            <div className="px-4 sm:px-5">
+              <LineList lines={shared.required} currency={currency} label="Quote items" />
+            </div>
+          </SectionCard>
+        )}
 
         {optional.length > 0 && (
           <SectionCard
@@ -117,7 +231,21 @@ function QuoteDocumentView({ token, doc }: { token: string; doc: QuoteDocument }
         )}
 
         <Card padded>
-          <TotalsList currency={currency} rows={standardTotals(quote)} />
+          {totalsOption && (
+            <p className="text-muted mb-2 text-xs font-medium">{totalsOption.name}</p>
+          )}
+          {hasOptions && !totalsOption ? (
+            <p className="text-muted text-sm">
+              {canRespond
+                ? 'Choose an option above to see its total. Each option’s total is shown on its card.'
+                : 'Each option’s total is shown on its card.'}
+            </p>
+          ) : (
+            <TotalsList
+              currency={currency}
+              rows={standardTotals({ ...totals, tax_rate_bps: quote.tax_rate_bps })}
+            />
+          )}
           {optional.length > 0 && (
             <p className="text-muted mt-3 text-xs">
               {selectionChanged && canRespond
@@ -141,9 +269,143 @@ function QuoteDocumentView({ token, doc }: { token: string; doc: QuoteDocument }
           </SectionCard>
         )}
 
-        {canRespond && <RespondPanel token={token} picked={picked} optional={optional} />}
+        {canRespond && (
+          <RespondPanel
+            token={token}
+            picked={picked}
+            optional={optional}
+            hasOptions={hasOptions}
+            chosenOption={hasOptions ? (options.find((o) => o.id === chosenOption) ?? null) : null}
+          />
+        )}
+
+        {quote.status === 'approved' && schedule.available && (
+          <QuoteSchedulePanel token={token} doc={doc} />
+        )}
+        {schedule.job_token && (
+          <QuoteScheduledPanel
+            token={token}
+            doc={doc}
+            paidReturn={paidReturn}
+            pollingDone={pollingDone}
+            canceledReturn={canceledReturn}
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+          />
+        )}
       </div>
     </PublicLayout>
+  );
+}
+
+/** Side-by-side option cards (stacked on phones), each with its own lines and total. */
+function OptionCards({
+  doc,
+  chosen,
+  answeredChoice,
+  onChoose,
+}: {
+  doc: QuoteDocument;
+  chosen: string | null;
+  /** The option the customer accepted (approved / converted quotes only). */
+  answeredChoice: string | null;
+  /** null = read-only (the quote can no longer be answered). */
+  onChoose: ((id: string) => void) | null;
+}) {
+  const { options, shop } = doc;
+  const currency = shop.currency;
+  return (
+    <section aria-label="Options">
+      <h2 className="text-ink mb-2 text-base font-semibold">
+        {onChoose ? 'Choose an option' : 'Options'}
+      </h2>
+      <div
+        className={cn(
+          'grid grid-cols-1 gap-3',
+          options.length === 2 && 'md:grid-cols-2',
+          options.length >= 3 && 'md:grid-cols-3',
+          options.length === 4 && 'md:grid-cols-2 lg:grid-cols-4',
+        )}
+      >
+        {options.map((option) => (
+          <OptionCard
+            key={option.id}
+            option={option}
+            lines={linesOf(doc.line_items, option.id).required}
+            currency={currency}
+            selected={chosen === option.id}
+            answeredChoice={answeredChoice === option.id}
+            answered={answeredChoice !== null}
+            onChoose={onChoose}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OptionCard({
+  option,
+  lines,
+  currency,
+  selected,
+  answeredChoice,
+  answered,
+  onChoose,
+}: {
+  option: QuoteOption;
+  lines: QuoteLine[];
+  currency: string;
+  selected: boolean;
+  answeredChoice: boolean;
+  answered: boolean;
+  onChoose: ((id: string) => void) | null;
+}) {
+  const active = selected || answeredChoice;
+  return (
+    <Card
+      padded
+      className={cn(
+        'flex flex-col gap-3 transition-shadow',
+        active && 'ring-brand ring-2',
+        answered && !answeredChoice && 'opacity-70 print:opacity-100',
+      )}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="text-ink text-sm font-semibold break-words">{option.name}</h3>
+        {answeredChoice && <Badge tone="success">Your choice</Badge>}
+      </div>
+      {option.description && (
+        <p className="text-muted text-xs break-words whitespace-pre-line">{option.description}</p>
+      )}
+      {lines.length > 0 && (
+        <ul aria-label={`${option.name} items`} className="divide-line divide-y">
+          {lines.map((line) => (
+            <LineRow key={line.id} line={line} currency={currency} />
+          ))}
+        </ul>
+      )}
+      <div className="mt-auto flex items-end justify-between gap-2 pt-1">
+        <div>
+          <p className="text-muted text-xs">Total</p>
+          <p className="text-ink text-lg font-semibold tabular-nums">
+            {formatCents(option.total_cents, { currency })}
+          </p>
+        </div>
+        {onChoose && (
+          <Button
+            size="sm"
+            variant={selected ? 'primary' : 'secondary'}
+            aria-pressed={selected}
+            aria-label={`${selected ? 'Chosen' : 'Choose'} ${option.name}`}
+            className="print:hidden"
+            onClick={() => onChoose(option.id)}
+          >
+            {selected ? 'Chosen' : 'Choose'}
+          </Button>
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -189,18 +451,21 @@ function OptionalLine({
 }
 
 function QuoteStateBanner({ doc }: { doc: QuoteDocument }) {
-  const { quote, shop } = doc;
+  const { quote, shop, self_schedule: schedule } = doc;
   const tz = shop.timezone;
   switch (quote.status) {
     case 'approved':
       return (
         <Banner tone="success" title="Quote approved">
           {quote.approved_by_name ? `Approved by ${quote.approved_by_name}` : 'Approved'}
-          {quote.approved_at ? ` on ${formatDateTime(quote.approved_at, tz)}` : ''}. {shop.name}{' '}
-          will be in touch to schedule the work.
+          {quote.approved_at ? ` on ${formatDateTime(quote.approved_at, tz)}` : ''}.{' '}
+          {schedule.available
+            ? 'Pick a time for the work below.'
+            : `${shop.name} will be in touch to schedule the work.`}
         </Banner>
       );
     case 'converted':
+      if (schedule.job_token) return null; // the booked panel says it
       return (
         <Banner tone="success" title="Quote accepted and scheduled">
           This quote has been turned into an appointment. {shop.name} will send you the details.
@@ -235,15 +500,20 @@ function RespondPanel({
   token,
   picked,
   optional,
+  hasOptions,
+  chosenOption,
 }: {
   token: string;
   picked: ReadonlySet<string>;
   optional: QuoteLine[];
+  hasOptions: boolean;
+  chosenOption: QuoteOption | null;
 }) {
   const toast = useToast();
   const respond = useRespondQuote(token);
   const [name, setName] = useState('');
   const [nameError, setNameError] = useState<string | null>(null);
+  const [optionError, setOptionError] = useState<string | null>(null);
   const [declineOpen, setDeclineOpen] = useState(false);
   const [reason, setReason] = useState('');
   const [reasonError, setReasonError] = useState<string | null>(null);
@@ -251,6 +521,11 @@ function RespondPanel({
   const approve = (event: FormEvent) => {
     event.preventDefault();
     const signer = name.trim();
+    if (hasOptions && !chosenOption) {
+      setOptionError('Choose one of the options above first.');
+      return;
+    }
+    setOptionError(null);
     if (!signer) {
       setNameError('Type your full name to approve.');
       return;
@@ -265,6 +540,7 @@ function RespondPanel({
         action: 'approve',
         signerName: signer,
         selectedOptionalIds: optional.filter((l) => picked.has(l.id)).map((l) => l.id),
+        optionId: chosenOption?.id ?? null,
       },
       { onSuccess: () => toast.success('Quote approved — thank you!') },
     );
@@ -296,12 +572,21 @@ function RespondPanel({
     <SectionCard
       title="Approve this quote"
       description="Typing your full name below acts as your signature."
+      className="print:hidden"
     >
       <form noValidate onSubmit={approve} className="flex flex-col gap-4">
         {respond.isError && !declineOpen && (
           <Banner tone="danger" title="Couldn’t send your response">
             {errorMessage(respond.error)}
           </Banner>
+        )}
+        {hasOptions && (
+          <p className={cn('text-sm', optionError ? 'text-danger-ink' : 'text-ink')} role="status">
+            {optionError ??
+              (chosenOption
+                ? `You chose ${chosenOption.name}.`
+                : 'Choose one of the options above before approving.')}
+          </p>
         )}
         <FormField label="Your full name" required error={nameError}>
           <Input
@@ -314,6 +599,7 @@ function RespondPanel({
         </FormField>
         <p className="text-muted text-xs">
           By approving, you accept this quote
+          {chosenOption ? ` (${chosenOption.name})` : ''}
           {addOns > 0 ? ` with ${addOns} optional add-on${addOns === 1 ? '' : 's'}` : ''} and its
           terms.
         </p>

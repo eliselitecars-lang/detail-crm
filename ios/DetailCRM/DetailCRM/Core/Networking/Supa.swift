@@ -133,6 +133,15 @@ enum ErrorText {
         if let postgrest = error as? PostgrestError {
             return message(forDatabaseCode: postgrest.code, text: postgrest.message)
         }
+        if let http = error as? HTTPError {
+            // A non-2xx reply the client couldn't read as a PostgREST error.
+            if ShopEntitlement.PaymentRequired.matches(httpStatus: http.response.statusCode) {
+                let server = ShopEntitlement.PaymentRequired.serverMessage(fromBody: http.data)
+                return sentence(ShopEntitlement.PaymentRequired.message(serverMessage: server))
+            }
+            return EdgeErrorDecoder.statusMessage(http.response.statusCode)
+                ?? "The request failed (\(http.response.statusCode)). Try again."
+        }
         if error is DecodingError {
             return "The app received data it didn't expect. Update the app or try again."
         }
@@ -141,6 +150,11 @@ enum ErrorText {
     }
 
     static func message(forDatabaseCode code: String?, text: String) -> String {
+        if ShopEntitlement.PaymentRequired.matches(databaseCode: code) {
+            // PT402 (HTTP 402): the shop's subscription is inactive or its
+            // seat limit is reached — the database's own sentence.
+            return sentence(ShopEntitlement.PaymentRequired.message(serverMessage: text))
+        }
         switch code {
         case "42501":
             // Row-level security denials have generic text; RPC guards have

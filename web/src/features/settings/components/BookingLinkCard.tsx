@@ -1,62 +1,71 @@
-import { Copy, ExternalLink } from 'lucide-react';
-import { Badge, Button, buttonClasses, SectionCard, useToast } from '@/components/ui';
+import { Code, ExternalLink, QrCode as QrIcon } from 'lucide-react';
+import { useState } from 'react';
+import { Badge, Button, buttonClasses, CopyField, QrCode, SectionCard } from '@/components/ui';
 import { bookingUrl } from '../links';
+import { EmbedSnippets } from './EmbedSnippets';
 
 export function BookingLinkCard({ slug, enabled }: { slug: string; enabled: boolean }) {
-  const toast = useToast();
   const url = bookingUrl(slug);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.success('Booking link copied');
-    } catch {
-      toast.error('Couldn’t copy the link', 'Select the link and copy it manually.');
-    }
-  };
+  const [panel, setPanel] = useState<'qr' | 'embed' | null>(null);
 
   return (
     <SectionCard
       title="Your booking link"
-      description="Share it on your website, Google profile and social media."
+      description="Share it on your website, Google profile and social media, print its QR code, or put the booking page right on your website."
       actions={
         <Badge tone={enabled ? 'success' : 'neutral'} dot>
           {enabled ? 'Taking bookings' : 'Booking off'}
         </Badge>
       }
     >
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <output
-          aria-label="Booking link"
-          className="border-line bg-surface-2 rounded-control text-ink min-w-0 flex-1 truncate border px-3 py-2 font-mono text-sm select-all"
-        >
-          {url}
-        </output>
-        <div className="flex shrink-0 gap-2">
+      <div className="flex flex-col gap-3">
+        <CopyField
+          value={url}
+          label="Booking link"
+          copiedMessage="Booking link copied"
+          actions={
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className={buttonClasses({ variant: 'ghost' })}
+            >
+              <ExternalLink className="size-4" aria-hidden="true" />
+              Open
+              <span className="sr-only"> booking page in a new tab</span>
+            </a>
+          }
+        />
+        <div className="flex flex-wrap gap-2">
           <Button
             variant="secondary"
-            leadingIcon={<Copy className="size-4" aria-hidden="true" />}
-            onClick={() => void copy()}
+            size="sm"
+            leadingIcon={<QrIcon className="size-4" aria-hidden="true" />}
+            aria-expanded={panel === 'qr'}
+            onClick={() => setPanel(panel === 'qr' ? null : 'qr')}
           >
-            Copy link
+            QR code
           </Button>
-          <a
-            href={url}
-            target="_blank"
-            rel="noreferrer"
-            className={buttonClasses({ variant: 'ghost' })}
+          <Button
+            variant="secondary"
+            size="sm"
+            leadingIcon={<Code className="size-4" aria-hidden="true" />}
+            aria-expanded={panel === 'embed'}
+            onClick={() => setPanel(panel === 'embed' ? null : 'embed')}
           >
-            <ExternalLink className="size-4" aria-hidden="true" />
-            Open
-            <span className="sr-only"> booking page in a new tab</span>
-          </a>
+            Embed on your website
+          </Button>
         </div>
+        {panel === 'qr' && (
+          <QrCode value={url} label="QR code for your booking page" fileName={`${slug}-booking`} />
+        )}
+        {panel === 'embed' && <EmbedSnippets target={{ slug }} title="Book online" />}
+        {!enabled && (
+          <p className="text-muted text-xs">
+            Turn on online booking below so customers can book from this page.
+          </p>
+        )}
       </div>
-      {!enabled && (
-        <p className="text-muted mt-2 text-xs">
-          Turn on online booking below so customers can book from this page.
-        </p>
-      )}
     </SectionCard>
   );
 }

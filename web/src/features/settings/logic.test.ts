@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { BlockedTime, Coupon } from './api';
 import { logoFileProblem, logoPath } from './api';
-import { blockToFormInput, describeBlock, isAllDayBlock } from './blockedTimes';
+import { blockToFormInput, describeBlock, describeRecurrence, isAllDayBlock } from './blockedTimes';
 import {
   couponLastDay,
+  couponRestrictions,
   couponState,
   couponToFormInput,
   describeDiscount,
@@ -138,7 +139,48 @@ describe('bookingSchema', () => {
     bookingMessage: '',
     cancellationPolicy: '',
     cancelHours: '24',
+    maxConcurrentShop: '',
+    maxConcurrentMobile: '',
+    countMemberAvailability: false,
+    allowMultiDay: false,
+    multiDayMaxDays: '2',
+    quoteSelfSchedule: false,
+    metaPixelId: '',
+    ga4MeasurementId: '',
   };
+
+  it('validates tracking ids like the database CHECKs', () => {
+    const ok = bookingSchema.parse({
+      ...base,
+      metaPixelId: ' 123456789012 ',
+      ga4MeasurementId: 'g-abc1234',
+    });
+    expect(ok.metaPixelId).toBe('123456789012');
+    expect(ok.ga4MeasurementId).toBe('G-ABC1234');
+    expect(bookingSchema.parse(base).metaPixelId).toBeNull();
+    const bad = bookingSchema.safeParse({
+      ...base,
+      metaPixelId: 'fb-123',
+      ga4MeasurementId: 'UA-1',
+    });
+    expect(bad.error?.issues.map((i) => i.path[0])).toEqual(
+      expect.arrayContaining(['metaPixelId', 'ga4MeasurementId']),
+    );
+  });
+
+  it('bounds the location caps and multi-day length', () => {
+    const ok = bookingSchema.parse({ ...base, maxConcurrentShop: '2', multiDayMaxDays: '7' });
+    expect(ok.maxConcurrentShop).toBe(2);
+    expect(ok.maxConcurrentMobile).toBeNull();
+    const bad = bookingSchema.safeParse({
+      ...base,
+      maxConcurrentMobile: '101',
+      multiDayMaxDays: '8',
+    });
+    expect(bad.error?.issues.map((i) => i.path[0])).toEqual(
+      expect.arrayContaining(['maxConcurrentMobile', 'multiDayMaxDays']),
+    );
+  });
 
   it('stores percent deposits as basis points and fixed as cents', () => {
     expect(depositValueOf(bookingSchema.parse(base))).toBe(2500);
@@ -181,6 +223,7 @@ describe('taxes & sms schemas', () => {
         invoiceTerms: 'Net 7',
         invoiceDueDays: '7',
         techsCanCollectPayments: true,
+        techsCanShareReports: false,
       }),
     ).toEqual({
       taxRate: 925,
@@ -188,6 +231,7 @@ describe('taxes & sms schemas', () => {
       invoiceTerms: 'Net 7',
       invoiceDueDays: 7,
       techsCanCollectPayments: true,
+      techsCanShareReports: false,
     });
   });
 
@@ -202,10 +246,22 @@ describe('taxes & sms schemas', () => {
 
 describe('blocked times', () => {
   const schema = blockedTimeSchema(TZ);
+  const extra = {
+    kind: 'closed' as const,
+    title: '',
+    affectsCapacity: true,
+    repeat: '' as const,
+    interval: '1',
+    weekdays: [],
+    repeatEnd: 'never' as const,
+    untilDate: '',
+    count: '10',
+  };
 
   it('converts shop-local all-day ranges to UTC midnights (end exclusive)', () => {
     expect(
       schema.parse({
+        ...extra,
         memberId: '',
         allDay: true,
         startDate: '2026-12-24',
@@ -215,16 +271,22 @@ describe('blocked times', () => {
         reason: 'Holiday',
       }),
     ).toEqual({
+      kind: 'closed',
       member_id: null,
+      title: null,
       starts_at: '2026-12-24T06:00:00.000Z',
       ends_at: '2026-12-26T06:00:00.000Z',
       reason: 'Holiday',
+      affects_capacity: true,
+      recurrence: null,
     });
   });
 
   it('handles DST days and rejects backwards ranges', () => {
     expect(
       schema.parse({
+        ...extra,
+        kind: 'time_off',
         memberId: 'm1',
         allDay: false,
         startDate: '2026-03-08',
@@ -240,6 +302,7 @@ describe('blocked times', () => {
       reason: null,
     });
     const bad = schema.safeParse({
+      ...extra,
       memberId: '',
       allDay: false,
       startDate: '2026-03-08',
@@ -251,6 +314,58 @@ describe('blocked times', () => {
     expect(bad.error?.issues[0]?.message).toBe('End must be after the start.');
   });
 
+  it('builds repeat rules and checks their bounds', () => {
+    const base = {
+      ...extra,
+      kind: 'meeting' as const,
+      memberId: '',
+      allDay: false,
+      startDate: '2026-06-01',
+      startTime: '08:00',
+      endDate: '2026-06-01',
+      endTime: '08:30',
+      reason: '',
+      affectsCapacity: false,
+    };
+    expect(
+      schema.parse({
+        ...base,
+        repeat: 'week',
+        interval: '2',
+        weekdays: [3, 1, 3],
+        repeatEnd: 'until',
+        untilDate: '2026-12-31',
+      }),
+    ).toMatchObject({
+      kind: 'meeting',
+      affects_capacity: false,
+      recurrence: { freq: 'week', interval: 2, by_weekday: [1, 3], until_date: '2026-12-31' },
+    });
+    expect(
+      schema.parse({ ...base, repeat: 'month', repeatEnd: 'count', count: '6' }).recurrence,
+    ).toEqual({ freq: 'month', interval: 1, count: 6 });
+    const bad = schema.safeParse({
+      ...base,
+      repeat: 'week',
+      interval: '13',
+      weekdays: [],
+      repeatEnd: 'until',
+      untilDate: '2026-05-01',
+    });
+    expect(bad.error?.issues.map((i) => i.path[0])).toEqual(
+      expect.arrayContaining(['interval', 'weekdays', 'untilDate']),
+    );
+    expect(schema.safeParse({ ...base, kind: 'time_off' }).error?.issues[0]?.path[0]).toBe(
+      'memberId',
+    );
+    expect(describeRecurrence({ freq: 'week', interval: 2, by_weekday: [1, 3], count: 4 })).toBe(
+      'Every 2 weeks on Mon, Wed · 4 times',
+    );
+    expect(describeRecurrence({ freq: 'day', until_date: '2026-12-31' })).toBe(
+      'Every day · until Dec 31, 2026',
+    );
+  });
+
   it('describes and round-trips blocks in the shop zone', () => {
     const allDay: BlockedTime = {
       id: 'b1',
@@ -258,6 +373,12 @@ describe('blocked times', () => {
       starts_at: '2026-12-24T06:00:00Z',
       ends_at: '2026-12-26T06:00:00Z',
       reason: null,
+      kind: 'closed',
+      title: null,
+      customer_id: null,
+      affects_capacity: true,
+      color: null,
+      recurrence: null,
     };
     expect(isAllDayBlock(allDay, TZ)).toBe(true);
     expect(describeBlock(allDay, TZ)).toBe('Dec 24 – Dec 25, 2026 · all day');
@@ -293,7 +414,47 @@ describe('coupons', () => {
     redemptions: 3,
     online_only: false,
     active: true,
+    service_ids: null,
+    min_subtotal_cents: null,
+    once_per_customer: false,
+    customer_id: null,
+    new_customers_only: false,
   };
+
+  it('round-trips restrictions (services, minimum, once, customer, new customers)', () => {
+    const restricted: Coupon = {
+      ...coupon,
+      service_ids: ['s1', 's2'],
+      min_subtotal_cents: 10000,
+      once_per_customer: true,
+    };
+    expect(couponSchema(TZ).parse(couponToFormInput(restricted, TZ))).toMatchObject({
+      service_ids: ['s1', 's2'],
+      min_subtotal_cents: 10000,
+      once_per_customer: true,
+      customer_id: null,
+      new_customers_only: false,
+    });
+    expect(couponSchema(TZ).parse(couponToFormInput(coupon, TZ))).toMatchObject({
+      service_ids: null,
+      min_subtotal_cents: null,
+    });
+    expect(couponRestrictions(restricted)).toEqual([
+      '2 services',
+      'Min $100.00',
+      'Once per customer',
+    ]);
+    const conflicting = couponSchema(TZ).safeParse({
+      ...couponToFormInput(coupon, TZ),
+      customerId: 'cust-1',
+      newCustomersOnly: true,
+      limitServices: true,
+      serviceIds: [],
+    });
+    expect(conflicting.error?.issues.map((i) => i.path[0])).toEqual(
+      expect.arrayContaining(['newCustomersOnly', 'serviceIds']),
+    );
+  });
 
   it('converts inclusive local days to a half-open UTC window', () => {
     const values = couponSchema(TZ).parse(couponToFormInput(coupon, TZ));

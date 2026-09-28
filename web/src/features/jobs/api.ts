@@ -12,6 +12,7 @@ import { shopDateRangeUtc } from '@/lib/dates';
 import { unwrap, unwrapRequired, type InsertRow, type Row, type UpdateRow } from '@/lib/db';
 import { unwrapList } from './db';
 import { AppError } from '@/lib/errors';
+import { readCustomData } from '@/lib/customFields';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { cancelOpenPaymentsResultSchema } from '@/features/invoices/api';
@@ -480,6 +481,13 @@ const jobDetailSchema = z.object({
   cancel_reason: z.string().nullable(),
   reminder_sent_at: z.string().nullable(),
   review_requested_at: z.string().nullable(),
+  // parity columns (0050 / 0061 / 0085); defaults keep older fixtures readable
+  series_id: z.string().nullable().default(null),
+  series_seq: z.number().nullable().default(null),
+  series_detached: z.boolean().default(false),
+  custom_data: z.unknown().default({}).transform(readCustomData),
+  sold_by_member_id: z.string().nullable().default(null),
+  deposit_followups_paused: z.boolean().default(false),
   customer: customerDetailSchema,
   vehicle: vehicleDetailSchema,
 });
@@ -493,6 +501,7 @@ const DETAIL_COLUMNS =
   'discount_kind, discount_value, subtotal_cents, discount_cents, tax_rate_bps, tax_cents, ' +
   'total_cents, deposit_required_cents, created_at, updated_at, confirmed_at, en_route_at, ' +
   'started_at, completed_at, cancelled_at, cancel_reason, reminder_sent_at, review_requested_at, ' +
+  'series_id, series_seq, series_detached, custom_data, sold_by_member_id, deposit_followups_paused, ' +
   'customer:customers!jobs_customer_fk(id, first_name, last_name, company, email, phone, ' +
   'address_line1, address_line2, city, region, postal_code, sms_opted_out_at, email_opted_out_at), ' +
   'vehicle:vehicles!jobs_vehicle_fk(id, year, make, model, trim, color, vin, license_plate, category_id)';
@@ -520,6 +529,7 @@ export type LineItem = Pick<
   Row<'job_line_items'>,
   | 'id'
   | 'service_id'
+  | 'fee_id'
   | 'vehicle_id'
   | 'name'
   | 'description'
@@ -541,7 +551,7 @@ export function useLineItems(jobId: string) {
         await supabase
           .from('job_line_items')
           .select(
-            'id, service_id, vehicle_id, name, description, quantity, unit_price_cents, discount_cents, taxable, duration_minutes, sort, total_cents',
+            'id, service_id, fee_id, vehicle_id, name, description, quantity, unit_price_cents, discount_cents, taxable, duration_minutes, sort, total_cents',
           )
           .eq('shop_id', shopId)
           .eq('job_id', jobId)
@@ -595,6 +605,8 @@ export type JobPatch = Pick<
   | 'coupon_id'
   | 'deposit_required_cents'
   | 'vehicle_id'
+  | 'sold_by_member_id'
+  | 'custom_data'
 >;
 
 export async function updateJob(shopId: string, jobId: string, patch: JobPatch): Promise<void> {
@@ -679,27 +691,52 @@ export function useReleaseJobPayments(jobId: string) {
   });
 }
 
+/**
+ * set_job_status (0073): the status RPC for every role — the same transition
+ * rules as a direct update (managers any edge; technicians the
+ * technician_allowed forward edges of their jobs). `force` (managers+) moves
+ * past the completion gates and records the override with `reason`; for a
+ * move to cancelled the reason is also the job's cancel_reason.
+ */
 export function useSetStatus(jobId: string) {
-  const { shopId } = useShop();
   const invalidate = useInvalidateJobs();
   return useMutation({
-    mutationFn: async ({ status, reason }: { status: JobStatus; reason?: string }) => {
-      const patch: UpdateRow<'jobs'> = { status };
-      if (status === 'cancelled') patch.cancel_reason = reason?.trim() || null;
-      const rows = unwrap(
-        await supabase
-          .from('jobs')
-          .update(patch)
-          .eq('shop_id', shopId)
-          .eq('id', jobId)
-          .select('id'),
+    mutationFn: async ({
+      status,
+      reason,
+      force,
+    }: {
+      status: JobStatus;
+      reason?: string;
+      force?: boolean;
+    }) => {
+      const text = reason?.trim() ?? '';
+      unwrap(
+        await supabase.rpc('set_job_status', {
+          p_job_id: jobId,
+          p_status: status,
+          ...(force ? { p_force: true } : {}),
+          ...(text ? { p_reason: text } : {}),
+        }),
       );
-      if (!rows || rows.length === 0) {
-        throw new AppError('You can’t change the status of this job.', { kind: 'permission' });
-      }
     },
     onSettled: invalidate,
   });
+}
+
+const gateStateSchema = z.object({
+  open_required_items: z.array(z.object({ id: z.string(), label: z.string() })),
+  before_photos: z.object({ required: z.number(), have: z.number() }),
+  after_photos: z.object({ required: z.number(), have: z.number() }),
+});
+
+export type GateState = z.infer<typeof gateStateSchema>;
+
+/** job_completion_blockers: required checklist items still open + photo counts (images only). */
+export async function fetchCompletionBlockers(jobId: string): Promise<GateState> {
+  return gateStateSchema.parse(
+    unwrap(await supabase.rpc('job_completion_blockers', { p_job_id: jobId })),
+  );
 }
 
 // Line items -----------------------------------------------------------------
@@ -740,6 +777,7 @@ export function useAddLineItems(jobId: string) {
 
 export type LinePatch = Pick<
   UpdateRow<'job_line_items'>,
+  | 'vehicle_id'
   | 'name'
   | 'description'
   | 'quantity'
@@ -784,6 +822,19 @@ export function useMoveLineItem(jobId: string) {
       const ids = movedLineOrder(rows, index, delta);
       if (!ids) return;
       unwrap(await supabase.rpc('reorder_job_line_items', { p_job_id: jobId, p_ids: ids }));
+    },
+    onSettled: invalidate,
+  });
+}
+
+/** add_fee_line('job', …) (0068, manager+): the fee becomes an ordinary line. */
+export function useAddFeeLine(jobId: string) {
+  const invalidate = useInvalidateJobs();
+  return useMutation({
+    mutationFn: async (feeId: string) => {
+      unwrap(
+        await supabase.rpc('add_fee_line', { p_doc_kind: 'job', p_doc_id: jobId, p_fee_id: feeId }),
+      );
     },
     onSettled: invalidate,
   });

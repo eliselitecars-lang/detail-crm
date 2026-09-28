@@ -18,6 +18,10 @@ export interface NotificationLink {
 }
 
 const jobLink = (id: string): NotificationLink => ({ href: `/app/jobs/${id}`, label: 'Open job' });
+const customerLink = (id: string): NotificationLink => ({
+  href: `/app/customers/${id}`,
+  label: 'Open customer',
+});
 
 export function notificationLink(n: NotificationLinkInput): NotificationLink | null {
   switch (n.kind) {
@@ -39,10 +43,28 @@ export function notificationLink(n: NotificationLinkInput): NotificationLink | n
     case 'booking_cancelled':
     case 'form_signed':
     case 'general':
+    case 'inspection_acknowledged':
+    case 'job_assigned':
+    case 'job_rescheduled':
       if (n.job_id) return jobLink(n.job_id);
+      return n.customer_id ? customerLink(n.customer_id) : null;
+    case 'new_lead':
       return n.customer_id
-        ? { href: `/app/customers/${n.customer_id}`, label: 'Open customer' }
-        : null;
+        ? customerLink(n.customer_id)
+        : { href: '/app/customers', label: 'Open customers' };
+    case 'membership_joined':
+      return { href: '/app/memberships', label: 'Open memberships' };
+    case 'gift_card_purchased':
+      return { href: '/app/gift-cards', label: 'Open gift cards' };
+    case 'low_stock':
+      return { href: '/app/inventory', label: 'Open inventory' };
+    case 'task_assigned':
+    case 'task_due':
+      return { href: '/app/tasks', label: 'Open tasks' };
+    case 'sms_number_status':
+      return { href: '/app/settings/sms', label: 'Open text messaging' };
+    case 'webhook_failing':
+      return { href: '/app/settings/webhooks', label: 'Open webhooks' };
     default:
       return null;
   }
@@ -57,4 +79,15 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   inbound_message: 'Message',
   form_signed: 'Form signed',
   general: 'Update',
+  gift_card_purchased: 'Gift card sold',
+  membership_joined: 'New member',
+  low_stock: 'Low stock',
+  inspection_acknowledged: 'Inspection signed',
+  job_assigned: 'Job assigned',
+  job_rescheduled: 'Job rescheduled',
+  new_lead: 'New lead',
+  task_assigned: 'Task assigned',
+  task_due: 'Task due',
+  sms_number_status: 'Text messaging',
+  webhook_failing: 'Webhook failing',
 };

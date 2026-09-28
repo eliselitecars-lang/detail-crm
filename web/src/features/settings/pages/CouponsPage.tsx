@@ -1,11 +1,12 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Pencil, Plus, TicketPercent, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { Controller, useForm, useWatch } from 'react-hook-form';
+import { Controller, useForm, useWatch, type Control, type FieldErrors } from 'react-hook-form';
 import {
   Badge,
   Button,
   Card,
+  Combobox,
   ConfirmDialog,
   DateInput,
   Dialog,
@@ -26,6 +27,7 @@ import { toAppError } from '@/lib/errors';
 import { useCoupons, useDeleteCoupon, useSaveCoupon, type Coupon } from '../api';
 import {
   COUPON_STATE_LABELS,
+  couponRestrictions,
   couponState,
   couponToFormInput,
   describeDiscount,
@@ -33,6 +35,14 @@ import {
   type CouponState,
 } from '../coupons';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
+import { ServiceChecklist } from '../components/ServiceChecklist';
+import {
+  customerLabel,
+  useCustomerOption,
+  useCustomerOptions,
+  useServiceOptions,
+  type CustomerOption,
+} from '../data/pickers';
 import { couponSchema, type CouponFormInput, type CouponFormValues } from '../schemas';
 import { useSettingsAccess } from '../useSettingsAccess';
 
@@ -69,6 +79,25 @@ export default function CouponsPage() {
     },
     { key: 'discount', header: 'Discount', cell: (c) => describeDiscount(c, currency) },
     { key: 'window', header: 'Valid', cell: (c) => describeWindow(c, timezone) },
+    {
+      key: 'limits',
+      header: 'Limits',
+      hideOnMobile: true,
+      cell: (c) => {
+        const limits = couponRestrictions(c, currency);
+        return limits.length === 0 ? (
+          <span className="text-muted">None</span>
+        ) : (
+          <span className="flex flex-wrap gap-1">
+            {limits.map((l) => (
+              <Badge key={l} tone="neutral">
+                {l}
+              </Badge>
+            ))}
+          </span>
+        );
+      },
+    },
     {
       key: 'redemptions',
       header: 'Used',
@@ -354,7 +383,145 @@ function CouponDialog({ coupon, onClose }: { coupon: Coupon | null; onClose: () 
             )}
           />
         </div>
+        <CouponRestrictionsFields control={control} errors={errors} />
       </form>
     </Dialog>
+  );
+}
+
+function CouponRestrictionsFields({
+  control,
+  errors,
+}: {
+  control: Control<CouponFormInput, unknown, CouponFormValues>;
+  errors: FieldErrors<CouponFormInput>;
+}) {
+  const services = useServiceOptions();
+  const limitServices = useWatch({ control, name: 'limitServices' });
+  const customerId = useWatch({ control, name: 'customerId' });
+  const [customerQuery, setCustomerQuery] = useState('');
+  const customers = useCustomerOptions(customerQuery);
+  const selectedCustomer = useCustomerOption(customerId ?? null);
+
+  return (
+    <fieldset className="border-line flex flex-col gap-4 border-t pt-4 sm:col-span-2">
+      <legend className="text-ink float-left mb-1 w-full text-sm font-semibold">
+        Restrictions
+      </legend>
+      <Controller
+        control={control}
+        name="limitServices"
+        render={({ field }) => (
+          <Switch
+            label="Only for some services"
+            description="The discount applies only to these services; the job needs at least one of them."
+            checked={field.value}
+            onCheckedChange={field.onChange}
+          />
+        )}
+      />
+      {limitServices && (
+        <Controller
+          control={control}
+          name="serviceIds"
+          render={({ field }) =>
+            services.isPending ? (
+              <p className="text-muted text-sm">Loading services…</p>
+            ) : services.isError ? (
+              <p role="alert" className="text-danger-ink text-sm">
+                Couldn’t load your services.
+              </p>
+            ) : (
+              <ServiceChecklist
+                legend="Services the coupon applies to"
+                services={services.data}
+                value={field.value}
+                onChange={field.onChange}
+                max={100}
+                error={errors.serviceIds?.message}
+              />
+            )
+          }
+        />
+      )}
+      <FormField
+        label="Minimum spend"
+        error={errors.minSubtotalCents?.message}
+        help="On the services the coupon applies to, before tax. Leave empty for none."
+        className="max-w-xs"
+      >
+        <Controller
+          control={control}
+          name="minSubtotalCents"
+          render={({ field }) => (
+            <MoneyInput
+              value={field.value}
+              onChange={field.onChange}
+              onBlur={field.onBlur}
+              name={field.name}
+              ref={field.ref}
+            />
+          )}
+        />
+      </FormField>
+      <Controller
+        control={control}
+        name="oncePerCustomer"
+        render={({ field }) => (
+          <Switch
+            label="Once per customer"
+            description="Each customer can use the code on one job."
+            checked={field.value}
+            onCheckedChange={field.onChange}
+          />
+        )}
+      />
+      <Controller
+        control={control}
+        name="newCustomersOnly"
+        render={({ field }) => (
+          <Switch
+            label="New customers only"
+            description="Only customers without a completed job or a payment can use it."
+            checked={field.value}
+            onCheckedChange={field.onChange}
+          />
+        )}
+      />
+      {errors.newCustomersOnly?.message && (
+        <p role="alert" className="text-danger-ink text-xs font-medium">
+          {errors.newCustomersOnly.message}
+        </p>
+      )}
+      <FormField
+        label="Only for this customer"
+        help="Leave empty so anyone can use the code."
+        className="max-w-md"
+      >
+        <Controller
+          control={control}
+          name="customerId"
+          render={({ field }) => (
+            <Combobox<CustomerOption>
+              value={
+                field.value
+                  ? (customers.data?.find((c) => c.id === field.value) ??
+                    selectedCustomer.data ??
+                    null)
+                  : null
+              }
+              onChange={(c) => field.onChange(c?.id ?? null)}
+              options={customers.data ?? []}
+              onQueryChange={setCustomerQuery}
+              getOptionValue={(c) => c.id}
+              getOptionLabel={customerLabel}
+              loading={customers.isFetching}
+              placeholder="Search customers…"
+              emptyText="No customers match"
+            />
+          )}
+        />
+      </FormField>
+    </fieldset>
   );
 }

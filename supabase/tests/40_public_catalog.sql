@@ -8,8 +8,8 @@
 -- ------------------------------------------------------------ public_shop_profile
 select tests.as_anon();
 select tests.eq(pg_temp.keys(public.public_shop_profile('shop-a')),
-                'booking,brand_color,business_type,city,country,currency,logo_path,name,phone,region,slug,tax_rate_bps,timezone,website',
-                'profile keys are curated (no email, street address, SMS number, Stripe, terms)');
+                'booking,brand_color,business_type,city,country,currency,logo_path,name,phone,region,slug,tax_rate_bps,timezone,tracking,website',
+                'profile keys are curated (no email, street address, SMS number, Stripe, terms; tracking ids: comms 0088)');
 select tests.eq(pg_temp.keys(public.public_shop_profile('shop-a') -> 'booking'),
                 'allow_client_cancel_hours,auto_confirm,booking_message,cancellation_policy,deposit_type,deposit_value,enabled,lead_time_minutes,max_days_ahead,require_deposit,service_area_limited,slot_interval_minutes',
                 'booking keys are curated (no postal code list)');
@@ -69,8 +69,9 @@ select tests.eq((select e -> 'addon_ids' from cat, jsonb_array_elements(c -> 'se
 select tests.eq((select e -> 'includes' from cat, jsonb_array_elements(c -> 'services') e where e ->> 'name' = 'Showroom Package'),
                 '["Full Detail", "Exterior Wash"]'::jsonb, 'package contents by name');
 select tests.eq((select c -> 'service_categories' from cat),
-                jsonb_build_array(jsonb_build_object('id', tests.fx('svc_cat_a'), 'name', 'Exterior')),
-                'only categories that have bookable services');
+                jsonb_build_array(jsonb_build_object('id', tests.fx('svc_cat_a'), 'name', 'Exterior',
+                                                     'bookable_weekdays', null)),
+                'only categories that have bookable services (bookable_weekdays null = every day, 0053)');
 select tests.eq((select jsonb_array_length(c -> 'vehicle_categories') from cat), 4, 'all vehicle categories');
 select tests.ok((select not (c::text like '%' || tests.fx('svc_b')::text || '%') from cat), 'no shop B services');
 drop table cat;
@@ -89,17 +90,20 @@ grant select on v to anon, authenticated;
 select tests.eq((select r from v),
                 jsonb_build_object('valid', true, 'message', null, 'code', 'SAVE10', 'kind', 'percent', 'value', 1000,
                                    'description', null, 'subtotal_cents', 24000, 'discount_cents', 2400,
-                                   'tax_cents', 1800, 'total_cents', 23400),
+                                   'tax_cents', 1800, 'total_cents', 23400,
+                                   'eligible_service_ids', jsonb_build_array(tests.fx('svc_a'), tests.fx('addon_pet')),
+                                   'restrictions_text', null),
                 'valid percent coupon (case-insensitive code): 10% off, tax on the discounted taxable part');
 drop table v;
 select tests.eq(public.public_validate_coupon('shop-a', 'FIXED25', array[tests.fx('svc_wash')], null, '2025-06-01 12:00Z')
-                  - array['message', 'code', 'kind', 'value', 'valid'],
+                  - array['message', 'code', 'kind', 'value', 'valid', 'eligible_service_ids', 'restrictions_text'],
                 '{"description": "$25 off", "subtotal_cents": 5000, "discount_cents": 2500, "tax_cents": 250, "total_cents": 2750}'::jsonb,
                 'fixed coupon');
 select tests.eq(public.public_validate_coupon('shop-a', 'nope', array[tests.fx('svc_wash')], null, '2025-06-01 12:00Z'),
                 jsonb_build_object('valid', false, 'message', 'this coupon code is not valid', 'code', 'nope', 'kind', null,
                                    'value', null, 'description', null, 'subtotal_cents', 5000, 'discount_cents', 0,
-                                   'tax_cents', 500, 'total_cents', 5500),
+                                   'tax_cents', 500, 'total_cents', 5500, 'eligible_service_ids', '[]'::jsonb,
+                                   'restrictions_text', null),
                 'unknown code: an answer, not an error, with undiscounted totals');
 select tests.eq(public.public_validate_coupon('shop-a', 'EXPIRED', array[tests.fx('svc_wash')], null, '2025-06-01 12:00Z') ->> 'message',
                 'this coupon has expired', 'expired');

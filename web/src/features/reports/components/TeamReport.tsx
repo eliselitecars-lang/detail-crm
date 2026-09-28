@@ -1,12 +1,14 @@
 import { Users } from 'lucide-react';
+import { useState } from 'react';
 import { Badge, EmptyState, SectionCard, Table, type Column } from '@/components/ui';
 import { bpsToPercentInput, formatBps, formatCents } from '@/lib/money';
 import { ROLE_LABELS } from '@/features/shop/permissions';
 import { useShop } from '@/features/shop/shopContext';
 import { useTeamReport } from '../api';
 import { centsCell, toCsv } from '../csv';
-import { formatCount, formatHours, teamHasPay, type TeamRow } from '../model';
+import { formatCount, formatHours, teamHasEarnings, teamHasPay, type TeamRow } from '../model';
 import { rangeFileSuffix, type DateRange } from '../ranges';
+import { EarningsDrawer } from './EarningsDrawer';
 import { CsvButton, ReportState } from './shared';
 
 export function TeamReport({ range, ownOnly }: { range: DateRange; ownOnly: boolean }) {
@@ -27,9 +29,13 @@ function TeamBody({
   range: DateRange;
   ownOnly: boolean;
 }) {
-  const { currency } = useShop();
+  const { currency, role, memberId } = useShop();
   const money = (cents: number | null) => formatCents(cents, { currency });
   const showPay = teamHasPay(rows);
+  const showEarnings = teamHasEarnings(rows);
+  const [open, setOpen] = useState<TeamRow | null>(null);
+  // report_member_earnings: owners / admins see anyone's; everyone their own.
+  const canOpen = (r: TeamRow) => role === 'owner' || role === 'admin' || r.member_id === memberId;
 
   if (rows.length === 0)
     return (
@@ -48,7 +54,18 @@ function TeamBody({
       primary: true,
       cell: (r) => (
         <span className="flex flex-wrap items-center gap-1.5">
-          <span className="font-medium">{r.display_name}</span>
+          {canOpen(r) ? (
+            <button
+              type="button"
+              onClick={() => setOpen(r)}
+              className="text-primary-ink font-medium hover:underline"
+              aria-label={`${r.display_name}: earnings by job`}
+            >
+              {r.display_name}
+            </button>
+          ) : (
+            <span className="font-medium">{r.display_name}</span>
+          )}
           <span className="text-muted text-xs font-normal">{ROLE_LABELS[r.role]}</span>
           {!r.active && <Badge tone="neutral">Inactive</Badge>}
         </span>
@@ -97,6 +114,34 @@ function TeamBody({
           },
         ] satisfies Column<TeamRow>[])
       : []),
+    ...(showEarnings
+      ? ([
+          {
+            key: 'tips',
+            header: 'Tips',
+            align: 'right',
+            cell: (r) => money(r.tips_cents),
+          },
+          {
+            key: 'serviceCommission',
+            header: 'Service commission',
+            align: 'right',
+            cell: (r) => money(r.service_commission_cents),
+          },
+          {
+            key: 'salesCommission',
+            header: 'Sales commission',
+            align: 'right',
+            cell: (r) => money(r.sales_commission_cents),
+          },
+          {
+            key: 'total',
+            header: 'Total earnings',
+            align: 'right',
+            cell: (r) => <span className="font-semibold">{money(r.total_earnings_cents)}</span>,
+          },
+        ] satisfies Column<TeamRow>[])
+      : []),
   ];
 
   const header = [
@@ -109,6 +154,7 @@ function TeamBody({
     'Pre-tax revenue',
   ];
   if (showPay) header.push('Hourly rate', 'Commission %', 'Commission', 'Labor cost');
+  if (showEarnings) header.push('Tips', 'Service commission', 'Sales commission', 'Total earnings');
   const csv = () =>
     toCsv(
       header,
@@ -122,22 +168,30 @@ function TeamBody({
           centsCell(r.revenue_cents),
           centsCell(r.pre_tax_revenue_cents),
         ];
-        return showPay
+        const pay = showPay
           ? [
-              ...base,
               centsCell(r.hourly_rate_cents),
               bpsToPercentInput(r.commission_bps),
               centsCell(r.commission_cents),
               centsCell(r.labor_cost_cents),
             ]
-          : base;
+          : [];
+        const earnings = showEarnings
+          ? [
+              centsCell(r.tips_cents),
+              centsCell(r.service_commission_cents),
+              centsCell(r.sales_commission_cents),
+              centsCell(r.total_earnings_cents),
+            ]
+          : [];
+        return [...base, ...pay, ...earnings];
       }),
     );
 
   return (
     <SectionCard
       title={ownOnly ? 'My numbers' : 'Team'}
-      description="Hours from the time clock; revenue from completed jobs, split evenly between assigned members."
+      description="Hours from the time clock; revenue and tips from completed jobs, split evenly between assigned members. Select a name for the jobs behind it."
       flush
       actions={<CsvButton filename={`team_${rangeFileSuffix(range)}.csv`} build={csv} />}
     >
@@ -147,6 +201,14 @@ function TeamBody({
         rows={rows}
         getRowId={(r) => r.member_id}
       />
+      {open && (
+        <EarningsDrawer
+          memberId={open.member_id}
+          name={open.display_name}
+          range={range}
+          onClose={() => setOpen(null)}
+        />
+      )}
     </SectionCard>
   );
 }

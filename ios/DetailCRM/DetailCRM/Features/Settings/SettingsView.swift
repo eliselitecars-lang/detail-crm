@@ -185,7 +185,13 @@ private struct SettingsList: View {
             } header: {
                 Text("Business")
             }
-            SettingsBookingSection(booking: snapshot.booking, canEdit: canEdit, saving: savingBooking, setBooking: setBooking)
+            SettingsBookingSection(
+                shop: snapshot.shop,
+                booking: snapshot.booking,
+                canEdit: canEdit,
+                saving: savingBooking,
+                setBooking: setBooking
+            )
             SettingsMoneySection(shop: snapshot.shop, canEdit: canEdit, setTechsCollect: setTechsCollect, editTax: editTax)
             SettingsStripeSection(state: stripeState, visible: stripeVisible, clock: clock, retry: retryStripe)
             Section {
@@ -249,6 +255,7 @@ struct SettingsNavRow: View {
 /// Online booking on/off and auto-confirm. Each switch saves only its
 /// own column, and both wait while a save is running.
 private struct SettingsBookingSection: View {
+    let shop: Shop
     let booking: ShopSettingsBooking?
     let canEdit: Bool
     let saving: Bool
@@ -283,6 +290,12 @@ private struct SettingsBookingSection: View {
                     .foregroundStyle(Theme.textSecondary)
                     .themedRow()
             }
+            NavigationLink {
+                OpsBookingQRView(shopName: shop.name, slug: shop.slug, bookingEnabled: booking?.enabled)
+            } label: {
+                SettingsNavRow(title: "Booking link & QR code", subtitle: "Share your booking page or print its QR code", systemImage: "qrcode")
+            }
+            .themedRow()
         } header: {
             Text("Online booking")
         } footer: {

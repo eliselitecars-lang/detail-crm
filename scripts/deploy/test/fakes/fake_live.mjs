@@ -7,11 +7,28 @@ import { createServer } from 'node:http';
 
 const env = (code, message, status) => ({ status, body: { error: message, code, request_id: randomUUID() } });
 
-export async function startFakeLive({ ref, anon, service, token, app, faults = [] }) {
+export async function startFakeLive({ ref, anon, service, token, app, faults = [], billing = { enabled: false, trialDays: 0 } }) {
   const f = new Set(faults);
-  const verifyJwt = { account: true, invites: true, 'stripe-connect': true, payments: false, messaging: false, 'stripe-webhook': false, 'storage-purge': false };
+  const verifyJwt = {
+    account: true,
+    invites: true,
+    'stripe-connect': true,
+    payments: false,
+    messaging: false,
+    'stripe-webhook': false,
+    'storage-purge': false,
+    push: false,
+    'calendar-feed': false,
+    'public-media': false,
+    'sms-provisioning': false,
+    webhooks: false,
+    pdf: false,
+    billing: false,
+    'billing-webhook': false,
+  };
   if (f.has('webhook-verify-jwt')) verifyJwt['stripe-webhook'] = true;
-  const corsFns = new Set(['account', 'invites', 'messaging', 'payments', 'stripe-connect']);
+  if (f.has('billing-verify-jwt')) verifyJwt.billing = true;
+  const corsFns = new Set(['account', 'invites', 'messaging', 'payments', 'stripe-connect', 'push', 'public-media', 'sms-provisioning', 'pdf', 'billing']);
   const authCfg = {
     site_url: app,
     uri_allow_list: `${app}/**,${app}/reset-password`,
@@ -41,10 +58,27 @@ export async function startFakeLive({ ref, anon, service, token, app, faults = [
       if (sub === '/functions') return send(200, Object.entries(verifyJwt).map(([slug, v]) => ({ slug, verify_jwt: v, status: 'ACTIVE', version: 3 })));
       if (sub === '/database/query') {
         const q = JSON.parse(raw).query;
+        if (/platform_config/.test(q) && /billing_enabled/.test(q)) {
+          return send(201, [
+            { key: 'billing_enabled', value: String(billing.enabled) },
+            { key: 'billing_trial_days', value: String(billing.trialDays) },
+          ]);
+        }
         if (/platform_config/.test(q)) return send(201, [{ value: app }]);
         if (/cron\.job/.test(q)) {
-          const jobs = ['detail-crm-expire-quotes', 'detail-crm-process-queue', 'detail-crm-run-automations', 'detail-crm-storage-purge', 'detail-crm-sweep-payment-sheets'];
-          return send(201, (f.has('cron-missing') ? jobs.slice(1) : jobs).map((jobname) => ({ jobname, active: true })));
+          const jobs = [
+            'detail-crm-billing-sync-plans',
+            'detail-crm-expire-quotes',
+            'detail-crm-generate-series',
+            'detail-crm-process-queue',
+            'detail-crm-push',
+            'detail-crm-run-automations',
+            'detail-crm-sms-status',
+            'detail-crm-storage-purge',
+            'detail-crm-sweep-payment-sheets',
+            'detail-crm-webhooks',
+          ];
+          return send(201, (f.has('cron-missing') ? jobs.filter((j) => j !== 'detail-crm-expire-quotes') : jobs).map((jobname) => ({ jobname, active: true })));
         }
         return send(201, []);
       }
@@ -113,12 +147,26 @@ export async function startFakeLive({ ref, anon, service, token, app, faults = [
       const action = url.searchParams.get('action') ?? (raw && req.headers['content-type']?.includes('json') ? JSON.parse(raw).action : undefined);
       const reply = (e) => send(e.status, e.body);
       if (fn === 'stripe-webhook') return reply(env('invalid_signature', 'Invalid Stripe signature.', 400));
+      if (fn === 'billing-webhook') {
+        // The function refuses an unsigned request before it needs its secret.
+        if (req.headers['stripe-signature'] && f.has('billing-secret-missing')) return reply(env('server_misconfigured', 'Server misconfigured.', 500));
+        return reply(env('invalid_signature', 'Invalid Stripe signature.', 400));
+      }
+      if (fn === 'billing' && action === 'checkout') {
+        const body = JSON.parse(raw);
+        if ('price' in body) return reply(env('validation_failed', 'Some fields are missing or invalid.', 400));
+      }
+      if (fn === 'billing' && action === 'plans') return reply(env('unauthorized', 'Sign in to continue.', 401));
+      if (fn === 'calendar-feed') {
+        if (req.method !== 'GET') return reply(env('method_not_allowed', 'Method not allowed.', 405));
+        return reply(env('validation_failed', 'Some fields are missing or invalid.', 400));
+      }
       if (fn === 'messaging' && action === 'unsubscribe' && req.method === 'GET') {
         return send(303, undefined, { location: `${f.has('app-url-mismatch') ? 'https://old.example.com' : app}/u/${url.searchParams.get('token')}` });
       }
       if (fn === 'messaging' && action === 'twilio_inbound') return reply(env('invalid_signature', 'The Twilio signature is missing or invalid.', 400));
       if (!action) return reply(env('unknown_action', 'Unknown action.', 400));
-      if (['process_queue', 'sweep_payment_sheets', 'purge'].includes(action)) {
+      if (['process_queue', 'sweep_payment_sheets', 'purge', 'deliver', 'refresh_status', 'sync_plans'].includes(action)) {
         return reply(f.has('cron-secret-missing') ? env('server_misconfigured', 'Server misconfigured.', 500) : env('unauthorized', 'Unauthorized.', 401));
       }
       if (action === 'invoice_checkout') {

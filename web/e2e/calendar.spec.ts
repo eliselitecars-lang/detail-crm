@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, SHOP, TECH } from './support/fixtures';
-import { mockSupabase, reply, type MockReply } from './support/mockSupabase';
+import { mockSupabase, reply, type Handler, type MockReply } from './support/mockSupabase';
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type Row = { [key: string]: Json };
@@ -92,6 +92,9 @@ interface Setup {
   rangeCalls?: Json[];
   /** Answer every reschedule (PATCH) with this PostgREST error. */
   rejectPatch?: MockReply;
+  /** Extra table / RPC handlers (calendar events, day map). */
+  tables?: Record<string, Json[] | Handler>;
+  rpc?: Record<string, Json | Handler>;
 }
 
 async function setup(page: Page, options: Setup = {}) {
@@ -126,6 +129,7 @@ async function setup(page: Page, options: Setup = {}) {
         }
         return [{ id: JOB_ID }];
       },
+      ...options.tables,
     },
     rpc: {
       shop_team: TEAM,
@@ -133,6 +137,7 @@ async function setup(page: Page, options: Setup = {}) {
         options.rangeCalls?.push(body as Json);
         return options.events ?? [jobEvent(today)];
       },
+      ...options.rpc,
     },
   });
   return today;
@@ -339,5 +344,140 @@ test.describe('calendar', () => {
     await expect(bay.locator('.fc-timegrid-event', { hasText: '#1001' })).toHaveCount(1);
     await expect(none.locator('.fc-timegrid-event')).toHaveCount(0);
     await expect(bay).toContainText('1 job');
+  });
+
+  test('manager adds a weekly meeting; it shows with its kind on the calendar', async ({
+    page,
+  }) => {
+    const today = shopToday();
+    const inserts: Row[] = [];
+    const events = [jobEvent(today)];
+    await setup(page, {
+      events,
+      tables: {
+        blocked_times: ({ method, body }) => {
+          if (method === 'POST') {
+            const row = body as Row;
+            inserts.push(row);
+            events.push({
+              ...busyBlock(today),
+              event_type: 'blocked_time',
+              id: '70000000-0000-4000-8000-000000000001',
+              is_busy_block: true,
+              starts_at: row.starts_at ?? null,
+              ends_at: row.ends_at ?? null,
+              assigned_member_ids: [],
+              title: row.title ?? null,
+              event_kind: 'meeting',
+            });
+            return [{ id: '70000000-0000-4000-8000-000000000001' }];
+          }
+          return [];
+        },
+      },
+    });
+    await page.goto('/app/calendar');
+    await page.getByRole('button', { name: 'Day', exact: true }).click();
+    await page.getByRole('button', { name: 'New event' }).click();
+    const dialog = page.getByRole('dialog', { name: 'New event' });
+    await dialog.getByLabel('Title').fill('Team huddle');
+    await dialog.getByLabel('Start date').fill(today);
+    await dialog.getByLabel('Start time').fill('13:00');
+    await dialog.getByLabel('End time').fill('13:30');
+    await dialog.getByLabel('Repeat').selectOption('week');
+    await dialog.getByRole('button', { name: 'Add event' }).click();
+    await expect(page.getByText('Event added')).toBeVisible();
+    expect(inserts[0]).toMatchObject({
+      shop_id: SHOP.id,
+      kind: 'meeting',
+      title: 'Team huddle',
+      member_id: null,
+      starts_at: shopTimeToUtc(today, '13:00'),
+      ends_at: shopTimeToUtc(today, '13:30'),
+      affects_capacity: false,
+      recurrence: { freq: 'week', interval: 1 },
+    });
+    const meeting = page.locator('.fc-event', { hasText: 'Team huddle' });
+    await expect(meeting).toBeVisible();
+    await expect(meeting).toContainText('Meeting:');
+  });
+
+  test('day map: stops on OpenStreetMap, reorder saves the route, Google Maps hand-off', async ({
+    page,
+  }) => {
+    const today = shopToday();
+    const orders: Json[] = [];
+    // OpenStreetMap tiles are the only third-party requests; serve a blank tile
+    await page.route('https://tile.openstreetmap.org/**', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'image/png',
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+          'base64',
+        ),
+      }),
+    );
+    await setup(page, {
+      events: [
+        jobEvent(today, {
+          location_type: 'mobile',
+          service_address: '1 Main St, Birmingham',
+          service_lat: 33.52,
+          service_lng: -86.81,
+        }),
+        jobEvent(today, {
+          id: '40000000-0000-4000-8000-000000000009',
+          job_number: 1009,
+          title: 'Sam Lee',
+          starts_at: shopTimeToUtc(today, '14:00'),
+          ends_at: shopTimeToUtc(today, '15:00'),
+          location_type: 'mobile',
+          service_address: '5 Oak Ave, Homewood',
+          service_lat: null,
+          service_lng: null,
+        }),
+      ],
+      tables: {
+        shops: [
+          {
+            lat: 33.5,
+            lng: -86.8,
+            address_line1: null,
+            city: null,
+            region: null,
+            postal_code: null,
+          },
+        ],
+      },
+      rpc: {
+        set_route_order: ({ body }) => {
+          orders.push(body as Json);
+          return 2;
+        },
+      },
+    });
+    await page.goto('/app/calendar');
+    await page.getByRole('button', { name: 'Map' }).click();
+    const map = page.getByRole('region', { name: 'Map of the day’s stops' });
+    await expect(map).toBeVisible();
+    await expect(map.locator('.dc-route-marker')).toHaveCount(2); // the shop + the located stop
+    await expect(map).toContainText('OpenStreetMap');
+    const stops = page.getByRole('region', { name: 'Stops in route order' });
+    await expect(
+      stops.getByText('Not located yet — open the job in the iPhone app.'),
+    ).toBeVisible();
+    const link = stops.getByRole('link', { name: /Open route in Google Maps/ });
+    const href = new URL((await link.getAttribute('href')) ?? '');
+    expect(href.searchParams.get('origin')).toBe('33.5,-86.8');
+    expect(href.searchParams.get('waypoints')).toBe('33.52,-86.81');
+    expect(href.searchParams.get('destination')).toBe('5 Oak Ave, Homewood');
+
+    await stops.getByRole('button', { name: 'Move Sam Lee earlier' }).click();
+    await expect
+      .poll(() => orders)
+      .toEqual([
+        { p_shop_id: SHOP.id, p_job_ids: ['40000000-0000-4000-8000-000000000009', JOB_ID] },
+      ]);
   });
 });

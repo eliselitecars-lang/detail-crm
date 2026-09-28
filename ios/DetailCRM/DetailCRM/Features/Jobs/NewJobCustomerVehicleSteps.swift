@@ -309,9 +309,11 @@ struct NewJobVehicleRow: View {
     }
 }
 
-/// New vehicle fields with VIN decode.
+/// New vehicle fields with VIN scan (P-22) and decode.
 struct NewJobVehicleForm: View {
     @Bindable var model: NewJobModel
+
+    @State private var showingScanner = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -327,6 +329,13 @@ struct NewJobVehicleForm: View {
                 .disabled(VIN.normalize(model.vehicleDraft.vin).count != 17)
                 .padding(.bottom, 6)
             }
+            Button {
+                showingScanner = true
+            } label: {
+                Label("Scan the VIN barcode", systemImage: "barcode.viewfinder")
+            }
+            .buttonStyle(.themeSecondaryCompact)
+            .accessibilityHint("Opens the camera to read the VIN from the door jamb or windshield")
             HStack(spacing: Theme.Spacing.sm) {
                 ThemedTextField(label: "Year", placeholder: "2022", text: $model.vehicleYearText, kind: .number)
                     .frame(maxWidth: 110)
@@ -351,6 +360,12 @@ struct NewJobVehicleForm: View {
             }
             AsyncButton("Add vehicle", style: .themePrimary) {
                 await model.createVehicle()
+            }
+        }
+        .sheet(isPresented: $showingScanner) {
+            JobsVINScannerView { result in
+                model.vehicleDraft.vin = result.vin
+                Task { await model.decodeVIN(requireCheckDigit: result.checkDigitVerified) }
             }
         }
     }

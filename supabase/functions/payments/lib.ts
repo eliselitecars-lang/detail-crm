@@ -4,7 +4,7 @@
  * customer on that account, amount guards, metadata and error mapping.
  */
 import type { Env } from "../_shared/env.ts";
-import { errors, HttpError } from "../_shared/errors.ts";
+import { errors, HttpError, subscriptionRefusal } from "../_shared/errors.ts";
 import type { ActionContext } from "../_shared/actions.ts";
 import type { Logger } from "../_shared/log.ts";
 import { applicationFeeCents, assertChargeableCents } from "../_shared/money.ts";
@@ -57,13 +57,18 @@ export function dbFailure(what: string, cause: unknown): Error {
 
 /**
  * Maps a PostgREST error from a money RPC to a stable HttpError. Messages
- * are ours (generic per call site); the database text is only logged.
+ * are ours (generic per call site); the database text is only logged —
+ * except PT402 (the shop's subscription is inactive, 0102), which is `402
+ * payment_required` with the database's neutral sentence.
  */
 export function rpcError(what: string, error: DbError, messages: {
   notFound?: string;
   invalid?: string;
   conflict?: string;
+  unavailable?: string;
 } = {}): Error {
+  const paused = subscriptionRefusal(error);
+  if (paused) return paused;
   switch (error.code) {
     case "P0002":
     case "PT404": // public RPCs' not-found (HTTP 404; 0042 convention)
@@ -87,9 +92,34 @@ export function rpcError(what: string, error: DbError, messages: {
           cause: error,
         },
       );
+    case "55000": // object not in prerequisite state (e.g. a feature the shop turned off)
+      return new HttpError(
+        "conflict",
+        messages.unavailable ?? "This is not available right now.",
+        { cause: error },
+      );
+    case "PT429": // public RPCs' abuse limits (HTTP 429)
+      return new HttpError(
+        "rate_limited",
+        "Too many attempts. Please try again later or contact the shop.",
+        { cause: error, headers: { "Retry-After": "3600" } },
+      );
     default:
       return dbFailure(what, error);
   }
+}
+
+/**
+ * The customer-facing text of a validation error (22023) raised by one of our
+ * own public RPCs (gift_card_order_prepare, membership_join_prepare): those
+ * messages are written for the customer ("enter a valid email address"), so
+ * a public form can show them. Capitalised, one line, at most 200 characters.
+ */
+export function publicValidationMessage(error: DbError, fallback: string): string {
+  const text = (error.message ?? "").replace(/\s+/g, " ").trim();
+  if (!text || text.length > 200) return fallback;
+  const sentence = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +247,100 @@ export function assertPayable(invoice: InvoiceRow): number {
     throw errors.conflict("This invoice is already paid.", { reason: "paid" });
   }
   return invoice.balance_cents;
+}
+
+/**
+ * Money on its way to the invoice that its balance does not show yet: ACH
+ * debits (and other asynchronous methods) recorded `processing` (P-31, in
+ * flight for days; 0064 payment_in_flight). Card attempts still open are
+ * settled separately (settle.ts).
+ */
+export async function processingCents(
+  admin: SupabaseClient,
+  shopId: string,
+  invoiceId: string,
+): Promise<number> {
+  const { data, error } = await admin
+    .from("payments")
+    .select("amount_cents")
+    .eq("shop_id", shopId)
+    .eq("invoice_id", invoiceId)
+    .eq("status", "processing");
+  if (error) throw dbFailure("processing payments lookup", error);
+  let total = 0;
+  for (const row of (data ?? []) as Array<{ amount_cents: number }>) {
+    if (typeof row.amount_cents === "number" && Number.isSafeInteger(row.amount_cents)) {
+      total += row.amount_cents;
+    }
+  }
+  return total;
+}
+
+/**
+ * What can still be paid on the invoice now: its balance less the money
+ * processing toward it (the public invoice's `payable`, 0066). 409
+ * payment_in_progress when processing payments cover the whole balance.
+ */
+export async function payableBalance(s: Services, invoice: InvoiceRow): Promise<number> {
+  const balance = assertPayable(invoice);
+  const available = balance - await processingCents(s.admin, invoice.shop_id, invoice.id);
+  if (available <= 0) throw paymentInProgress();
+  return available;
+}
+
+// ---------------------------------------------------------------------------
+// Invoices and their jobs (P-7: an invoice bills one job, or several)
+// ---------------------------------------------------------------------------
+
+/**
+ * The jobs an invoice bills: its job, or the jobs of a grouped invoice
+ * (invoice_jobs; job_id is null on a grouped invoice). A deposit payment of
+ * any of them lands on this invoice (payments_before_write).
+ */
+export async function invoiceJobIds(
+  admin: SupabaseClient,
+  invoice: Pick<InvoiceRow, "id" | "shop_id" | "job_id">,
+): Promise<string[]> {
+  if (invoice.job_id) return [invoice.job_id];
+  const { data, error } = await admin
+    .from("invoice_jobs")
+    .select("job_id")
+    .eq("shop_id", invoice.shop_id)
+    .eq("invoice_id", invoice.id)
+    .eq("voided", false);
+  if (error) throw dbFailure("invoice_jobs lookup", error);
+  return ((data ?? []) as Array<{ job_id: string }>).map((row) => row.job_id);
+}
+
+/**
+ * The job's live (non-void) invoice, single or grouped, or null. A job has at
+ * most one (0061 invoice_jobs_one_live_invoice); a deposit payment of the job
+ * is attached to it.
+ */
+export async function liveInvoiceForJob(
+  admin: SupabaseClient,
+  shopId: string,
+  jobId: string,
+): Promise<InvoiceRow | null> {
+  const { data, error } = await admin
+    .from("invoice_jobs")
+    .select("invoice_id")
+    .eq("shop_id", shopId)
+    .eq("job_id", jobId)
+    .eq("voided", false);
+  if (error) throw dbFailure("invoice_jobs lookup", error);
+  const ids = ((data ?? []) as Array<{ invoice_id: string }>).map((row) => row.invoice_id);
+  if (ids.length === 0) return null;
+  const found = await admin
+    .from("invoices")
+    .select(INVOICE_COLUMNS)
+    .eq("shop_id", shopId)
+    .in("id", ids)
+    .neq("status", "void")
+    .limit(1)
+    .maybeSingle();
+  if (found.error) throw dbFailure("job invoice lookup", found.error);
+  return (found.data as InvoiceRow | null) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -539,41 +663,119 @@ export function isInvalidRequest(err: unknown): boolean {
     (err as { type?: unknown }).type === "StripeInvalidRequestError";
 }
 
-type SessionMatch = (session: Stripe.Checkout.Session) => boolean;
+export type SessionMatch = (session: Stripe.Checkout.Session) => boolean;
 
 const invoiceLinks = (shopId: string, invoiceId: string): SessionMatch => (session) =>
   session.mode === "payment" && session.metadata?.shop_id === shopId &&
   session.metadata?.invoice_id === invoiceId && session.metadata?.kind === "payment";
 
-const depositLinks = (shopId: string, jobId: string): SessionMatch => (session) =>
-  session.mode === "payment" && session.metadata?.shop_id === shopId &&
-  session.metadata?.job_id === jobId && session.metadata?.kind === "deposit";
+const depositLinks = (shopId: string, jobIds: ReadonlyArray<string>): SessionMatch => {
+  const jobs = new Set(jobIds);
+  return (session) =>
+    session.mode === "payment" && session.metadata?.shop_id === shopId &&
+    jobs.has(session.metadata?.job_id ?? "") && session.metadata?.kind === "deposit";
+};
 
 /** Metadata matchers for the sessions each action creates. */
 export const sessionFor = {
   invoice: invoiceLinks,
-  deposit: depositLinks,
-  /** Invoice pay links of the job's invoice(s) (invoice_checkout tags job_id). */
-  jobInvoices: (shopId: string, jobId: string): SessionMatch => (session) =>
-    session.mode === "payment" && session.metadata?.shop_id === shopId &&
-    session.metadata?.job_id === jobId && session.metadata?.kind === "payment",
+  /** Deposit links (booking and quote deposits) of the job. */
+  deposit: (shopId: string, jobId: string): SessionMatch => depositLinks(shopId, [jobId]),
+  /** Deposit links of any of these jobs (the jobs a grouped invoice bills). */
+  deposits: (shopId: string, jobIds: ReadonlyArray<string>): SessionMatch =>
+    depositLinks(shopId, jobIds),
+  /**
+   * Invoice pay links that pay toward the job: those tagged with the job
+   * (invoice_checkout tags a single-job invoice's job_id) and, when the job
+   * has a live invoice (single or grouped), that invoice's links.
+   */
+  jobInvoices: (shopId: string, jobId: string, liveInvoiceId: string | null): SessionMatch => {
+    const live = liveInvoiceId ? invoiceLinks(shopId, liveInvoiceId) : null;
+    return (session) =>
+      (session.mode === "payment" && session.metadata?.shop_id === shopId &&
+        session.metadata?.job_id === jobId && session.metadata?.kind === "payment") ||
+      (live !== null && live(session));
+  },
   /**
    * Every open instrument that pays toward the invoice: its own pay links
-   * and its job's deposit links. A deposit payment is attached to the job's
-   * invoice (payments_before_write), so a deposit link left open after the
-   * balance was collected would overpay the invoice by the deposit.
+   * and the deposit links of the jobs it bills (one job, or every job of a
+   * grouped invoice). A deposit payment is attached to the job's invoice
+   * (payments_before_write), so a deposit link left open after the balance
+   * was collected would overpay the invoice by the deposit.
    */
   invoiceOrDeposit: (
     shopId: string,
-    invoice: { id: string; job_id: string | null },
+    invoice: { id: string },
+    jobIds: ReadonlyArray<string>,
   ): SessionMatch => {
     const own = invoiceLinks(shopId, invoice.id);
-    const deposit = invoice.job_id ? depositLinks(shopId, invoice.job_id) : null;
+    const deposit = jobIds.length > 0 ? depositLinks(shopId, jobIds) : null;
     return (session) => own(session) || (deposit !== null && deposit(session));
   },
   membership: (shopId: string, membershipId: string) => (session: Stripe.Checkout.Session) =>
     session.mode === "subscription" && session.metadata?.shop_id === shopId &&
     session.metadata?.membership_id === membershipId,
+};
+
+// ---------------------------------------------------------------------------
+// Public pages and shops by slug
+// ---------------------------------------------------------------------------
+
+/**
+ * A public web page under APP_BASE_URL (SPEC §6 routes), e.g.
+ * appPage(base, "gift", slug, "done") -> https://app/gift/<slug>/done.
+ * Segments are URL-encoded.
+ */
+export function appPage(baseUrl: string, ...segments: string[]): string {
+  if (segments.length === 0 || segments.some((part) => part === "")) {
+    throw new TypeError("page segments must not be empty");
+  }
+  return `${baseUrl.replace(/\/+$/, "")}/${segments.map(encodeURIComponent).join("/")}`;
+}
+
+/** A shop slug as typed in a public URL (the RPCs lower-case and trim it). */
+export const SLUG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$/;
+
+/** The shop with this public slug (404 when none). */
+export async function loadShopBySlug(admin: SupabaseClient, slug: string): Promise<
+  ShopRow & {
+    slug: string;
+  }
+> {
+  const { data, error } = await admin
+    .from("shops")
+    .select("id, name, currency, techs_can_collect_payments, slug")
+    .eq("slug", slug.trim().toLowerCase())
+    .maybeSingle();
+  if (error) throw dbFailure("shops lookup", error);
+  if (!data) throw errors.notFound("Shop not found.");
+  return data as ShopRow & { slug: string };
+}
+
+/**
+ * Payment method options of the public Checkout links (P-31): the card is
+ * saved for charge-card-on-file through the CARD options, never the
+ * intent's top-level setup_future_usage, which would hide every method that
+ * cannot be saved (pay-later) and restrict the rest. With no
+ * payment_method_types the connected account's enabled methods apply
+ * (dynamic payment methods): cards and wallets always, US bank debits (ACH)
+ * and pay-later providers when the shop turned them on in Stripe.
+ */
+export const SAVE_CARD_OPTIONS: Stripe.Checkout.SessionCreateParams.PaymentMethodOptions = {
+  card: { setup_future_usage: "off_session" },
+};
+
+/**
+ * Wallet options of the same links: Link is not offered. A Link payment is
+ * its own payment method type ("link"), which the card options above do not
+ * save, and the CRM's card on file is card-only (charge_saved_card confirms
+ * with payment_method_types ['card']). With Link shown, a customer paying
+ * through it would leave no card on file, so the deposit's "card on file"
+ * would silently be missing when staff later charge it. Apple Pay / Google
+ * Pay stay: they produce card payment methods and are saved as cards.
+ */
+export const NO_LINK_WALLET: Stripe.Checkout.SessionCreateParams.WalletOptions = {
+  link: { display: "never" },
 };
 
 /** The shop's connected account, or null when Stripe was never connected. */

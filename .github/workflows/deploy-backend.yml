@@ -1,9 +1,10 @@
 # Production backend deploy (docs/DEPLOY.md): migrations, edge functions
 # (verify_jwt from supabase/config.toml), function secrets, production Auth
 # through the Management API (config.toml is never pushed), the platform setup
-# of supabase/setup/cron.sql, optionally the Stripe Connect webhook endpoint;
-# then read-only smoke checks against the live project. Manual only; the dry
-# run (default) changes nothing.
+# of supabase/setup/cron.sql with the billing settings (docs/BILLING.md),
+# optionally the Stripe webhook endpoints (Connect, and the platform billing
+# endpoint when BILLING_ENABLED is true); then read-only smoke checks against
+# the live project. Manual only; the dry run (default) changes nothing.
 name: deploy-backend
 
 on:
@@ -14,7 +15,7 @@ on:
         type: boolean
         default: true
       stripe_webhooks:
-        description: "Create/update the Stripe Connect webhook endpoint and store its signing secret"
+        description: "Create/update the Stripe webhook endpoints (Connect; platform billing when BILLING_ENABLED) and store their signing secrets"
         type: boolean
         default: false
       include_all_migrations:
@@ -52,12 +53,27 @@ jobs:
       STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
       STRIPE_PUBLISHABLE_KEY: ${{ vars.STRIPE_PUBLISHABLE_KEY || secrets.STRIPE_PUBLISHABLE_KEY }}
       STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+      # Shop subscription billing (docs/BILLING.md): database settings + the
+      # platform billing webhook's signing secret (only while billing is on)
+      BILLING_ENABLED: ${{ vars.BILLING_ENABLED }}
+      BILLING_TRIAL_DAYS: ${{ vars.BILLING_TRIAL_DAYS }}
+      BILLING_AUTOMATIC_TAX: ${{ vars.BILLING_AUTOMATIC_TAX }}
+      STRIPE_BILLING_WEBHOOK_SECRET: ${{ secrets.STRIPE_BILLING_WEBHOOK_SECRET }}
       PLATFORM_FEE_BPS: ${{ vars.PLATFORM_FEE_BPS }}
       TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
       TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       EMAIL_FROM: ${{ vars.EMAIL_FROM }}
       CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
+      # Optional: APNs push for the iPhone app (all four, or none = no pushes)
+      APNS_KEY_ID: ${{ vars.APNS_KEY_ID }}
+      APNS_TEAM_ID: ${{ vars.APNS_TEAM_ID }}
+      APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
+      APNS_TOPIC: ${{ vars.APNS_TOPIC }}
+      # Optional feature flags (unset = off; docs/DEPLOY.md)
+      SMS_PROVISIONING_ENABLED: ${{ vars.SMS_PROVISIONING_ENABLED }}
+      TWILIO_ISV_ENABLED: ${{ vars.TWILIO_ISV_ENABLED }}
+      TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: ${{ vars.TWILIO_PRIMARY_CUSTOMER_PROFILE_SID }}
       # Optional knobs (docs/DEPLOY.md)
       REQUIRE_LIVE_STRIPE: ${{ vars.REQUIRE_LIVE_STRIPE }}
       AUTH_SMTP_SENDER_EMAIL: ${{ vars.AUTH_SMTP_SENDER_EMAIL }}
@@ -86,6 +102,9 @@ jobs:
           need EMAIL_FROM "variable"
           if [ "$STRIPE_WEBHOOKS" != "true" ]; then
             need STRIPE_WEBHOOK_SECRET "secret, or run with stripe_webhooks"
+            if [ "$(printf '%s' "${BILLING_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+              need STRIPE_BILLING_WEBHOOK_SECRET "secret while BILLING_ENABLED is true, or run with stripe_webhooks"
+            fi
           fi
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing repository/environment settings: ${missing[*]}"

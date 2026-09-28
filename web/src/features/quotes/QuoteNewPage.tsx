@@ -5,6 +5,7 @@ import {
   Card,
   CardBody,
   CardFooter,
+  Checkbox,
   DateInput,
   ErrorState,
   FormField,
@@ -14,7 +15,7 @@ import {
 } from '@/components/ui';
 import { formatLocalDate, isLocalDate, shopToday } from '@/lib/dates';
 import { useShop } from '@/features/shop/shopContext';
-import { useCreateQuote } from './api';
+import { STARTER_OPTION_NAMES, useCreateQuote } from './api';
 import { useCustomer, useDocDefaults, type PickerCustomer } from './shared/api';
 import { CustomerCombobox, VehicleSelect } from './shared/CustomerPicker';
 
@@ -37,6 +38,7 @@ export default function QuoteNewPage() {
   const [validUntil, setValidUntil] = useState('');
   const [notes, setNotes] = useState('');
   const [terms, setTerms] = useState<string | undefined>(undefined);
+  const [withOptions, setWithOptions] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
   const customer = picked === undefined ? (preset.data ?? null) : picked;
@@ -68,6 +70,7 @@ export default function QuoteNewPage() {
         validUntil: validUntil || null,
         notes: notes.trim() || null,
         terms: termsValue.trim() || null,
+        ...(withOptions ? { optionNames: STARTER_OPTION_NAMES } : {}),
       });
       toast.success(`Quote #${quote.number} created`);
       await navigate(`/app/quotes/${quote.id}`, { replace: true });
@@ -150,6 +153,12 @@ export default function QuoteNewPage() {
                 onChange={(event) => setTerms(event.target.value)}
               />
             </FormField>
+            <Checkbox
+              label="Offer options"
+              description="Give the customer two or more alternatives (for example basic and premium) to choose from. You can add options later too."
+              checked={withOptions}
+              onChange={(event) => setWithOptions(event.target.checked)}
+            />
           </CardBody>
           <CardFooter className="flex justify-end gap-2">
             <Button variant="secondary" onClick={() => void navigate('/app/quotes')}>

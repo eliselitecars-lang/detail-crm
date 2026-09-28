@@ -3,8 +3,10 @@
 //  DetailCRM
 //
 //  The job's checklist. Staff on the job tick items (optimistic, rolled
-//  back if the server refuses); managers add one-off items, remove items
-//  and apply checklist templates.
+//  back if the server refuses); managers add one-off items, remove items,
+//  flag items as required and apply checklist templates. Required items
+//  must be done before the job can be completed (P-11, enforced by the
+//  server; a manager can override from the status control).
 //
 
 import SwiftUI
@@ -52,6 +54,7 @@ struct JobChecklistSection: View {
                         isPending: model.pendingChecklist.contains(item.id),
                         canToggle: canWork,
                         onToggle: { toggle(item) },
+                        onToggleRequired: canManage ? { toggleRequired(item) } : nil,
                         onDelete: canManage ? { confirmDelete(item) } : nil
                     )
                 }
@@ -61,10 +64,20 @@ struct JobChecklistSection: View {
 
     private func progressLine(_ items: [JobChecklistItem]) -> some View {
         let done = items.filter(\.isDone).count
+        let openRequired = items.filter { $0.isRequired && !$0.isDone }.count
         return HStack {
-            Text("\(done) of \(items.count) done")
-                .font(Theme.Typography.footnote.weight(.semibold))
-                .foregroundStyle(done == items.count ? Theme.success : Theme.textSecondary)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                Text("\(done) of \(items.count) done")
+                    .font(Theme.Typography.footnote.weight(.semibold))
+                    .foregroundStyle(done == items.count ? Theme.success : Theme.textSecondary)
+                if openRequired > 0 {
+                    Text(openRequired == 1
+                         ? "1 required item left before completing"
+                         : "\(openRequired) required items left before completing")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.warning)
+                }
+            }
             Spacer()
             ProgressView(value: Double(done), total: Double(max(items.count, 1)))
                 .tint(done == items.count ? Theme.success : Theme.glacier)
@@ -134,6 +147,16 @@ struct JobChecklistSection: View {
         }
     }
 
+    private func toggleRequired(_ item: JobChecklistItem) {
+        Task {
+            do {
+                try await model.setChecklistItemRequired(item, required: !item.isRequired)
+            } catch {
+                toasts.showError(error)
+            }
+        }
+    }
+
     private func addItem() async {
         guard let label = newItem.trimmedNonEmpty else { return }
         do {
@@ -174,6 +197,7 @@ struct JobChecklistRow: View {
     let isPending: Bool
     let canToggle: Bool
     let onToggle: () -> Void
+    var onToggleRequired: (() -> Void)? = nil
     let onDelete: (() -> Void)?
 
     var body: some View {
@@ -184,23 +208,41 @@ struct JobChecklistRow: View {
                         .font(Theme.Typography.title.weight(.regular))
                         .foregroundStyle(item.isDone ? Theme.success : Theme.textTertiary)
                         .accessibilityHidden(true)
-                    Text(item.label)
-                        .font(Theme.Typography.body)
-                        .foregroundStyle(item.isDone ? Theme.textSecondary : Theme.textPrimary)
-                        .strikethrough(item.isDone, color: Theme.textTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                        Text(item.label)
+                            .font(Theme.Typography.body)
+                            .foregroundStyle(item.isDone ? Theme.textSecondary : Theme.textPrimary)
+                            .strikethrough(item.isDone, color: Theme.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if item.isRequired {
+                            Text("Required")
+                                .font(Theme.Typography.captionEmphasis)
+                                .foregroundStyle(item.isDone ? Theme.textTertiary : Theme.warning)
+                                .padding(.horizontal, Theme.Spacing.xs)
+                                .padding(.vertical, Theme.Spacing.xxs)
+                                .background(
+                                    RoundedRectangle(cornerRadius: Theme.Radius.badge)
+                                        .fill(Theme.fill(for: item.isDone ? .neutral : .warning))
+                                )
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(minHeight: Theme.Size.controlHeight)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(!canToggle || isPending)
-            .accessibilityLabel(item.label)
+            .accessibilityLabel(item.isRequired ? "\(item.label), required" : item.label)
             .accessibilityValue(item.isDone ? "Done" : "Not done")
             .accessibilityAddTraits(.isButton)
             if let onDelete {
                 Menu {
+                    if let onToggleRequired {
+                        Button(item.isRequired ? "Don't require" : "Require before completing",
+                               systemImage: item.isRequired ? "exclamationmark.circle" : "exclamationmark.circle.fill",
+                               action: onToggleRequired)
+                    }
                     Button("Remove", role: .destructive, action: onDelete)
                 } label: {
                     Image(systemName: "ellipsis")

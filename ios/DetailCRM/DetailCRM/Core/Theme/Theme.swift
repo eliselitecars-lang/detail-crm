@@ -37,6 +37,8 @@ enum Theme {
     static let onAccent = Color.white
     /// Text/icon color placed on a solid Amber fill (dark ink for contrast).
     static let onAmber = Color(light: 0x0B1220, dark: 0x0B1220)
+    /// Dark scrim behind white text over camera / video / photos (both modes).
+    static let scrim = Color(light: 0x0B1220, dark: 0x000000)
 
     // MARK: - Surfaces
 
@@ -130,6 +132,8 @@ enum Theme {
         static let footnote = Font.system(.footnote)
         static let caption = Font.system(.caption)
         static let captionEmphasis = Font.system(.caption).weight(.semibold)
+        /// Small glyphs inside dense calendar blocks.
+        static let caption2 = Font.system(.caption2)
         /// Uppercase eyebrow labels above sections.
         static let eyebrow = Font.system(.caption2).weight(.semibold)
         static let button = Font.system(.body).weight(.semibold)

@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import { Constants } from '@/lib/database.types';
 import type { Row } from '@/lib/db';
+import { bpsToPercentInput, formatBps, formatCents, parsePercentToBps } from '@/lib/money';
 import { zOptionalText, zRequiredText } from '@/lib/validation';
 
 export type ServiceRow = Row<'services'>;
@@ -78,22 +79,69 @@ export const zSort = z
   .refine((v) => /^-?\d{1,6}$/.test(v), 'Enter a whole number.')
   .transform((v) => Number(v));
 
-export const serviceFormSchema = z.object({
-  name: zRequiredText('Name', 120),
-  description: zOptionalText(10000),
-  kind: z.enum(['service', 'package', 'addon', 'product']),
-  categoryId: z.string().transform((v) => (v === '' ? null : v)),
-  durationMinutes: zMinutes,
-  taxable: z.boolean(),
-  onlineBookable: z.boolean(),
-  active: z.boolean(),
-  sort: zSort,
-});
+export type CommissionKind = ServiceRow['commission_kind'];
+
+export const COMMISSION_KIND_LABELS: Record<CommissionKind, string> = {
+  none: 'No service commission',
+  percent: 'Percent of the line',
+  flat: 'Flat amount per unit sold',
+};
+
+/** services.min_before_photos / min_after_photos CHECK (0..20). */
+export const MAX_PHOTO_MINIMUM = 20;
+
+/** 0–20 photos typed as text. */
+export const zPhotoMinimum = z
+  .string()
+  .trim()
+  .refine(
+    (v) => /^\d{1,2}$/.test(v) && Number(v) <= MAX_PHOTO_MINIMUM,
+    `Enter a number from 0 to ${MAX_PHOTO_MINIMUM}.`,
+  )
+  .transform((v) => Number(v));
+
+export const serviceFormSchema = z
+  .object({
+    name: zRequiredText('Name', 120),
+    description: zOptionalText(10000),
+    kind: z.enum(['service', 'package', 'addon', 'product']),
+    categoryId: z.string().transform((v) => (v === '' ? null : v)),
+    durationMinutes: zMinutes,
+    taxable: z.boolean(),
+    onlineBookable: z.boolean(),
+    active: z.boolean(),
+    sort: zSort,
+    minBeforePhotos: zPhotoMinimum,
+    minAfterPhotos: zPhotoMinimum,
+    commissionKind: z.enum(['none', 'percent', 'flat']),
+    /** Percent text ("10", "12.5") when commissionKind is percent. */
+    commissionPercent: z.string(),
+    /** Cents per unit when commissionKind is flat. */
+    commissionCents: z.number().int().min(0).nullable(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.commissionKind === 'percent' && parsePercentToBps(v.commissionPercent) === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['commissionPercent'],
+        message: 'Enter a percentage between 0 and 100.',
+      });
+    }
+    if (v.commissionKind === 'flat' && v.commissionCents === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['commissionCents'],
+        message: 'Enter the amount paid per unit sold.',
+      });
+    }
+  });
 
 export type ServiceFormInput = z.input<typeof serviceFormSchema>;
 export type ServiceFormOutput = z.output<typeof serviceFormSchema>;
 
 export function serviceFormDefaults(service?: ServiceRow | null): ServiceFormInput {
+  const kind = service?.commission_kind ?? 'none';
+  const value = service?.commission_value ?? 0;
   return {
     name: service?.name ?? '',
     description: service?.description ?? '',
@@ -104,11 +152,41 @@ export function serviceFormDefaults(service?: ServiceRow | null): ServiceFormInp
     onlineBookable: service?.online_bookable ?? false,
     active: service?.active ?? true,
     sort: String(service?.sort ?? 0),
+    minBeforePhotos: String(service?.min_before_photos ?? 0),
+    minAfterPhotos: String(service?.min_after_photos ?? 0),
+    commissionKind: kind,
+    commissionPercent: kind === 'percent' ? bpsToPercentInput(value) : '',
+    commissionCents: kind === 'flat' ? value : null,
   };
 }
 
-/** Form output → the columns of `services` it edits (never shop_id / archived_at). */
-export function serviceColumns(values: ServiceFormOutput) {
+/** The commission columns a form sets (services_money_commission_guard: owners / admins only). */
+export function commissionColumns(values: ServiceFormOutput): {
+  commission_kind: CommissionKind;
+  commission_value: number;
+} {
+  switch (values.commissionKind) {
+    case 'percent':
+      return {
+        commission_kind: 'percent',
+        commission_value: parsePercentToBps(values.commissionPercent) ?? 0,
+      };
+    case 'flat':
+      return { commission_kind: 'flat', commission_value: values.commissionCents ?? 0 };
+    default:
+      return { commission_kind: 'none', commission_value: 0 };
+  }
+}
+
+/**
+ * Form output → the columns of `services` it edits (never shop_id /
+ * archived_at). Commission columns only when the editor may set them
+ * (owners / admins), so a manager's save never touches pay settings.
+ */
+export function serviceColumns(
+  values: ServiceFormOutput,
+  { commission = false }: { commission?: boolean } = {},
+) {
   return {
     name: values.name,
     description: values.description,
@@ -119,7 +197,22 @@ export function serviceColumns(values: ServiceFormOutput) {
     online_bookable: values.onlineBookable,
     active: values.active,
     sort: values.sort,
+    min_before_photos: values.minBeforePhotos,
+    min_after_photos: values.minAfterPhotos,
+    ...(commission ? commissionColumns(values) : {}),
   };
+}
+
+/** "10% of the line" / "$5.00 per unit" / null (none). */
+export function describeCommission(
+  service: Pick<ServiceRow, 'commission_kind' | 'commission_value'>,
+  currency: string,
+): string | null {
+  if (service.commission_kind === 'percent')
+    return `${formatBps(service.commission_value)} of the line`;
+  if (service.commission_kind === 'flat')
+    return `${formatCents(service.commission_value, { currency })} per unit sold`;
+  return null;
 }
 
 export const categoryFormSchema = z.object({ name: zRequiredText('Name', 80) });
@@ -352,4 +445,108 @@ export function soleAddonServices(
 ): string[] {
   const hasOther = new Set(links.filter((l) => l.addon_id !== addonId).map((l) => l.service_id));
   return serviceIds.filter((id) => !hasOther.has(id));
+}
+
+// ------------------------------------------------------------ follow-ups
+
+/** service_followups.offset_days CHECK. */
+export const FOLLOWUP_MAX_DAYS = 1095;
+/** A 5th follow-up per service and channel is refused (23514). */
+export const MAX_FOLLOWUPS_PER_CHANNEL = 4;
+/** "Months" are counted as 30 days (offsets are stored in days). */
+export const MONTH_DAYS = 30;
+
+export type OffsetUnit = 'days' | 'weeks' | 'months';
+
+export const OFFSET_UNIT_LABELS: Record<OffsetUnit, string> = {
+  days: 'days',
+  weeks: 'weeks',
+  months: 'months (30 days)',
+};
+
+export function daysToOffsetParts(days: number): { amount: string; unit: OffsetUnit } {
+  if (days > 0 && days % MONTH_DAYS === 0)
+    return { amount: String(days / MONTH_DAYS), unit: 'months' };
+  if (days > 0 && days % 7 === 0) return { amount: String(days / 7), unit: 'weeks' };
+  return { amount: String(days), unit: 'days' };
+}
+
+/** Whole days for an amount + unit, or an error message. */
+export function offsetPartsToDays(
+  amount: string,
+  unit: OffsetUnit,
+): { days: number; error: null } | { days: null; error: string } {
+  const text = amount.trim();
+  if (!/^\d{1,4}$/.test(text) || Number(text) < 1) {
+    return { days: null, error: 'Enter a whole number, 1 or more.' };
+  }
+  const n = Number(text);
+  const days = unit === 'months' ? n * MONTH_DAYS : unit === 'weeks' ? n * 7 : n;
+  if (days > FOLLOWUP_MAX_DAYS) {
+    return { days: null, error: 'Follow-ups can be at most 3 years (1095 days) after the visit.' };
+  }
+  return { days, error: null };
+}
+
+/** "2 weeks after the visit" / "6 months after the visit" / "10 days after the visit". */
+export function describeFollowupOffset(days: number): string {
+  const { amount, unit } = daysToOffsetParts(days);
+  const n = Number(amount);
+  const word =
+    unit === 'months'
+      ? n === 1
+        ? 'month'
+        : 'months'
+      : unit === 'weeks'
+        ? n === 1
+          ? 'week'
+          : 'weeks'
+        : n === 1
+          ? 'day'
+          : 'days';
+  return `${n} ${word} after the visit`;
+}
+
+// ---------------------------------------------------------- consumables
+
+/** A quantity per unit sold: > 0, at most 3 decimals (numeric(12,3)). */
+export function parseQuantity(text: string): number | null {
+  const t = text.trim().replace(',', '.');
+  if (!/^\d{1,9}(\.\d{1,3})?$/.test(t)) return null;
+  const n = Number(t);
+  return n > 0 ? n : null;
+}
+
+/** 1.5 → "1.5", 2 → "2" (no float noise). */
+export function formatQuantity(value: number): string {
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 }).format(value);
+}
+
+// ------------------------------------------------ category bookable days
+
+export const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+export const WEEKDAY_LONG = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+] as const;
+
+/** "Every day" / "Mon, Wed, Fri" / "Never online" (bookable_weekdays: 0 = Sunday … 6). */
+export function describeWeekdays(weekdays: readonly number[] | null | undefined): string {
+  if (!weekdays || weekdays.length === 7) return 'Every day';
+  if (weekdays.length === 0) return 'No days (not bookable online)';
+  return [...weekdays]
+    .sort((a, b) => a - b)
+    .map((d) => WEEKDAY_SHORT[d] ?? '')
+    .join(', ');
+}
+
+/** The value to store: every day selected → null (no restriction). */
+export function weekdaysValue(selected: ReadonlySet<number>): number[] | null {
+  if (selected.size === 7) return null;
+  return [...selected].sort((a, b) => a - b);
 }

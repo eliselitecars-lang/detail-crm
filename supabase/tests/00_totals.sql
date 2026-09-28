@@ -141,3 +141,55 @@ select tests.ok((select bool_and(j.subtotal_cents = r.subtotal_cents and j.disco
                       from public.job_line_items li where li.job_id = j.id),
                    j.discount_kind, j.discount_value, j.tax_rate_bps) r),
                 'every job''s stored totals match compute_document_totals');
+
+-- ------------------------------------------------------------ discount-eligible lines (money 0062)
+-- E = eligible subtotal, ET = eligible taxable subtotal; the discount applies to E
+-- (capped at E) and its taxable share is round(discount x ET / E).
+select tests.eq(pg_temp.t('[{"quantity":1,"unit_price_cents":10000,"taxable":true,"discount_eligible":true},
+                            {"quantity":1,"unit_price_cents":5000,"taxable":false,"discount_eligible":true}]', 'percent', 1000, 825),
+                '15000/1500/743/14243', 'every line eligible (explicitly): identical to the classic formula');
+select tests.eq(pg_temp.t('[{"quantity":1,"unit_price_cents":10000,"taxable":true},
+                            {"quantity":1,"unit_price_cents":5000,"taxable":false,"discount_eligible":false}]', 'percent', 1000, 825),
+                '15000/1000/743/14743', '10% of the eligible 10000 only; tax on 10000 - 1000 = 742.5 -> 743');
+select tests.eq(pg_temp.t('[{"quantity":1,"unit_price_cents":3000,"discount_eligible":true},
+                            {"quantity":1,"unit_price_cents":7000,"discount_eligible":false}]', 'fixed', 5000, 0),
+                '10000/3000/0/7000', 'a fixed discount is capped at the eligible subtotal, not the whole subtotal');
+select tests.eq(pg_temp.t('[{"quantity":1,"unit_price_cents":7000,"discount_eligible":false}]', 'percent', 5000, 1000),
+                '7000/0/700/7700', 'no eligible line: no discount (percent)');
+select tests.eq(pg_temp.t('[{"quantity":1,"unit_price_cents":7000,"discount_eligible":false}]', 'fixed', 500, 1000),
+                '7000/0/700/7700', 'no eligible line: no discount (fixed), no division by zero');
+select tests.eq(pg_temp.t('[{"quantity":1,"unit_price_cents":6000,"taxable":true},
+                            {"quantity":1,"unit_price_cents":4000,"taxable":false},
+                            {"quantity":1,"unit_price_cents":10000,"taxable":true,"discount_eligible":false}]', 'fixed', 1000, 1000),
+                '20000/1000/1540/20540',
+                'taxable share of the discount comes from eligible lines only: round(1000 x 6000 / 10000) = 600; tax on 16000 - 600');
+select tests.eq((select taxable_subtotal_cents || '/' || taxable_discount_cents
+                   from public.compute_document_totals('[{"quantity":1,"unit_price_cents":6000,"taxable":true},
+                            {"quantity":1,"unit_price_cents":4000,"taxable":false},
+                            {"quantity":1,"unit_price_cents":10000,"taxable":true,"discount_eligible":false}]', 'fixed', 1000, 1000)),
+                '16000/600', 'taxable subtotal includes ineligible taxable lines; taxable discount only the eligible share');
+select tests.eq(pg_temp.t('[{"quantity":1,"unit_price_cents":1005,"discount_eligible":true},
+                            {"quantity":3,"unit_price_cents":999,"discount_eligible":false}]', 'percent', 5000, 0),
+                '4002/503/0/3499', 'percent of the eligible 1005 = 502.5 rounds half up to 503');
+select tests.eq(pg_temp.t('[{"quantity":1,"unit_price_cents":3333,"taxable":true},
+                            {"quantity":1,"unit_price_cents":3333,"taxable":false,"discount_eligible":null},
+                            {"quantity":1,"unit_price_cents":3334,"taxable":true}]', 'fixed', 1001, 1000),
+                '10000/1001/600/9599', 'discount_eligible null reads as eligible (default)');
+select tests.throws($$select public.compute_document_totals('[{"unit_price_cents":1,"discount_eligible":"yes"}]')$$, '22023',
+                    'discount_eligible must be a boolean');
+select tests.ok((select bool_and(r.total_cents = r.subtotal_cents - r.discount_cents + r.tax_cents
+                                 and r.discount_cents <= e.eligible and r.taxable_discount_cents <= r.taxable_subtotal_cents)
+                 from generate_series(1, 200) g
+                 cross join lateral (select jsonb_agg(jsonb_build_object('quantity', (1 + (g * k) % 3),
+                                                                          'unit_price_cents', (g * 7919 * k) % 25000,
+                                                                          'taxable', (g + k) % 2 = 0,
+                                                                          'discount_eligible', (g * k) % 3 <> 0)) as lines
+                                       from generate_series(1, 4) k) l
+                 cross join lateral (select coalesce(sum(public.line_total_cents((x ->> 'quantity')::numeric,
+                                                                                 (x ->> 'unit_price_cents')::bigint, 0))
+                                                     filter (where (x ->> 'discount_eligible')::boolean), 0) as eligible
+                                       from jsonb_array_elements(l.lines) x) e
+                 cross join lateral public.compute_document_totals(l.lines,
+                   case when g % 2 = 0 then 'percent' else 'fixed' end::public.discount_kind,
+                   case when g % 2 = 0 then (g * 37) % 10001 else (g * 911) % 60000 end, (g * 13) % 1500) r),
+                'property: total = subtotal - discount + tax, discount <= eligible subtotal, taxable discount <= taxable subtotal (200 cases)');

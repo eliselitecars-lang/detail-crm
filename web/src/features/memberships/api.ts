@@ -84,8 +84,12 @@ const subscriberRowSchema = z.object({
       id: z.string(),
       name: z.string(),
       price_cents: z.number(),
-      interval: z.enum(['month', 'year']),
+      interval: z.enum(['week', 'month', 'year']),
       interval_count: z.number(),
+      included_uses_per_period: z
+        .number()
+        .nullish()
+        .transform((v) => v ?? null),
     })
     .nullable(),
   customer: z
@@ -115,7 +119,7 @@ export type SubscriberRow = z.infer<typeof subscriberRowSchema>;
 
 const SUBSCRIBER_COLUMNS =
   'id, status, plan_id, customer_id, vehicle_id, stripe_subscription_id, current_period_end, cancel_at_period_end, started_at, cancelled_at, created_at, ' +
-  'plan:membership_plans(id, name, price_cents, interval, interval_count), ' +
+  'plan:membership_plans(id, name, price_cents, interval, interval_count, included_uses_per_period), ' +
   'customer:customers(id, first_name, last_name, company, phone, email, sms_opted_out_at, email_opted_out_at), ' +
   'vehicle:vehicles(id, year, make, model, license_plate)';
 
@@ -155,6 +159,12 @@ export interface PlanInput {
   included_service_ids: string[];
   discount_bps: number;
   active: boolean;
+  /** Offered on the public join page (/join/<slug>). */
+  online_joinable: boolean;
+  /** Included services may be used this many times per billing period (null = unlimited). */
+  included_uses_per_period: number | null;
+  /** Shown on the join page and at checkout. */
+  terms: string | null;
 }
 
 export function useSavePlan() {
@@ -206,6 +216,35 @@ export function useArchivePlan() {
   });
 }
 
+export const membershipUsageSchema = z.object({
+  uses_per_period: z.number().int().nullable(),
+  uses_this_period: z.number().int(),
+  period_start: z.string().nullable(),
+  period_end: z.string().nullable(),
+});
+export type MembershipUsage = z.infer<typeof membershipUsageSchema>;
+
+/** Included-service uses in the current billing period (membership_usage, managers+). */
+export function useMembershipUsage(membershipId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: [...membershipKeys.all(shopId), 'usage', membershipId] as const,
+    enabled,
+    staleTime: 60_000,
+    queryFn: async (): Promise<MembershipUsage> =>
+      membershipUsageSchema.parse(
+        unwrap(await supabase.rpc('membership_usage', { p_membership_id: membershipId })),
+      ),
+  });
+}
+
+/** "2 of 4 used", "3 used" (unlimited). */
+export function usageText(usage: Pick<MembershipUsage, 'uses_per_period' | 'uses_this_period'>) {
+  return usage.uses_per_period === null
+    ? `${usage.uses_this_period} used`
+    : `${usage.uses_this_period} of ${usage.uses_per_period} used`;
+}
+
 export function useCreateMembership() {
   const invalidate = useInvalidateMemberships();
   return useMutation({
@@ -226,7 +265,7 @@ export const checkoutResultSchema = z.object({
   url: z.url(),
   expires_at: z.number().nullable().optional(),
   amount_cents: z.number().int(),
-  interval: z.enum(['month', 'year']),
+  interval: z.enum(['week', 'month', 'year']),
   interval_count: z.number().int(),
   currency: z.string(),
 });

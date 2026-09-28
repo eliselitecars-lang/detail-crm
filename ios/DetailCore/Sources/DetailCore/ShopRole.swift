@@ -71,6 +71,9 @@ public enum Capability: String, CaseIterable, Sendable {
     case editJobs
     case createJobs
     case progressAssignedJobs
+    /// Publish / send the customer job report of a job the member works
+    /// (managers and above; technicians when the shop allows it).
+    case shareJobReports
 
     // Money
     case manageQuotes
@@ -101,9 +104,12 @@ public enum Capability: String, CaseIterable, Sendable {
 public struct ShopPolicy: Equatable, Sendable {
     /// `shops.techs_can_collect_payments`.
     public var techsCanCollectPayments: Bool
+    /// `shops.techs_can_share_reports` (P-8).
+    public var techsCanShareReports: Bool
 
-    public init(techsCanCollectPayments: Bool = false) {
+    public init(techsCanCollectPayments: Bool = false, techsCanShareReports: Bool = false) {
         self.techsCanCollectPayments = techsCanCollectPayments
+        self.techsCanShareReports = techsCanShareReports
     }
 }
 
@@ -135,6 +141,9 @@ extension ShopRole {
 
         case .collectPaymentOnAssignedJob:
             return isManagerOrAbove || policy.techsCanCollectPayments
+
+        case .shareJobReports:
+            return isManagerOrAbove || policy.techsCanShareReports
 
         case .viewOwnReports:
             return true

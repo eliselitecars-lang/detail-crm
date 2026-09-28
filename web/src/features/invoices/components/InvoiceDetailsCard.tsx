@@ -19,7 +19,7 @@ import {
 import { formatPhone } from '@/lib/phone';
 import type { PickerCustomer } from '@/features/quotes/shared/api';
 import { customerName } from '@/features/quotes/shared/format';
-import { useUpdateInvoice, type InvoicePatch, type InvoiceRow } from '../api';
+import { useUpdateInvoice, type InvoiceJob, type InvoicePatch, type InvoiceRow } from '../api';
 
 const MAX_TEXT = 20000;
 
@@ -46,6 +46,8 @@ export interface InvoiceDetailsCardProps {
   today: string;
   /** manager+ on a non-void invoice */
   editable: boolean;
+  /** Jobs the invoice bills (grouped invoices list every one). */
+  jobs?: readonly InvoiceJob[];
 }
 
 export function InvoiceDetailsCard({
@@ -54,6 +56,7 @@ export function InvoiceDetailsCard({
   timezone,
   today,
   editable,
+  jobs = [],
 }: InvoiceDetailsCardProps) {
   const toast = useToast();
   const update = useUpdateInvoice(invoice.id);
@@ -145,6 +148,29 @@ export function InvoiceDetailsCard({
           ? [
               { key: 'voided', label: 'Voided', value: formatDate(invoice.voided_at, timezone) },
               { key: 'reason', label: 'Void reason', value: invoice.void_reason },
+            ]
+          : []),
+        ...(!invoice.job_id && jobs.length > 0
+          ? [
+              {
+                key: 'jobs',
+                label: `Jobs (${jobs.length})`,
+                value: (
+                  <span className="inline-flex flex-wrap justify-end gap-x-2 gap-y-1">
+                    {jobs.map((row) =>
+                      row.job ? (
+                        <Link
+                          key={row.job_id}
+                          to={`/app/jobs/${row.job_id}`}
+                          className="text-primary-ink hover:underline"
+                        >
+                          #{row.job.number}
+                        </Link>
+                      ) : null,
+                    )}
+                  </span>
+                ),
+              },
             ]
           : []),
         ...(invoice.job_id

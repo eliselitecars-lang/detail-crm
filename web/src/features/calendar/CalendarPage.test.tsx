@@ -1,11 +1,25 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { membership, renderRoute, shopValue } from '@/test/render';
-import { createBuilder, resetSupabaseMock, setTableResult, supabase } from '@/test/supabaseMock';
+import {
+  builders,
+  createBuilder,
+  resetSupabaseMock,
+  setTableResult,
+  supabase,
+} from '@/test/supabaseMock';
 import { TEAM } from '@/features/jobs/testFixtures';
 import CalendarPage from './CalendarPage';
 
 vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
+// Leaflet needs a real layout engine; the day map's list and route are what matter here.
+vi.mock('./LeafletMap', () => ({
+  default: ({ stops }: { stops: { label: string }[] }) => (
+    <div role="region" aria-label="Map of the day’s stops">
+      {stops.map((s) => s.label).join(', ')}
+    </div>
+  ),
+}));
 
 const JOB = {
   event_type: 'job',
@@ -183,5 +197,264 @@ describe('CalendarPage', () => {
       '/app/settings/resources',
     );
     expect(screen.getByRole('region', { name: 'No bay / van' })).toBeInTheDocument();
+  });
+
+  it('marks repeating jobs and shows calendar events by kind', async () => {
+    setup('owner', [
+      { ...JOB, series_id: 'series-1' },
+      {
+        ...BUSY,
+        event_type: 'blocked_time',
+        id: 'blk-1',
+        is_busy_block: true,
+        event_kind: 'meeting',
+        title: 'Team meeting',
+        starts_at: '2026-09-29T19:00:00Z',
+        ends_at: '2026-09-29T20:00:00Z',
+      },
+    ]);
+    expect(await screen.findByText('#1001 · Jane Doe')).toBeInTheDocument();
+    expect(screen.getByText('Repeats:')).toBeInTheDocument();
+    expect(screen.getByText('Team meeting')).toBeInTheDocument();
+    expect(screen.getByText('Meeting:')).toBeInTheDocument();
+  });
+
+  it('lets a manager add a calendar event', async () => {
+    const { user } = setup();
+    setTableResult('blocked_times', { data: { id: 'blk-new' } });
+    await screen.findByText('#1001 · Jane Doe');
+    await user.click(screen.getByRole('button', { name: 'New event' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New event' });
+    await user.type(within(dialog).getByLabelText('Title'), 'Staff training');
+    await user.selectOptions(within(dialog).getByLabelText('Team member'), 'member-2');
+    await user.click(within(dialog).getByRole('button', { name: 'Add event' }));
+    await waitFor(() =>
+      expect(builders.blocked_times?.some((b) => b.insert.mock.calls.length > 0)).toBe(true),
+    );
+    const insert = builders.blocked_times?.find((b) => b.insert.mock.calls.length > 0)?.insert;
+    // today (Mon 28 Sep) 09:00–10:00 in America/Chicago, not the browser's zone
+    expect(insert).toHaveBeenCalledWith({
+      shop_id: 'shop-1',
+      kind: 'meeting',
+      member_id: 'member-2',
+      customer_id: null,
+      title: 'Staff training',
+      reason: null,
+      starts_at: '2026-09-28T14:00:00.000Z',
+      ends_at: '2026-09-28T15:00:00.000Z',
+      affects_capacity: false,
+      color: null,
+      recurrence: null,
+    });
+  });
+
+  it('ends a repeating event before the opened occurrence', async () => {
+    const { user } = setup('owner', [
+      JOB,
+      {
+        ...BUSY,
+        event_type: 'blocked_time',
+        id: 'blk-1',
+        event_kind: 'meeting',
+        title: 'Weekly huddle',
+        starts_at: '2026-09-29T14:00:00Z',
+        ends_at: '2026-09-29T15:00:00Z',
+      },
+    ]);
+    setTableResult('blocked_times', {
+      data: {
+        id: 'blk-1',
+        member_id: null,
+        starts_at: '2026-09-15T14:00:00Z',
+        ends_at: '2026-09-15T15:00:00Z',
+        reason: null,
+        kind: 'meeting',
+        title: 'Weekly huddle',
+        customer_id: null,
+        affects_capacity: false,
+        color: null,
+        recurrence: { freq: 'week', interval: 1, count: 10 },
+      },
+    });
+    await user.click(await screen.findByText('Weekly huddle'));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit event' });
+    // the opened occurrence, not the series' first date
+    expect(within(dialog).getByLabelText('Start date')).toHaveValue('2026-09-29');
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete this event?' });
+    await user.click(within(confirm).getByRole('radio', { name: 'This and later occurrences' }));
+    await user.click(within(confirm).getByRole('button', { name: 'Delete' }));
+    await waitFor(() =>
+      expect((builders.blocked_times ?? []).flatMap((b) => b.update.mock.calls)).toContainEqual([
+        { recurrence: { freq: 'week', interval: 1, until_date: '2026-09-28' } },
+      ]),
+    );
+    expect((builders.blocked_times ?? []).some((b) => b.delete.mock.calls.length > 0)).toBe(false);
+  });
+
+  it('opens a closure from the calendar and shows calendar events once in the bay view', async () => {
+    const closure = {
+      ...BUSY,
+      event_type: 'blocked_time',
+      id: 'blk-closed',
+      is_busy_block: true,
+      event_kind: 'closed',
+      title: 'Holiday',
+      starts_at: '2026-09-28T19:00:00Z',
+      ends_at: '2026-09-28T21:00:00Z',
+    };
+    const meeting = {
+      ...closure,
+      id: 'blk-meet',
+      event_kind: 'meeting',
+      title: 'Team meeting',
+      starts_at: '2026-09-28T14:00:00Z',
+      ends_at: '2026-09-28T15:00:00Z',
+    };
+    const { user } = setup(
+      'owner',
+      [JOB, closure, meeting],
+      [
+        { id: 'bay-1', name: 'Bay 1', kind: 'bay', active: true, archived_at: null },
+        { id: 'van-1', name: 'Van 1', kind: 'van', active: true, archived_at: null },
+      ],
+    );
+    setTableResult('blocked_times', {
+      data: {
+        id: 'blk-closed',
+        member_id: null,
+        starts_at: '2026-09-28T19:00:00Z',
+        ends_at: '2026-09-28T21:00:00Z',
+        reason: null,
+        kind: 'closed',
+        title: 'Holiday',
+        customer_id: null,
+        affects_capacity: true,
+        color: null,
+        recurrence: null,
+      },
+    });
+    await screen.findByText('#1001 · Jane Doe');
+    expect(screen.getByText('Closed:')).toBeInTheDocument();
+    await user.click(screen.getByText('Holiday'));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit event' });
+    expect(within(dialog).getByLabelText('Title')).toHaveValue('Holiday');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await user.click(screen.getByRole('button', { name: 'Bays' }));
+    const none = await screen.findByRole('region', { name: 'No bay / van' });
+    expect(screen.getAllByText('Team meeting')).toHaveLength(1);
+    expect(within(none).getByText('Team meeting')).toBeInTheDocument();
+    expect(screen.getAllByText('Holiday')).toHaveLength(1);
+    expect(
+      within(screen.getByRole('region', { name: 'Bay 1' })).queryByText('Team meeting'),
+    ).toBeNull();
+  });
+
+  it('keeps the day map to the filters and the jobs that start that day', async () => {
+    const mobile = {
+      ...JOB,
+      location_type: 'mobile',
+      starts_at: '2026-09-28T15:00:00Z',
+      ends_at: '2026-09-28T16:00:00Z',
+      service_address: '1 Main St, Birmingham',
+      service_lat: 33.52,
+      service_lng: -86.81,
+    };
+    const { user } = setup('owner', [
+      mobile,
+      {
+        ...mobile,
+        id: 'job-4',
+        job_number: 1004,
+        title: 'Sam Lee',
+        assigned_member_ids: ['member-1'],
+        starts_at: '2026-09-28T17:00:00Z',
+        ends_at: '2026-09-28T18:00:00Z',
+      },
+      {
+        // a two-day coating that began yesterday (shop time)
+        ...mobile,
+        id: 'job-5',
+        job_number: 1005,
+        title: 'Coating for Ann Poe',
+        starts_at: '2026-09-27T14:00:00Z',
+        ends_at: '2026-09-28T22:00:00Z',
+      },
+    ]);
+    await screen.findByText('#1001 · Jane Doe');
+    await user.click(screen.getByRole('button', { name: 'Map' }));
+    const stops = await screen.findByRole('region', { name: 'Stops in route order' });
+    expect(within(stops).getByText('2 stops')).toBeInTheDocument();
+    const continuing = within(stops).getByRole('region', {
+      name: 'Continuing from an earlier day',
+    });
+    expect(within(continuing).getByText('Coating for Ann Poe')).toBeInTheDocument();
+    // notices meant for the other views stay away
+    expect(screen.queryByText(/No bays or vans set up yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No jobs in this range/)).not.toBeInTheDocument();
+
+    // the route sent to the server holds only the jobs that start this day
+    await user.click(within(stops).getByRole('button', { name: 'Move Sam Lee earlier' }));
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('set_route_order', {
+        p_shop_id: 'shop-1',
+        p_job_ids: ['job-4', 'job-1'],
+      }),
+    );
+
+    // the Team member filter narrows the map too
+    await user.selectOptions(screen.getByLabelText('Team member'), 'member-1');
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('region', { name: 'Stops in route order' })).getByText('1 stop'),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('Coating for Ann Poe')).not.toBeInTheDocument();
+    expect(screen.queryByText('Jane Doe')).not.toBeInTheDocument();
+  });
+
+  it('maps the day’s mobile stops, reorders them and hands the route to Google Maps', async () => {
+    const mobile = {
+      ...JOB,
+      location_type: 'mobile',
+      starts_at: '2026-09-28T15:00:00Z',
+      ends_at: '2026-09-28T16:00:00Z',
+      service_address: '1 Main St, Birmingham',
+      service_lat: 33.52,
+      service_lng: -86.81,
+    };
+    const { user } = setup('owner', [
+      mobile,
+      {
+        ...mobile,
+        id: 'job-4',
+        job_number: 1004,
+        title: 'Sam Lee',
+        starts_at: '2026-09-28T17:00:00Z',
+        ends_at: '2026-09-28T18:00:00Z',
+        service_address: '5 Oak Ave, Homewood',
+        service_lat: null,
+        service_lng: null,
+      },
+    ]);
+    await screen.findByText('#1001 · Jane Doe');
+    await user.click(screen.getByRole('button', { name: 'Map' }));
+    const stops = await screen.findByRole('region', { name: 'Stops in route order' });
+    expect(within(stops).getByText('2 stops')).toBeInTheDocument();
+    expect(within(stops).getByText(/Not located yet/)).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Map of the day’s stops' })).toHaveTextContent(
+      'Jane Doe',
+    );
+    const link = within(stops).getByRole('link', { name: /Open route in Google Maps/ });
+    expect(link.getAttribute('href')).toContain('https://www.google.com/maps/dir/?api=1');
+
+    await user.click(within(stops).getByRole('button', { name: 'Move Sam Lee earlier' }));
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('set_route_order', {
+        p_shop_id: 'shop-1',
+        p_job_ids: ['job-4', 'job-1'],
+      }),
+    );
   });
 });

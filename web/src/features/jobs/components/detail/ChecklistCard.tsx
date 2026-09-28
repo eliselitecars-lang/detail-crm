@@ -1,6 +1,7 @@
-import { Plus, Trash2 } from 'lucide-react';
+import { Asterisk, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import {
+  Badge,
   Button,
   Checkbox,
   EmptyState,
@@ -21,6 +22,7 @@ import {
   useChecklist,
   useChecklistTemplates,
   useDeleteChecklistItem,
+  useSetChecklistItemRequired,
   useToggleChecklistItem,
 } from '../../fieldApi';
 
@@ -34,11 +36,14 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
   const remove = useDeleteChecklistItem(jobId);
   const templates = useChecklistTemplates(canManage);
   const apply = useApplyChecklistTemplate(jobId);
+  const setRequired = useSetChecklistItemRequired(jobId);
   const [label, setLabel] = useState('');
+  const [required, setRequiredDraft] = useState(false);
   const [templateId, setTemplateId] = useState('');
 
   const rows = items.data ?? [];
   const done = rows.filter((i) => i.done_at).length;
+  const openRequired = rows.filter((i) => i.required && !i.done_at).length;
 
   const onAdd = async () => {
     if (!label.trim()) return;
@@ -46,8 +51,10 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
       await add.mutateAsync({
         label,
         sort: rows.reduce((max, i) => Math.max(max, i.sort), 0) + 1,
+        required,
       });
       setLabel('');
+      setRequiredDraft(false);
     } catch (error) {
       toast.error(error);
     }
@@ -67,7 +74,11 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
   return (
     <SectionCard
       title="Checklist"
-      description={rows.length > 0 ? `${done} of ${rows.length} done` : undefined}
+      description={
+        rows.length > 0
+          ? `${done} of ${rows.length} done${openRequired > 0 ? ` · ${openRequired} required to finish` : ''}`
+          : undefined
+      }
     >
       {items.isPending ? (
         <LoadingState label="Loading checklist…" />
@@ -84,7 +95,16 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
           {rows.map((item) => (
             <li key={item.id} className="flex items-start justify-between gap-2">
               <Checkbox
-                label={item.label}
+                label={
+                  <>
+                    {item.label}
+                    {item.required && (
+                      <Badge tone={item.done_at ? 'neutral' : 'warning'} className="ml-2">
+                        Required
+                      </Badge>
+                    )}
+                  </>
+                }
                 description={
                   item.done_at ? `Done ${formatDateTime(item.done_at, timezone)}` : undefined
                 }
@@ -96,15 +116,30 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
                 }
               />
               {canManage && (
-                <IconButton
-                  size="sm"
-                  variant="danger"
-                  label={`Remove ${item.label}`}
-                  icon={<Trash2 className="size-4" />}
-                  onClick={() =>
-                    remove.mutateAsync(item.id).catch((error: unknown) => toast.error(error))
-                  }
-                />
+                <span className="flex shrink-0 gap-0.5">
+                  <IconButton
+                    size="sm"
+                    variant={item.required ? 'secondary' : 'ghost'}
+                    label={`Required to complete: ${item.label}`}
+                    aria-pressed={item.required}
+                    icon={<Asterisk className="size-4" />}
+                    disabled={setRequired.isPending}
+                    onClick={() =>
+                      setRequired
+                        .mutateAsync({ id: item.id, required: !item.required })
+                        .catch((error: unknown) => toast.error(error))
+                    }
+                  />
+                  <IconButton
+                    size="sm"
+                    variant="danger"
+                    label={`Remove ${item.label}`}
+                    icon={<Trash2 className="size-4" />}
+                    onClick={() =>
+                      remove.mutateAsync(item.id).catch((error: unknown) => toast.error(error))
+                    }
+                  />
+                </span>
               )}
             </li>
           ))}
@@ -113,7 +148,7 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
       {canManage && (
         <div className="border-line mt-4 flex flex-col gap-3 border-t pt-4">
           <form
-            className="flex gap-2"
+            className="flex flex-wrap gap-2 sm:flex-nowrap"
             onSubmit={(e) => {
               e.preventDefault();
               void onAdd();
@@ -125,6 +160,12 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
               maxLength={200}
               value={label}
               onChange={(e) => setLabel(e.target.value)}
+            />
+            <Checkbox
+              className="shrink-0 self-center"
+              label="Required"
+              checked={required}
+              onChange={(e) => setRequiredDraft(e.target.checked)}
             />
             <Button
               type="submit"

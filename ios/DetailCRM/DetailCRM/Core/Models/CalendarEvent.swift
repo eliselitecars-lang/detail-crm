@@ -13,6 +13,13 @@
 //                       time; the reason is hidden from technicians unless
 //                       the block is shop-wide or their own.
 //
+//  v2 (0052, P-17) adds `event_kind` (`job`, or the blocked time's kind:
+//  closed / time_off / meeting / consultation / reminder / other), the
+//  job's `series_id`, the event `color`, and the job's service coordinates
+//  (full view only). Repeating events come back once per occurrence with
+//  the block's id, so `key` includes the start time. Customer-linked
+//  events name the customer for managers only.
+//
 
 import Foundation
 import DetailCore
@@ -38,8 +45,17 @@ struct CalendarEvent: Codable, Hashable, Sendable, Identifiable {
     var assignedMemberIDs: [UUID]
     /// Blocked times only: the member the block applies to (nil = whole shop).
     var memberID: UUID?
-    /// Jobs: "Customer — Service, Service"; blocked times: the reason.
+    /// Jobs: "Customer — Service, Service"; blocked times: the event
+    /// title, else the reason.
     var title: String?
+    /// `job` or the `calendar_event_kind` of a blocked time.
+    var eventKind: String?
+    /// Jobs of a recurring series.
+    var seriesID: UUID?
+    /// Event colour (`#RRGGBB`), when set.
+    var color: String?
+    var serviceLat: Double?
+    var serviceLng: Double?
 
     enum CodingKeys: String, CodingKey {
         case eventType = "event_type"
@@ -59,6 +75,11 @@ struct CalendarEvent: Codable, Hashable, Sendable, Identifiable {
         case assignedMemberIDs = "assigned_member_ids"
         case memberID = "member_id"
         case title
+        case eventKind = "event_kind"
+        case seriesID = "series_id"
+        case color
+        case serviceLat = "service_lat"
+        case serviceLng = "service_lng"
     }
 
     init(
@@ -78,7 +99,12 @@ struct CalendarEvent: Codable, Hashable, Sendable, Identifiable {
         resourceID: UUID? = nil,
         assignedMemberIDs: [UUID] = [],
         memberID: UUID? = nil,
-        title: String? = nil
+        title: String? = nil,
+        eventKind: String? = nil,
+        seriesID: UUID? = nil,
+        color: String? = nil,
+        serviceLat: Double? = nil,
+        serviceLng: Double? = nil
     ) {
         self.eventType = eventType
         self.id = id
@@ -97,6 +123,11 @@ struct CalendarEvent: Codable, Hashable, Sendable, Identifiable {
         self.assignedMemberIDs = assignedMemberIDs
         self.memberID = memberID
         self.title = title
+        self.eventKind = eventKind
+        self.seriesID = seriesID
+        self.color = color
+        self.serviceLat = serviceLat
+        self.serviceLng = serviceLng
     }
 
     init(from decoder: Decoder) throws {
@@ -123,6 +154,11 @@ struct CalendarEvent: Codable, Hashable, Sendable, Identifiable {
         assignedMemberIDs = try c.decodeIfPresent([UUID].self, forKey: .assignedMemberIDs) ?? []
         memberID = try c.decodeIfPresent(UUID.self, forKey: .memberID)
         title = try c.decodeIfPresent(String.self, forKey: .title)
+        eventKind = try c.decodeIfPresent(String.self, forKey: .eventKind)
+        seriesID = try c.decodeIfPresent(UUID.self, forKey: .seriesID)
+        color = try c.decodeIfPresent(String.self, forKey: .color)
+        serviceLat = try c.decodeIfPresent(Double.self, forKey: .serviceLat)
+        serviceLng = try c.decodeIfPresent(Double.self, forKey: .serviceLng)
     }
 
     // MARK: - Derived
@@ -135,8 +171,33 @@ struct CalendarEvent: Codable, Hashable, Sendable, Identifiable {
 
     var isMobile: Bool { locationType == "mobile" }
 
-    /// Stable key across both event types (ids come from different tables).
-    var key: String { "\(eventType):\(id.uuidString)" }
+    /// Stable key across both event types (ids come from different tables;
+    /// a repeating event has one row per occurrence with the same id).
+    var key: String {
+        if isBlockedTime {
+            return "\(eventType):\(id.uuidString):\(Int(startsAt.timeIntervalSince1970))"
+        }
+        return "\(eventType):\(id.uuidString)"
+    }
+
+    /// The blocked time's kind (`closed` for rows from before kinds).
+    var blockKind: JobsCalendarEvent.Kind? {
+        guard isBlockedTime else { return nil }
+        return JobsCalendarEvent.Kind(rawValue: eventKind ?? "closed") ?? .other
+    }
+
+    /// Closed hours and time off are drawn as shading behind the jobs;
+    /// meetings, consultations, reminders and other events as blocks.
+    var isBackgroundBlock: Bool {
+        guard let kind = blockKind else { return false }
+        return kind == .closed || kind == .timeOff
+    }
+
+    /// A calendar event (blocked-time row) drawn and opened like a block.
+    var isForegroundEvent: Bool { isBlockedTime && !isBackgroundBlock }
+
+    /// An occurrence of a recurring job series.
+    var isSeriesJob: Bool { isJob && seriesID != nil }
 
     /// The service part of a job title ("Ana Ruiz — Full Detail, Wax" ->
     /// "Full Detail, Wax"), or nil.
@@ -160,7 +221,7 @@ struct CalendarEvent: Codable, Hashable, Sendable, Identifiable {
     /// rows show separately via `servicesSummary`).
     var displayTitle: String {
         if isBlockedTime {
-            return title?.trimmedNonEmpty ?? "Blocked"
+            return title?.trimmedNonEmpty ?? blockKind?.displayName ?? "Blocked"
         }
         if isBusyBlock { return "Busy" }
         return customerName?.trimmedNonEmpty ?? titleCustomerPart ?? "Job"

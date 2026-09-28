@@ -4,6 +4,7 @@
  * content fields, lines and the status moves staff are allowed to make
  * directly (→ draft / approved / declined), and calls the RPCs for the rest.
  */
+import type { PostgrestError } from '@supabase/supabase-js';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { pageRange } from '@/components/ui';
@@ -20,6 +21,13 @@ import type { Enums } from './shared/types';
 export type QuoteStatus = Enums['quote_status'];
 export type QuoteRow = Row<'quotes'>;
 export type QuoteLineRow = Row<'quote_line_items'>;
+export type QuoteOptionRow = Row<'quote_options'>;
+
+/** Most proposal options a quote can have (quote_options_before_write). */
+export const MAX_QUOTE_OPTIONS = 4;
+
+/** Default names for a fresh set of options (renamed freely; no prices implied). */
+export const STARTER_OPTION_NAMES: readonly string[] = ['Option 1', 'Option 2'];
 
 export const QUOTE_PAGE_SIZE = 25;
 
@@ -38,6 +46,7 @@ export const quoteKeys = {
     [...quoteKeys.all(shopId), 'list', filters] as const,
   detail: (shopId: string, id: string) => [...quoteKeys.all(shopId), 'detail', id] as const,
   lines: (shopId: string, id: string) => [...quoteKeys.all(shopId), 'lines', id] as const,
+  options: (shopId: string, id: string) => [...quoteKeys.all(shopId), 'options', id] as const,
 };
 
 const customerEmbed = z
@@ -186,6 +195,11 @@ export function toDocLine(row: QuoteLineRow): DocLine {
     optional: row.optional,
     selected: row.selected,
     duration_minutes: row.duration_minutes,
+    // Normalised: rows from before the parity columns read as their defaults.
+    discount_eligible: row.discount_eligible ?? true,
+    fee_id: row.fee_id ?? null,
+    option_id: row.option_id ?? null,
+    job_id: null,
   };
 }
 
@@ -206,6 +220,69 @@ export function useQuoteLines(quoteId: string) {
   });
 }
 
+/** Proposal options (P-15) in display order, with their server totals. */
+export function useQuoteOptions(quoteId: string) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: quoteKeys.options(shopId, quoteId),
+    queryFn: async (): Promise<QuoteOptionRow[]> =>
+      unwrapList(
+        await supabase
+          .from('quote_options')
+          .select('*')
+          .eq('shop_id', shopId)
+          .eq('quote_id', quoteId)
+          .order('sort', { ascending: true })
+          .order('created_at', { ascending: true })
+          .order('id', { ascending: true }),
+      ),
+  });
+}
+
+/**
+ * The option a quote counts (mirrors quote_effective_option): the chosen
+ * one, else the first. null when the quote has no options.
+ */
+export function effectiveOptionId(
+  quote: Pick<QuoteRow, 'selected_option_id'>,
+  options: readonly Pick<QuoteOptionRow, 'id'>[],
+): string | null {
+  if (options.length === 0) return null;
+  if (quote.selected_option_id && options.some((o) => o.id === quote.selected_option_id)) {
+    return quote.selected_option_id;
+  }
+  return options[0]?.id ?? null;
+}
+
+export interface SelfScheduleSettings {
+  /** Online booking is on (booking_settings.enabled). */
+  bookingEnabled: boolean;
+  /** Customers may schedule approved quotes (booking_settings.quote_self_schedule). */
+  quoteSelfSchedule: boolean;
+}
+
+/** The shop switches quote self-scheduling depends on (every member may read them). */
+export function useSelfScheduleSettings() {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: shopKey(shopId, 'settings', 'money-quote-self-schedule'),
+    staleTime: 60_000,
+    queryFn: async (): Promise<SelfScheduleSettings> => {
+      const row = unwrap(
+        await supabase
+          .from('booking_settings')
+          .select('enabled, quote_self_schedule')
+          .eq('shop_id', shopId)
+          .maybeSingle(),
+      );
+      return {
+        bookingEnabled: row?.enabled ?? false,
+        quoteSelfSchedule: row?.quote_self_schedule ?? false,
+      };
+    },
+  });
+}
+
 function useInvalidateQuotes() {
   const { shopId } = useShop();
   const queryClient = useQueryClient();
@@ -218,14 +295,16 @@ export interface NewQuoteInput {
   validUntil: string | null;
   notes: string | null;
   terms: string | null;
+  /** Start with proposal options (named `optionNames`, renamed freely later). */
+  optionNames?: readonly string[];
 }
 
 export function useCreateQuote() {
   const { shopId, shop } = useShop();
   const invalidate = useInvalidateQuotes();
   return useMutation({
-    mutationFn: async (input: NewQuoteInput): Promise<QuoteRow> =>
-      unwrapRequired(
+    mutationFn: async (input: NewQuoteInput): Promise<QuoteRow> => {
+      const quote = unwrapRequired<QuoteRow>(
         await supabase
           .from('quotes')
           .insert({
@@ -243,7 +322,26 @@ export function useCreateQuote() {
           .select('*')
           .maybeSingle(),
         'quote',
-      ),
+      );
+      const names = input.optionNames ?? [];
+      if (names.length > 0) {
+        const created = await supabase.from('quote_options').insert(
+          names.map((name, index) => ({
+            shop_id: shopId,
+            quote_id: quote.id,
+            name,
+            sort: index + 1,
+          })),
+        );
+        if (created.error) {
+          // The staff member asked for options: don't hand back a single-set
+          // draft that could be sent without them. Remove it and report why.
+          await supabase.from('quotes').delete().eq('shop_id', shopId).eq('id', quote.id);
+          unwrap({ data: null, error: created.error });
+        }
+      }
+      return quote;
+    },
     onSettled: invalidate,
   });
 }
@@ -257,6 +355,8 @@ export type QuotePatch = Pick<
   | 'internal_notes'
   | 'discount_kind'
   | 'discount_value'
+  | 'self_schedule'
+  | 'selected_option_id'
 >;
 
 export function useUpdateQuote(quoteId: string) {
@@ -291,6 +391,8 @@ export type SetQuoteStatusInput =
        * selects exactly these and deselects the other optional lines).
        */
       selectedOptionalLineIds: readonly string[];
+      /** Required when the quote has proposal options: the one the customer chose. */
+      optionId?: string | null;
     }
   | { status: 'declined'; declinedReason?: string | null };
 
@@ -327,6 +429,7 @@ export function useSetQuoteStatus(quoteId: string) {
           ...(input.status === 'approved'
             ? { p_selected_optional_line_ids: [...input.selectedOptionalLineIds] }
             : {}),
+          ...(input.status === 'approved' && input.optionId ? { p_option_id: input.optionId } : {}),
           ...(text
             ? input.status === 'approved'
               ? { p_approved_by_name: text }
@@ -388,6 +491,8 @@ function lineInsert(shopId: string, quoteId: string, draft: LineDraft, sort: num
     shop_id: shopId,
     quote_id: quoteId,
     service_id: draft.service_id,
+    vehicle_id: draft.vehicle_id ?? null,
+    option_id: draft.option_id ?? null,
     name: draft.name,
     description: draft.description,
     quantity: draft.quantity,
@@ -403,17 +508,26 @@ function lineInsert(shopId: string, quoteId: string, draft: LineDraft, sort: num
 }
 
 /**
- * Duplicates a quote as a new draft with the same content and lines, priced
- * with the shop's CURRENT tax rate (like a new quote), not the old quote's.
- * Line vehicles that no longer belong to the customer are dropped (the
- * validate trigger would reject them), and if the lines still fail to copy
- * the half-made draft is deleted so no empty quote is left behind.
+ * Duplicates a quote as a new draft with the same content, proposal options
+ * and lines, priced with the shop's CURRENT tax rate (like a new quote), not
+ * the old quote's. Line vehicles that no longer belong to the customer are
+ * dropped (the validate trigger would reject them), and if the options or
+ * lines still fail to copy the half-made draft is deleted so no empty quote
+ * is left behind.
  */
 export function useDuplicateQuote() {
   const { shopId } = useShop();
   const invalidate = useInvalidateQuotes();
   return useMutation({
-    mutationFn: async ({ quote, lines }: { quote: QuoteRow; lines: readonly DocLine[] }) => {
+    mutationFn: async ({
+      quote,
+      lines,
+      options = [],
+    }: {
+      quote: QuoteRow;
+      lines: readonly DocLine[];
+      options?: readonly QuoteOptionRow[];
+    }) => {
       const shopRow = unwrapRequired<Pick<Row<'shops'>, 'tax_rate_bps'>>(
         await supabase.from('shops').select('tax_rate_bps').eq('id', shopId).maybeSingle(),
         'shop',
@@ -448,11 +562,40 @@ export function useDuplicateQuote() {
             internal_notes: quote.internal_notes,
             discount_kind: quote.discount_kind,
             discount_value: quote.discount_value,
+            self_schedule: quote.self_schedule,
           })
           .select('*')
           .maybeSingle(),
         'quote',
       );
+      const discard = async (failed: { error: PostgrestError | null }) => {
+        // Don't leave a half-made draft behind; the original error is what matters.
+        await supabase.from('quotes').delete().eq('shop_id', shopId).eq('id', copy.id);
+        unwrap({ data: null, error: failed.error });
+      };
+      const optionIds = new Map<string, string>();
+      if (options.length > 0) {
+        const created = await supabase
+          .from('quote_options')
+          .insert(
+            options.map((option, index) => ({
+              shop_id: shopId,
+              quote_id: copy.id,
+              name: option.name,
+              description: option.description,
+              sort: index + 1,
+            })),
+          )
+          .select('id, sort');
+        if (created.error || !created.data) {
+          await discard(created);
+          return copy;
+        }
+        for (const row of created.data) {
+          const source = options[row.sort - 1];
+          if (source) optionIds.set(source.id, row.id);
+        }
+      }
       if (lines.length > 0) {
         const inserted = await supabase.from('quote_line_items').insert(
           lines.map((line, index) => ({
@@ -461,18 +604,95 @@ export function useDuplicateQuote() {
               line.vehicle_id !== null && customerVehicles.has(line.vehicle_id)
                 ? line.vehicle_id
                 : null,
+            option_id: line.option_id ? (optionIds.get(line.option_id) ?? null) : null,
+            // Keep preset fee lines tied to their fee: a converted job's
+            // auto-fee trigger matches on fee_id, so an anonymous copy would
+            // be charged again when the location type changes.
+            fee_id: line.fee_id,
           })),
         );
-        if (inserted.error) {
-          // Don't leave an empty draft behind; the original error is what matters.
-          await supabase.from('quotes').delete().eq('shop_id', shopId).eq('id', copy.id);
-          unwrap(inserted);
-        }
+        if (inserted.error) await discard(inserted);
       }
       return copy;
     },
     onSettled: invalidate,
   });
+}
+
+export interface NewOptionInput {
+  name: string;
+  description?: string | null;
+}
+
+/**
+ * Proposal options (P-15): add (up to 4), rename, reorder, remove. Totals
+ * and the quote's counted option are recomputed by the server; removing an
+ * option removes its lines (FK cascade).
+ */
+export function useQuoteOptionMutations(quoteId: string, options: readonly QuoteOptionRow[]) {
+  const { shopId } = useShop();
+  const invalidate = useInvalidateQuotes();
+  const add = useMutation({
+    mutationFn: async (inputs: NewOptionInput[]) => {
+      const start = options.reduce((acc, option) => Math.max(acc, option.sort), 0);
+      return unwrapList(
+        await supabase
+          .from('quote_options')
+          .insert(
+            inputs.map((input, index) => ({
+              shop_id: shopId,
+              quote_id: quoteId,
+              name: input.name,
+              description: input.description ?? null,
+              sort: start + index + 1,
+            })),
+          )
+          .select('*'),
+      );
+    },
+    onSettled: invalidate,
+  });
+  const update = useMutation({
+    mutationFn: async ({
+      id,
+      patch,
+    }: {
+      id: string;
+      patch: Pick<UpdateRow<'quote_options'>, 'name' | 'description'>;
+    }) => {
+      unwrap(await supabase.from('quote_options').update(patch).eq('shop_id', shopId).eq('id', id));
+    },
+    onSettled: invalidate,
+  });
+  /** Swaps an option with its neighbour (sorts are rewritten 1..n in the new order). */
+  const move = useMutation({
+    mutationFn: async ({ id, direction }: { id: string; direction: -1 | 1 }) => {
+      const order = [...options];
+      const index = order.findIndex((o) => o.id === id);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= order.length) return;
+      const [moved] = order.splice(index, 1);
+      if (moved) order.splice(target, 0, moved);
+      for (const [i, option] of order.entries()) {
+        if (option.sort === i + 1) continue;
+        unwrap(
+          await supabase
+            .from('quote_options')
+            .update({ sort: i + 1 })
+            .eq('shop_id', shopId)
+            .eq('id', option.id),
+        );
+      }
+    },
+    onSettled: invalidate,
+  });
+  const remove = useMutation({
+    mutationFn: async (id: string) => {
+      unwrap(await supabase.from('quote_options').delete().eq('shop_id', shopId).eq('id', id));
+    },
+    onSettled: invalidate,
+  });
+  return { add, update, move, remove };
 }
 
 export function useQuoteLineMutations(quoteId: string, lines: readonly DocLine[]) {

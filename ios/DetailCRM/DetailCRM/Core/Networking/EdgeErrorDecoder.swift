@@ -78,7 +78,9 @@ enum EdgeErrorDecoder {
 
     /// Reads a non-2xx reply body. Our envelope keeps its own wording; any
     /// other body is mapped from the status (401, 403, 404, 429, 5xx), and
-    /// only for other statuses its `message` / `msg` is shown.
+    /// only for other statuses its `message` / `msg` is shown. A 402 (the
+    /// shop's subscription is inactive) shows the server's sentence, or the
+    /// neutral paused notice without one.
     static func decode(status: Int, data: Data) -> EdgeFunctionError {
         let object = (try? JSONDecoder().decode([String: AnyJSON].self, from: data)) ?? [:]
         let details = object["details"]?.asObject
@@ -93,6 +95,16 @@ enum EdgeErrorDecoder {
             )
         }
         let other = object["message"]?.asString?.trimmedNonEmpty ?? object["msg"]?.asString?.trimmedNonEmpty
+        if ShopEntitlement.PaymentRequired.matches(httpStatus: status) {
+            return EdgeFunctionError(
+                status: status,
+                code: object["code"]?.asString,
+                reason: nil,
+                message: ErrorText.sentence(ShopEntitlement.PaymentRequired.message(serverMessage: other)),
+                details: nil,
+                isEnvelope: false
+            )
+        }
         return EdgeFunctionError(
             status: status,
             code: object["code"]?.asString,

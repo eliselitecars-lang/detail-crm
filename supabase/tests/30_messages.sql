@@ -54,8 +54,9 @@ select tests.eq(public.comms_job_vars(tests.fx('job_a')),
                   'job_date', 'Monday, June 2', 'job_time', '10:00 AM', 'vehicle', '2021 Honda Civic',
                   'services', 'Full Detail',
                   'booking_link', 'https://app.example.test/booking/' || tests.fx('tok_a'),
-                  'quote_link', null, 'invoice_link', null, 'amount', '$200.00', 'balance', '$200.00'),
-                'job vars: names, shop, local date/time (CDT), vehicle, services, links, money');
+                  'quote_link', null, 'invoice_link', null, 'amount', '$200.00', 'balance', '$200.00',
+                  'rebook_link', 'https://app.example.test/book/shop-a'),
+                'job vars: names, shop, local date/time (CDT), vehicle, services, links, money, rebook link (0083)');
 
 -- winter (CST) and a UTC time that is still the previous local day
 update public.jobs set scheduled_start = '2025-01-15 15:00Z', scheduled_end = '2025-01-15 16:00Z' where id = tests.fx('job_a2');

@@ -131,22 +131,25 @@ describe('JobDetailPage', () => {
     const { user } = setup();
     const next = await screen.findByRole('button', { name: 'Mark as Confirmed' });
     await user.click(next);
+    // one RPC with the same transition rules as a direct update (0073)
     await waitFor(() =>
-      expect(builders.jobs?.some((b) => b.update.mock.calls.length > 0)).toBe(true),
+      expect(supabase.rpc).toHaveBeenCalledWith('set_job_status', {
+        p_job_id: 'job-1',
+        p_status: 'confirmed',
+      }),
     );
-    const statusUpdate = builders.jobs?.find((b) => b.update.mock.calls.length > 0);
-    expect(statusUpdate?.update).toHaveBeenCalledWith({ status: 'confirmed' });
 
     await user.click(screen.getByRole('button', { name: 'Cancel job' }));
     const dialog = await screen.findByRole('dialog', { name: 'Cancel this job?' });
     await user.type(within(dialog).getByLabelText(/Reason/), 'Customer rescheduled');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel job' }));
-    await waitFor(() => {
-      const calls = (builders.jobs ?? []).flatMap((b) => b.update.mock.calls);
-      expect(calls).toContainEqual([
-        { status: 'cancelled', cancel_reason: 'Customer rescheduled' },
-      ]);
-    });
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('set_job_status', {
+        p_job_id: 'job-1',
+        p_status: 'cancelled',
+        p_reason: 'Customer rescheduled',
+      }),
+    );
     // Open card payments / pay links are released first.
     expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
       body: { action: 'cancel_open_payments', shop_id: 'shop-1', job_id: 'job-1' },
@@ -162,8 +165,7 @@ describe('JobDetailPage', () => {
     expect(
       await within(dialog).findByText('A card payment is in progress — wait for it to finish.'),
     ).toBeInTheDocument();
-    const updates = (builders.jobs ?? []).flatMap((b) => b.update.mock.calls);
-    expect(updates).toEqual([]);
+    expect(supabase.rpc).not.toHaveBeenCalledWith('set_job_status', expect.anything());
   });
 
   it('says so when money was recorded, then marks the no-show', async () => {
@@ -173,10 +175,12 @@ describe('JobDetailPage', () => {
     const confirm = await screen.findByRole('alertdialog', { name: 'Mark as no-show?' });
     await user.click(within(confirm).getByRole('button', { name: 'Mark no-show' }));
     expect(await screen.findByText('A card payment was recorded')).toBeInTheDocument();
-    await waitFor(() => {
-      const calls = (builders.jobs ?? []).flatMap((b) => b.update.mock.calls);
-      expect(calls).toContainEqual([{ status: 'no_show' }]);
-    });
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('set_job_status', {
+        p_job_id: 'job-1',
+        p_status: 'no_show',
+      }),
+    );
   });
 
   it('moves a line with one reorder_job_line_items call', async () => {

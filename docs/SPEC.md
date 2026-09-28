@@ -71,6 +71,10 @@ ios/DetailCore/       Swift package with pure logic + tests
 | Reports | all | all | all | own hours/jobs/commission only |
 | Messages inbox (2-way SMS/email), campaigns | ✓ | ✓ | ✓ | send templated "on my way"/"job complete" for assigned jobs only |
 | Time clock | all entries | all entries | all entries (edit) | own clock in/out; cannot edit closed entries |
+| Shop subscription (platform billing, §4.10) | choose a plan, checkout, billing portal (web only) | view status | view status | standing only (to explain a refusal) |
+
+Shop subscription: purchase and management are owner-only and happen on the web app; the iPhone app never shows prices, plans or
+anything that leads to buying (App Store 3.1.1 / 3.1.3) — only neutral status text from `shop_entitlement` (§4.10).
 
 Helper SQL functions (SECURITY DEFINER, STABLE, `set search_path = ''`):
 `is_shop_member(shop_id)`, `shop_role_of(shop_id) returns shop_role`,
@@ -157,6 +161,38 @@ on customers, vehicles, services, membership_plans, resources.
 * `create_shop(name, slug, timezone, ...)` → creates shop + owner membership; each domain migration seeds its own defaults via `AFTER INSERT ON shops` triggers. `accept_invite(token)`.
 * `search_shop(shop, query)` — global search over customers, vehicles, jobs, quotes, invoices.
 
+### 4.10 Platform billing (shops pay the operator; 0100–0102, docs/BILLING.md)
+The operator charges shops a recurring subscription on the operator's own (platform) Stripe account — never a shop's Connect
+account. Plans and prices live in Stripe and are mirrored by the `billing` function; nothing about a plan is hard-coded.
+**Billing is off until the operator turns it on; while off every shop is fully usable.**
+* `platform_config` keys: `billing_enabled` (`'true'`/`'false'`, absent = off), `billing_trial_days` (0–730, absent = 0).
+  `set_billing_config(p_enabled, p_trial_days)` (service_role; the deploy) writes both; switching billing on starts the in-app
+  trial of every shop that never subscribed and has none. New shops get the trial while billing is on.
+* `platform_plans` — stripe_price_id (unique), stripe_product_id, name, description, amount_cents, currency, interval
+  (`month`|`year`), interval_count, max_members (null = unlimited), features text[], sort, active. **No client access**
+  (Stripe ids stay server-side): plans are listed by `public_billing_plans()` (anon + authenticated; `[]` while billing is off;
+  never Stripe ids) or the `billing` function.
+* `shop_billing` (1:1 with shops, row created by trigger) — stripe_customer_id, stripe_subscription_id, plan_id, status (Stripe's
+  subscription statuses + `none`), trial_ends_at, trial_used, current_period_end, cancel_at_period_end, comp_until,
+  last_event_at. Written only by definer code / service_role. Owners, admins and managers may SELECT it, but only through a
+  column grant without the Stripe ids and last_event_at (select explicit columns).
+* Standing (`billing_state`, the single rule set): billing off → `active`; comp_until > now → `comped`; subscription `active` /
+  `trialing` / `past_due` (still writes) as such; `none`/`incomplete` → `trialing` while trial_ends_at > now, else `lapsed`;
+  `canceled`/`unpaid`/`incomplete_expired`/`paused` → `active` until current_period_end, else `lapsed`. `can_write` =
+  not lapsed. `shop_entitlement(p_shop_id)` (any active member, else P0002) → {billing_enabled, state, reason, plan_name,
+  trial_ends_at, current_period_end, cancel_at_period_end, max_members, members_used, can_write, is_owner}; the plan, dates
+  and seats are for managers+ (null for technicians).
+* Lapsed shops keep reads, exports, edits, finishing existing jobs, collecting money on existing invoices / deposits and
+  managing billing. Refused with **PT402** (HTTP 402, neutral text shown verbatim on iPhone): new customers, jobs, quotes,
+  invoices, campaigns, job series and staff-written outbound messages when a signed-in member of the shop creates them
+  (service_role / cron / webhooks are never blocked). Online booking answers the existing 55000; automations, per-service and
+  document follow-ups and campaign sends skip the shop (no error, nothing logged).
+* Seat limit (plan max_members while billing is on and not comped): active members + pending unexpired invites; inviting or
+  (re)activating a member beyond it is PT402 `This shop's plan allows N team members.`; accepting an invite never fails.
+* Service-role RPCs (billing functions): billing_upsert_plan, billing_deactivate_plans_except, billing_checkout_context,
+  billing_link_customer, billing_apply_subscription (out-of-order safe), billing_payment_failed (owner notification
+  `billing_payment_failed`, neutral text), billing_set_comp (the operator's pilot-shop tool).
+
 ## 5. Edge functions (supabase/functions)
 
 Shared `_shared/` (cors, supabase admin client, auth → caller membership check, Stripe client factory, Twilio/Resend clients, template renderer, errors). Every function validates the caller's JWT and role **server-side**, derives all amounts from the database, and never trusts client totals.
@@ -170,8 +206,10 @@ Shared `_shared/` (cors, supabase admin client, auth → caller membership check
 | `invites` | `send_invite` (admin+; emails invite link) |
 | `storage-purge` | `purge` (pg_cron, cron secret): removes the stored files of deleted shops/jobs/inspections/forms queued in `storage_purge_requests` via the Storage API |
 | `account` | `delete_account` (any signed-in user, own account; 409 `owns_shops` while they own a shop — transfer ownership or delete it first; App Store 5.1.1(v)) |
+| `billing` | Shop subscription billing on the PLATFORM Stripe account (§4.10): `plans` (signed-in), `checkout` (owner; Checkout Session, mode subscription; carries the in-app trial), `portal` (owner; Stripe Customer Portal), `sync_plans` (cron secret; mirrors plan Products/Prices into platform_plans). verify_jwt off: the actions check the caller themselves |
+| `billing-webhook` | Platform billing webhook (own endpoint and secret; Connect events ignored; idempotent via `stripe_events`): checkout.session.completed, customer.subscription.created/updated/deleted, invoice.paid, invoice.payment_failed, product.* / price.* (plan sync) |
 
-Secrets (function env, never in repo): `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY`, `PLATFORM_FEE_BPS`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `RESEND_API_KEY`, `EMAIL_FROM`, `APP_BASE_URL`, `CRON_SECRET`.
+Secrets (function env, never in repo): `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_BILLING_WEBHOOK_SECRET` (platform billing endpoint), `STRIPE_PUBLISHABLE_KEY`, `PLATFORM_FEE_BPS`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `RESEND_API_KEY`, `EMAIL_FROM`, `APP_BASE_URL`, `CRON_SECRET`; optional `BILLING_AUTOMATIC_TAX` (Stripe Tax on subscription Checkout, off by default). Billing on/off and the trial length are database settings (`set_billing_config`), not secrets.
 
 ## 6. Web app (web/)
 
@@ -212,5 +250,16 @@ Architecture mirrors good SwiftUI practice: Theme tokens only, services as stati
 | 0070–0079 | field ops v2: customer-facing job reports + remote inspection sign-off, required checklists, documents, customer merge |
 | 0080–0089 | comms & integrations v2: push notifications, document follow-ups, multi reminders + per-service maintenance reminders, CSV import/export, custom fields + lead forms, booking embed/pixels, SMS number provisioning |
 | 0090–0099 | cross-cutting hardening and integration fixes (grants audit, indexes, cross-surface contract additions) |
+| 0100–0109 | shop subscription billing (platform Stripe account): 0100 schema (billing_payment_failed notification kind, platform_config keys, platform_plans, shop_billing), 0101 rules + RPCs, 0102 enforcement |
+
+Notes on the cross-cutting files: 0090 comms, 0092 CRM / ops and 0093 money integration primitives; 0094 staff_record_quote_response
+honours quote options (DROP + CREATE with a trailing `p_option_id`); 0095 parity fixes — upsert_customer_payment_method compares
+with the saved card's own Stripe customer (cards moved by a merge), `gift_card_order_expired(p_session_id)` (service_role,
+checkout.session.expired), HINTs `already_member` (membership_join_prepare) and `amount_out_of_range` (gift_card_order_prepare)
+on their unchanged 22023 errors, `p_request_nonce` on add_fee_line / import_customers / import_services (a retry returns the
+first result; ledger `client_requests`), shop timezone in the job report JSON and shop slug / timezone / currency on portal
+document / report / referral rows. blocked_times needed no change: technicians never read customer-linked events (0052).
+When a function has to change again, the replacement is copied from its LATEST definition (0102 replaces booking, automation,
+follow-up and claim functions; 0095 the import, fee, card, portal and prepare functions).
 
 Parity roadmap (from the Urable parity audit, 2026-09-27): P0 recurring jobs, push notifications, document follow-ups, multiple + per-service reminders, CSV import/export, Tap to Pay / Terminal (ships dark until Apple grants the entitlement); P1 multi-job invoicing, customer job reports, lead forms + custom fields, booking embed/QR/pixels, required checklists, tips + commissions, coupon restrictions, gift cards, self-serve SMS numbers (gated on Twilio ISV onboarding); P2 proposal options, quote self-scheduling, calendar events/capacity v2, day map + route hand-off, iCal feeds, customer merge, preset fees, VIN barcode scan, memberships v2, geostamped clock-in, documents, iOS realtime. Not built (partner agreements / compliance): QuickBooks sync, own processing, Carfax/Sirius XM, 3D visualizer, marketplace/store, voice calling, Android app, workflow builder, route optimization engine, Reserve with Google, card surcharging.

@@ -5,7 +5,8 @@
 //  The signed-in member's in-app notifications for the active shop:
 //  unread first, then newest. Tapping one marks it read and opens what it
 //  is about (`AppNotification.route`: the conversation, quote, invoice, job
-//  or customer). Swipe to toggle read or dismiss; "Mark all
+//  or customer; task notifications open the Tasks screen, as their pushes
+//  do). Swipe to toggle read or dismiss; "Mark all
 //  read" in the toolbar. Rows are created by the server (new bookings,
 //  quote answers, payments, inbound messages, signed forms).
 //
@@ -16,6 +17,8 @@ import DetailCore
 struct NotificationsView: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(JobsRealtimeHub.self) private var realtime
+    @Environment(JobsPushRegistrar.self) private var push
 
     @State private var state: LoadState<[AppNotification]> = .idle
 
@@ -37,6 +40,14 @@ struct NotificationsView: View {
         .screenBackground()
         .navigationTitle("Notifications")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                NavigationLink {
+                    JobsNotificationPrefsView()
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .accessibilityLabel("Push notification settings")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Mark all read") {
                     Task { @MainActor in
@@ -47,6 +58,10 @@ struct NotificationsView: View {
             }
         }
         .task { await load() }
+        // A new or changed notification (Realtime): re-read the list.
+        .onChange(of: realtime.revision(.notifications)) { _, _ in
+            Task { await load() }
+        }
     }
 
     // MARK: - Loading
@@ -68,6 +83,7 @@ struct NotificationsView: View {
             toasts.show(message, style: .error, duration: .seconds(5))
         }
         state.apply(result)
+        await push.refreshBadge()
     }
 
     // MARK: - Mutations (optimistic, rolled back on failure)
@@ -98,6 +114,7 @@ struct NotificationsView: View {
         Task { @MainActor in
             do {
                 try await NotificationService.setRead(shopID: shopID, id: item.id, read: read)
+                await push.refreshBadge()
             } catch {
                 replace(item)
                 toasts.showError(error)
@@ -122,6 +139,7 @@ struct NotificationsView: View {
         do {
             let shopID = try appState.requireShopID()
             try await NotificationService.markAllRead(shopID: shopID)
+            await push.refreshBadge()
             if let items = state.value {
                 let now = Date()
                 state = .loaded(items.map { item in
@@ -156,7 +174,7 @@ private struct NotificationsList: View {
                 EmptyStateView(
                     systemImage: "bell",
                     title: "You're all caught up",
-                    message: "New bookings, quote answers, payments and messages will show up here."
+                    message: "New bookings, jobs assigned to you, quote answers, payments and messages will show up here."
                 )
                 .frame(minHeight: 360)
             }
@@ -201,7 +219,15 @@ private struct NotificationsRowLink: View {
     let onOpen: (AppNotification) -> Void
 
     var body: some View {
-        if let route = item.route {
+        if item.kindValue.isTaskKind {
+            // Same destination as a tapped task push (JobsPushRouter).
+            NavigationLink {
+                MoreDestinationView(item: MoreItem.tasksDestination)
+                    .onAppear { onOpen(item) }
+            } label: {
+                NotificationsRow(item: item, clock: clock)
+            }
+        } else if let route = item.route {
             NavigationLink {
                 AppRouteDestination(route: route)
                     .onAppear { onOpen(item) }
@@ -288,10 +314,13 @@ private struct NotificationsRow: View {
     /// Money notifications use the money tone; everything else Glacier.
     private func iconColor(_ kind: AppNotificationKind) -> Color {
         switch kind {
-        case .paymentReceived: return Theme.amber
-        case .bookingCancelled, .quoteDeclined: return Theme.danger
-        case .quoteApproved, .formSigned: return Theme.success
-        case .newBooking, .inboundMessage, .general: return Theme.glacier
+        case .paymentReceived, .giftCardPurchased, .membershipJoined: return Theme.amber
+        case .bookingCancelled, .quoteDeclined, .webhookFailing: return Theme.danger
+        case .quoteApproved, .formSigned, .inspectionAcknowledged: return Theme.success
+        case .lowStock, .taskDue: return Theme.warning
+        case .newBooking, .inboundMessage, .general, .jobAssigned, .jobRescheduled,
+             .newLead, .taskAssigned, .smsNumberStatus:
+            return Theme.glacier
         }
     }
 }

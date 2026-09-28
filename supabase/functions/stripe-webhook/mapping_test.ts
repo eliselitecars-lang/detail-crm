@@ -3,26 +3,31 @@ import type { Stripe } from "../_shared/stripe.ts";
 import {
   cancelsAtPeriodEnd,
   chargeCard,
+  chargeMethod,
   intentMethod,
+  intentSavesCard,
   invoiceSubscription,
   isoFromUnix,
   isReconfirmableSheetIntent,
   membershipStatusOf,
   mergeMetadata,
-  nonCardMethodType,
+  methodForStripeType,
   ownership,
   paymentIntentId,
   paymentMethodCard,
   readMetadata,
   splitTip,
+  stripeMethodTypeOf,
   subscriptionPeriodEnd,
   subscriptionTerms,
+  unmappedMethodType,
 } from "./mapping.ts";
 
 const SHOP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const INVOICE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const MEMBERSHIP = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const ORDER = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 
 Deno.test("mapping: readMetadata parses the contract and drops malformed values", () => {
   assertEquals(
@@ -39,6 +44,7 @@ Deno.test("mapping: readMetadata parses the contract and drops malformed values"
       customerId: null,
       membershipId: null,
       kind: "deposit",
+      giftCardOrderId: null,
       tipCents: 250,
       problems: [],
     },
@@ -56,6 +62,27 @@ Deno.test("mapping: readMetadata parses the contract and drops malformed values"
   assertEquals(readMetadata(null).shopId, null);
   assertEquals(readMetadata({ tip_cents: "1.5" }).tipCents, 0);
   assertEquals(readMetadata({ tip_cents: "1000000000" }).tipCents, 0);
+});
+
+Deno.test("mapping: a gift card sale carries its order (never a payment kind)", () => {
+  const sale = readMetadata({ shop_id: SHOP, kind: "gift_card", gift_card_order_id: ORDER });
+  assertEquals([sale.giftCardOrderId, sale.kind, sale.problems], [ORDER, "payment", []]);
+  // without (or with a malformed) order id it is not a sale, and it is flagged
+  const orphan = readMetadata({ shop_id: SHOP, kind: "gift_card" });
+  assertEquals([orphan.giftCardOrderId, orphan.problems.length], [null, 1]);
+  const malformed = readMetadata({ shop_id: SHOP, kind: "gift_card", gift_card_order_id: "x" });
+  assertEquals([malformed.giftCardOrderId, malformed.problems.length], [null, 2]);
+  // an order id on another kind is ignored
+  assertEquals(
+    readMetadata({ shop_id: SHOP, kind: "payment", gift_card_order_id: ORDER }).giftCardOrderId,
+    null,
+  );
+  // Terminal intents: channel / source are informational, never problems
+  assertEquals(
+    readMetadata({ shop_id: SHOP, invoice_id: INVOICE, channel: "terminal", source: "terminal" })
+      .problems,
+    [],
+  );
 });
 
 Deno.test("mapping: membership kind is implied by membership_id", () => {
@@ -165,7 +192,15 @@ Deno.test("mapping: subscriptionTerms is the single item's price × quantity", (
   assertEquals(subscriptionTerms(sub(item({ unit_amount: null }))), null);
   assertEquals(subscriptionTerms(sub(item({ unit_amount: 12.5 }))), null);
   assertEquals(
-    subscriptionTerms(sub(item({ recurring: { interval: "week", interval_count: 1 } }))),
+    subscriptionTerms(sub(item({ recurring: { interval: "week", interval_count: 2 } }))),
+    { priceId: "price_1Gold", amountCents: 5000, interval: "week", intervalCount: 2 },
+  );
+  assertEquals(
+    subscriptionTerms(sub(item({ recurring: { interval: "week", interval_count: 13 } }))),
+    null,
+  );
+  assertEquals(
+    subscriptionTerms(sub(item({ recurring: { interval: "day", interval_count: 1 } }))),
     null,
   );
   assertEquals(
@@ -216,8 +251,112 @@ Deno.test("mapping: card details come only from brand/last4/expiry", () => {
 
 Deno.test("mapping: in-person-only intents are card_present", () => {
   assertEquals(intentMethod({ payment_method_types: ["card_present"] }), "card_present");
+  assertEquals(
+    intentMethod({ payment_method_types: ["card_present", "interac_present"] }),
+    "card_present",
+  );
   assertEquals(intentMethod({ payment_method_types: ["card", "link"] }), "card");
   assertEquals(intentMethod({ payment_method_types: ["card", "card_present"] }), "card");
+  assertEquals(intentMethod({ payment_method_types: [] }), "card");
+});
+
+Deno.test("mapping: an intent's method follows the chosen or only payment method type", () => {
+  // a Checkout intent with dynamic methods is a card until the customer chooses
+  assertEquals(
+    intentMethod({ payment_method_types: ["card", "us_bank_account", "affirm"] }),
+    "card",
+  );
+  assertEquals(intentMethod({ payment_method_types: ["us_bank_account"] }), "ach_debit");
+  assertEquals(intentMethod({ payment_method_types: ["klarna"] }), "bnpl");
+  assertEquals(
+    intentMethod({
+      payment_method_types: ["card", "us_bank_account"],
+      payment_method: { id: "pm_1", type: "us_bank_account" } as unknown as Stripe.PaymentMethod,
+    }),
+    "ach_debit",
+  );
+  assertEquals(
+    intentMethod({
+      payment_method_types: ["card", "affirm"],
+      payment_method: { id: "pm_1", type: "affirm" } as unknown as Stripe.PaymentMethod,
+    }),
+    "bnpl",
+  );
+  // an unexpanded payment method id says nothing
+  assertEquals(
+    intentMethod({ payment_method_types: ["card", "us_bank_account"], payment_method: "pm_1" }),
+    "card",
+  );
+});
+
+Deno.test("mapping: Stripe payment method types map onto payment methods (P-31)", () => {
+  for (const type of ["card", "link", "apple_pay", "google_pay"]) {
+    assertEquals(methodForStripeType(type), "card", type);
+  }
+  assertEquals(methodForStripeType("card_present"), "card_present");
+  assertEquals(methodForStripeType("interac_present"), "card_present");
+  assertEquals(methodForStripeType("us_bank_account"), "ach_debit");
+  for (const type of ["affirm", "klarna", "afterpay_clearpay", "zip"]) {
+    assertEquals(methodForStripeType(type), "bnpl", type);
+  }
+  assertEquals(methodForStripeType("cashapp"), null);
+  assertEquals(methodForStripeType(null), null);
+
+  const withType = (type: string, extra: Record<string, unknown> = {}) =>
+    ({ payment_method_details: { type, ...extra } }) as unknown as Stripe.Charge;
+  assertEquals(
+    chargeMethod(withType("us_bank_account", { us_bank_account: { last4: "6789" } })),
+    { method: "ach_debit", brand: null, last4: "6789" },
+  );
+  assertEquals(chargeMethod(withType("klarna")), { method: "bnpl", brand: null, last4: null });
+  assertEquals(
+    chargeMethod(withType("card", { card: { brand: "visa", last4: "4242" } })),
+    { method: "card", brand: "visa", last4: "4242" },
+  );
+  assertEquals(chargeMethod(withType("link")), { method: "card", brand: null, last4: null });
+  assertEquals(chargeMethod(withType("cashapp")), null);
+  assertEquals(chargeMethod(null), null);
+
+  // stripe_method_type: charge first, then the expanded payment method, then the only type
+  assertEquals(stripeMethodTypeOf(withType("affirm")), "affirm");
+  assertEquals(
+    stripeMethodTypeOf(null, {
+      payment_method: { type: "us_bank_account" } as unknown as Stripe.PaymentMethod,
+      payment_method_types: ["card", "us_bank_account"],
+    }),
+    "us_bank_account",
+  );
+  assertEquals(
+    stripeMethodTypeOf(null, { payment_method: "pm_1", payment_method_types: ["card_present"] }),
+    "card_present",
+  );
+  assertEquals(
+    stripeMethodTypeOf(null, { payment_method: null, payment_method_types: ["card", "klarna"] }),
+    null,
+  );
+  assertEquals(stripeMethodTypeOf(withType("Weird Type!")), null);
+});
+
+Deno.test("mapping: a card saved for later is asked for on the intent or its card options", () => {
+  assertEquals(
+    intentSavesCard({ setup_future_usage: "off_session", payment_method_options: null }),
+    true,
+  );
+  assertEquals(
+    intentSavesCard({
+      setup_future_usage: null,
+      payment_method_options: { card: { setup_future_usage: "off_session" } },
+    } as unknown as Stripe.PaymentIntent),
+    true,
+  );
+  assertEquals(
+    intentSavesCard({
+      setup_future_usage: null,
+      payment_method_options: { card: { request_three_d_secure: "automatic" } },
+    } as unknown as Stripe.PaymentIntent),
+    false,
+  );
+  assertEquals(intentSavesCard({ setup_future_usage: null, payment_method_options: null }), false);
 });
 
 Deno.test("mapping: ids and timestamps are validated", () => {
@@ -243,20 +382,22 @@ Deno.test("mapping: ids and timestamps are validated", () => {
   );
 });
 
-Deno.test("mapping: nonCardMethodType flags only non-card charges", () => {
+Deno.test("mapping: unmappedMethodType flags only types the CRM has no method for", () => {
   const withType = (type: string) =>
     ({ payment_method_details: { type } }) as unknown as Stripe.Charge;
-  assertEquals(nonCardMethodType(withType("card")), null);
-  assertEquals(nonCardMethodType(withType("card_present")), null);
-  assertEquals(nonCardMethodType(withType("interac_present")), null);
-  assertEquals(nonCardMethodType(withType("us_bank_account")), "us_bank_account");
-  assertEquals(nonCardMethodType(withType("klarna")), "klarna");
-  assertEquals(nonCardMethodType(withType("Weird Type!")), "other");
-  assertEquals(nonCardMethodType(null), null);
-  assertEquals(nonCardMethodType({} as Stripe.Charge), null);
+  assertEquals(unmappedMethodType(withType("card")), null);
+  assertEquals(unmappedMethodType(withType("card_present")), null);
+  assertEquals(unmappedMethodType(withType("interac_present")), null);
+  assertEquals(unmappedMethodType(withType("us_bank_account")), null);
+  assertEquals(unmappedMethodType(withType("klarna")), null);
+  assertEquals(unmappedMethodType(withType("link")), null);
+  assertEquals(unmappedMethodType(withType("cashapp")), "cashapp");
+  assertEquals(unmappedMethodType(withType("Weird Type!")), "other");
+  assertEquals(unmappedMethodType(null), null);
+  assertEquals(unmappedMethodType({} as Stripe.Charge), null);
 });
 
-Deno.test("mapping: isReconfirmableSheetIntent — only unconfirmed payment_sheet intents", () => {
+Deno.test("mapping: isReconfirmableSheetIntent — only unconfirmed sheet / Terminal intents", () => {
   const pi = (status: string, source?: string) =>
     ({ status, metadata: source ? { source } : {} }) as unknown as Stripe.PaymentIntent;
   assertEquals(isReconfirmableSheetIntent(pi("requires_payment_method", "payment_sheet")), true);
@@ -273,4 +414,7 @@ Deno.test("mapping: isReconfirmableSheetIntent — only unconfirmed payment_shee
     false,
   );
   assertEquals(isReconfirmableSheetIntent(pi("requires_payment_method")), false);
+  // Terminal / Tap to Pay: a declined tap can be retried on the same intent
+  assertEquals(isReconfirmableSheetIntent(pi("requires_payment_method", "terminal")), true);
+  assertEquals(isReconfirmableSheetIntent(pi("succeeded", "terminal")), false);
 });

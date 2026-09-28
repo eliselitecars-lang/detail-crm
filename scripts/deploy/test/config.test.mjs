@@ -4,12 +4,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import {
+  BILLING_INPUTS,
+  billingConfig,
   buildAuthConfig,
   diffAuthConfig,
   functionsBaseUrl,
   functionsPlan,
   normalizeAppBaseUrl,
   parseEmailFrom,
+  readStripeFacts,
   parseFunctionsConfig,
   parseHandledStripeEvents,
   parseStripeApiVersion,
@@ -63,12 +66,20 @@ verify_jwt = true
     const plan = Object.fromEntries(functionsPlan(SUPA).map((f) => [f.name, f.verifyJwt]));
     assert.deepEqual(plan, {
       account: true,
+      billing: false,
+      'billing-webhook': false,
+      'calendar-feed': false,
       invites: true,
       messaging: false,
       payments: false,
+      pdf: false,
+      'public-media': false,
+      push: false,
+      'sms-provisioning': false,
       'storage-purge': false,
       'stripe-connect': true,
       'stripe-webhook': false,
+      webhooks: false,
     });
   });
 });
@@ -80,6 +91,67 @@ describe('Stripe facts', () => {
     assert.equal(new Set(events).size, events.length);
     assert.match(parseStripeApiVersion(readFileSync(join(SUPA, 'functions/_shared/stripe.ts'), 'utf8')), /^\d{4}-\d{2}-\d{2}\.[a-z]+$/);
     assert.throws(() => parseHandledStripeEvents('nothing'), /not found/);
+  });
+
+  test('the platform billing endpoint\'s events come from billing-webhook/handlers.ts, separate from Connect', () => {
+    const facts = readStripeFacts(SUPA);
+    assert.deepEqual([...facts.billingEvents].sort(), [
+      'checkout.session.completed',
+      'customer.subscription.created',
+      'customer.subscription.deleted',
+      'customer.subscription.updated',
+      'invoice.paid',
+      'invoice.payment_failed',
+      'price.created',
+      'price.deleted',
+      'price.updated',
+      'product.created',
+      'product.deleted',
+      'product.updated',
+    ]);
+    // Connect-only events never go to the platform endpoint
+    assert.ok(!facts.billingEvents.includes('account.updated'));
+    assert.ok(facts.events.includes('account.updated'));
+    assert.throws(() => parseHandledStripeEvents('nothing', 'billing-webhook/handlers.ts'), /billing-webhook\/handlers\.ts/);
+  });
+});
+
+describe('billing inputs', () => {
+  test('defaults: off, no trial, not explicit', () => {
+    assert.deepEqual(billingConfig({}), { enabled: false, enabledSet: false, trialDays: 0, trialDaysSet: false });
+    assert.deepEqual(billingConfig({ BILLING_ENABLED: ' TRUE ', BILLING_TRIAL_DAYS: '14' }), { enabled: true, enabledSet: true, trialDays: 14, trialDaysSet: true });
+    assert.deepEqual(billingConfig({ BILLING_ENABLED: 'false', BILLING_TRIAL_DAYS: '0' }), { enabled: false, enabledSet: true, trialDays: 0, trialDaysSet: true });
+    assert.throws(() => billingConfig({ BILLING_ENABLED: 'on' }), /BILLING_ENABLED must be true or false/);
+    assert.throws(() => billingConfig({ BILLING_TRIAL_DAYS: '731' }), /BILLING_TRIAL_DAYS/);
+    assert.deepEqual(BILLING_INPUTS.map((i) => i.name), ['BILLING_ENABLED', 'BILLING_TRIAL_DAYS']);
+  });
+
+  test('STRIPE_BILLING_WEBHOOK_SECRET: required only with BILLING_ENABLED=true and without --stripe-webhooks', () => {
+    const names = (env, opts) => validateDeployEnv(env, opts).missing.map((m) => m.name);
+    assert.ok(!names(GOOD).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    assert.ok(!names({ ...GOOD, BILLING_ENABLED: 'false' }).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    assert.ok(names({ ...GOOD, BILLING_ENABLED: 'true' }).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    assert.ok(!names({ ...GOOD, BILLING_ENABLED: 'true' }, { stripeWebhooks: true }).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    const set = validateDeployEnv({ ...GOOD, BILLING_ENABLED: 'true', STRIPE_BILLING_WEBHOOK_SECRET: 'whsec_billing123' });
+    assert.deepEqual([set.missing, set.invalid], [[], []]);
+    assert.equal(set.secrets.STRIPE_BILLING_WEBHOOK_SECRET, 'whsec_billing123');
+    // billing inputs are database settings, never function secrets
+    assert.ok(!('BILLING_ENABLED' in set.secrets) && !('BILLING_TRIAL_DAYS' in set.secrets));
+  });
+
+  test('BILLING_AUTOMATIC_TAX is an optional true/false function secret', () => {
+    assert.deepEqual(validateDeployEnv(GOOD).invalid, []);
+    const on = validateDeployEnv({ ...GOOD, BILLING_AUTOMATIC_TAX: 'true' });
+    assert.equal(on.secrets.BILLING_AUTOMATIC_TAX, 'true');
+    assert.deepEqual(validateDeployEnv({ ...GOOD, BILLING_AUTOMATIC_TAX: 'maybe' }).invalid.map((i) => i.name), ['BILLING_AUTOMATIC_TAX']);
+  });
+
+  test('invalid billing inputs are named; a trial without billing only warns', () => {
+    const r = validateDeployEnv({ ...GOOD, BILLING_ENABLED: 'yes', BILLING_TRIAL_DAYS: '1.5', STRIPE_BILLING_WEBHOOK_SECRET: 'sk_nope' });
+    assert.deepEqual(r.invalid.map((i) => i.name).sort(), ['BILLING_ENABLED', 'BILLING_TRIAL_DAYS', 'STRIPE_BILLING_WEBHOOK_SECRET']);
+    const w = validateDeployEnv({ ...GOOD, BILLING_TRIAL_DAYS: '14' });
+    assert.deepEqual(w.invalid, []);
+    assert.ok(w.warnings.some((x) => /BILLING_TRIAL_DAYS is set but BILLING_ENABLED is not true/.test(x)));
   });
 });
 
@@ -126,6 +198,73 @@ describe('inputs', () => {
       'TWILIO_ACCOUNT_SID',
     ]);
     for (const i of validateDeployEnv(bad).invalid) assert.ok(!i.problem.includes('short') || i.name !== 'CRON_SECRET');
+  });
+
+  test('optional push / SMS-provisioning settings: absent is fine, present is validated', () => {
+    assert.deepEqual(validateDeployEnv(GOOD).invalid, []);
+    const pem = '-----BEGIN PRIVATE KEY-----\\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg\\n-----END PRIVATE KEY-----';
+    const ok = validateDeployEnv({
+      ...GOOD,
+      APNS_KEY_ID: 'ABC123DEFG',
+      APNS_TEAM_ID: 'TEAM123456',
+      APNS_PRIVATE_KEY: pem,
+      APNS_TOPIC: 'com.example.detailcrm',
+      SMS_PROVISIONING_ENABLED: 'true',
+      TWILIO_ISV_ENABLED: 'false',
+      TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: `BU${'a'.repeat(32)}`,
+    });
+    assert.deepEqual(ok.invalid, []);
+    assert.equal(ok.secrets.APNS_PRIVATE_KEY, pem);
+    const bad = validateDeployEnv({
+      ...GOOD,
+      APNS_KEY_ID: 'short',
+      APNS_PRIVATE_KEY: 'not a key',
+      APNS_TOPIC: 'nodots',
+      SMS_PROVISIONING_ENABLED: 'yes',
+      TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: 'BU123',
+    });
+    assert.deepEqual(bad.invalid.map((i) => i.name).sort(), [
+      'APNS_KEY_ID',
+      'APNS_PRIVATE_KEY',
+      'APNS_TOPIC',
+      'SMS_PROVISIONING_ENABLED',
+      'TWILIO_PRIMARY_CUSTOMER_PROFILE_SID',
+    ]);
+  });
+
+  test('APNs values are all or none; ISV mode needs the primary profile', () => {
+    const pem = '-----BEGIN PRIVATE KEY-----\\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg\\n-----END PRIVATE KEY-----';
+    const partial = validateDeployEnv({ ...GOOD, APNS_KEY_ID: 'ABC123DEFG', APNS_TOPIC: 'com.example.detailcrm' });
+    assert.deepEqual(partial.invalid, []);
+    assert.deepEqual(partial.missing.map((m) => m.name).sort(), ['APNS_PRIVATE_KEY', 'APNS_TEAM_ID']);
+    for (const m of partial.missing) {
+      assert.match(m.where, /all four APNS_\* values or none/);
+      assert.match(m.where, /APNS_KEY_ID, APNS_TOPIC are set/);
+    }
+    const all = validateDeployEnv({
+      ...GOOD,
+      APNS_KEY_ID: 'ABC123DEFG',
+      APNS_TEAM_ID: 'TEAM123456',
+      APNS_PRIVATE_KEY: pem,
+      APNS_TOPIC: 'com.example.detailcrm',
+    });
+    assert.deepEqual([all.missing, all.invalid], [[], []]);
+    // blank counts as unset
+    assert.deepEqual(validateDeployEnv({ ...GOOD, APNS_KEY_ID: '  ' }).missing, []);
+
+    const isv = validateDeployEnv({ ...GOOD, SMS_PROVISIONING_ENABLED: 'true', TWILIO_ISV_ENABLED: 'TRUE' });
+    assert.deepEqual(isv.missing.map((m) => m.name), ['TWILIO_PRIMARY_CUSTOMER_PROFILE_SID']);
+    assert.match(isv.missing[0].where, /TWILIO_ISV_ENABLED=true/);
+    const isvOk = validateDeployEnv({
+      ...GOOD,
+      SMS_PROVISIONING_ENABLED: 'true',
+      TWILIO_ISV_ENABLED: 'true',
+      TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: `BU${'a'.repeat(32)}`,
+    });
+    assert.deepEqual([isvOk.missing, isvOk.invalid, isvOk.warnings.filter((w) => /ISV/.test(w))], [[], [], []]);
+    assert.deepEqual(validateDeployEnv({ ...GOOD, TWILIO_ISV_ENABLED: 'false' }).missing, []);
+    const idle = validateDeployEnv({ ...GOOD, TWILIO_ISV_ENABLED: 'true', TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: `BU${'a'.repeat(32)}` });
+    assert.match(idle.warnings.join(), /no effect until SMS_PROVISIONING_ENABLED=true/);
   });
 
   test('test-mode Stripe keys warn, or fail with REQUIRE_LIVE_STRIPE', () => {

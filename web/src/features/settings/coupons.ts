@@ -67,6 +67,12 @@ export function couponToFormInput(coupon: Coupon | null, tz: string): CouponForm
       maxRedemptions: '',
       onlineOnly: false,
       active: true,
+      limitServices: false,
+      serviceIds: [],
+      minSubtotalCents: null,
+      oncePerCustomer: false,
+      customerId: null,
+      newCustomersOnly: false,
     };
   }
   return {
@@ -80,5 +86,36 @@ export function couponToFormInput(coupon: Coupon | null, tz: string): CouponForm
     maxRedemptions: coupon.max_redemptions === null ? '' : String(coupon.max_redemptions),
     onlineOnly: coupon.online_only,
     active: coupon.active,
+    limitServices: coupon.service_ids !== null,
+    serviceIds: coupon.service_ids ?? [],
+    minSubtotalCents: coupon.min_subtotal_cents,
+    oncePerCustomer: coupon.once_per_customer,
+    customerId: coupon.customer_id,
+    newCustomersOnly: coupon.new_customers_only,
   };
+}
+
+/** Short restriction labels for the coupon list. */
+export function couponRestrictions(
+  coupon: Pick<
+    Coupon,
+    | 'service_ids'
+    | 'min_subtotal_cents'
+    | 'once_per_customer'
+    | 'customer_id'
+    | 'new_customers_only'
+  >,
+  currency = 'usd',
+): string[] {
+  const out: string[] = [];
+  if (coupon.service_ids) {
+    out.push(`${coupon.service_ids.length} service${coupon.service_ids.length === 1 ? '' : 's'}`);
+  }
+  if (coupon.min_subtotal_cents) {
+    out.push(`Min ${formatCents(coupon.min_subtotal_cents, { currency })}`);
+  }
+  if (coupon.once_per_customer) out.push('Once per customer');
+  if (coupon.customer_id) out.push('One customer');
+  if (coupon.new_customers_only) out.push('New customers');
+  return out;
 }

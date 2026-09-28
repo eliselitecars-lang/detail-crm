@@ -27,7 +27,44 @@ import {
   type LineDraft,
   type LineItem,
 } from '../../api';
-import { formatDuration } from '../../model';
+import { formatDuration, vehicleLabel } from '../../model';
+import { useCustomerVehicles, type VehicleOption } from '../../newJobApi';
+
+// ---------------------------------------------------------------------------
+// Vehicle picker (P-7: a line can name another of the customer's vehicles —
+// fleets / dealers put several vehicles on one job)
+// ---------------------------------------------------------------------------
+
+/** The customer's vehicles plus the job's own (even if archived since). */
+function useLineVehicles(job: JobDetail): VehicleOption[] {
+  const vehicles = useCustomerVehicles(job.customer_id);
+  const list = [...(vehicles.data ?? [])];
+  if (job.vehicle && !list.some((v) => v.id === job.vehicle?.id)) list.unshift(job.vehicle);
+  return list;
+}
+
+function VehiclePicker({
+  vehicles,
+  value,
+  onChange,
+}: {
+  vehicles: readonly VehicleOption[];
+  value: string;
+  onChange: (vehicleId: string) => void;
+}) {
+  return (
+    <FormField label="Vehicle" help="Which of the customer’s vehicles this line is for.">
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        options={[
+          { value: '', label: 'No specific vehicle' },
+          ...vehicles.map((v) => ({ value: v.id, label: vehicleLabel(v, true) })),
+        ]}
+      />
+    </FormField>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Custom / edit line
@@ -60,6 +97,10 @@ export function LineDialog({ job, line, nextSort, onClose }: LineDialogProps) {
   const [discount, setDiscount] = useState<number | null>(line?.discount_cents ?? 0);
   const [taxable, setTaxable] = useState(line?.taxable ?? true);
   const [duration, setDuration] = useState(line ? String(line.duration_minutes) : '0');
+  const [vehicleId, setVehicleId] = useState(
+    line ? (line.vehicle_id ?? '') : (job.vehicle_id ?? ''),
+  );
+  const vehicles = useLineVehicles(job);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const pending = add.isPending || update.isPending;
 
@@ -84,6 +125,7 @@ export function LineDialog({ job, line, nextSort, onClose }: LineDialogProps) {
       discount_cents: discount,
       taxable,
       duration_minutes: minutes,
+      vehicle_id: vehicleId || null,
     };
     try {
       if (line) {
@@ -91,7 +133,7 @@ export function LineDialog({ job, line, nextSort, onClose }: LineDialogProps) {
         toast.success('Line updated');
       } else {
         await add.mutateAsync({
-          lines: [{ ...values, service_id: null, vehicle_id: job.vehicle_id }],
+          lines: [{ ...values, service_id: null }],
           startSort: nextSort,
         });
         toast.success('Line added');
@@ -157,6 +199,11 @@ export function LineDialog({ job, line, nextSort, onClose }: LineDialogProps) {
             onChange={(e) => setDuration(e.target.value)}
           />
         </FormField>
+        {vehicles.length > 0 && (
+          <div className="col-span-2">
+            <VehiclePicker vehicles={vehicles} value={vehicleId} onChange={setVehicleId} />
+          </div>
+        )}
         <Checkbox
           className="col-span-2"
           label="Taxable"
@@ -186,6 +233,8 @@ export function CatalogDialog({ job, nextSort, onClose }: CatalogDialogProps) {
   const add = useAddLineItems(job.id);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
+  const vehicles = useLineVehicles(job);
+  const [vehicleId, setVehicleId] = useState(job.vehicle_id ?? '');
   const [categoryId, setCategoryId] = useState(job.vehicle?.category_id ?? '');
   // A shop without vehicle sizes prices every service at its base price.
   const noSizes = categories.isSuccess && categories.data.length === 0;
@@ -195,7 +244,7 @@ export function CatalogDialog({ job, nextSort, onClose }: CatalogDialogProps) {
       ? {
           customerId: job.customer_id,
           vehicleCategoryId: categoryId || null,
-          vehicleId: job.vehicle_id,
+          vehicleId: vehicleId || null,
           serviceIds: selected,
         }
       : null,
@@ -215,7 +264,7 @@ export function CatalogDialog({ job, nextSort, onClose }: CatalogDialogProps) {
   const save = async () => {
     const drafts: LineDraft[] = lines.map((l) => ({
       service_id: l.service_id,
-      vehicle_id: job.vehicle_id,
+      vehicle_id: vehicleId || null,
       name: l.name,
       description: l.note,
       quantity: 1,
@@ -257,6 +306,18 @@ export function CatalogDialog({ job, nextSort, onClose }: CatalogDialogProps) {
       }
     >
       <div className="flex flex-col gap-3">
+        {vehicles.length > 1 && (
+          <VehiclePicker
+            vehicles={vehicles}
+            value={vehicleId}
+            onChange={(id) => {
+              setVehicleId(id);
+              // price for the picked vehicle's size
+              const size = vehicles.find((v) => v.id === id)?.category_id;
+              if (size) setCategoryId(size);
+            }}
+          />
+        )}
         {!noSizes && (
           <FormField
             label="Vehicle size"

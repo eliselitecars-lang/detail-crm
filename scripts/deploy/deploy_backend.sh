@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Production deploy of the Detail CRM backend to a hosted Supabase project:
 # migrations, edge functions (verify_jwt from config.toml), function secrets,
-# optional Stripe Connect webhook, production Auth (Management API) and the
-# platform setup of supabase/setup/cron.sql. Idempotent: safe to re-run.
-# Operator runbook: docs/DEPLOY.md.
+# optional Stripe webhooks, production Auth (Management API), the platform
+# setup of supabase/setup/cron.sql and billing. Idempotent: safe to re-run.
+# Operator runbook: docs/DEPLOY.md (billing: docs/BILLING.md).
 #
 #   scripts/deploy/deploy_backend.sh [--dry-run] [--stripe-webhooks]
 #                                    [--include-all] [--allow-dirty]
 #
 #   --dry-run          validate inputs, link, list pending migrations and print
 #                      what every other step would change; changes nothing
-#   --stripe-webhooks  create/update the Stripe Connect webhook endpoint and
-#                      store its signing secret (STRIPE_WEBHOOK_SECRET)
+#   --stripe-webhooks  create/update the Stripe webhook endpoints (Connect; the
+#                      platform billing one too when BILLING_ENABLED=true)
 #   --include-all      pass --include-all to `supabase db push` (a migration
 #                      numbered below one already applied; see docs/DEPLOY.md)
 #   --allow-dirty      deploy although supabase/ has uncommitted changes
@@ -116,7 +116,9 @@ fi
 
 if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   REV="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
-  DIRTY="$(git -C "$ROOT" status --porcelain -- supabase 2>/dev/null | head -20)"
+  # sed reads all of git's output (head would close the pipe early: SIGPIPE,
+  # exit 141 under pipefail, whenever more than 20 paths are dirty).
+  DIRTY="$(git -C "$ROOT" status --porcelain -- supabase 2>/dev/null | sed -n '1,20p')"
   info "source: $(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || printf '?') @ $REV"
   if [ -n "$DIRTY" ]; then
     if [ "$DRY_RUN" = 1 ] || [ "$ALLOW_DIRTY" = 1 ]; then
@@ -165,11 +167,11 @@ step 5 "Function secrets"
 node "$API" secrets ${api_flags[@]+"${api_flags[@]}"} ${secret_flags[@]+"${secret_flags[@]}"}
 
 # ------------------------------------------------------------------ 6
-step 6 "Stripe Connect webhook endpoint"
+step 6 "Stripe webhook endpoints (Connect; platform billing when enabled)"
 if [ "$STRIPE_WEBHOOKS" = 1 ]; then
   node "$API" stripe-webhook ${api_flags[@]+"${api_flags[@]}"} --supabase-dir "$WORK/supabase"
 else
-  info "skipped (pass --stripe-webhooks to manage it; STRIPE_WEBHOOK_SECRET is used as given)"
+  info "skipped (pass --stripe-webhooks to manage them; STRIPE_WEBHOOK_SECRET / STRIPE_BILLING_WEBHOOK_SECRET are used as given)"
 fi
 
 # ------------------------------------------------------------------ 7
@@ -194,7 +196,7 @@ step 8 "Production Auth (Management API; config.toml is never pushed)"
 node "$API" auth ${api_flags[@]+"${api_flags[@]}"}
 
 # ------------------------------------------------------------------ 9
-step 9 "Platform setup (supabase/setup/cron.sql with real values, in memory)"
+step 9 "Platform setup (cron.sql with real values, in memory; billing config and plan sync)"
 node "$API" platform-setup ${api_flags[@]+"${api_flags[@]}"} --cron-sql "$WORK/supabase/setup/cron.sql"
 
 printf '\n%s\n' "$([ "$DRY_RUN" = 1 ] && printf 'Dry run complete: nothing was changed.' || printf 'Backend deployed.')"

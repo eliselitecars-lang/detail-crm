@@ -5,6 +5,8 @@
 //   VITE_SUPABASE_URL=https://<ref>.supabase.co node scripts/deploy/web_headers.mjs --dist web/dist
 //     [--embed-path '/book/*' ...]   paths other sites may iframe (default: none)
 //     [--embed-ancestors '*']        frame-ancestors for those paths
+//     [--tracking-path '/book/*' ...] public booking paths that may load the shop's
+//                                    Meta Pixel / GA4 tag (default: none)
 //     [--host cloudflare|netlify]    _redirects flavour (default cloudflare)
 //     [--report-uri URL]             add a CSP report-uri
 //     [--print]                      also print the files
@@ -20,7 +22,10 @@
 //   - fonts: same origin, fonts.gstatic.com, data: (FullCalendar's icon font
 //     is a data: URI inside the CSS it injects)
 //   - images: same origin, data: (signature pad), blob: (local previews),
-//     the Supabase origin (Storage public + signed URLs)
+//     the Supabase origin (Storage public + signed URLs), OpenStreetMap
+//     tiles (tile.openstreetmap.org: the calendar's day map, P-18)
+//   - media: same origin, blob:, the Supabase origin (job videos from
+//     Storage signed URLs on job pages and customer job reports)
 //   - connect: same origin, Supabase https + wss (REST/Auth/Functions/Storage/
 //     Realtime), NHTSA vPIC (VIN decode in jobs/customers)
 //   - Stripe Checkout / Connect onboarding and Google Maps are top-level
@@ -29,8 +34,12 @@
 //     unless the app sets z.config({ jitless: true }) before building any
 //     schema; see csp_proof.mjs KNOWN_VIOLATIONS.
 // Staff/app routes: frame-ancestors 'none' + X-Frame-Options DENY. Only
-// --embed-path routes may be framed (neither SPEC nor web/src has an embed
-// route yet: "booking embed" is on the SPEC §9 roadmap).
+// --embed-path routes may be framed: the booking page and lead forms
+// (/book/*, /lead/*: P-10 embed; web/public/embed.js). The web app also
+// refuses to render any other route inside a frame (src/app/RootLayout.tsx).
+// --tracking-path routes (only /book/* and /booking/*) additionally allow the
+// shop's own Meta Pixel / GA4 tag (web/src/features/booking/tracking.ts):
+// TRACKING_SOURCES below, nothing else.
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -41,8 +50,33 @@ export const KNOWN_EXTERNAL = {
   'fonts.googleapis.com': { directive: 'style-src', source: 'web/index.html <link rel=stylesheet> (Inter)' },
   'fonts.gstatic.com': { directive: 'font-src', source: 'font files referenced by the Google Fonts CSS' },
   'vpic.nhtsa.dot.gov': { directive: 'connect-src', source: 'web/src/features/{jobs,customers}/vin.ts (VIN decode)' },
-  'www.google.com': { directive: null, source: 'web/src/features/jobs/model.ts Google Maps link (navigation only)' },
+  'www.google.com': { directive: null, source: 'Google Maps links in jobs / timesheets (navigation only)' },
+  'hooks.zapier.com': { directive: null, source: 'web/src/features/settings/data/webhooks.ts example text in a validation message (never loaded)' },
+  'connect.facebook.net': { directive: 'script-src (--tracking-path only)', source: 'web/src/features/booking/tracking.ts (the shop\'s Meta Pixel)' },
+  'www.googletagmanager.com': { directive: 'script-src (--tracking-path only)', source: 'web/src/features/booking/tracking.ts (the shop\'s GA4 tag)' },
+  'tile.openstreetmap.org': { directive: 'img-src', source: 'web/src/features/calendar/LeafletMap.tsx (day map tiles, P-18)' },
+  'www.openstreetmap.org': { directive: null, source: 'web/src/features/calendar/LeafletMap.tsx map attribution link (navigation only)' },
 };
+
+/**
+ * What a shop's Meta Pixel (fbevents.js) and GA4 tag (gtag.js) load and call,
+ * allowed only on --tracking-path routes (the public booking pages).
+ */
+export const TRACKING_SOURCES = {
+  'script-src': ['https://connect.facebook.net', 'https://www.googletagmanager.com'],
+  'img-src': ['https://www.facebook.com', 'https://www.google-analytics.com', 'https://www.googletagmanager.com'],
+  'connect-src': [
+    'https://www.facebook.com',
+    'https://connect.facebook.net',
+    'https://www.google-analytics.com',
+    'https://*.google-analytics.com',
+    'https://*.analytics.google.com',
+    'https://www.googletagmanager.com',
+  ],
+};
+
+/** Only the public booking pages may carry a shop's tracking tags. */
+export const TRACKING_PATHS_ALLOWED = ['/book/*', '/booking/*'];
 
 /** sha256 of the empty string: allows only EMPTY inline <style> elements. */
 export const EMPTY_STYLE_HASH = "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='";
@@ -92,15 +126,18 @@ export function supabaseOrigins(raw) {
   return { https: url.origin, wss: `wss://${url.host}` };
 }
 
-export function buildCsp({ supabaseUrl, scriptHashes = [], styleHashes = [], frameAncestors = "'none'", reportUri }) {
+export function buildCsp({ supabaseUrl, scriptHashes = [], styleHashes = [], frameAncestors = "'none'", reportUri, tracking = false }) {
   const sb = supabaseOrigins(supabaseUrl);
+  const extra = (directive) => (tracking ? TRACKING_SOURCES[directive] : []);
   const directives = [
     ["default-src", "'self'"],
-    ['script-src', "'self'", ...scriptHashes],
+    ['script-src', "'self'", ...scriptHashes, ...extra('script-src')],
     ['style-src', "'self'", 'https://fonts.googleapis.com', EMPTY_STYLE_HASH, ...styleHashes],
     ['font-src', "'self'", 'https://fonts.gstatic.com', 'data:'],
-    ['img-src', "'self'", 'data:', 'blob:', sb.https],
-    ['connect-src', "'self'", sb.https, sb.wss, 'https://vpic.nhtsa.dot.gov'],
+    ['img-src', "'self'", 'data:', 'blob:', sb.https, 'https://tile.openstreetmap.org', ...extra('img-src')],
+    // Job videos (P-30) play from short-lived Storage signed URLs.
+    ['media-src', "'self'", 'blob:', sb.https],
+    ['connect-src', "'self'", sb.https, sb.wss, 'https://vpic.nhtsa.dot.gov', ...extra('connect-src')],
     ['frame-src', "'none'"],
     ['object-src', "'none'"],
     ['base-uri', "'self'"],
@@ -120,16 +157,30 @@ function validateEmbedPath(p) {
   }
 }
 
+function validateTrackingPath(p) {
+  if (!TRACKING_PATHS_ALLOWED.includes(p)) {
+    throw new HeadersError(`--tracking-path "${p}": tracking tags are only allowed on ${TRACKING_PATHS_ALLOWED.join(' and ')}`);
+  }
+}
+
+/** Is `path` (a rule pattern) inside one of the tracking patterns? */
+function isTracked(path, trackingPaths) {
+  return trackingPaths.some((t) => (t.endsWith('*') ? path.startsWith(t.slice(0, -1)) : path === t));
+}
+
 /** The _headers file (Cloudflare Pages semantics, see lib/static_server.mjs). */
-export function buildHeadersFile({ supabaseUrl, html, embedPaths = [], embedAncestors = '*', reportUri }) {
+export function buildHeadersFile({ supabaseUrl, html, embedPaths = [], embedAncestors = '*', reportUri, trackingPaths = [] }) {
   const { scripts, styles, problems } = inlineHashes(html);
   if (problems.length) throw new HeadersError(problems.join('; '));
   for (const p of embedPaths) validateEmbedPath(p);
+  for (const p of trackingPaths) validateTrackingPath(p);
   if (!/^(\*|'self'|'none'|https:\/\/[^\s;,]+)( (\*|'self'|https:\/\/[^\s;,]+))*$/.test(embedAncestors)) {
     throw new HeadersError(`--embed-ancestors "${embedAncestors}" is not a frame-ancestors source list`);
   }
-  const csp = buildCsp({ supabaseUrl, scriptHashes: scripts, styleHashes: styles, reportUri });
-  const embedCsp = buildCsp({ supabaseUrl, scriptHashes: scripts, styleHashes: styles, frameAncestors: embedAncestors, reportUri });
+  const base = { supabaseUrl, scriptHashes: scripts, styleHashes: styles, reportUri };
+  const csp = buildCsp(base);
+  const embedCsp = buildCsp({ ...base, frameAncestors: embedAncestors });
+  const trackingCsp = buildCsp({ ...base, tracking: true });
   const lines = [
     '# Generated by scripts/deploy/web_headers.mjs after `vite build`. Do not edit:',
     '# it is regenerated on every deploy (hashes follow web/index.html).',
@@ -150,15 +201,22 @@ export function buildHeadersFile({ supabaseUrl, html, embedPaths = [], embedAnce
     '  ! Cache-Control',
     '  Cache-Control: public, max-age=31536000, immutable',
   ];
+  // Tracking rules first; embed rules after them (a later rule's "! Name"
+  // replaces the earlier value), each with tracking when its path is tracked.
+  for (const p of [...new Set(trackingPaths)].filter((t) => !embedPaths.includes(t))) {
+    lines.push('', "# Public booking page: the shop's own Meta Pixel / GA4 tag may load (--tracking-path).", p, '  ! Content-Security-Policy', `  Content-Security-Policy: ${trackingCsp}`);
+  }
   for (const p of embedPaths) {
-    lines.push('', `# Embeddable (booking embed): framing allowed from ${embedAncestors}.`, p, '  ! Content-Security-Policy', '  ! X-Frame-Options', `  Content-Security-Policy: ${embedCsp}`);
+    const tracked = isTracked(p, trackingPaths);
+    const policy = tracked ? buildCsp({ ...base, frameAncestors: embedAncestors, tracking: true }) : embedCsp;
+    lines.push('', `# Embeddable (booking embed): framing allowed from ${embedAncestors}${tracked ? '; shop tracking tags allowed' : ''}.`, p, '  ! Content-Security-Policy', '  ! X-Frame-Options', `  Content-Security-Policy: ${policy}`);
   }
   const text = `${lines.join('\n')}\n`;
   const long = text.split('\n').filter((l) => l.length > CF_MAX_LINE);
   if (long.length) throw new HeadersError(`a _headers line exceeds Cloudflare's ${CF_MAX_LINE}-character limit`);
   const rules = text.split('\n').filter((l) => /^\//.test(l)).length;
   if (rules > CF_MAX_RULES) throw new HeadersError(`more than ${CF_MAX_RULES} _headers rules`);
-  return { text, csp, embedCsp, scriptHashes: scripts, styleHashes: styles };
+  return { text, csp, embedCsp, trackingCsp, scriptHashes: scripts, styleHashes: styles };
 }
 
 export function buildRedirectsFile({ host = 'cloudflare' } = {}) {
@@ -178,7 +236,7 @@ export function buildRedirectsFile({ host = 'cloudflare' } = {}) {
   throw new HeadersError(`unknown --host ${host} (cloudflare | netlify)`);
 }
 
-export function generate({ dist, supabaseUrl, embedPaths = [], embedAncestors = '*', host = 'cloudflare', reportUri }) {
+export function generate({ dist, supabaseUrl, embedPaths = [], embedAncestors = '*', host = 'cloudflare', reportUri, trackingPaths = [] }) {
   const indexPath = join(dist, 'index.html');
   if (!existsSync(indexPath)) throw new HeadersError(`${indexPath} not found: run vite build first`);
   if (!existsSync(join(dist, 'assets'))) throw new HeadersError(`${join(dist, 'assets')} not found: not a Vite build output`);
@@ -186,7 +244,7 @@ export function generate({ dist, supabaseUrl, embedPaths = [], embedAncestors = 
     throw new HeadersError('dist/404.html exists: Cloudflare Pages would stop serving the SPA fallback');
   }
   const html = readFileSync(indexPath, 'utf8');
-  const headers = buildHeadersFile({ supabaseUrl, html, embedPaths, embedAncestors, reportUri });
+  const headers = buildHeadersFile({ supabaseUrl, html, embedPaths, embedAncestors, reportUri, trackingPaths });
   const redirects = buildRedirectsFile({ host });
   writeFileSync(join(dist, '_headers'), headers.text);
   writeFileSync(join(dist, '_redirects'), redirects);
@@ -194,8 +252,9 @@ export function generate({ dist, supabaseUrl, embedPaths = [], embedAncestors = 
 }
 
 function parseArgs(argv) {
-  const out = { embedPaths: [], host: 'cloudflare', embedAncestors: process.env.WEB_EMBED_ANCESTORS || '*' };
+  const out = { embedPaths: [], trackingPaths: [], host: 'cloudflare', embedAncestors: process.env.WEB_EMBED_ANCESTORS || '*' };
   for (const p of (process.env.WEB_EMBED_PATHS ?? '').split(',').map((s) => s.trim()).filter(Boolean)) out.embedPaths.push(p);
+  for (const p of (process.env.WEB_TRACKING_PATHS ?? '').split(',').map((s) => s.trim()).filter(Boolean)) out.trackingPaths.push(p);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => {
@@ -207,6 +266,7 @@ function parseArgs(argv) {
     else if (a === '--supabase-url') out.supabaseUrl = next();
     else if (a === '--embed-path') out.embedPaths.push(next());
     else if (a === '--embed-ancestors') out.embedAncestors = next();
+    else if (a === '--tracking-path') out.trackingPaths.push(next());
     else if (a === '--host') out.host = next();
     else if (a === '--report-uri') out.reportUri = next();
     else if (a === '--print') out.print = true;
@@ -222,7 +282,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const supabaseUrl = args.supabaseUrl ?? process.env.VITE_SUPABASE_URL;
     if (!supabaseUrl) throw new HeadersError('VITE_SUPABASE_URL (or --supabase-url) is required');
     const out = generate({ ...args, supabaseUrl });
-    console.log(`wrote ${join(args.dist, '_headers')} (${out.scriptHashes.length} inline script hash(es); embeddable: ${args.embedPaths.join(', ') || 'none'})`);
+    console.log(`wrote ${join(args.dist, '_headers')} (${out.scriptHashes.length} inline script hash(es); embeddable: ${args.embedPaths.join(', ') || 'none'}; tracking tags: ${args.trackingPaths.join(', ') || 'none'})`);
     console.log(`wrote ${join(args.dist, '_redirects')} (${args.host})`);
     if (args.print) console.log(`\n${out.text}\n${out.redirects}`);
   } catch (err) {

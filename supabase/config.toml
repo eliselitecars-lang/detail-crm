@@ -52,9 +52,13 @@ port = 54324
 
 [storage]
 enabled = true
-# Buckets (job-photos, signatures, shop-assets) and their policies are
-# created by migrations so local and hosted match exactly.
-file_size_limit = "50MiB"
+# Buckets (job-photos, signatures, shop-assets, documents, job-media) and
+# their policies are created by migrations so local and hosted match
+# exactly; each bucket carries its own limit (job-media: 200 MiB videos,
+# migration 0071). This global cap must be at least the largest bucket
+# limit. Hosted projects: raise the upload limit in the Dashboard (Storage
+# -> Settings) to 200 MB too; it is plan-dependent.
+file_size_limit = "200MiB"
 
 [storage.image_transformation]
 # Not used by the app (thumbnails are sized client-side); off so the local
@@ -185,4 +189,57 @@ import_map = "./functions/deno.json"
 # and checks shop ownership as that user (account_deletion_blockers).
 [functions.account]
 verify_jwt = true
+import_map = "./functions/deno.json"
+
+# pg_cron (x-cron-secret: APNs delivery of queued notifications) and staff
+# (send_test: the caller's JWT and membership are verified in the function).
+# pg_net sends no JWT, so the gateway check must be off.
+[functions.push]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+# GET by an unguessable per-member token: calendar apps (Apple, Google,
+# Outlook) subscribe to the URL and never send a Supabase JWT.
+[functions.calendar-feed]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+# Mixed audience: job_report / booking_documents are PUBLIC (authorized by
+# the report or booking link token) and portal_document verifies the
+# client's JWT in the function.
+[functions.public-media]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+# Staff (owner/admin, JWT and role verified in the function) and pg_cron
+# (refresh_status, x-cron-secret). Ships dark behind SMS_PROVISIONING_ENABLED.
+[functions.sms-provisioning]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+# pg_cron only (x-cron-secret): delivers queued outbound webhooks.
+[functions.webhooks]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+# Mixed audience: quote / invoice PDFs are PUBLIC by the document's link
+# token (also as a plain GET link); staff_document verifies the JWT and role
+# in the function.
+[functions.pdf]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+# Shop subscription billing on the PLATFORM Stripe account (docs/BILLING.md).
+# Mixed audience: plans / checkout / portal verify the caller's JWT and role
+# (owner) inside the function; sync_plans is called by pg_cron and the deploy
+# with x-cron-secret and no JWT, so the gateway check must be off.
+[functions.billing]
+verify_jwt = false
+import_map = "./functions/deno.json"
+
+# Called by Stripe (the platform billing endpoint), which sends no Supabase
+# JWT. Authenticity comes from the Stripe-Signature header, verified with
+# STRIPE_BILLING_WEBHOOK_SECRET over the raw body.
+[functions.billing-webhook]
+verify_jwt = false
 import_map = "./functions/deno.json"

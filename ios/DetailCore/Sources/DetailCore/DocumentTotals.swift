@@ -15,6 +15,11 @@ public struct TotalsLine: Equatable, Sendable {
     /// `selected` is true. Non-optional lines always count.
     public var isOptional: Bool
     public var isSelected: Bool
+    /// `discount_eligible` (0062): whether the document-level discount
+    /// (manual or coupon) applies to this line. Lines a coupon excludes, and
+    /// fee lines, carry `false`; everything else defaults to `true`, which
+    /// gives exactly the pre-0062 totals.
+    public var discountEligible: Bool
 
     public init(
         quantity: Decimal = 1,
@@ -22,7 +27,8 @@ public struct TotalsLine: Equatable, Sendable {
         discountCents: Int = 0,
         taxable: Bool = true,
         isOptional: Bool = false,
-        isSelected: Bool = true
+        isSelected: Bool = true,
+        discountEligible: Bool = true
     ) {
         self.quantity = quantity
         self.unitPriceCents = unitPriceCents
@@ -30,6 +36,7 @@ public struct TotalsLine: Equatable, Sendable {
         self.taxable = taxable
         self.isOptional = isOptional
         self.isSelected = isSelected
+        self.discountEligible = discountEligible
     }
 
     /// Whether this line participates in the document totals.
@@ -81,8 +88,8 @@ public enum DocumentDiscount: Equatable, Sendable {
         }
     }
 
-    /// The discount in cents for a given subtotal: never negative and never
-    /// more than the subtotal. (The server rejects negative values and
+    /// The discount in cents for a given subtotal (the discount-eligible
+    /// part of the document): never negative and never more than it. (The server rejects negative values and
     /// percentages above 10000 bps outright; previews clamp instead.)
     public func cents(forSubtotal subtotal: Int) -> Int {
         let raw: Int
@@ -104,10 +111,15 @@ public enum DocumentDiscount: Equatable, Sendable {
 ///
 ///     line_total   = round(quantity × unit_price) − line discount (≥ 0)
 ///     subtotal     = Σ line_total
-///     discount     = document discount, capped at subtotal
-///     taxable_base = Σ taxable line_total − round(discount × Σ taxable / subtotal)
+///     E            = Σ line_total of discount-eligible lines
+///     ET           = Σ line_total of discount-eligible taxable lines
+///     discount     = percent: round(E × bps / 10000) | fixed value; capped at E
+///     taxable_base = Σ taxable line_total − (E > 0 ? round(discount × ET / E) : 0)
 ///     tax          = round(taxable_base × tax_rate_bps / 10000)
 ///     total        = subtotal − discount + tax
+///
+/// With every line eligible (the default) E = subtotal and ET = the taxable
+/// subtotal, which is the original SPEC §4.5 formula.
 ///
 /// All rounding is half away from zero (Postgres `round(numeric)`).
 public struct DocumentTotals: Equatable, Sendable {
@@ -121,13 +133,20 @@ public struct DocumentTotals: Equatable, Sendable {
     public init(lines: [TotalsLine], discount: DocumentDiscount = .none, taxRateBps: Int) {
         let counted = lines.map { $0.counts ? $0.lineTotalCents : 0 }
         let subtotal = counted.reduce(0, +)
-        let taxableSum = zip(lines, counted).reduce(0) { sum, pair in
-            pair.0.taxable ? sum + pair.1 : sum
+        var taxableSum = 0
+        var eligible = 0
+        var eligibleTaxable = 0
+        for (line, total) in zip(lines, counted) {
+            if line.taxable { taxableSum += total }
+            if line.discountEligible {
+                eligible += total
+                if line.taxable { eligibleTaxable += total }
+            }
         }
-        let discount = discount.cents(forSubtotal: subtotal)
+        let discount = discount.cents(forSubtotal: eligible)
         let taxableDiscount: Int
-        if subtotal > 0 && taxableSum > 0 && discount > 0 {
-            taxableDiscount = Rounding.divideHalfAwayFromZero(discount * taxableSum, subtotal)
+        if eligible > 0 && eligibleTaxable > 0 && discount > 0 {
+            taxableDiscount = Rounding.divideHalfAwayFromZero(discount * eligibleTaxable, eligible)
         } else {
             taxableDiscount = 0
         }

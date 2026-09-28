@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { paymentRow } from '@/features/quotes/testFixtures';
 import { ledgerDateFilter, type LedgerRow } from './api';
 import { csvCell, ledgerToCsv } from './csv';
-import { paymentMethodLabel, refundableCents } from './paymentFormat';
+import { isStripeMethod, paymentMethodLabel, refundableCents } from './paymentFormat';
 
 describe('paymentFormat', () => {
   it('labels card payments with brand and last4 only', () => {
@@ -24,12 +24,21 @@ describe('paymentFormat', () => {
     ).toBe(10000);
     expect(refundableCents(paymentRow({ status: 'refunded', refunded_cents: 11500 }))).toBe(0);
     expect(refundableCents(paymentRow({ status: 'pending' }))).toBe(0);
+    expect(refundableCents(paymentRow({ status: 'processing' }))).toBe(0);
+  });
+
+  it('routes Stripe-backed methods to Stripe refunds', () => {
+    for (const method of ['card', 'card_present', 'ach_debit', 'bnpl'] as const) {
+      expect(isStripeMethod(method)).toBe(true);
+    }
+    expect(isStripeMethod('gift_card')).toBe(false);
+    expect(isStripeMethod('cash')).toBe(false);
   });
 });
 
 describe('ledger CSV', () => {
   const row: LedgerRow = {
-    ...paymentRow({ note: 'Paid, "thanks"' }),
+    ...paymentRow({ note: 'Paid, "thanks"', stripe_method_type: 'card' }),
     customer: { id: 'c1', first_name: 'Jane', last_name: 'Doe', company: null },
     invoice: { id: 'inv-1', number: 2001 },
     job: null,
@@ -47,11 +56,25 @@ describe('ledger CSV', () => {
     const csv = ledgerToCsv([row], 'America/Chicago');
     const [header, line] = csv.trim().split('\r\n');
     expect(header).toBe(
-      'Date,Customer,Invoice,Job,Kind,Method,Card,Status,Amount,Tip,Refunded,Note',
+      'Date,Customer,Invoice,Job,Kind,Method,Stripe method type,Card,Status,Amount,Tip,Refunded,Note',
     );
     expect(line).toBe(
-      '2026-09-21 10:00,Jane Doe,2001,,Payment,Card,Visa 4242,succeeded,100.00,15.00,0.00,"Paid, ""thanks"""',
+      '2026-09-21 10:00,Jane Doe,2001,,Payment,Card,card,Visa 4242,succeeded,100.00,15.00,0.00,"Paid, ""thanks"""',
     );
+  });
+
+  it('labels bank debit payments with Stripe’s method type', () => {
+    const ach: LedgerRow = {
+      ...row,
+      method: 'ach_debit',
+      status: 'processing',
+      card_brand: null,
+      card_last4: null,
+      stripe_method_type: 'us_bank_account',
+      note: null,
+    };
+    const line = ledgerToCsv([ach], 'America/Chicago').trim().split('\r\n')[1];
+    expect(line).toContain(',Bank debit (ACH),us_bank_account,,processing,');
   });
 });
 

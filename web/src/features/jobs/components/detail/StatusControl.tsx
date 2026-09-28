@@ -11,10 +11,12 @@ import {
 } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { formatDateTime } from '@/lib/dates';
+import { toAppError } from '@/lib/errors';
 import { EdgeFunctionError } from '@/features/quotes/shared/edge';
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import {
+  fetchCompletionBlockers,
   useReleaseJobPayments,
   useSetStatus,
   useStatusTransitions,
@@ -22,11 +24,17 @@ import {
 } from '../../api';
 import {
   allowedTransitions,
+  gateBlockers,
+  isGatedMove,
   statusNeedsSchedule,
   statusSteps,
+  type GateBlocker,
   type JobStatus,
   type StatusTransition,
 } from '../../model';
+
+/** Longest reason set_job_status accepts (cancel reason / gate override). */
+const REASON_MAX = 500;
 
 export interface StatusControlProps {
   job: JobDetail;
@@ -44,12 +52,17 @@ export function StatusControl({ job }: StatusControlProps) {
   const setStatus = useSetStatus(job.id);
   const release = useReleaseJobPayments(job.id);
   const canCollect = useCan('payments.collect');
+  const canOverride = useCan('jobs.manage');
   const [confirming, setConfirming] = useState<StatusTransition | null>(null);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [reason, setReason] = useState('');
   /** A card payment on the job is still processing: the side exit must wait. */
   const [held, setHeld] = useState(false);
-  const busy = setStatus.isPending || release.isPending;
+  /** The completion gates block this move (P-11): what is missing. */
+  const [gate, setGate] = useState<{ status: JobStatus; blockers: GateBlocker[] } | null>(null);
+  const [overrideReason, setOverrideReason] = useState('');
+  const [checking, setChecking] = useState(false);
+  const busy = setStatus.isPending || release.isPending || checking;
 
   /**
    * Before cancelling / no-show: release the job's open card payments and pay
@@ -85,19 +98,53 @@ export function StatusControl({ job }: StatusControlProps) {
   const cancelEdge = allowed.find((t) => t.to_status === 'cancelled') ?? null;
   const noShowEdge = allowed.find((t) => t.to_status === 'no_show') ?? null;
 
-  const move = async (status: JobStatus, cancelReason?: string) => {
+  /** The gates' current state for a move (null when nothing blocks or it can't be read). */
+  const blockersFor = async (status: JobStatus): Promise<GateBlocker[] | null> => {
+    try {
+      const blockers = gateBlockers(await fetchCompletionBlockers(job.id), job.status, status);
+      return blockers.length > 0 ? blockers : null;
+    } catch {
+      return null; // the server re-checks the move itself
+    }
+  };
+
+  const move = async (
+    status: JobStatus,
+    options: { reason?: string; force?: boolean } = {},
+  ): Promise<void> => {
     setHeld(false);
     if ((status === 'cancelled' || status === 'no_show') && !(await releasePayments())) return;
+    if (!options.force && isGatedMove(job.status, status)) {
+      setChecking(true);
+      const blockers = await blockersFor(status);
+      setChecking(false);
+      if (blockers) {
+        setGate({ status, blockers });
+        return;
+      }
+    }
     try {
       await setStatus.mutateAsync({
         status,
-        ...(cancelReason !== undefined ? { reason: cancelReason } : {}),
+        ...(options.reason !== undefined ? { reason: options.reason } : {}),
+        ...(options.force ? { force: true } : {}),
       });
       toast.success(`Job marked ${statusLabel('job', status).toLowerCase()}`);
       setConfirming(null);
       setCancelOpen(false);
       setReason('');
+      setGate(null);
+      setOverrideReason('');
     } catch (error) {
+      // A gate that closed meanwhile (another device ticked an item off):
+      // show what is missing instead of the raw refusal.
+      if (!options.force && toAppError(error).code === '23514' && isGatedMove(job.status, status)) {
+        const blockers = await blockersFor(status);
+        if (blockers) {
+          setGate({ status, blockers });
+          return;
+        }
+      }
       toast.error(error);
     }
   };
@@ -249,7 +296,11 @@ export function StatusControl({ job }: StatusControlProps) {
             <Button variant="secondary" onClick={() => setCancelOpen(false)}>
               Keep job
             </Button>
-            <Button variant="danger" loading={busy} onClick={() => void move('cancelled', reason)}>
+            <Button
+              variant="danger"
+              loading={busy}
+              onClick={() => void move('cancelled', { reason })}
+            >
               Cancel job
             </Button>
           </>
@@ -259,11 +310,74 @@ export function StatusControl({ job }: StatusControlProps) {
         <FormField label="Reason" help="Optional. Shown on the job's activity.">
           <Textarea
             rows={3}
-            maxLength={1000}
+            maxLength={REASON_MAX}
             value={reason}
             onChange={(e) => setReason(e.target.value)}
           />
         </FormField>
+      </Dialog>
+
+      <Dialog
+        open={gate !== null}
+        onClose={() => {
+          if (setStatus.isPending) return;
+          setGate(null);
+          setOverrideReason('');
+        }}
+        title={
+          gate?.status === 'completed'
+            ? 'This job can’t be completed yet'
+            : 'This job can’t be started yet'
+        }
+        description="Your shop requires these first."
+        size="sm"
+        dismissible={!setStatus.isPending}
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={setStatus.isPending}
+              onClick={() => {
+                setGate(null);
+                setOverrideReason('');
+              }}
+            >
+              {canOverride ? 'Cancel' : 'OK'}
+            </Button>
+            {canOverride && gate && (
+              <Button
+                variant="danger"
+                loading={setStatus.isPending}
+                onClick={() => void move(gate.status, { force: true, reason: overrideReason })}
+              >
+                {gate.status === 'completed' ? 'Complete anyway' : 'Start anyway'}
+              </Button>
+            )}
+          </>
+        }
+      >
+        <ul className="text-ink mb-3 flex list-disc flex-col gap-1.5 pl-5 text-sm">
+          {gate?.blockers.map((b) => (
+            <li key={b.key}>{b.text}</li>
+          ))}
+        </ul>
+        {canOverride ? (
+          <FormField
+            label="Reason for the override"
+            help="Optional. Saved with the job so the team knows why."
+          >
+            <Textarea
+              rows={2}
+              maxLength={REASON_MAX}
+              value={overrideReason}
+              onChange={(e) => setOverrideReason(e.target.value)}
+            />
+          </FormField>
+        ) : (
+          <p className="text-muted text-sm">
+            Finish these first, or ask a manager to override the requirement.
+          </p>
+        )}
       </Dialog>
     </div>
   );

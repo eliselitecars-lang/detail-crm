@@ -22,6 +22,8 @@ struct CalendarTimelineView: View {
     let memberColors: [UUID: String]
     let onRefresh: () async -> Void
     let onSelectDay: (Date) -> Void
+    /// Opens a calendar event (managers+); nil = events aren't tappable.
+    var onOpenEvent: ((CalendarEvent) -> Void)? = nil
 
     /// The first-hour scroll runs once per range (the parent gives each
     /// range its own identity), not on every reappearance, so coming back
@@ -55,7 +57,8 @@ struct CalendarTimelineView: View {
                                     hourHeight: hourHeight,
                                     compact: compact,
                                     clock: clock,
-                                    memberColors: memberColors
+                                    memberColors: memberColors,
+                                    onOpenEvent: onOpenEvent
                                 )
                             }
                         }
@@ -170,6 +173,7 @@ private struct CalendarDayColumn: View {
     let compact: Bool
     let clock: ShopClock
     let memberColors: [UUID: String]
+    let onOpenEvent: ((CalendarEvent) -> Void)?
 
     private var totalHeight: CGFloat { hourHeight * 24 }
 
@@ -180,7 +184,7 @@ private struct CalendarDayColumn: View {
                 let width = max(geometry.size.width, 0)
                 ZStack(alignment: .topLeading) {
                     ForEach(layout.shaded) { placed in
-                        CalendarShadedBlock(placed: placed, compact: compact, clock: clock)
+                        CalendarShadedBlock(placed: placed, compact: compact, clock: clock, onOpen: onOpenEvent)
                             .frame(width: width, height: height(of: placed))
                             .offset(y: y(of: placed.startMinute))
                     }
@@ -189,7 +193,8 @@ private struct CalendarDayColumn: View {
                             placed: placed,
                             compact: compact,
                             clock: clock,
-                            memberColors: memberColors
+                            memberColors: memberColors,
+                            onOpenEvent: onOpenEvent
                         )
                         .frame(width: blockWidth(placed, total: width), height: height(of: placed))
                         .offset(x: blockX(placed, total: width), y: y(of: placed.startMinute))
@@ -273,6 +278,8 @@ private struct CalendarShadedBlock: View {
     let placed: CalendarPlacedEvent
     let compact: Bool
     let clock: ShopClock
+    /// Managers open closed hours / time off to edit them.
+    let onOpen: ((CalendarEvent) -> Void)?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -280,7 +287,7 @@ private struct CalendarShadedBlock: View {
                 .fill(Theme.surfaceMuted)
                 .opacity(0.9)
             if !compact {
-                Label(placed.event.displayTitle, systemImage: "nosign")
+                Label(placed.event.displayTitle, systemImage: placed.event.blockKind?.systemImage ?? "nosign")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary)
                     .lineLimit(1)
@@ -288,9 +295,12 @@ private struct CalendarShadedBlock: View {
                     .padding(.top, Theme.Spacing.xxs)
             }
         }
-        .allowsHitTesting(false)
+        .contentShape(Rectangle())
+        .onTapGesture { onOpen?(placed.event) }
+        .allowsHitTesting(onOpen != nil)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(CalendarAccessibility.label(for: placed.event, clock: clock))
+        .accessibilityAddTraits(onOpen != nil ? .isButton : [])
     }
 }
 
@@ -299,10 +309,18 @@ private struct CalendarBlockLink: View {
     let compact: Bool
     let clock: ShopClock
     let memberColors: [UUID: String]
+    let onOpenEvent: ((CalendarEvent) -> Void)?
 
     var body: some View {
         if placed.event.isOpenableJob {
             NavigationLink(value: AppRoute.job(placed.event.id)) {
+                CalendarBlock(placed: placed, compact: compact, clock: clock, memberColors: memberColors)
+            }
+            .buttonStyle(.plain)
+        } else if placed.event.isForegroundEvent, let onOpenEvent {
+            Button {
+                onOpenEvent(placed.event)
+            } label: {
                 CalendarBlock(placed: placed, compact: compact, clock: clock, memberColors: memberColors)
             }
             .buttonStyle(.plain)
@@ -326,10 +344,21 @@ private struct CalendarBlock: View {
                 .fill(accent)
                 .frame(width: 3)
             VStack(alignment: .leading, spacing: 1) {
-                Text(event.displayTitle)
-                    .font(compact ? Theme.Typography.caption.weight(.semibold) : Theme.Typography.footnote.weight(.semibold))
-                    .foregroundStyle(event.isOpenableJob ? Theme.textPrimary : Theme.textSecondary)
-                    .lineLimit(compact ? 3 : 2)
+                HStack(alignment: .firstTextBaseline, spacing: 2) {
+                    if let kind = event.blockKind {
+                        Image(systemName: kind.systemImage)
+                            .font(Theme.Typography.caption2)
+                            .accessibilityHidden(true)
+                    } else if event.isSeriesJob {
+                        Image(systemName: "repeat")
+                            .font(Theme.Typography.caption2)
+                            .accessibilityHidden(true)
+                    }
+                    Text(event.displayTitle)
+                        .font(compact ? Theme.Typography.caption.weight(.semibold) : Theme.Typography.footnote.weight(.semibold))
+                        .lineLimit(compact ? 3 : 2)
+                }
+                .foregroundStyle(event.isOpenableJob || event.isForegroundEvent ? Theme.textPrimary : Theme.textSecondary)
                 if !compact && placed.durationMinutes >= 40 {
                     Text(CalendarFormat.timeRange(event, clock: clock))
                         .font(Theme.Typography.caption)
@@ -357,7 +386,7 @@ private struct CalendarBlock: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(CalendarAccessibility.label(for: event, clock: clock))
-        .accessibilityAddTraits(event.isOpenableJob ? .isButton : [])
+        .accessibilityAddTraits(event.isOpenableJob || event.isForegroundEvent ? .isButton : [])
     }
 
     private func detailText(_ event: CalendarEvent) -> String? {

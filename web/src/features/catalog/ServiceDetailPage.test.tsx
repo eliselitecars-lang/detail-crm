@@ -227,4 +227,95 @@ describe('ServiceDetailPage', () => {
       ),
     );
   });
+
+  it('adds a follow-up message and warns when the shop switch is off', async () => {
+    results.message_templates = {
+      data: [
+        { channel: 'sms', enabled: false },
+        { channel: 'email', enabled: false },
+      ],
+    };
+    results.service_followups = {
+      data: [
+        {
+          id: 'fu-1',
+          shop_id: 'shop-1',
+          service_id: 'pkg-1',
+          channel: 'sms',
+          offset_days: 90,
+          subject: null,
+          body: 'Time for a check-up: {{rebook_link}}',
+          enabled: true,
+          sort: 0,
+          created_at: '',
+          updated_at: '',
+        },
+      ],
+    };
+    const { user } = renderAs('manager');
+    const card = await screen.findByRole('region', { name: 'Follow-up messages' });
+    expect(await within(card).findByText('3 months after the visit')).toBeInTheDocument();
+    expect(await within(card).findByText(/turned off for the whole shop/)).toBeInTheDocument();
+    expect(within(card).getByRole('link', { name: 'Turn them on in Templates' })).toHaveAttribute(
+      'href',
+      '/app/settings/templates?edit=service_followup',
+    );
+    await user.click(within(card).getByRole('button', { name: 'Add follow-up' }));
+    const dialog = await screen.findByRole('dialog', {
+      name: /New follow-up for Showroom Package/,
+    });
+    await user.click(within(dialog).getByRole('radio', { name: 'Email' }));
+    const amount = within(dialog).getByRole('textbox', { name: /After/ });
+    await user.clear(amount);
+    await user.type(amount, '2');
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: /Unit/ }), 'weeks');
+    await user.type(within(dialog).getByRole('textbox', { name: /Subject/ }), 'How is your car?');
+    await user.type(
+      within(dialog).getByRole('textbox', { name: /Message/ }),
+      'Hi {{{{customer_first_name}}!',
+    );
+    expect(within(dialog).getByText(/Preview/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Add follow-up' }));
+    await waitFor(() => {
+      const insert = builders.service_followups?.find((b) => b.insert.mock.calls.length > 0);
+      expect(insert?.insert).toHaveBeenCalledWith({
+        channel: 'email',
+        offset_days: 14,
+        subject: 'How is your car?',
+        body: 'Hi {{customer_first_name}}!',
+        enabled: true,
+        shop_id: 'shop-1',
+        service_id: 'pkg-1',
+      });
+    });
+  });
+
+  it('lists the materials a service uses (managers)', async () => {
+    results.products = {
+      data: [
+        {
+          id: 'prod-1',
+          name: 'Coating kit',
+          unit: 'kit',
+          sku: null,
+          active: true,
+          archived_at: null,
+        },
+      ],
+    };
+    results.service_consumables = {
+      data: [{ id: 'sc-1', product_id: 'prod-1', vehicle_category_id: 'vc-truck', quantity: 1.5 }],
+    };
+    renderAs('manager');
+    const card = await screen.findByRole('region', { name: 'Materials used' });
+    expect(await within(card).findByText('Coating kit')).toBeInTheDocument();
+    expect(within(card).getByText('1.5 kit per unit · Truck')).toBeInTheDocument();
+  });
+
+  it('hides follow-ups and materials from technicians', async () => {
+    renderAs('technician');
+    await screen.findByRole('heading', { name: 'Showroom Package' });
+    expect(screen.queryByRole('region', { name: 'Follow-up messages' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Materials used' })).not.toBeInTheDocument();
+  });
 });

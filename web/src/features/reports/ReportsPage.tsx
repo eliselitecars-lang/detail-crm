@@ -5,16 +5,31 @@ import { Card, EmptyState, PageHeader, Tabs, type TabItem } from '@/components/u
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import { CustomersReport } from './components/CustomersReport';
+import { GiftCardsReport } from './components/GiftCardsReport';
 import { OutstandingReport } from './components/OutstandingReport';
 import { PaymentsReport } from './components/PaymentsReport';
+import { JobProfitReport, ServiceProfitReport } from './components/ProfitReports';
 import { RangePicker } from './components/RangePicker';
 import { RevenueReport } from './components/RevenueReport';
+import { LeadSourcesReport, QuoteConversionReport } from './components/SalesFunnelReports';
 import { SalesReport } from './components/SalesReport';
 import { TeamReport } from './components/TeamReport';
 import { readParams, type Bucket, type DateRange, type Preset } from './ranges';
 import { useShopDayClock } from './useShopDayClock';
 
-const ALL_TABS = ['revenue', 'payments', 'sales', 'team', 'customers', 'outstanding'] as const;
+const ALL_TABS = [
+  'revenue',
+  'payments',
+  'sales',
+  'team',
+  'customers',
+  'lead_sources',
+  'quotes',
+  'job_profit',
+  'service_profit',
+  'gift_cards',
+  'outstanding',
+] as const;
 type ReportTab = (typeof ALL_TABS)[number];
 
 const TAB_LABELS: Record<ReportTab, string> = {
@@ -23,6 +38,11 @@ const TAB_LABELS: Record<ReportTab, string> = {
   sales: 'Sales by service',
   team: 'Team',
   customers: 'Customers',
+  lead_sources: 'Lead sources',
+  quotes: 'Quote conversion',
+  job_profit: 'Job profit',
+  service_profit: 'Service profit',
+  gift_cards: 'Gift cards',
   outstanding: 'Outstanding',
 };
 
@@ -94,6 +114,16 @@ export default function ReportsPage() {
         return guard(<TeamReport range={range} ownOnly={!canViewAll} />);
       case 'customers':
         return guard(<CustomersReport range={range} />);
+      case 'lead_sources':
+        return guard(<LeadSourcesReport range={range} />);
+      case 'quotes':
+        return guard(<QuoteConversionReport range={range} />);
+      case 'job_profit':
+        return guard(<JobProfitReport range={range} />);
+      case 'service_profit':
+        return guard(<ServiceProfitReport range={range} />);
+      case 'gift_cards':
+        return guard(<GiftCardsReport range={range} />);
       case 'outstanding':
         return <OutstandingReport />;
     }
@@ -111,7 +141,7 @@ export default function ReportsPage() {
         title="Reports"
         description={
           canViewAll
-            ? 'Revenue, payments, sales, team and customer reports in your shop’s time zone.'
+            ? 'Revenue, payments, sales, team, customers, leads, quotes, profit and gift cards in your shop’s time zone.'
             : 'Your hours, completed jobs and pay for a period.'
         }
       />

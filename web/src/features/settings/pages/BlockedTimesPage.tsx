@@ -6,6 +6,7 @@ import {
   Badge,
   Button,
   Card,
+  Checkbox,
   ConfirmDialog,
   DateInput,
   Dialog,
@@ -21,6 +22,7 @@ import {
   type Column,
 } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { WEEKDAY_NAMES } from '@/lib/dates';
 import {
   useBlockedTimes,
   useDeleteBlockedTime,
@@ -29,10 +31,17 @@ import {
   type BlockedTime,
   type MemberOption,
 } from '../api';
-import { blockToFormInput, describeBlock } from '../blockedTimes';
+import {
+  blockToFormInput,
+  describeBlock,
+  describeRecurrence,
+  EVENT_KIND_LABELS,
+  readRecurrence,
+} from '../blockedTimes';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
 import {
   blockedTimeSchema,
+  EVENT_KINDS,
   type BlockedTimeFormInput,
   type BlockedTimeFormValues,
 } from '../schemas';
@@ -57,7 +66,34 @@ export default function BlockedTimesPage() {
   }, [members.data]);
 
   const columns: Column<BlockedTime>[] = [
-    { key: 'when', header: 'When', primary: true, cell: (b) => describeBlock(b, timezone) },
+    {
+      key: 'when',
+      header: 'When',
+      primary: true,
+      cell: (b) => {
+        const repeat = describeRecurrence(readRecurrence(b.recurrence));
+        return (
+          <span className="flex flex-col">
+            <span>{describeBlock(b, timezone)}</span>
+            {repeat && <span className="text-muted text-xs">{repeat}</span>}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'kind',
+      header: 'Type',
+      cell: (b) => (
+        <span className="inline-flex flex-wrap gap-1">
+          <Badge tone={b.kind === 'closed' ? 'warning' : 'neutral'}>
+            {EVENT_KIND_LABELS[b.kind]}
+          </Badge>
+          {b.affects_capacity && b.kind !== 'closed' && b.kind !== 'time_off' && (
+            <Badge tone="info">Blocks booking</Badge>
+          )}
+        </span>
+      ),
+    },
     {
       key: 'who',
       header: 'Applies to',
@@ -70,8 +106,8 @@ export default function BlockedTimesPage() {
     },
     {
       key: 'reason',
-      header: 'Reason',
-      cell: (b) => b.reason ?? <span className="text-muted">—</span>,
+      header: 'Title / reason',
+      cell: (b) => b.title ?? b.reason ?? <span className="text-muted">—</span>,
     },
     ...(canManageBlockedTimes
       ? [
@@ -128,7 +164,7 @@ export default function BlockedTimesPage() {
               <EmptyState
                 icon={<CalendarOff aria-hidden="true" />}
                 title={showPast ? 'No blocked times yet' : 'No upcoming blocked times'}
-                description="Block holidays, closures or someone’s time off so nothing gets booked then."
+                description="Block holidays, closures or someone’s time off so nothing gets booked then. Meetings and other events can be added here or on the calendar."
                 action={
                   canManageBlockedTimes && (
                     <Button variant="secondary" onClick={() => setEditing({ block: null })}>
@@ -164,10 +200,12 @@ export default function BlockedTimesPage() {
         open={deleting !== null}
         onClose={() => setDeleting(null)}
         tone="danger"
-        title="Delete this blocked time?"
+        title="Delete this event?"
         description={
           deleting
-            ? `${describeBlock(deleting, timezone)} will be open for booking again.`
+            ? deleting.recurrence
+              ? `Every repeat of this event is deleted (${describeBlock(deleting, timezone)} onward).`
+              : `${describeBlock(deleting, timezone)} will be open for booking again.`
             : undefined
         }
         confirmLabel="Delete"
@@ -210,11 +248,14 @@ function BlockedTimeDialog({
     defaultValues: blockToFormInput(block, timezone),
   });
   const allDay = useWatch({ control, name: 'allDay' });
+  const kind = useWatch({ control, name: 'kind' });
+  const repeat = useWatch({ control, name: 'repeat' });
+  const repeatEnd = useWatch({ control, name: 'repeatEnd' });
 
   const onSubmit = handleSubmit(async (values) => {
     try {
       await save.mutateAsync({ id: block?.id, ...values });
-      toast.success(block ? 'Blocked time updated' : 'Time blocked');
+      toast.success(block ? 'Saved' : 'Added to the calendar');
       onClose();
     } catch (error) {
       toast.error(error);
@@ -227,7 +268,8 @@ function BlockedTimeDialog({
       open
       onClose={onClose}
       dismissible={!save.isPending}
-      title={block ? 'Edit blocked time' : 'Block time'}
+      size="lg"
+      title={block ? 'Edit event' : 'Block time'}
       description={`Times are in the shop’s time zone (${timezone.replace(/_/g, ' ')}).`}
       footer={
         <>
@@ -246,17 +288,41 @@ function BlockedTimeDialog({
         onSubmit={(e) => void onSubmit(e)}
         className="flex flex-col gap-4"
       >
-        <FormField label="Applies to" help="Whole shop also closes online booking for that time.">
-          <Select {...register('memberId')}>
-            <option value="">Whole shop</option>
-            {members.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.display_name}
-                {m.active ? '' : ' (inactive)'}
-              </option>
-            ))}
-          </Select>
-        </FormField>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <FormField label="Type">
+            <Select
+              options={EVENT_KINDS.map((k) => ({ value: k, label: EVENT_KIND_LABELS[k] }))}
+              {...register('kind')}
+            />
+          </FormField>
+          {kind !== 'closed' && (
+            <FormField
+              label={kind === 'time_off' ? 'Who is off' : 'For'}
+              required={kind === 'time_off'}
+              error={errors.memberId?.message}
+            >
+              <Select {...register('memberId')}>
+                <option value="">{kind === 'time_off' ? 'Choose…' : 'Whole shop'}</option>
+                {members.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.display_name}
+                    {m.active ? '' : ' (inactive)'}
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+          )}
+        </div>
+        {kind === 'closed' && (
+          <p className="text-muted text-xs">
+            A closure applies to the whole shop and closes online booking for that time.
+          </p>
+        )}
+        {kind !== 'closed' && kind !== 'time_off' && (
+          <FormField label="Title" error={errors.title?.message} help="Shown on the calendar.">
+            <Input maxLength={120} {...register('title')} />
+          </FormField>
+        )}
         <Controller
           control={control}
           name="allDay"
@@ -291,12 +357,112 @@ function BlockedTimeDialog({
           )}
         </div>
         <FormField
-          label="Reason"
+          label={kind === 'closed' || kind === 'time_off' ? 'Reason' : 'Notes'}
           error={errors.reason?.message}
           help="Optional, e.g. Holiday or Training."
         >
           <Input maxLength={500} {...register('reason')} />
         </FormField>
+        {kind !== 'closed' && kind !== 'time_off' && (
+          <Controller
+            control={control}
+            name="affectsCapacity"
+            render={({ field }) => (
+              <Switch
+                label="Blocks online booking"
+                description="On: this time counts as busy — for the person it’s for, or one job’s worth of capacity for the whole shop."
+                checked={field.value}
+                onCheckedChange={field.onChange}
+              />
+            )}
+          />
+        )}
+        <fieldset className="border-line flex flex-col gap-3 border-t pt-4">
+          <legend className="text-ink float-left mb-1 w-full text-sm font-semibold">Repeat</legend>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField label="Repeats">
+              <Select
+                options={[
+                  { value: '', label: 'Doesn’t repeat' },
+                  { value: 'day', label: 'Daily' },
+                  { value: 'week', label: 'Weekly' },
+                  { value: 'month', label: 'Monthly (same date)' },
+                ]}
+                {...register('repeat')}
+              />
+            </FormField>
+            {repeat !== '' && (
+              <FormField
+                label={`Every how many ${repeat === 'day' ? 'days' : repeat === 'week' ? 'weeks' : 'months'}`}
+                error={errors.interval?.message}
+              >
+                <Input inputMode="numeric" {...register('interval')} />
+              </FormField>
+            )}
+          </div>
+          {repeat === 'week' && (
+            <Controller
+              control={control}
+              name="weekdays"
+              render={({ field }) => (
+                <fieldset className="flex flex-col gap-1.5">
+                  <legend className="text-ink mb-1 text-sm font-medium">On</legend>
+                  <div className="flex flex-wrap gap-x-4 gap-y-2">
+                    {WEEKDAY_NAMES.map((name, day) => (
+                      <Checkbox
+                        key={name}
+                        label={name.slice(0, 3)}
+                        aria-label={name}
+                        checked={field.value.includes(day)}
+                        onChange={(e) =>
+                          field.onChange(
+                            e.target.checked
+                              ? [...field.value, day].sort()
+                              : field.value.filter((d) => d !== day),
+                          )
+                        }
+                      />
+                    ))}
+                  </div>
+                  {errors.weekdays?.message && (
+                    <p role="alert" className="text-danger-ink text-xs font-medium">
+                      {errors.weekdays.message}
+                    </p>
+                  )}
+                </fieldset>
+              )}
+            />
+          )}
+          {repeat !== '' && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField label="Ends">
+                <Select
+                  options={[
+                    { value: 'never', label: 'Never' },
+                    { value: 'until', label: 'On a date' },
+                    { value: 'count', label: 'After a number of times' },
+                  ]}
+                  {...register('repeatEnd')}
+                />
+              </FormField>
+              {repeatEnd === 'until' && (
+                <FormField label="Last date" required error={errors.untilDate?.message}>
+                  <DateInput {...register('untilDate')} />
+                </FormField>
+              )}
+              {repeatEnd === 'count' && (
+                <FormField label="Times" required error={errors.count?.message}>
+                  <Input inputMode="numeric" {...register('count')} />
+                </FormField>
+              )}
+            </div>
+          )}
+          {repeat !== '' && block?.recurrence && (
+            <p className="text-muted text-xs">
+              Changes apply to every occurrence. To change a single one, use the calendar.
+            </p>
+          )}
+        </fieldset>
       </form>
     </Dialog>
   );

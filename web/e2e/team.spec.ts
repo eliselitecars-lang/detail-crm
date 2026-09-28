@@ -101,6 +101,7 @@ test.describe('team', () => {
         member_id: team[1]!.member_id,
         hourly_rate_cents: 2450,
         commission_bps: 750,
+        sales_commission_bps: 0,
         shop_id: expect.any(String),
       },
     ]);

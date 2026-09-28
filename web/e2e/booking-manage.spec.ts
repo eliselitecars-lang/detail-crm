@@ -164,10 +164,10 @@ test.describe('manage booking', () => {
     await expect(page.getByRole('button', { name: 'Cancel booking' })).toHaveCount(0);
     // Nothing is owed on a cancelled booking, whatever total − paid comes to.
     await expect(page.getByText('Balance', { exact: true })).toHaveCount(0);
-    await expect(page.getByRole('link', { name: 'Book again' })).toHaveAttribute(
-      'href',
-      '/book/glacier',
-    );
+    const again = page.getByRole('link', { name: 'Book again' });
+    await expect(again).toHaveAttribute('href', '/book/glacier');
+    // A new document without a referrer (the booking page may load the shop's tags).
+    await expect(again).toHaveAttribute('rel', 'noreferrer');
     expect(calls.find((c) => c.name === 'public_cancel_booking')?.body).toEqual({
       p_token: TOKEN,
       p_reason: 'Out of town',

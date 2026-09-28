@@ -185,7 +185,9 @@ test.describe('invoices', () => {
     await expect(page.getByRole('button', { name: 'Record payment' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Charge card' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Refund/ })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'More invoice actions' })).toHaveCount(0);
+    // the only extra action is the invoice PDF (collectors may open their job's invoice)
+    await page.getByRole('button', { name: 'More invoice actions' }).click();
+    await expect(page.getByRole('menuitem')).toHaveText(['Download PDF']);
   });
 
   test('invoice list fits a 360px phone', async ({ page }) => {

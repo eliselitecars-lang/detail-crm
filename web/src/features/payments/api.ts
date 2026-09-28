@@ -62,6 +62,11 @@ export const ledgerRowSchema = z.object({
   refunded_cents: z.number(),
   card_brand: z.string().nullable(),
   card_last4: z.string().nullable(),
+  /** Stripe's payment method type (card, us_bank_account, affirm…), set by the webhook. */
+  stripe_method_type: z
+    .string()
+    .nullish()
+    .transform((v) => v ?? null),
   note: z.string().nullable(),
   paid_at: z.string().nullable(),
   created_at: z.string(),
@@ -77,7 +82,7 @@ export const ledgerRowSchema = z.object({
 export type LedgerRow = z.infer<typeof ledgerRowSchema>;
 
 const LEDGER_COLUMNS =
-  'id, kind, method, status, amount_cents, tip_cents, refunded_cents, card_brand, card_last4, note, paid_at, created_at, invoice_id, job_id, membership_id, customer_id, ' +
+  'id, kind, method, status, amount_cents, tip_cents, refunded_cents, card_brand, card_last4, stripe_method_type, note, paid_at, created_at, invoice_id, job_id, membership_id, customer_id, ' +
   'customer:customers(id, first_name, last_name, company), invoice:invoices(id, number), job:jobs(id, number)';
 
 /**

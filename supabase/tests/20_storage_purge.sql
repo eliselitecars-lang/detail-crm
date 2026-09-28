@@ -50,10 +50,13 @@ values (tests.fx('shop_a'), tests.fx('job_a'), tests.fx('shop_a') || '/' || test
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(tests.row_count($$delete from public.jobs where id = tests.fx('job_a')$$), 1::bigint, 'manager deletes the job');
 select tests.as_superuser();
-select tests.eq((select array_agg(bucket_id || ' ' || path || ' ' || is_prefix::text || ' ' || reason)
+-- (0076: plus its video folder in job-media and its documents folder)
+select tests.eq((select array_agg(bucket_id || ' ' || path || ' ' || is_prefix::text || ' ' || reason order by bucket_id)
                    from public.storage_purge_requests where shop_id = tests.fx('shop_a')),
-                array['job-photos ' || tests.fx('shop_a') || '/' || tests.fx('job_a') || '/ true job_deleted'],
-                'deleting the job queues its photo folder for the storage purge');
+                array['documents '  || tests.fx('shop_a') || '/jobs/' || tests.fx('job_a') || '/ true job_deleted',
+                      'job-media '  || tests.fx('shop_a') || '/' || tests.fx('job_a') || '/ true job_deleted',
+                      'job-photos ' || tests.fx('shop_a') || '/' || tests.fx('job_a') || '/ true job_deleted'],
+                'deleting the job queues its photo, video and document folders for the storage purge');
 
 select tests.authenticate_as(tests.fx('u_tech2_a'));
 select tests.eq(tests.row_count(format($$select 1 from storage.objects where bucket_id = 'job-photos' and name like '%s/%s/%%'$$,
@@ -181,7 +184,8 @@ select tests.eq((select array_agg(bucket_id || ' ' || path || ' ' || reason orde
                       'signatures ' || tests.fx('shop_a') || '/inspections/shared.png inspection_deleted'],
                 'the job''s inspection signatures and its form''s public upload folder are queued');
 select tests.eq((select count(*) from public.storage_purge_requests
-                  where path = tests.fx('shop_a') || '/' || tests.fx('job_q') || '/' and reason = 'job_deleted'), 1::bigint,
+                  where path = tests.fx('shop_a') || '/' || tests.fx('job_q') || '/' and reason = 'job_deleted'
+                    and bucket_id = 'job-photos'), 1::bigint,
                 'and its photo folder');
 
 -- =================================================================== #2 (2) shop deletion
@@ -199,7 +203,9 @@ select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('
 select tests.as_superuser();
 select tests.eq((select array_agg(bucket_id || ' ' || path || ' ' || reason order by bucket_id)
                    from public.storage_purge_requests where shop_id = tests.fx('shop_b')),
-                array['job-photos '  || tests.fx('shop_b') || '/ shop_deleted',
+                array['documents '   || tests.fx('shop_b') || '/ shop_deleted',
+                      'job-media '   || tests.fx('shop_b') || '/ shop_deleted',
+                      'job-photos '  || tests.fx('shop_b') || '/ shop_deleted',
                       'shop-assets ' || tests.fx('shop_b') || '/ shop_deleted',
                       'signatures '  || tests.fx('shop_b') || '/ shop_deleted'],
                 'deleting the shop queues its whole folder in every bucket (and nothing per cascaded row)');

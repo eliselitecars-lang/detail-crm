@@ -4,8 +4,10 @@
 //
 //  Manager+: the job's services. Catalog lines are priced by the server
 //  (`price_services` for the job's customer and vehicle — category price,
-//  membership inclusions); custom lines take a typed price. After every
-//  write the job row is re-read so the totals shown are the server's.
+//  membership inclusions); custom lines take a typed price; preset fees
+//  come from the shop's list (P-21). Each line can name one of the
+//  customer's vehicles (P-7). After every write the job row is re-read so
+//  the totals shown are the server's.
 //
 
 import SwiftUI
@@ -15,6 +17,7 @@ import DetailCore
 enum JobLinesRoute: Hashable {
     case catalog
     case custom
+    case fees
     case edit(UUID)
 }
 
@@ -54,6 +57,8 @@ struct JobLinesEditorSheet: View {
             )
         case .custom:
             return AnyView(JobLineFormView(model: model, line: nil) { path.removeAll() })
+        case .fees:
+            return AnyView(JobsFeePickerSheet(model: model) { path.removeAll() })
         case .edit(let id):
             let line = model.snapshot?.lineItems.first { $0.id == id }
             return AnyView(JobLineFormView(model: model, line: line) { path.removeAll() })
@@ -92,6 +97,11 @@ struct JobLinesEditorSheet: View {
                     .themedRow()
                     NavigationLink(value: JobLinesRoute.custom) {
                         Label("Add a custom line", systemImage: "square.and.pencil")
+                            .foregroundStyle(Theme.glacier)
+                    }
+                    .themedRow()
+                    NavigationLink(value: JobLinesRoute.fees) {
+                        Label("Add a preset fee", systemImage: "tag")
                             .foregroundStyle(Theme.glacier)
                     }
                     .themedRow()
@@ -256,6 +266,7 @@ struct JobLineFormView: View {
     @State private var discountText = ""
     @State private var durationText = ""
     @State private var taxable = true
+    @State private var vehicleID: UUID?
     @State private var errorMessage: String?
     @State private var didPrefill = false
     @State private var confirmation: ConfirmationRequest?
@@ -283,6 +294,7 @@ struct JobLineFormView: View {
                 .tint(Theme.glacier)
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.textPrimary)
+            JobsLineVehiclePicker(model: model, vehicleID: $vehicleID)
             AsyncButton(line == nil ? "Add line" : "Save line", style: .themePrimary) {
                 await save()
             }
@@ -302,6 +314,7 @@ struct JobLineFormView: View {
     private func prefill() {
         guard !didPrefill else { return }
         didPrefill = true
+        vehicleID = line?.vehicleID ?? model.job?.vehicleID
         guard let line else { return }
         let currency = appState.currencyCode
         name = line.name
@@ -345,7 +358,7 @@ struct JobLineFormView: View {
         }
         return JobLineDraft(
             serviceID: line?.serviceID,
-            vehicleID: line?.vehicleID ?? model.job?.vehicleID,
+            vehicleID: vehicleID,
             name: trimmedName,
             description: descriptionText.trimmedNonEmpty,
             quantity: quantity,

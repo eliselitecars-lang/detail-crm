@@ -143,18 +143,27 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               notes.
             </li>
             <li>
-              <Term>Jobs and documents:</Term> appointments (date, time, service address, services,
-              prices, notes and status history), checklists, inspections (damage marks, mileage,
-              fuel level, notes), quotes (including the name typed to approve one), invoices,
-              payments and memberships.
+              <Term>Jobs and documents:</Term> appointments and repeating appointments (date, time,
+              service address, services, prices, notes and status history), checklists, inspections
+              (damage marks, mileage, fuel level, notes), quotes (including the name typed to
+              approve one and a time the customer picks), invoices, payments, memberships, gift
+              cards and store credit, referral codes (and which customer referred whom), staff
+              tasks, and any extra details the shop chooses to keep in its own custom fields or asks
+              as booking questions.
             </li>
             <li>
-              <Term>Photos and signatures:</Term> before-and-after and inspection photos, and
-              signatures customers draw on inspections and forms. They are kept in private file
-              storage that only the shop’s team can open, according to their role. Shop logos and
-              service images are public, because they appear on the shop’s booking pages. When a
-              customer signs a form, the typed name, the time and the IP address of the signing
-              device are recorded as evidence of the signature.
+              <Term>Photos, videos, files and signatures:</Term> before-and-after and inspection
+              photos, walkaround videos (with their sound), documents the shop uploads to a job or
+              customer (such as PDFs, Word and Excel files and images), and signatures customers
+              draw on inspections and forms. They are kept in private file storage that only the
+              shop’s team can open, according to their role. When a shop shares a job report, the
+              customer’s link shows only the photos, videos, inspection details and documents the
+              shop chose to share, through links that expire after a few minutes; documents the shop
+              marks as shared also appear on the customer’s booking page and in the customer portal
+              the same way. Shop logos and service images are public, because they appear on the
+              shop’s booking pages. When a customer signs a form or an inspection remotely, the
+              typed name and the time are recorded (and, for forms, the IP address of the signing
+              device) as evidence of the signature.
             </li>
             <li>
               <Term>Messages:</Term> texts and emails sent to customers (recipient, content and
@@ -162,21 +171,39 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               and in-app notifications for staff.
             </li>
             <li>
-              <Term>Payments:</Term> card payments are processed by Stripe. Card numbers are entered
-              on Stripe’s payment page on the web or in Stripe’s payment form in the iPhone app and
-              go directly to Stripe; the Service never receives or stores them. We keep only
-              Stripe’s reference IDs, the card brand, the last four digits and, for saved cards, the
-              expiry month and year, together with amounts, tips, refunds and the outcome of any
-              dispute. Cash, check and other payments are recorded by staff.
+              <Term>Payments:</Term> online and in-person payments are processed by Stripe: cards
+              and wallets such as Apple Pay and Google Pay and, when they are turned on for the
+              shop’s Stripe account, US bank debits and pay-later services. Card and bank details
+              are entered on Stripe’s payment page on the web or in Stripe’s payment form in the
+              iPhone app, or read by Stripe’s software when a card is tapped on the iPhone or a
+              Stripe card reader, and go directly to Stripe; the Service never receives or stores
+              them. We keep only Stripe’s reference IDs, the kind of payment method, the card brand,
+              the last four digits of the card or bank account and, for saved cards, the expiry
+              month and year, together with amounts, tips, refunds and the outcome of any dispute.
+              Cash, check and other payments are recorded by staff.
             </li>
             <li>
               <Term>Time tracking:</Term> when staff clock in and out, the job the time belongs to,
-              and notes.
+              and notes. When a team member clocks in or out in the iPhone app and has allowed
+              location access, the location of the device at that moment (and its accuracy) is
+              recorded with the time entry, where the shop’s managers can see it; it is never
+              tracked in between. Clocking in or out in the web app records no location.
             </li>
             <li>
-              <Term>Online booking:</Term> what a customer enters when booking: name, email, phone,
-              vehicle, service address, notes, the chosen services and time, a coupon code and
-              marketing choices.
+              <Term>Online booking and contact forms:</Term> what a customer enters when booking
+              (name, email, phone, vehicle, service address, notes, answers to the shop’s booking
+              questions, the chosen services and time, a coupon or referral code and marketing
+              choices) or when filling in a shop’s contact form (name, email, phone, vehicle,
+              message, answers and marketing choices, plus the IP address of the device, used to
+              limit abuse). Gift card purchases record the buyer’s and recipient’s names and email
+              addresses, the gift message and the IP address of the buyer’s device; gift card codes
+              are stored only in a scrambled form (plus their last four characters, so staff can
+              find a card) and are emailed to the recipient. When someone enters a gift card code
+              that does not work on an invoice payment page, the IP address of the device is
+              recorded with the failed attempt to stop codes being guessed. A shop can embed its
+              booking page or contact form in its own website: the form then appears inside that
+              website, and the embed script sets no cookies and tells the website only how tall the
+              form is.
             </li>
             <li>
               <Term>Customer portal:</Term> customers who create a portal account sign in with an
@@ -185,12 +212,22 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
             </li>
             <li>
               <Term>Devices and connections:</Term> the web app keeps your sign-in session and a few
-              preferences (theme, last shop used, sidebar state) in your browser’s local storage,
-              and uses no advertising or analytics cookies. The iPhone app keeps your sign-in
-              session and the shop you last chose on the device; it uses the camera and photo
-              library only when you take or attach a photo, and it does not access your location.
-              Our hosting providers process IP addresses and request details to deliver the Service,
-              keep it secure and fix problems.
+              preferences (theme, last shop used, calendar view, column choices for spreadsheet
+              imports) in your browser’s local storage, and the staff app uses no advertising or
+              analytics cookies. Spreadsheets imported into the web app are read in your browser;
+              only the columns you choose are sent to the Service, when you check or import them,
+              and the file’s name is kept in the shop’s import history. Exports are made from what
+              your role may see and saved to your device. The iPhone app keeps your sign-in session
+              and the shop you last chose on the device; it uses the camera, the microphone (for the
+              sound of a video) and the photo library only when you take or attach a photo or video
+              or scan a VIN. If you allow location access while using the app, it uses your location
+              in three places: it is recorded with a clock-in or clock-out (the only time it is
+              stored); the day map shows your own position on your device without sending it
+              anywhere; and when a shop takes in-person card payments with Tap to Pay or a card
+              reader, Stripe’s payment software uses it while the payment is taken. If you allow
+              notifications, the iPhone app registers a device token with the Service so it can send
+              you push notifications about your work. Our hosting providers process IP addresses and
+              request details to deliver the Service, keep it secure and fix problems.
             </li>
           </LegalList>
         ),
@@ -219,7 +256,10 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
             </LegalList>
             <p>
               We do not sell personal information, we do not share it for targeted advertising, we
-              do not show ads, and neither app contains advertising or analytics trackers.
+              do not show ads, and neither app contains our own advertising or analytics trackers. A
+              shop may choose to add its own Meta (Facebook) Pixel or Google Analytics tag to its
+              public booking page; Meta or Google then receive information as that shop’s providers
+              (see below).
             </p>
             <p>
               Where the law requires a legal basis (for example in the European Economic Area or the
@@ -262,11 +302,23 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               <li>
                 <Term>Apple</Term> distributes the iPhone app through the App Store and TestFlight.
                 Apple’s own privacy policy covers what Apple collects, such as downloads and any
-                crash reports you choose to share with app developers.
+                crash reports you choose to share with app developers. Push notifications to the
+                iPhone app are delivered through the Apple Push Notification service, which receives
+                the device token, the notification’s title and text, and the internal ID of the
+                record it opens. The iPhone app’s maps are Apple Maps: when staff use the map of
+                mobile jobs, service addresses that have no map point yet are sent to Apple’s map
+                service to find their location, and the point found is saved with the job so the
+                team sees it on the web map too.
               </li>
               <li>
                 <Term>Google Fonts</Term> provides the web app’s typeface, so your browser sends
                 Google its IP address and browser details when a page loads.
+              </li>
+              <li>
+                <Term>OpenStreetMap</Term>: the day map in the web app shows map images from the
+                OpenStreetMap Foundation’s tile servers, so the browser sends them its IP address
+                and the part of the map shown (around the day’s service addresses). The web app
+                never sends addresses to a map service to look them up.
               </li>
               <li>
                 <Term>NHTSA</Term> (the US National Highway Traffic Safety Administration): when
@@ -275,13 +327,58 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               </li>
             </LegalList>
             <p>
-              Map buttons open Apple Maps or Google Maps with an address only when you tap them.
+              Map and route buttons open Apple Maps or Google Maps with the addresses or map points
+              of the stops only when you tap them.
             </p>
             <p>
+              <Term>Tools a shop chooses:</Term> a shop can connect its own tools; the information
+              then goes to those tools under the shop’s responsibility:
+            </p>
+            <LegalList>
+              <li>
+                Webhooks send details of bookings, jobs, payments, signed forms and memberships
+                (including the customer’s name, email address and phone number) to web addresses the
+                shop sets up, such as Zapier or its own systems. Card details and internal notes are
+                never included.
+              </li>
+              <li>
+                If the shop adds its own Meta (Facebook) Pixel or Google Analytics 4 tag in its
+                booking settings, its public booking page loads the tag (also when that page is
+                embedded in the shop’s website), and Meta or Google receive, as the shop’s
+                providers, page views, the start of a booking and each booking made, with its value;
+                Google Analytics also receives the amount of a deposit paid online, when the
+                customer comes back from paying it. With these they receive the device’s IP address
+                and browser details, and they may set cookies. The tags run on no other page: not on
+                private booking links, contact forms, quotes, invoices, the customer portal or staff
+                pages, and the customer’s own booking page loads only Google Analytics, only for
+                that deposit report. The Service never gives these tags names, email addresses,
+                phone numbers, coupon codes or booking links, and the page address they are given
+                never contains a booking link or a coupon code. Meta also offers a pixel setting,
+                “automatic advanced matching”, that lets its code pick up contact details typed into
+                a page; the booking settings ask shops to keep it off.
+              </li>
+              <li>
+                A personal calendar feed link lets a team member see their jobs (or, for managers
+                who choose it, every job of the shop), their own calendar events and the shop-wide
+                ones such as closures, from a week back to 90 days ahead, in a calendar app such as
+                Google Calendar, Apple Calendar or Outlook. That calendar provider then fetches and
+                keeps a copy of the feed on its servers. Each job shows its time, number and
+                services, the customer’s first name and last initial (or company name), the
+                vehicle’s year, make and model, the service address (or the shop’s address) and a
+                link to the job in the app; each event shows its time and title. Phone numbers,
+                email addresses, prices and notes are never included.
+              </li>
+              <li>
+                To verify a shop’s texting number, the business details the shop enters are sent to
+                Twilio and the mobile carriers.
+              </li>
+            </LegalList>
+            <p>
               Inside a shop, team members see information according to their role; technicians see
-              only the jobs assigned to them. Booking, quote, invoice and form links contain a long
-              random code: anyone who has a link can open that one page, so shops send each link
-              only to the customer concerned.
+              only the jobs assigned to them. Booking, quote, invoice, form, job report, gift card
+              and calendar feed links contain a long random code: anyone who has a link can open
+              that one page, so shops send each link only to the person concerned, and can withdraw
+              a job report or calendar link at any time.
             </p>
             <p>
               We may also disclose information when the law requires it, to protect the rights,
@@ -344,9 +441,10 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               are expired and running membership subscriptions are cancelled first; then the shop
               and everything recorded in it — customers, vehicles, jobs, documents, payment records,
               messages and team memberships — are deleted, and the shop’s stored files (photos,
-              signatures, logo and service images) are removed from file storage by an automatic
-              clean-up job. The shop’s Stripe account belongs to the shop and is not closed. Photos
-              and signatures of a deleted job, inspection or form are removed the same way.
+              videos, uploaded documents, signatures, logo and service images) are removed from file
+              storage by an automatic clean-up job. The shop’s Stripe account belongs to the shop
+              and is not closed. Photos, videos, documents and signatures of a deleted job,
+              customer, inspection or form are removed the same way.
             </p>
             <p>
               Copies held by our providers — for example messages already delivered through Twilio
@@ -584,9 +682,9 @@ export function termsOfService(operator: LegalOperator): LegalText {
               terms do not set it.
             </li>
             <li>
-              Card numbers are entered directly with Stripe. The Service stores only Stripe’s
-              reference IDs, the card brand, the last four digits and the expiry date of saved
-              cards.
+              Card and bank details are entered directly with Stripe. The Service stores only
+              Stripe’s reference IDs, the card brand, the last four digits of the card or bank
+              account and the expiry date of saved cards.
             </li>
             <li>
               Cash, check and other payments you record are your own records; the Service does not

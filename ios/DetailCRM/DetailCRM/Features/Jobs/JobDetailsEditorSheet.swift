@@ -35,6 +35,12 @@ struct JobDetailsEditorSheet: View {
     @State private var depositText = ""
     @State private var errorMessage: String?
     @State private var didPrefill = false
+    /// A recurring visit: the edit waits for "this visit / following".
+    @State private var pendingSeriesPatch: JobDetailsPatch?
+    @State private var asksSeriesScope = false
+    /// Why the pending edit can only be saved on this visit (a new date or
+    /// deposit), or nil when "this and following" is offered too.
+    @State private var seriesFollowingLimit: String?
 
     init(model: JobDetailModel, targetStatus: JobStatus? = nil) {
         self.model = model
@@ -105,6 +111,20 @@ struct JobDetailsEditorSheet: View {
                 }
             }
             .onAppear { prefill() }
+            .jobsSeriesScopeDialog(
+                isPresented: $asksSeriesScope,
+                followingLimit: seriesFollowingLimit,
+                onThisVisit: {
+                    guard let patch = pendingSeriesPatch else { return }
+                    pendingSeriesPatch = nil
+                    Task { await apply(patch) }
+                },
+                onFollowing: {
+                    guard let patch = pendingSeriesPatch, seriesFollowingLimit == nil else { return }
+                    pendingSeriesPatch = nil
+                    Task { await applyFollowing(patch) }
+                }
+            )
         }
     }
 
@@ -259,6 +279,24 @@ struct JobDetailsEditorSheet: View {
             depositRequiredCents: deposit,
             status: targetStatus
         )
+        // A recurring visit being edited (not scheduled from a request):
+        // ask whether the following visits change too.
+        if job.isSeriesOccurrence && targetStatus == nil && scheduled {
+            pendingSeriesPatch = patch
+            seriesFollowingLimit = JobsSeriesDraft.followingScopeLimit(
+                originalStart: job.scheduledStart,
+                newStart: patch.scheduledStart,
+                originalDepositCents: job.depositRequiredCents,
+                newDepositCents: deposit,
+                calendar: appState.clock.calendar
+            )
+            asksSeriesScope = true
+            return
+        }
+        await apply(patch)
+    }
+
+    private func apply(_ patch: JobDetailsPatch) async {
         do {
             try await model.saveDetails(patch)
             if let targetStatus {
@@ -266,6 +304,26 @@ struct JobDetailsEditorSheet: View {
             } else {
                 toasts.show("Job updated")
             }
+            dismiss()
+        } catch {
+            errorMessage = ErrorText.message(for: error)
+        }
+    }
+
+    /// "This and following": the series from this visit on. Eligible
+    /// visits are replaced on their own dates (this one too, and the screen
+    /// then goes back); when this visit was kept (confirmed, paid, invoiced
+    /// or moved by hand), the edit is applied to it directly as well. Only
+    /// offered when the edit keeps the visit's day and deposit
+    /// (`JobsSeriesDraft.followingScopeLimit`), since a replaced visit
+    /// would lose them.
+    private func applyFollowing(_ patch: JobDetailsPatch) async {
+        do {
+            let outcome = try await model.updateSeriesFollowing(patch, clock: appState.clock)
+            if !model.jobRemoved {
+                try await model.saveDetails(patch)
+            }
+            toasts.show(outcome.text(verb: "updated"), style: .info, duration: .seconds(6))
             dismiss()
         } catch {
             errorMessage = ErrorText.message(for: error)

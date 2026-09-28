@@ -1,24 +1,37 @@
 /**
- * Membership billing (manager+):
- *   membership_checkout  Checkout (mode subscription) link for an incomplete
- *                        membership; the plan's Product/Price live on the
- *                        shop's connected account and are created lazily.
- *   membership_checkout  (a new link expires the membership's older open links)
- *   membership_cancel    cancel now, or at the end of the paid period. A
- *                        never-billed membership's open links are expired
- *                        first; a cancelled membership that Stripe still
- *                        bills (link completed after the cancel) is stopped.
+ * Membership billing:
+ *   membership_checkout       manager+: Checkout (mode subscription) link for
+ *                             an incomplete membership; the plan's
+ *                             Product/Price live on the shop's connected
+ *                             account and are created lazily (weekly,
+ *                             monthly or yearly). A new link expires the
+ *                             membership's older open links.
+ *   membership_cancel         manager+: cancel now, or at the end of the paid
+ *                             period. A never-billed membership's open links
+ *                             are expired first; a cancelled membership that
+ *                             Stripe still bills (link completed after the
+ *                             cancel) is stopped.
+ *   membership_join_checkout  PUBLIC by shop slug (/join/<slug>, P-23): the
+ *                             customer joins an online plan; the membership
+ *                             is prepared by membership_join_prepare (0069)
+ *                             and paid through the same subscription Checkout.
+ *   portal_membership_cancel  signed-in client (portal): cancel at the end of
+ *                             the paid period (never immediately).
+ *   portal_billing_portal     signed-in client: Stripe's billing portal on the
+ *                             shop's account to update the card and see
+ *                             billing history (cancelling stays in the CRM).
  * Subscription state is written back with sync_stripe_subscription (the
  * webhook remains the source of truth and replays are harmless).
  */
 import { z } from "zod";
 import { requireShopRole, requireUser, ROLES } from "../_shared/auth.ts";
-import { errors } from "../_shared/errors.ts";
+import { errors, HttpError } from "../_shared/errors.ts";
 import { links, withQuery } from "../_shared/links.ts";
-import { requestNonce, uuid } from "../_shared/schemas.ts";
+import { email, requestNonce, uuid } from "../_shared/schemas.ts";
 import { idempotencyKey, onAccount, type Stripe } from "../_shared/stripe.ts";
 import {
   type AccountRow,
+  appPage,
   chargeable,
   createCheckoutSession,
   customerSessions,
@@ -29,12 +42,15 @@ import {
   loadAccount,
   loadCustomer,
   loadShop,
+  loadShopBySlug,
   metadata,
+  publicValidationMessage,
   requestPart,
   rpcError,
   type Services,
   sessionFor,
   type ShopRow,
+  SLUG_RE,
 } from "./lib.ts";
 
 export const membershipCheckoutInput = z.object({
@@ -48,6 +64,31 @@ export const membershipCancelInput = z.object({
   membership_id: uuid,
   at_period_end: z.boolean().optional(),
 }).strict();
+
+const trimmed = (max: number) => z.string().trim().min(1).max(max);
+
+export const membershipJoinCheckoutInput = z.object({
+  slug: z.string().regex(SLUG_RE, "must be a shop link name"),
+  plan_id: uuid,
+  customer: z.object({
+    first_name: trimmed(100),
+    last_name: trimmed(100).optional(),
+    email: z.string().trim().max(254).pipe(email),
+    /** Any common format; the database normalises it to E.164 for the shop's country. */
+    phone: z.string().trim().min(7).max(32).optional(),
+    sms_opt_in: z.boolean().optional(),
+    email_opt_in: z.boolean().optional(),
+  }).strict(),
+  /** The vehicle the membership covers (vehicle-scoped plans); optional. */
+  vehicle: z.object({
+    year: z.number().int().min(1886).max(2100).optional(),
+    make: trimmed(60),
+    model: trimmed(60),
+  }).strict().optional(),
+  request_nonce: requestNonce.optional(),
+}).strict();
+
+export const portalMembershipInput = z.object({ membership_id: uuid }).strict();
 
 export type MembershipStatus = "incomplete" | "active" | "past_due" | "cancelled";
 
@@ -69,7 +110,7 @@ interface PlanRow {
   name: string;
   description: string | null;
   price_cents: number;
-  interval: "month" | "year";
+  interval: "week" | "month" | "year";
   interval_count: number;
   active: boolean;
   archived_at: string | null;
@@ -244,6 +285,53 @@ async function ensurePlanPrice(
 
 const ENDED_SUBSCRIPTION = new Set<string>(["canceled", "incomplete_expired"]);
 
+/** Most updates sent when idempotent replays keep returning a stale subscription. */
+const MAX_CANCEL_ATTEMPTS = 4;
+
+/**
+ * Sets cancel_at_period_end on the subscription and returns its CURRENT
+ * state. Stripe's idempotency layer replays the first response stored under
+ * a key for 24 hours without running the request again: after the
+ * subscription was resumed (for example in the Stripe Dashboard), a second
+ * cancel under the same key would get the old "cancelling" body while Stripe
+ * keeps billing, and the CRM would show a cancellation that never happened
+ * (no webhook corrects it, since nothing changed in Stripe). So the key also
+ * carries the 10-minute window, the subscription is re-read after every
+ * update, and while it is still not cancelling the update is sent again under
+ * a key chained on the attempt.
+ */
+async function cancelAtPeriodEnd(
+  s: Services,
+  account: AccountRow,
+  subscriptionId: string,
+  scope: string,
+  parts: ReadonlyArray<string>,
+): Promise<Stripe.Subscription> {
+  const window = requestPart(undefined, s.now);
+  const chain: string[] = [];
+  for (let attempt = 0; attempt < MAX_CANCEL_ATTEMPTS; attempt++) {
+    await s.stripe.subscriptions.update(
+      subscriptionId,
+      { cancel_at_period_end: true },
+      onAccount(account.stripe_account_id, {
+        idempotencyKey: await idempotencyKey(scope, ...parts, window, ...chain),
+      }),
+    );
+    const current = await s.stripe.subscriptions.retrieve(
+      subscriptionId,
+      {},
+      onAccount(account.stripe_account_id),
+    );
+    if (current.cancel_at_period_end === true || ENDED_SUBSCRIPTION.has(current.status)) {
+      return current;
+    }
+    chain.push(`retry:${attempt + 1}`);
+  }
+  throw errors.conflict("This membership keeps changing. Refresh and try again.", {
+    reason: "membership_changed",
+  });
+}
+
 /** The subscription is still live in Stripe (not ended, not missing). */
 async function isLive(
   s: Services,
@@ -342,6 +430,27 @@ export async function membershipCheckout(
   const caller = await requireUser(req, { admin: s.admin });
   await requireShopRole(s.admin, caller, input.shop_id, ROLES.managerPlus);
   const membership = await loadMembership(s, input.shop_id, input.membership_id);
+  const shop = await loadShop(s.admin, membership.shop_id);
+  const portal = links.portal(s.env.appBaseUrl());
+  return await subscriptionCheckout(s, shop, membership, {
+    successUrl: withQuery(portal, { membership: "active" }),
+    cancelUrl: withQuery(portal, { membership: "canceled" }),
+    nonce: input.request_nonce,
+    source: "membership_checkout",
+  });
+}
+
+/**
+ * The subscription Checkout of an incomplete membership (staff link or the
+ * public join page): the plan's recurring Price on the connected account,
+ * one live link per membership, 409 when an earlier link was already paid.
+ */
+async function subscriptionCheckout(
+  s: Services,
+  shop: ShopRow,
+  membership: MembershipRow,
+  options: { successUrl: string; cancelUrl: string; nonce: string | undefined; source: string },
+): Promise<Record<string, unknown>> {
   if (membership.status !== "incomplete" || membership.stripe_subscription_id) {
     throw errors.conflict(`This membership is ${membership.status}; it does not need checkout.`, {
       reason: "membership_not_incomplete",
@@ -353,7 +462,6 @@ export async function membershipCheckout(
       reason: "plan_unavailable",
     });
   }
-  const shop = await loadShop(s.admin, membership.shop_id);
   const account = await loadAccount(s.admin, shop.id);
   chargeable(plan.price_cents, shop.currency);
   const customer = await loadCustomer(s.admin, shop.id, membership.customer_id);
@@ -379,9 +487,9 @@ export async function membershipCheckout(
     plan_id: plan.id,
     customer_id: membership.customer_id,
     kind: "membership",
+    source: options.source,
   });
   const feeBps = s.env.platformFeeBps();
-  const portal = links.portal(s.env.appBaseUrl());
   const session = await createCheckoutSession(
     s,
     account,
@@ -397,11 +505,11 @@ export async function membershipCheckout(
         ...(feeBps > 0 ? { application_fee_percent: feeBps / 100 } : {}),
       },
       metadata: meta,
-      success_url: withQuery(portal, { membership: "active" }),
-      cancel_url: withQuery(portal, { membership: "canceled" }),
+      success_url: options.successUrl,
+      cancel_url: options.cancelUrl,
     },
     "membership_checkout",
-    [membership.id, priceId, stripeCustomer, requestPart(input.request_nonce, s.now)],
+    [membership.id, priceId, stripeCustomer, requestPart(options.nonce, s.now)],
   );
   // One live link per membership: two completed links would start two
   // subscriptions for one membership.
@@ -414,6 +522,262 @@ export async function membershipCheckout(
     interval_count: plan.interval_count,
     currency: shop.currency,
   };
+}
+
+// ---------------------------------------------------------------------------
+// membership_join_checkout (PUBLIC, /join/<slug>)
+// ---------------------------------------------------------------------------
+
+interface JoinPrepared {
+  membership_id: string;
+  customer_id: string;
+  shop_id: string;
+}
+
+/**
+ * A customer joins one of the shop's online plans. membership_join_prepare
+ * (0069, service role) owns the rules: the plan is active and sold online,
+ * the customer is matched like an online booking (never overwritten) or
+ * created, the vehicle is reused or added, a never-billed membership of a
+ * retried join is reused, and at most 3 online joins per email per 24 h.
+ * Then the same subscription Checkout as membership_checkout; the webhook
+ * activates the membership (managers get 'membership_joined').
+ */
+/** The public join answer when the details match an existing membership of the plan. */
+export const JOIN_UNAVAILABLE_MESSAGE =
+  "We can't start this sign-up online. If you're already a member, manage your membership " +
+  "from your client portal, or contact the shop.";
+
+export async function membershipJoinCheckout(
+  s: Services,
+  input: z.output<typeof membershipJoinCheckoutInput>,
+): Promise<Record<string, unknown>> {
+  // Card payments first: no customer or membership is created for a shop
+  // that cannot bill it.
+  const shop = await loadShopBySlug(s.admin, input.slug);
+  await loadAccount(s.admin, shop.id);
+  const { request_nonce: nonce, slug: _slug, plan_id: planId, ...payload } = input;
+  const prepared = await s.admin.rpc("membership_join_prepare", {
+    p_slug: shop.slug,
+    p_plan_id: planId,
+    p_payload: payload,
+  });
+  if (prepared.error) {
+    switch (prepared.error.code) {
+      case "55000":
+        throw new HttpError("conflict", "This membership plan is not available online.", {
+          details: { reason: "plan_unavailable" },
+          cause: prepared.error,
+        });
+      case "22023":
+        if (/already has this membership/i.test(prepared.error.message ?? "")) {
+          // Anyone can type any email here: the answer must not confirm
+          // that this person holds the plan (as portal_membership_access
+          // never confirms ids). A neutral reason and wording, which a
+          // real member still understands.
+          throw new HttpError("conflict", JOIN_UNAVAILABLE_MESSAGE, {
+            details: { reason: "join_unavailable" },
+            cause: prepared.error,
+          });
+        }
+        throw new HttpError(
+          "unprocessable",
+          publicValidationMessage(prepared.error, "Check your details and try again."),
+          { details: { reason: "invalid_details" }, cause: prepared.error },
+        );
+      default:
+        throw rpcError("membership_join_prepare", prepared.error, { notFound: "Shop not found." });
+    }
+  }
+  const joined = prepared.data as Partial<JoinPrepared> | null;
+  if (typeof joined?.membership_id !== "string" || joined.shop_id !== shop.id) {
+    throw new Error("membership_join_prepare returned an unexpected membership");
+  }
+  const membership = await loadMembership(s, shop.id, joined.membership_id);
+  const page = appPage(s.env.appBaseUrl(), "join", shop.slug);
+  return await subscriptionCheckout(s, shop, membership, {
+    successUrl: withQuery(page, { joined: "1" }),
+    cancelUrl: withQuery(page, { canceled: "1" }),
+    nonce,
+    source: "membership_join_checkout",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Client portal (signed-in client, the customer's own memberships)
+// ---------------------------------------------------------------------------
+
+interface PortalAccess {
+  shop_id: string;
+  stripe_subscription_id: string | null;
+  stripe_customer_id: string | null;
+  status: MembershipStatus;
+}
+
+/**
+ * The caller's own membership: portal_membership_access (0069, service
+ * role) answers only for the portal user linked to the membership's
+ * customer. Anything else (not signed in as that customer, another shop's
+ * membership, an unknown id) is 403, so ids are never confirmed.
+ */
+async function portalAccess(
+  s: Services,
+  req: Request,
+  membershipId: string,
+): Promise<PortalAccess> {
+  const caller = await requireUser(req, { admin: s.admin });
+  const { data, error } = await s.admin.rpc("portal_membership_access", {
+    p_membership_id: membershipId,
+    p_user_id: caller.id,
+  });
+  if (error) throw rpcError("portal_membership_access", error);
+  const access = data as Partial<PortalAccess> | null;
+  if (!access || typeof access.shop_id !== "string") {
+    throw errors.forbidden("You can only manage your own memberships.");
+  }
+  return access as PortalAccess;
+}
+
+export async function portalMembershipCancel(
+  s: Services,
+  req: Request,
+  input: z.output<typeof portalMembershipInput>,
+): Promise<Record<string, unknown>> {
+  const access = await portalAccess(s, req, input.membership_id);
+  if (access.status === "cancelled") {
+    throw errors.conflict("This membership is already cancelled.", {
+      reason: "already_cancelled",
+    });
+  }
+  const subscriptionId = access.stripe_subscription_id;
+  if (!subscriptionId) {
+    // Never billed: there is nothing to stop (the portal does not list it).
+    throw errors.conflict("This membership has not started billing yet.", {
+      reason: "membership_not_billed",
+    });
+  }
+  const account = await loadAccount(s.admin, access.shop_id, { requireCharges: false });
+  // Always at the end of the paid period: the customer keeps what they paid for.
+  const subscription = await cancelAtPeriodEnd(
+    s,
+    account,
+    subscriptionId,
+    "portal_membership_cancel",
+    [input.membership_id, subscriptionId],
+  );
+  const status = membershipStatusOf(subscription.status);
+  const periodEnd = periodEndOf(subscription);
+  const synced = await s.admin.rpc("sync_stripe_subscription", {
+    p_shop_id: access.shop_id,
+    p_subscription_id: subscriptionId,
+    p_status: status,
+    p_current_period_end: periodEnd,
+    p_cancel_at_period_end: subscription.cancel_at_period_end === true,
+    p_membership_id: input.membership_id,
+  });
+  if (synced.error) {
+    // Stripe has the change; the subscription webhook will reconcile.
+    s.log.error("membership_sync_failed", {
+      shop_id: access.shop_id,
+      membership_id: input.membership_id,
+      error: rpcError("sync_stripe_subscription", synced.error),
+    });
+  }
+  const row = synced.data as
+    | { status?: string; cancel_at_period_end?: boolean; current_period_end?: string | null }
+    | null;
+  s.log.info("portal_membership_cancelled", {
+    shop_id: access.shop_id,
+    membership_id: input.membership_id,
+  });
+  return {
+    membership_id: input.membership_id,
+    status: row?.status ?? status,
+    cancel_at_period_end: row?.cancel_at_period_end ?? subscription.cancel_at_period_end === true,
+    current_period_end: periodEnd ?? row?.current_period_end ?? null,
+  };
+}
+
+/** Marks the billing portal configuration the CRM created on a connected account. */
+const PORTAL_CONFIG_TAG = "detail_crm_portal_v1";
+
+/**
+ * The connected account's billing portal configuration for members: update
+ * the payment method and see invoices; cancelling and plan changes are off
+ * (a member cancels in the CRM portal, which keeps the membership in sync).
+ * Created once per account (found again by its metadata tag).
+ */
+async function portalConfiguration(s: Services, account: AccountRow): Promise<string> {
+  for await (
+    const config of s.stripe.billingPortal.configurations.list(
+      { active: true, limit: 100 },
+      onAccount(account.stripe_account_id),
+    )
+  ) {
+    if (config.metadata?.[PORTAL_CONFIG_TAG] === "1") return config.id;
+  }
+  const created = await s.stripe.billingPortal.configurations.create(
+    {
+      features: {
+        payment_method_update: { enabled: true },
+        invoice_history: { enabled: true },
+        customer_update: { enabled: false },
+        subscription_cancel: { enabled: false },
+        subscription_update: { enabled: false },
+      },
+      metadata: { [PORTAL_CONFIG_TAG]: "1" },
+    },
+    onAccount(account.stripe_account_id, {
+      idempotencyKey: await idempotencyKey(
+        "billing_portal_config",
+        account.stripe_account_id,
+        PORTAL_CONFIG_TAG,
+      ),
+    }),
+  );
+  return created.id;
+}
+
+export async function portalBillingPortal(
+  s: Services,
+  req: Request,
+  input: z.output<typeof portalMembershipInput>,
+): Promise<{ url: string }> {
+  const access = await portalAccess(s, req, input.membership_id);
+  const account = await loadAccount(s.admin, access.shop_id, { requireCharges: false });
+  // The Stripe customer the subscription bills (the one the card is on).
+  let customer = access.stripe_customer_id;
+  if (access.stripe_subscription_id) {
+    try {
+      const subscription = await s.stripe.subscriptions.retrieve(
+        access.stripe_subscription_id,
+        {},
+        onAccount(account.stripe_account_id),
+      );
+      const owner = typeof subscription.customer === "string"
+        ? subscription.customer
+        : subscription.customer?.id;
+      if (owner) customer = owner;
+    } catch (err) {
+      if (!isMissing(err)) throw err;
+    }
+  }
+  if (!customer) {
+    throw errors.conflict("This membership has no billing details yet.", {
+      reason: "membership_not_billed",
+    });
+  }
+  const configuration = await portalConfiguration(s, account);
+  const session = await s.stripe.billingPortal.sessions.create(
+    {
+      customer,
+      configuration,
+      return_url: links.portal(s.env.appBaseUrl()),
+    },
+    onAccount(account.stripe_account_id),
+  );
+  if (!session.url) throw new Error("Stripe returned a billing portal session without a URL");
+  return { url: session.url };
 }
 
 export async function membershipCancel(
@@ -471,22 +835,27 @@ export async function membershipCancel(
   }
 
   const account = await loadAccount(s.admin, membership.shop_id, { requireCharges: false });
-  const key = await idempotencyKey(
-    "membership_cancel",
-    membership.id,
-    membership.stripe_subscription_id,
-    atPeriodEnd ? "period_end" : "now",
-  );
+  // Cancelling now cannot be undone, so a replayed response is always true;
+  // a period-end cancel can be (a resume in Stripe), see cancelAtPeriodEnd.
   const subscription = atPeriodEnd
-    ? await s.stripe.subscriptions.update(
+    ? await cancelAtPeriodEnd(
+      s,
+      account,
       membership.stripe_subscription_id,
-      { cancel_at_period_end: true },
-      onAccount(account.stripe_account_id, { idempotencyKey: key }),
+      "membership_cancel",
+      [membership.id, membership.stripe_subscription_id, "period_end"],
     )
     : await s.stripe.subscriptions.cancel(
       membership.stripe_subscription_id,
       {},
-      onAccount(account.stripe_account_id, { idempotencyKey: key }),
+      onAccount(account.stripe_account_id, {
+        idempotencyKey: await idempotencyKey(
+          "membership_cancel",
+          membership.id,
+          membership.stripe_subscription_id,
+          "now",
+        ),
+      }),
     );
 
   const status = membershipStatusOf(subscription.status);

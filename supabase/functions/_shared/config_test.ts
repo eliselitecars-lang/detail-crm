@@ -22,6 +22,14 @@ const EXPECTED_VERIFY_JWT: Record<string, boolean> = {
   "invites": true,
   "storage-purge": false,
   "account": true,
+  "push": false,
+  "calendar-feed": false,
+  "public-media": false,
+  "sms-provisioning": false,
+  "webhooks": false,
+  "pdf": false,
+  "billing": false,
+  "billing-webhook": false,
 };
 
 interface FunctionConfig {

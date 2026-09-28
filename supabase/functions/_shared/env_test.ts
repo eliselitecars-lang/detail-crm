@@ -167,3 +167,80 @@ Deno.test("env: ENV_NAMES lists every SPEC secret", () => {
     assertEquals((ENV_NAMES as readonly string[]).includes(name), true, name);
   }
 });
+
+Deno.test("env: APNs credentials are validated and one-line PEMs accepted", () => {
+  const pem =
+    "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg\n-----END PRIVATE KEY-----";
+  const good = {
+    APNS_KEY_ID: "ABC123DEFG",
+    APNS_TEAM_ID: "TEAM123456",
+    APNS_PRIVATE_KEY: pem.replace(/\n/g, "\\n"),
+    APNS_TOPIC: "com.example.detailcrm",
+  };
+  assertEquals(testEnv(good).apns(), {
+    keyId: "ABC123DEFG",
+    teamId: "TEAM123456",
+    privateKeyPem: pem,
+    topic: "com.example.detailcrm",
+  });
+  envError(() => testEnv({ ...good, APNS_KEY_ID: undefined }).apns(), "APNS_KEY_ID", "missing");
+  envError(() => testEnv({ ...good, APNS_TEAM_ID: "x" }).apns(), "APNS_TEAM_ID", "invalid");
+  envError(
+    () => testEnv({ ...good, APNS_PRIVATE_KEY: "nope" }).apns(),
+    "APNS_PRIVATE_KEY",
+    "invalid",
+  );
+  envError(() => testEnv({ ...good, APNS_TOPIC: "nodots" }).apns(), "APNS_TOPIC", "invalid");
+});
+
+Deno.test("env: feature flags are on only for 'true'; the ISV profile sid is checked", () => {
+  assertEquals(testEnv().smsProvisioningEnabled(), false);
+  assertEquals(testEnv({ SMS_PROVISIONING_ENABLED: "TRUE" }).smsProvisioningEnabled(), true);
+  assertEquals(testEnv({ SMS_PROVISIONING_ENABLED: "1" }).smsProvisioningEnabled(), false);
+  assertEquals(testEnv({ TWILIO_ISV_ENABLED: "true" }).twilioIsvEnabled(), true);
+  const sid = `BU${"a".repeat(32)}`;
+  assertEquals(
+    testEnv({ TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: sid }).twilioPrimaryCustomerProfileSid(),
+    sid,
+  );
+  envError(
+    () => testEnv({ TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: "BU1" }).twilioPrimaryCustomerProfileSid(),
+    "TWILIO_PRIMARY_CUSTOMER_PROFILE_SID",
+    "invalid",
+  );
+});
+
+Deno.test("env: the public API origin follows FUNCTIONS_PUBLIC_URL", () => {
+  assertEquals(testEnv().publicSupabaseUrl(), "https://fake-project.supabase.co");
+  assertEquals(
+    testEnv({ FUNCTIONS_PUBLIC_URL: "http://127.0.0.1:54321/functions/v1/" }).publicSupabaseUrl(),
+    "http://127.0.0.1:54321",
+  );
+  assertEquals(
+    testEnv({ FUNCTIONS_PUBLIC_URL: "https://tunnel.example.com/custom" }).publicSupabaseUrl(),
+    "https://fake-project.supabase.co",
+  );
+});
+
+Deno.test("env: the billing webhook secret is its own whsec_ value, required only when used", () => {
+  assertEquals((ENV_NAMES as readonly string[]).includes("STRIPE_BILLING_WEBHOOK_SECRET"), true);
+  assertEquals(
+    testEnv({ STRIPE_BILLING_WEBHOOK_SECRET: "whsec_Billing0123" }).stripeBillingWebhookSecret(),
+    "whsec_Billing0123",
+  );
+  const missing = assertThrows(() => testEnv().stripeBillingWebhookSecret(), EnvError);
+  assertEquals([missing.variable, missing.problem], ["STRIPE_BILLING_WEBHOOK_SECRET", "missing"]);
+  const invalid = assertThrows(
+    () => testEnv({ STRIPE_BILLING_WEBHOOK_SECRET: "sk_test_nope" }).stripeBillingWebhookSecret(),
+    EnvError,
+  );
+  assertEquals(invalid.problem, "invalid");
+  // The Connect secret is untouched by it.
+  assertEquals(testEnv().stripeWebhookSecret(), TEST_ENV.STRIPE_WEBHOOK_SECRET);
+});
+
+Deno.test("env: BILLING_AUTOMATIC_TAX is off unless exactly true", () => {
+  assertEquals(testEnv().billingAutomaticTax(), false);
+  assertEquals(testEnv({ BILLING_AUTOMATIC_TAX: "TRUE" }).billingAutomaticTax(), true);
+  assertEquals(testEnv({ BILLING_AUTOMATIC_TAX: "yes" }).billingAutomaticTax(), false);
+});

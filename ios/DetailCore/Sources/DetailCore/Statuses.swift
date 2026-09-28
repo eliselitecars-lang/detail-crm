@@ -227,6 +227,8 @@ public enum PaymentStatus: String, Codable, CaseIterable, Sendable {
     case cancelled
     case refunded
     case partiallyRefunded = "partially_refunded"
+    /// Bank debit / pay-later payment submitted; the money has not landed yet.
+    case processing
 
     public var displayName: String {
         switch self {
@@ -236,12 +238,13 @@ public enum PaymentStatus: String, Codable, CaseIterable, Sendable {
         case .cancelled: return "Cancelled"
         case .refunded: return "Refunded"
         case .partiallyRefunded: return "Partially refunded"
+        case .processing: return "Processing"
         }
     }
 
     public var tone: StatusTone {
         switch self {
-        case .pending: return .warning
+        case .pending, .processing: return .warning
         case .succeeded: return .success
         case .failed, .cancelled: return .danger
         case .refunded, .partiallyRefunded: return .neutral
@@ -275,6 +278,12 @@ public enum PaymentMethod: String, Codable, CaseIterable, Sendable {
     case check
     case bankTransfer = "bank_transfer"
     case other
+    /// Redeemed from a gift card balance (written by the redeem RPCs).
+    case giftCard = "gift_card"
+    /// US bank account debit through Stripe (settles after a few days).
+    case achDebit = "ach_debit"
+    /// Buy now, pay later through Stripe.
+    case bnpl
 
     public var displayName: String {
         switch self {
@@ -284,6 +293,9 @@ public enum PaymentMethod: String, Codable, CaseIterable, Sendable {
         case .check: return "Check"
         case .bankTransfer: return "Bank transfer"
         case .other: return "Other"
+        case .giftCard: return "Gift card"
+        case .achDebit: return "Bank debit (ACH)"
+        case .bnpl: return "Pay later"
         }
     }
 

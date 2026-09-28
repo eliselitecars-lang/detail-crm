@@ -4,6 +4,8 @@
 //
 //  Everything that isn't a main tab. Items are hidden by role using the
 //  DetailCore capability matrix (the server enforces the same rules).
+//  Under the account header: the shop's subscription status line when
+//  there is one (BillingNoticeBanner — neutral text, no purchase links).
 //
 
 import SwiftUI
@@ -15,6 +17,7 @@ enum MoreItem: String, CaseIterable, Identifiable, Hashable {
     case payments
     case memberships
     case timeClock
+    case tasks
     case reports
     case team
     case catalog
@@ -30,6 +33,7 @@ enum MoreItem: String, CaseIterable, Identifiable, Hashable {
         case .payments: return "Payments"
         case .memberships: return "Memberships"
         case .timeClock: return "Time Clock"
+        case .tasks: return "Tasks"
         case .reports: return "Reports"
         case .team: return "Team"
         case .catalog: return "Catalog"
@@ -45,6 +49,7 @@ enum MoreItem: String, CaseIterable, Identifiable, Hashable {
         case .payments: return "creditcard"
         case .memberships: return "arrow.triangle.2.circlepath"
         case .timeClock: return "clock"
+        case .tasks: return "checklist"
         case .reports: return "chart.bar"
         case .team: return "person.3"
         case .catalog: return "list.bullet.rectangle"
@@ -61,6 +66,7 @@ enum MoreItem: String, CaseIterable, Identifiable, Hashable {
         case .payments: return role.can(.managePayments, policy: policy)
         case .memberships: return role.can(.manageMemberships, policy: policy)
         case .timeClock: return role.can(.useOwnTimeClock, policy: policy)
+        case .tasks: return true
         case .reports: return role.can(.viewAllReports, policy: policy) || role.can(.viewOwnReports, policy: policy)
         case .team: return role.can(.viewTeam, policy: policy)
         case .catalog: return role.can(.viewCatalog, policy: policy)
@@ -69,19 +75,28 @@ enum MoreItem: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// Where task notifications open.
+    static var tasksDestination: MoreItem { .tasks }
+
     static let moneyItems: [MoreItem] = [.quotes, .invoices, .payments, .memberships]
-    static let workItems: [MoreItem] = [.timeClock, .reports, .team, .catalog]
+    static let workItems: [MoreItem] = [.timeClock, .tasks, .reports, .team, .catalog]
     static let shopItems: [MoreItem] = [.settings, .notifications]
 }
 
 struct MoreView: View {
     @Environment(AppState.self) private var appState
     @State private var confirmation: ConfirmationRequest?
+    @State private var billingNotice: ShopEntitlement.Notice?
 
     var body: some View {
         List {
             Section {
                 AccountHeader()
+                if let billingNotice {
+                    BillingNoticeBanner(notice: billingNotice, clock: appState.clock)
+                        .padding(.vertical, Theme.Spacing.xs)
+                        .themedRow()
+                }
             }
             itemSection("Money", items: MoreItem.moneyItems)
             itemSection("Work", items: MoreItem.workItems)
@@ -126,6 +141,7 @@ struct MoreView: View {
             MoreDestinationView(item: item)
         }
         .confirmation($confirmation)
+        .billingNotice($billingNotice, shopID: appState.shop?.id)
     }
 
     @ViewBuilder
@@ -190,6 +206,7 @@ struct MoreDestinationView: View {
         case .payments: PaymentsView()
         case .memberships: MembershipsView()
         case .timeClock: TimeClockView()
+        case .tasks: OpsTasksView()
         case .reports: ReportsView()
         case .team: TeamView()
         case .catalog: CatalogView()

@@ -4,3 +4,5 @@ playwright-report
 test-results
 package-lock.json
 src/lib/database.types.ts
+playwright-report-stack
+test-results-stack

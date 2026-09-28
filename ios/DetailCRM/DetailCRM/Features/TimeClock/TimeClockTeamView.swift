@@ -3,7 +3,9 @@
 //  DetailCRM
 //
 //  Managers and above: who is clocked in right now, and one member's
-//  timesheet for a shop week with add / edit / delete. The server rejects
+//  timesheet for a shop week with add / edit / delete. Punches made in the
+//  app carry the device location when the member allowed it (P-24); each
+//  one links to Maps. The server rejects
 //  overlapping entries and a second open entry of the same kind; those
 //  errors are shown in the editor.
 //
@@ -30,6 +32,7 @@ struct TimeClockSheetKey: Equatable {
 struct TimeClockTeamView: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(JobsRealtimeHub.self) private var realtime
     @State private var state: LoadState<TimeClockTeamSnapshot> = .idle
     @State private var selectedMemberID: UUID?
     @State private var weekStart: Date = Date()
@@ -83,6 +86,12 @@ struct TimeClockTeamView: View {
         .refreshable {
             await loadTeam()
             await reloadSheet()
+        }
+        .onChange(of: realtime.revision(.timeEntries)) { _, _ in
+            Task {
+                await loadTeam()
+                await reloadSheet(quietly: true)
+            }
         }
     }
 
@@ -148,14 +157,20 @@ struct TimeClockTeamView: View {
         }
     }
 
-    private func reloadSheet() async {
+    /// `quietly`: a live refresh keeps the current rows on screen until the
+    /// new ones arrive.
+    private func reloadSheet(quietly: Bool = false) async {
         guard let shopID = appState.shop?.id, let memberID = selectedMemberID else {
             sheet = .idle
             return
         }
         let clock = appState.clock
         let interval = clock.weekInterval(containing: weekStart)
-        sheet = .loading
+        if quietly {
+            sheet.beginLoading()
+        } else {
+            sheet = .loading
+        }
         let result = await LoadState<[TimeEntry]>.result {
             try await TimeClockService.entries(shopID: shopID, memberID: memberID, interval: interval)
         }
@@ -225,6 +240,23 @@ private struct TimeClockOpenRow: View {
     let clock: ShopClock
 
     var body: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            summary
+            if let url = entry.clockInSpot?.mapURL(label: "\(name) clocked in") {
+                Link(destination: url) {
+                    Image(systemName: "mappin.circle")
+                        .font(Theme.Typography.headline)
+                        .foregroundStyle(Theme.glacier)
+                        .frame(width: Theme.Size.compactControlHeight, height: Theme.Size.compactControlHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Show where \(name) clocked in on the map")
+            }
+        }
+    }
+
+    private var summary: some View {
         HStack(spacing: Theme.Spacing.md) {
             AvatarView(name: name, size: Theme.Size.avatarSmall, colorHex: colorHex)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
@@ -364,12 +396,22 @@ private struct TimeClockSheetRow: View {
     let delete: (TimeEntry) -> Void
 
     var body: some View {
-        Button {
-            if canEdit { edit(entry) }
-        } label: {
-            TimeClockEntryRow(entry: entry, clock: clock, jobNumber: jobNumber, memberName: nil)
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            Button {
+                if canEdit { edit(entry) }
+            } label: {
+                TimeClockEntryRow(entry: entry, clock: clock, jobNumber: jobNumber, memberName: nil)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(canEdit ? "Opens the entry editor" : "")
+            if entry.clockInSpot != nil || entry.clockOutSpot != nil {
+                HStack(spacing: Theme.Spacing.lg) {
+                    spotLink(entry.clockInSpot, title: "Clock-in spot", label: "Clocked in")
+                    spotLink(entry.clockOutSpot, title: "Clock-out spot", label: "Clocked out")
+                    Spacer(minLength: 0)
+                }
+            }
         }
-        .buttonStyle(.plain)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if canEdit {
                 Button(role: .destructive) {
@@ -379,6 +421,19 @@ private struct TimeClockSheetRow: View {
                 }
             }
         }
-        .accessibilityHint(canEdit ? "Opens the entry editor" : "")
+    }
+
+    /// A map link for a recorded punch location (P-24).
+    @ViewBuilder
+    private func spotLink(_ spot: TimeEntry.Spot?, title: String, label: String) -> some View {
+        if let spot, let url = spot.mapURL(label: label) {
+            Link(destination: url) {
+                Label(spot.accuracyText.map { "\(title) (\($0))" } ?? title, systemImage: "mappin.and.ellipse")
+                    .font(Theme.Typography.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.glacier)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityHint("Opens the location in Maps")
+        }
     }
 }

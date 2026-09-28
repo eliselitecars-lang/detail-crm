@@ -212,6 +212,24 @@ enum CustomerService {
         return updated
     }
 
+    /// Saves the customer's custom field answers (P-9, managers+). The
+    /// server validates every value against its field (22023 with the
+    /// field's label) and keeps unchanged answers of archived fields.
+    static func updateCustomData(shopID: UUID, customerID: UUID, data: [String: AnyJSON]) async throws -> Customer {
+        let rows: [Customer] = try await Supa.client
+            .from("customers")
+            .update(["custom_data": AnyJSON.object(data)], returning: .representation)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: customerID.uuidString)
+            .select(Customer.selectColumns)
+            .execute()
+            .value
+        guard let updated = rows.first else {
+            throw AppError.message("You don't have permission to edit this customer.")
+        }
+        return updated
+    }
+
     /// Archives (hides from lists) or restores a customer.
     static func setArchived(shopID: UUID, customerID: UUID, archived: Bool) async throws -> Customer {
         let payload = CustomerArchivePatch(archivedAt: archived ? Supa.iso(Date()) : nil)

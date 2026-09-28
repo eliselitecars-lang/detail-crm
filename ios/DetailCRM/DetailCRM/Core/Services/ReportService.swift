@@ -2,7 +2,8 @@
 //  ReportService.swift
 //  DetailCRM
 //
-//  Report RPCs (0047/0048). Dates are shop-local `yyyy-MM-dd` values the
+//  Report RPCs (0047/0048, plus earnings 0065 and lead sources / quote
+//  conversion 0078). Dates are shop-local `yyyy-MM-dd` values the
 //  server interprets in the shop's time zone; every amount is computed by
 //  the server. `p_now` is never sent (the server uses its own clock for
 //  API callers).
@@ -87,6 +88,53 @@ enum ReportService {
     static func outstanding(shopID: UUID) async throws -> ReportOutstanding {
         try await Supa.client
             .rpc("report_outstanding", params: ShopParams(p_shop_id: shopID))
+            .execute()
+            .value
+    }
+
+    /// One member's earnings per completed job (`report_member_earnings`):
+    /// owners / admins for anyone, everyone else only for themselves.
+    static func memberEarnings(shopID: UUID, memberID: UUID, from: String, to: String) async throws -> [OpsMemberEarning] {
+        struct Params: Encodable {
+            let p_shop_id: UUID
+            let p_member_id: UUID
+            let p_from: String
+            let p_to: String
+        }
+        return try await Supa.client
+            .rpc("report_member_earnings", params: Params(p_shop_id: shopID, p_member_id: memberID, p_from: from, p_to: to))
+            .execute()
+            .value
+    }
+
+    /// The subset of `jobIDs` the caller may read (jobs RLS: managers see
+    /// every job, technicians only their assigned ones). Best effort: an
+    /// error gives an empty set, so nothing links to a job that may not
+    /// open.
+    static func readableJobIDs(shopID: UUID, jobIDs: [UUID]) async -> Set<UUID> {
+        let unique = Array(Set(jobIDs))
+        var readable: Set<UUID> = []
+        // Chunks keep the `id=in.(…)` query string a safe length.
+        for start in stride(from: 0, to: unique.count, by: 100) {
+            let chunk = Array(unique[start..<min(start + 100, unique.count)])
+            guard let numbers = try? await TimeClockService.jobNumbers(shopID: shopID, jobIDs: chunk) else { return [] }
+            readable.formUnion(numbers.keys)
+        }
+        return readable
+    }
+
+    /// Customers, leads, conversions and revenue per customer source.
+    static func leadSources(shopID: UUID, from: String, to: String) async throws -> [OpsLeadSourceRow] {
+        try await Supa.client
+            .rpc("report_lead_sources", params: RangeParams(p_shop_id: shopID, p_from: from, p_to: to))
+            .execute()
+            .value
+    }
+
+    /// Quotes sent in the range: outcomes, approval rate, averages, months.
+    static func quoteConversion(shopID: UUID, from: String, to: String) async throws -> OpsQuoteConversion {
+        try await Supa.client
+            .rpc("report_quote_conversion", params: RangeParams(p_shop_id: shopID, p_from: from, p_to: to))
             .execute()
             .value
     }

@@ -13,6 +13,7 @@
 
 import Foundation
 import Observation
+import Supabase
 import DetailCore
 
 /// What the signed-in member may do on this job (SPEC §3). UI gating only —
@@ -25,6 +26,13 @@ struct JobDetailPermissions: Equatable {
 
     /// Manager+: schedule, lines, assignments, customer-visible notes.
     var canEditJob: Bool { role.can(.editJobs, policy: policy) }
+    /// Publish / send the customer job report (P-8): managers, or staff
+    /// on the job when the shop lets technicians share reports.
+    var canShareReport: Bool {
+        role.isManagerOrAbove || (isAssigned && role.can(.shareJobReports, policy: policy))
+    }
+    /// Show files / photos to the customer (managers+ for documents).
+    var canManageDocumentVisibility: Bool { role.isManagerOrAbove }
     /// "Staff on the job": checklist, photos, inspections, forms.
     var canWork: Bool { role.isManagerOrAbove || isAssigned }
     var canEditInternalNotes: Bool { canWork }
@@ -66,12 +74,27 @@ final class JobDetailModel {
     var photos: LoadState<[JobPhotoItem]> = .idle
     var inspections: LoadState<[JobInspectionBundle]> = .idle
     var forms: LoadState<[FormSubmission]> = .idle
+    /// The job's live customer report (nil = none, or not visible to this
+    /// member).
+    var report: LoadState<JobsReport?> = .idle
+    var documents: LoadState<[JobsDocument]> = .idle
+    /// The shop's job fields (archived ones too, to label stored values).
+    var customFields: LoadState<[JobsCustomField]> = .idle
+    /// Video uploads of this job still in progress / paused (P-30).
+    private(set) var pendingUploads: [JobsResumableUploader.Upload] = []
+    /// Upload progress (0…1) per pending upload id.
+    private(set) var uploadProgress: [UUID: Double] = [:]
     private(set) var resources: [JobResource] = []
     /// Bays/vans failed to load (the schedule card says so instead of
     /// guessing a name).
     private(set) var resourcesFailed = false
     /// Checklist items with a toggle in flight.
     private(set) var pendingChecklist: Set<UUID> = []
+    /// The recurring series of this visit (managers+; nil otherwise).
+    private(set) var series: JobsSeries?
+    /// This visit was replaced or removed by a series edit ("this and
+    /// following", end series): the screen goes back.
+    private(set) var jobRemoved = false
     /// A line/discount write succeeded but re-reading the job's lines and
     /// totals failed. Shown with a Refresh button; the write is NOT retried
     /// (that would duplicate lines).
@@ -129,6 +152,9 @@ final class JobDetailModel {
         async let formsError = loadForms()
         async let paymentError = loadPayment()
         async let resourcesDone: Void = loadResources()
+        async let documentsError = loadDocuments()
+        async let fieldsDone: Void = loadCustomFields()
+        async let reportDone: Void = loadReport()
         let errors: [String?] = [
             detailError,
             await checklistError,
@@ -136,9 +162,297 @@ final class JobDetailModel {
             await inspectionsError,
             await formsError,
             await paymentError,
+            await documentsError,
         ]
         _ = await resourcesDone
+        _ = await fieldsDone
+        _ = await reportDone
+        refreshPendingUploads()
+        await loadSeries()
         return errors.compactMap { $0 }.first
+    }
+
+    /// The series row behind a recurring visit (managers+ can read it).
+    func loadSeries() async {
+        guard let shopID, role.isManagerOrAbove, let seriesID = job?.seriesID else {
+            series = nil
+            return
+        }
+        series = try? await JobsSeriesService.series(shopID: shopID, seriesID: seriesID)
+    }
+
+    // MARK: - Report, documents, custom fields (P-8, P-25, P-9)
+
+    /// The live report, for members who may see report links.
+    func loadReport() async {
+        guard let shopID, permissions.canShareReport else {
+            report = .loaded(nil)
+            return
+        }
+        report.beginLoading()
+        let jobID = self.jobID
+        let result = await LoadState<JobsReport?>.result {
+            try await JobsReportService.liveReport(shopID: shopID, jobID: jobID)
+        }
+        report.apply(result)
+    }
+
+    func publishReport(
+        includeInspections: Bool,
+        photoKinds: [JobPhotoKind],
+        message: String?,
+        send: Bool,
+        channel: JobMessageChannel?
+    ) async throws -> JobsReportService.Published {
+        let published = try await JobsReportService.publish(
+            jobID: jobID,
+            includeInspections: includeInspections,
+            photoKinds: photoKinds,
+            message: message,
+            send: send,
+            channel: channel
+        )
+        await loadReport()
+        return published
+    }
+
+    func revokeReport(_ report: JobsReport) async throws {
+        try await JobsReportService.revoke(reportID: report.id)
+        await loadReport()
+    }
+
+    @discardableResult
+    func loadDocuments() async -> String? {
+        guard let shopID else { return nil }
+        let hadContent = documents.value != nil
+        documents.beginLoading()
+        let jobID = self.jobID
+        let result = await LoadState<[JobsDocument]>.result {
+            try await JobsDocumentService.list(shopID: shopID, owner: .job(jobID))
+        }
+        documents.apply(result)
+        return hadContent ? result.errorMessage : nil
+    }
+
+    func uploadDocument(data: Data, fileName: String, customerVisible: Bool) async throws {
+        let shopID = try requireShop()
+        let saved = try await JobsDocumentService.upload(
+            shopID: shopID,
+            owner: .job(jobID),
+            data: data,
+            fileName: fileName,
+            customerVisible: customerVisible && permissions.canManageDocumentVisibility
+        )
+        documents = .loaded([saved] + (documents.value ?? []))
+    }
+
+    func setDocumentVisible(_ document: JobsDocument, visible: Bool) async throws {
+        let shopID = try requireShop()
+        let saved = try await JobsDocumentService.setCustomerVisible(shopID: shopID, documentID: document.id, visible: visible)
+        replaceDocument(saved)
+    }
+
+    func renameDocument(_ document: JobsDocument, to name: String) async throws {
+        let shopID = try requireShop()
+        let saved = try await JobsDocumentService.rename(shopID: shopID, documentID: document.id, fileName: name)
+        replaceDocument(saved)
+    }
+
+    func deleteDocument(_ document: JobsDocument) async throws {
+        try await JobsDocumentService.delete(document)
+        if let items = documents.value {
+            documents = .loaded(items.filter { $0.id != document.id })
+        }
+    }
+
+    private func replaceDocument(_ document: JobsDocument) {
+        guard var items = documents.value, let index = items.firstIndex(where: { $0.id == document.id }) else { return }
+        items[index] = document
+        documents = .loaded(items)
+    }
+
+    func loadCustomFields() async {
+        guard let shopID else { return }
+        customFields.beginLoading()
+        let result = await LoadState<[JobsCustomField]>.result {
+            try await JobsCustomFieldService.allFields(shopID: shopID, entity: .job)
+        }
+        customFields.apply(result)
+    }
+
+    /// Saves the job's answers (managers+); the server validates them.
+    func saveCustomData(_ edited: [String: JobsCustomValue]) async throws {
+        let shopID = try requireShop()
+        let fields = customFields.value ?? []
+        let location = job?.locationType
+        let editable = Set(fields.filter { $0.isEditable(onJobAt: location) }.map(\.key))
+        let data = JobsCustomFieldService.mergedData(original: job?.customData, edited: edited, editableKeys: editable)
+        let updated = try await JobService.updateCustomData(shopID: shopID, jobID: jobID, data: data)
+        replaceJob(updated)
+    }
+
+    // MARK: - Customer visibility of photos (P-8)
+
+    func setPhotosVisible(_ photoIDs: [UUID], visible: Bool) async throws {
+        try await JobOpsService.setPhotoVisibility(photoIDs: photoIDs, visible: visible)
+        guard var items = photos.value else { return }
+        let ids = Set(photoIDs)
+        for index in items.indices where ids.contains(items[index].id) {
+            items[index].photo.customerVisible = visible
+        }
+        photos = .loaded(items)
+    }
+
+    // MARK: - Videos (P-30)
+
+    /// The signed-in user's unfinished uploads for this job (another
+    /// account's recordings on this iPhone are never listed or resumed).
+    func refreshPendingUploads() {
+        pendingUploads = JobsResumableUploader.pending(jobID: jobID, userID: userID)
+    }
+
+    /// Queues a recorded video (copied into the app's storage) and uploads
+    /// it: the file with the resumable protocol, a poster frame, then the
+    /// job_photos row. An interrupted upload stays listed with Resume.
+    func uploadVideo(fileURL: URL, durationSeconds: Int, posterJPEG: Data?, kind: JobPhotoKind) async throws {
+        let shopID = try requireShop()
+        guard let userID else { throw AppError.message("Sign in again to add videos.") }
+        let base = "v-" + UUID().uuidString.lowercased()
+        let ext = fileURL.pathExtension.lowercased() == "mp4" ? "mp4" : "mov"
+        let objectName = "\(shopID.uuidString.lowercased())/\(jobID.uuidString.lowercased())/\(base).\(ext)"
+        var metadata = [
+            "duration": String(max(1, durationSeconds)),
+            "kind": kind.rawValue,
+            "posterName": base + "-poster.jpg",
+        ]
+        if posterJPEG == nil { metadata["posterName"] = nil }
+        let upload = try JobsResumableUploader.prepare(
+            fileAt: fileURL,
+            userID: userID,
+            shopID: shopID,
+            jobID: jobID,
+            bucket: JobOpsService.mediaBucket,
+            objectName: objectName,
+            contentType: ext == "mp4" ? "video/mp4" : "video/quicktime",
+            metadata: metadata
+        )
+        if let posterJPEG {
+            // Kept next to the video so a resumed upload still has it.
+            try? posterJPEG.write(to: JobsResumableUploader.posterURL(for: upload))
+        }
+        refreshPendingUploads()
+        try await finishUpload(upload)
+    }
+
+    /// Sends (or resumes) a pending video upload and records it on the job.
+    func finishUpload(_ upload: JobsResumableUploader.Upload) async throws {
+        let uploadID = upload.id
+        // Only the account that recorded it may send it (its uploader
+        // gets the row's delete rights).
+        guard let userID, upload.userID == userID else {
+            throw AppError.message("This video was recorded by another account on this iPhone.")
+        }
+        // One run per upload at a time (set before the first suspension).
+        guard uploadProgress[uploadID] == nil else { return }
+        uploadProgress[uploadID] = 0
+        defer { uploadProgress[uploadID] = nil }
+        let token = try await Supa.client.auth.session.accessToken
+        try await JobsResumableUploader.run(upload, accessToken: token) { [weak self] fraction in
+            Task { @MainActor [weak self] in self?.uploadProgress[uploadID] = fraction }
+        }
+        var posterPath: String?
+        let posterFile = JobsResumableUploader.posterURL(for: upload)
+        if let name = upload.metadata["posterName"], let data = try? Data(contentsOf: posterFile) {
+            posterPath = try? await JobOpsService.uploadPoster(shopID: upload.shopID, jobID: upload.jobID, name: name, jpegData: data)
+        }
+        let kind = JobPhotoKind(rawValue: upload.metadata["kind"] ?? "") ?? .other
+        let duration = Int(upload.metadata["duration"] ?? "") ?? 1
+        let photo = try await JobOpsService.insertVideo(
+            shopID: upload.shopID,
+            jobID: upload.jobID,
+            storagePath: upload.objectName,
+            posterPath: posterPath,
+            durationSeconds: duration,
+            kind: kind
+        )
+        JobsResumableUploader.discard(upload)
+        refreshPendingUploads()
+        var url: URL?
+        if let posterPath {
+            url = try? await JobOpsService.signedURL(bucket: JobOpsService.photosBucket, path: posterPath)
+        }
+        photos = .loaded((photos.value ?? []) + [JobPhotoItem(photo: photo, url: url)])
+    }
+
+    /// Drops a pending upload that can't or shouldn't finish.
+    func discardUpload(_ upload: JobsResumableUploader.Upload) {
+        JobsResumableUploader.discard(upload)
+        refreshPendingUploads()
+    }
+
+    // MARK: - Recurring series (P-1)
+
+    /// "This and following": applies the edited time of day, length,
+    /// place, bay / van and notes to this visit and the later ones that are
+    /// still plain scheduled visits. Eligible visits (this one included)
+    /// are replaced on their own dates; when this visit was replaced the
+    /// screen goes back. A new date or deposit would be lost that way, so
+    /// such an edit is refused here (the editor offers "this visit only").
+    func updateSeriesFollowing(_ patch: JobDetailsPatch, clock: ShopClock) async throws -> JobsSeriesService.Outcome {
+        guard let job, let seriesID = job.seriesID else {
+            throw AppError.message("This job isn't part of a repeating series.")
+        }
+        if let limit = JobsSeriesDraft.followingScopeLimit(
+            originalStart: job.scheduledStart,
+            newStart: patch.scheduledStart,
+            originalDepositCents: job.depositRequiredCents,
+            newDepositCents: patch.depositRequiredCents,
+            calendar: clock.calendar
+        ) {
+            throw AppError.message(limit)
+        }
+        var json: [String: AnyJSON] = [
+            "location_type": .string(patch.locationType.rawValue),
+            "service_address_line1": patch.serviceAddressLine1.map { AnyJSON.string($0) } ?? .null,
+            "service_address_line2": patch.serviceAddressLine2.map { AnyJSON.string($0) } ?? .null,
+            "service_city": patch.serviceCity.map { AnyJSON.string($0) } ?? .null,
+            "service_region": patch.serviceRegion.map { AnyJSON.string($0) } ?? .null,
+            "service_postal_code": patch.servicePostalCode.map { AnyJSON.string($0) } ?? .null,
+            "resource_id": patch.resourceID.map { AnyJSON.string($0.uuidString) } ?? .null,
+            "notes": patch.notes.map { AnyJSON.string($0) } ?? .null,
+        ]
+        if let start = patch.scheduledStart, let end = patch.scheduledEnd {
+            json["local_start"] = .string(JobsSeriesDraft.timeString(start, calendar: clock.calendar))
+            json["duration_minutes"] = .integer(max(15, Int(end.timeIntervalSince(start) / 60)))
+        }
+        let outcome = try await JobsSeriesService.update(seriesID: seriesID, patch: json, fromJobID: job.id)
+        await refreshAfterSeriesChange()
+        return outcome
+    }
+
+    /// Ends the series after this visit (later plain visits are removed).
+    func endSeriesAfterThis(clock: ShopClock) async throws -> JobsSeriesService.Outcome {
+        guard let job, let seriesID = job.seriesID else {
+            throw AppError.message("This job isn't part of a repeating series.")
+        }
+        let day = JobsSeriesDraft.dayString(job.scheduledStart ?? Date(), calendar: clock.calendar)
+        let outcome = try await JobsSeriesService.end(seriesID: seriesID, afterDay: day)
+        await refreshAfterSeriesChange()
+        return outcome
+    }
+
+    /// Re-reads the job after a series change; notes when it's gone.
+    private func refreshAfterSeriesChange() async {
+        guard let shopID else { return }
+        do {
+            let fresh = try await JobService.job(shopID: shopID, jobID: jobID)
+            replaceJob(fresh)
+            await loadSeries()
+        } catch let error as AppError where error == .notFound("That job") {
+            jobRemoved = true
+        } catch {
+            // The change is saved; the next pull to refresh shows it.
+        }
     }
 
     @discardableResult
@@ -271,8 +585,17 @@ final class JobDetailModel {
     /// card payment that is still processing stops the change (thrown).
     /// Returns how many card payments turned out to have gone through while
     /// releasing (now recorded on the job), so the screen can say so.
+    ///
+    /// Starting and completing are gated by the server (required checklist
+    /// items, photo minimums: PostgrestError 23514); `force` is the manager
+    /// override, recorded with `overrideReason`.
     @discardableResult
-    func changeStatus(to status: JobStatus, cancelReason: String? = nil) async throws -> Int {
+    func changeStatus(
+        to status: JobStatus,
+        cancelReason: String? = nil,
+        force: Bool = false,
+        overrideReason: String? = nil
+    ) async throws -> Int {
         let shopID = try requireShop()
         if needsTimeFirst(for: status) {
             throw AppError.invalidInput("Set a date and time before moving this job to \(status.displayName.lowercased()).")
@@ -285,13 +608,25 @@ final class JobDetailModel {
             shopID: shopID,
             jobID: jobID,
             to: status,
-            cancelReason: cancelReason
+            cancelReason: cancelReason,
+            force: force,
+            overrideReason: overrideReason
         )
         replaceJob(updated)
         // Forms become void on cancel / no-show; deposits may matter again.
         await loadForms()
         await loadPayment()
         return recordedPayments
+    }
+
+    /// What blocks starting / completing right now (P-11).
+    func completionBlockers() async throws -> JobsCompletionBlockers {
+        try await JobService.completionBlockers(jobID: jobID)
+    }
+
+    /// True for the server's gate refusal (checklist / photo minimums).
+    static func isCompletionGateError(_ error: Error) -> Bool {
+        (error as? PostgrestError)?.code == "23514"
     }
 
     func saveInternalNotes(_ text: String) async throws {
@@ -384,6 +719,20 @@ final class JobDetailModel {
         await refreshJobAndLines()
     }
 
+    /// Adds a preset fee as a line (priced by the server, P-21).
+    func addFee(_ fee: JobsShopFee) async throws {
+        _ = try requireShop()
+        try await JobService.addFeeLine(kind: .job, documentID: jobID, feeID: fee.id)
+        await refreshJobAndLines()
+    }
+
+    /// The customer's vehicles (per-line vehicle picker, P-7).
+    func customerVehicles() async throws -> [JobVehicle] {
+        let shopID = try requireShop()
+        guard let customerID = job?.customerID else { return [] }
+        return try await JobService.vehicles(shopID: shopID, customerID: customerID)
+    }
+
     func updateDiscount(kind: JobDiscountKind, value: Int) async throws {
         let shopID = try requireShop()
         let updated = try await JobService.updateDiscount(shopID: shopID, jobID: jobID, kind: kind, value: value)
@@ -434,6 +783,12 @@ final class JobDetailModel {
         guard var items = checklist.value, let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[index] = item
         checklist = .loaded(items)
+    }
+
+    func setChecklistItemRequired(_ item: JobChecklistItem, required: Bool) async throws {
+        let shopID = try requireShop()
+        let saved = try await JobOpsService.setChecklistItemRequired(shopID: shopID, itemID: item.id, required: required)
+        replaceChecklistItem(saved)
     }
 
     func addChecklistItem(_ label: String) async throws {

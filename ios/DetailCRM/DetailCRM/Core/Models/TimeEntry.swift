@@ -58,6 +58,15 @@ struct TimeEntry: Codable, Identifiable, Hashable, Sendable {
     var notes: String?
     var createdAt: Date
     var updatedAt: Date
+    /// Where the member clocked in / out (P-24, 0056): the device location
+    /// sent with `clock_in` / `clock_out`, when they allowed it. Evidence
+    /// only — nobody can edit it through the API.
+    var clockInLat: Double?
+    var clockInLng: Double?
+    var clockInAccuracyM: Double?
+    var clockOutLat: Double?
+    var clockOutLng: Double?
+    var clockOutAccuracyM: Double?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -71,12 +80,57 @@ struct TimeEntry: Codable, Identifiable, Hashable, Sendable {
         case notes
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case clockInLat = "clock_in_lat"
+        case clockInLng = "clock_in_lng"
+        case clockInAccuracyM = "clock_in_accuracy_m"
+        case clockOutLat = "clock_out_lat"
+        case clockOutLng = "clock_out_lng"
+        case clockOutAccuracyM = "clock_out_accuracy_m"
     }
 
     static let selectColumns = [
         "id", "shop_id", "member_id", "job_id", "kind", "clock_in", "clock_out",
         "source", "notes", "created_at", "updated_at",
+        "clock_in_lat", "clock_in_lng", "clock_in_accuracy_m",
+        "clock_out_lat", "clock_out_lng", "clock_out_accuracy_m",
     ].joined(separator: ",")
+
+    /// A recorded clock-in / clock-out location.
+    struct Spot: Hashable, Sendable {
+        var latitude: Double
+        var longitude: Double
+        var accuracyMeters: Double?
+
+        /// "±25 m" when the accuracy is known.
+        var accuracyText: String? {
+            guard let accuracyMeters else { return nil }
+            return "±\(Int(accuracyMeters.rounded())) m"
+        }
+
+        /// An Apple Maps pin at this spot, labelled `label`.
+        func mapURL(label: String) -> URL? {
+            guard (-90...90).contains(latitude), (-180...180).contains(longitude) else { return nil }
+            var components = URLComponents()
+            components.scheme = "https"
+            components.host = "maps.apple.com"
+            components.path = "/"
+            components.queryItems = [
+                URLQueryItem(name: "ll", value: "\(latitude),\(longitude)"),
+                URLQueryItem(name: "q", value: label),
+            ]
+            return components.url
+        }
+    }
+
+    var clockInSpot: Spot? {
+        guard let clockInLat, let clockInLng else { return nil }
+        return Spot(latitude: clockInLat, longitude: clockInLng, accuracyMeters: clockInAccuracyM)
+    }
+
+    var clockOutSpot: Spot? {
+        guard let clockOutLat, let clockOutLng else { return nil }
+        return Spot(latitude: clockOutLat, longitude: clockOutLng, accuracyMeters: clockOutAccuracyM)
+    }
 
     var isOpen: Bool { clockOut == nil }
 

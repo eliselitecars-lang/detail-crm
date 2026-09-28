@@ -2,9 +2,12 @@
 //  InvoiceDetailView.swift
 //  DetailCRM
 //
-//  One invoice: balance, collect actions (card via Stripe PaymentSheet,
-//  saved card, cash/check), lines, the server's totals, payments (method,
-//  card brand/last4, tip, refunds), send / share the pay link, void.
+//  One invoice: balance, collect actions (card via Stripe PaymentSheet or
+//  in person, saved card, gift card / store credit, cash/check), lines
+//  (per job on a grouped invoice), the server's totals, payments (method,
+//  card brand/last4, tip, refunds, bank payments still settling), send /
+//  share the pay link or a PDF, automatic reminders, void. Payments update
+//  live (realtime) so a settling bank or in-person payment shows up.
 //  Actions are gated by role (SPEC §3) and enforced again by the server:
 //  technicians only reach this for an assigned job's invoice when the shop
 //  lets them collect payments.
@@ -26,6 +29,7 @@ enum InvoiceDetailSheet: Identifiable {
     case collectCard
     case recordManual
     case chargeSavedCard
+    case redeemGiftCard
     case send
     case void
     case refund(Payment)
@@ -35,6 +39,7 @@ enum InvoiceDetailSheet: Identifiable {
         case .collectCard: return "collectCard"
         case .recordManual: return "recordManual"
         case .chargeSavedCard: return "chargeSavedCard"
+        case .redeemGiftCard: return "redeemGiftCard"
         case .send: return "send"
         case .void: return "void"
         case .refund(let payment): return "refund-\(payment.id.uuidString)"
@@ -47,6 +52,7 @@ struct InvoiceDetailView: View {
 
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(JobsRealtimeHub.self) private var realtime
 
     @State private var state: LoadState<InvoiceService.DetailData> = .idle
     @State private var activeSheet: InvoiceDetailSheet?
@@ -66,9 +72,17 @@ struct InvoiceDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
         .task { await load() }
-        .sheet(item: $activeSheet) { sheet in
-            sheetContent(sheet)
+        // A payment changed somewhere (webhook settled a card, bank payment
+        // cleared or failed, someone else collected): re-read the invoice.
+        .onChange(of: realtime.revision(.payments)) {
+            guard activeSheet == nil else { return }
+            Task { await load() }
         }
+        .sheet(item: $activeSheet, onDismiss: {
+            Task { await load() }
+        }, content: { sheet in
+            sheetContent(sheet)
+        })
     }
 
     private var permissions: InvoicePermissions {
@@ -92,7 +106,16 @@ struct InvoiceDetailView: View {
             case .recordManual:
                 InvoiceManualPaymentSheet(
                     invoice: data.invoice,
-                    hasOpenCardAttempt: InvoiceService.hasOpenCardAttempt(data.payments)
+                    hasOpenCardAttempt: InvoiceService.hasOpenCardAttempt(data.payments),
+                    processingCents: InvoiceService.processingCents(data.payments)
+                ) {
+                    await load()
+                }
+            case .redeemGiftCard:
+                MoneyGiftCardRedeemSheet(
+                    invoice: data.invoice,
+                    canUseStoreCredit: permissions.canManage,
+                    inFlightCents: Payment.inFlightCents(data.payments, at: Date())
                 ) {
                     await load()
                 }
@@ -164,7 +187,15 @@ private struct InvoiceDetailContent: View {
                     currencyCode: currencyCode,
                     present: present
                 ))
-                AnyView(InvoiceLinesSection(lines: data.lines, currencyCode: currencyCode))
+                AnyView(MoneyInvoiceGroupedLinesSection(
+                    lines: data.lines,
+                    jobs: data.billedJobs,
+                    vehicles: data.vehicles,
+                    currencyCode: currencyCode,
+                    clock: clock,
+                    canOpenJobs: permissions.canManage,
+                    hasDocumentDiscount: data.invoice.discountKind != .none
+                ))
                 AnyView(InvoiceTotalsSection(invoice: data.invoice, currencyCode: currencyCode))
                 AnyView(InvoicePaymentsSection(
                     payments: data.payments,
@@ -173,6 +204,13 @@ private struct InvoiceDetailContent: View {
                     clock: clock,
                     onRefund: { payment in present(.refund(payment)) }
                 ))
+                if permissions.canManage && InvoiceDetailContent.showsFollowups(data.invoice) {
+                    AnyView(MoneyFollowupStatusRow(
+                        kind: .invoice,
+                        documentID: data.invoice.id,
+                        refreshKey: data.invoice.updatedAt
+                    ))
+                }
                 AnyView(InvoiceManageSection(
                     invoice: data.invoice,
                     linkToken: data.linkToken,
@@ -184,6 +222,11 @@ private struct InvoiceDetailContent: View {
             .padding(.horizontal, Theme.Spacing.gutter)
             .padding(.vertical, Theme.Spacing.lg)
         }
+    }
+
+    /// Reminders / overdue notices apply to a sent invoice with a balance.
+    static func showsFollowups(_ invoice: Invoice) -> Bool {
+        invoice.sentAt != nil && invoice.status.acceptsPayment && invoice.balanceCents > 0
     }
 }
 
@@ -205,7 +248,13 @@ private struct InvoiceHeaderSection: View {
             }
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 customerRow
-                if let jobID = invoice.jobID {
+                if data.isGrouped {
+                    InfoRow(
+                        label: "Jobs",
+                        value: data.billedJobs.map { "#\($0.number)" }.joined(separator: ", "),
+                        systemImage: "square.stack.3d.up"
+                    )
+                } else if let jobID = invoice.jobID {
                     NavigationLink(value: AppRoute.job(jobID)) {
                         HStack {
                             InfoRow(label: "Job", value: "Open job", systemImage: "wrench.and.screwdriver")
@@ -295,6 +344,12 @@ private struct InvoiceBalanceSection: View {
                 if hasPendingPayment {
                     InlineMessage(text: "A card payment is processing. It shows here once Stripe confirms it.", kind: .info)
                 }
+                if processingCents > 0 {
+                    InlineMessage(
+                        text: "\(Money.format(cents: processingCents, currencyCode: currencyCode)) is on its way by bank or pay-later payment. It counts once it clears (usually a few business days); until then the balance can't be collected twice.",
+                        kind: .info
+                    )
+                }
                 if invoice.status == .draft {
                     InlineMessage(text: "Send the invoice to issue it before collecting payment.", kind: .info)
                 }
@@ -323,11 +378,21 @@ private struct InvoiceBalanceSection: View {
             .buttonStyle(.themeSecondary)
         }
         Button {
+            present(.redeemGiftCard)
+        } label: {
+            Label(permissions.canManage ? "Gift card or store credit" : "Gift card", systemImage: "giftcard")
+        }
+        .buttonStyle(.themeSecondary)
+        Button {
             present(.recordManual)
         } label: {
             Label("Record cash, check or other", systemImage: "banknote")
         }
         .buttonStyle(.themeSecondary)
+    }
+
+    private var processingCents: Int {
+        InvoiceService.processingCents(data.payments)
     }
 
     private var balanceTitle: String {
@@ -341,37 +406,6 @@ private struct InvoiceBalanceSection: View {
 
     private var hasPendingPayment: Bool {
         data.payments.contains { $0.status == .pending }
-    }
-}
-
-private struct InvoiceLinesSection: View {
-    let lines: [InvoiceLineItem]
-    let currencyCode: String
-
-    var body: some View {
-        MoneySectionCard("Items") {
-            if lines.isEmpty {
-                Text("No items on this invoice.")
-                    .font(Theme.Typography.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
-            } else {
-                ForEach(lines) { line in
-                    MoneyLineRow(
-                        name: line.name,
-                        detail: line.lineDescription,
-                        quantity: line.quantity,
-                        unitPriceCents: line.unitPriceCents,
-                        discountCents: line.discountCents,
-                        totalCents: line.totalCents,
-                        currencyCode: currencyCode,
-                        note: line.taxable ? nil : "Not taxed"
-                    )
-                    if line.id != lines.last?.id {
-                        Divider().overlay(Theme.border)
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -458,6 +492,12 @@ struct InvoicePaymentRow: View {
                             .foregroundStyle(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    if let processing = payment.processingNote {
+                        Text(processing)
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Spacer(minLength: Theme.Spacing.sm)
                 VStack(alignment: .trailing, spacing: Theme.Spacing.xxs) {
@@ -501,6 +541,9 @@ private struct InvoiceManageSection: View {
 
     var body: some View {
         VStack(spacing: Theme.Spacing.sm) {
+            if permissions.canManage || (permissions.canCollect && invoice.status != .draft) {
+                MoneyPDFShareButton(kind: .invoice, documentID: invoice.id, number: invoice.number)
+            }
             if permissions.canManage && invoice.status != .void {
                 Button {
                     present(.send)

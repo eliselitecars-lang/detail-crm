@@ -22,6 +22,7 @@ export {
 export { Checkbox, type CheckboxProps } from './Checkbox';
 export { Combobox, type ComboboxProps } from './Combobox';
 export { ConfirmDialog, type ConfirmDialogProps } from './ConfirmDialog';
+export { CopyField, type CopyFieldProps } from './CopyField';
 export { DateInput, TimeInput, type DateInputProps, type TimeInputProps } from './DateTimeInputs';
 export { Dialog, type DialogProps } from './Dialog';
 export { Drawer, type DrawerProps } from './Drawer';
@@ -31,6 +32,12 @@ export {
   type DropdownMenuItem,
   type DropdownMenuProps,
 } from './DropdownMenu';
+export {
+  FileDropzone,
+  fileMatchesAccept,
+  formatBytes,
+  type FileDropzoneProps,
+} from './FileDropzone';
 export { FormField, type FormFieldProps } from './FormField';
 export { controlClasses, useFormFieldControl } from './formFieldContext';
 export { IconButton, type IconButtonProps } from './IconButton';
@@ -40,6 +47,7 @@ export { MoneyInput, type MoneyInputProps } from './MoneyInput';
 export { PageHeader, type PageHeaderProps } from './PageHeader';
 export { Pagination, pageRange, type PaginationProps } from './Pagination';
 export { PhoneInput, type PhoneInputProps } from './PhoneInput';
+export { QrCode, type QrCodeProps } from './QrCode';
 export { Portal } from './Portal';
 export { RadioGroup, type RadioGroupProps, type RadioOption } from './RadioGroup';
 export { SearchInput, type SearchInputProps } from './SearchInput';

@@ -11,6 +11,8 @@ export const ERROR_STATUS = {
   invalid_signature: 400,
   unauthorized: 401,
   payment_failed: 402,
+  /** The shop's subscription is inactive or its plan's seat limit is reached (PT402). */
+  payment_required: 402,
   forbidden: 403,
   origin_not_allowed: 403,
   not_found: 404,
@@ -78,6 +80,75 @@ export const errors = {
   unprocessable: (message: string, details?: unknown): HttpError =>
     new HttpError("unprocessable", message, { details }),
 } as const;
+
+// ---------------------------------------------------------------------------
+// Shop subscription refusals (PT402, migration 0102)
+// ---------------------------------------------------------------------------
+
+/**
+ * SQLSTATE the database raises when a shop's subscription is inactive
+ * (new business records are paused) or its plan's seat limit is reached.
+ * PostgREST answers it with HTTP 402; functions answer `402
+ * payment_required` with the database's own sentence.
+ */
+export const SUBSCRIPTION_SQLSTATE = "PT402";
+
+/** `details.reason` of a `payment_required` answer. */
+export type PaymentRequiredReason = "subscription_inactive" | "seat_limit";
+
+/**
+ * The database's neutral sentence (0102 billing_inactive_message), used only
+ * when a PT402 arrives without one. Shown verbatim on iPhone: no prices, no
+ * purchase wording.
+ */
+export const SUBSCRIPTION_INACTIVE_MESSAGE =
+  "This shop's subscription is inactive, so new records can't be created right now.";
+
+/** 0102 billing_seats_message: "This shop's plan allows N team member(s)." */
+const SEAT_LIMIT_MESSAGE = /^This shop's plan allows \d+ team members?\.$/;
+
+export function paymentRequiredReason(message: string): PaymentRequiredReason {
+  return SEAT_LIMIT_MESSAGE.test(message.trim()) ? "seat_limit" : "subscription_inactive";
+}
+
+interface PgErrorLike {
+  code?: unknown;
+  message?: unknown;
+}
+
+/**
+ * A database refusal with SQLSTATE PT402 as the standard `402
+ * payment_required` error: the database's message verbatim (it is written
+ * for people and deliberately neutral) and `details.reason`
+ * `subscription_inactive` or `seat_limit`. null for any other error.
+ */
+export function subscriptionRefusal(error: PgErrorLike | null | undefined): HttpError | null {
+  if (!error || typeof error !== "object" || error.code !== SUBSCRIPTION_SQLSTATE) return null;
+  const text = typeof error.message === "string" ? error.message.replace(/\s+/g, " ").trim() : "";
+  const message = text || SUBSCRIPTION_INACTIVE_MESSAGE;
+  return new HttpError("payment_required", message, {
+    details: { reason: paymentRequiredReason(message) },
+    cause: error,
+  });
+}
+
+/**
+ * The PT402 refusal anywhere in an error's `cause` chain (a PostgREST error
+ * wrapped by a function's own "... failed" error), as `payment_required`.
+ * The innermost PT402 wins: it is the database's own error, whose message
+ * is the sentence to show. Used by the handler's error mapping so a PT402
+ * that a call site did not map still answers 402, never 500.
+ */
+export function subscriptionRefusalIn(err: unknown): HttpError | null {
+  let found: PgErrorLike | null = null;
+  let node: unknown = err;
+  for (let depth = 0; depth < 8 && typeof node === "object" && node !== null; depth++) {
+    const candidate = node as PgErrorLike & { cause?: unknown };
+    if (candidate.code === SUBSCRIPTION_SQLSTATE) found = candidate;
+    node = candidate.cause;
+  }
+  return found ? subscriptionRefusal(found) : null;
+}
 
 /**
  * A failed call to a third-party API (Stripe, Twilio, Resend). The handler

@@ -1,9 +1,10 @@
 /**
  * Stripe Connect event handlers. Each one maps a verified event on a shop's
  * connected account to the service_role money helpers in migrations 0011,
- * 0013 and 0093 (upsert_stripe_payment, apply_stripe_refund,
+ * 0013, 0064, 0066 and 0093 (upsert_stripe_payment, apply_stripe_refund,
  * set_stripe_refund_total, apply_stripe_dispute,
- * upsert_customer_payment_method, sync_stripe_subscription) or to
+ * upsert_customer_payment_method, sync_stripe_subscription,
+ * gift_card_order_paid, gift_card_order_refunded) or to
  * shop_stripe_accounts.
  *
  * Rules every handler follows:
@@ -42,8 +43,23 @@
  *    0093): the money a lost dispute took back. Balances and revenue are not
  *    changed by a dispute; staff decide whether to bill the customer again.
  *  - Once a card payment settles an invoice in full, the invoice's other
- *    PaymentSheets still waiting for a card are cancelled (and recorded
- *    cancelled), so an open sheet on another device cannot charge it twice.
+ *    PaymentSheets (and Terminal / Tap to Pay intents) still waiting for a
+ *    card are cancelled (and recorded cancelled), so an open sheet on another
+ *    device cannot charge it twice.
+ *  - Asynchronous methods (P-31): an ACH debit (us_bank_account -> ach_debit)
+ *    is recorded `processing` while it clears (payment_intent.processing, or
+ *    a Checkout completed unpaid), which the database counts as money in
+ *    flight; it becomes succeeded (payment_intent.succeeded /
+ *    checkout.session.async_payment_succeeded) or failed
+ *    (payment_intent.payment_failed / async_payment_failed). Pay-later
+ *    providers (affirm, klarna, afterpay_clearpay, zip, ...) are `bnpl`.
+ *    Stripe's own type is stored in payments.stripe_method_type; a type the
+ *    CRM has no method for is stored as `card` with a note.
+ *  - Online gift card sales (metadata kind 'gift_card' + gift_card_order_id)
+ *    are never payments: gift_card_order_paid issues the card and
+ *    gift_card_order_refunded follows refunds (0066).
+ *  - Money for a customer merged into another (P-20) goes to the surviving
+ *    customer (customers.merged_into_id).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Logger } from "../_shared/log.ts";
@@ -54,17 +70,19 @@ import {
   type CardDetails,
   chargeCard,
   chargeId,
+  chargeMethod,
   checkoutSessionId,
   type CrmMetadata,
+  DEVICE_INTENT_SOURCES,
   hasLinkage,
   intentMethod,
+  intentSavesCard,
   invoiceSubscription,
   isoFromUnix,
   isReconfirmableSheetIntent,
   type MembershipStatus,
   membershipStatusOf,
   mergeMetadata,
-  nonCardMethodType,
   ownership,
   paymentIntentId,
   paymentMethodCard,
@@ -73,13 +91,18 @@ import {
   readMetadata,
   splitTip,
   stripeCustomerId,
+  stripeMethodTypeOf,
   subscriptionId,
   subscriptionPeriodEnd,
   subscriptionTerms,
+  unmappedMethodType,
 } from "./mapping.ts";
 
 export const HANDLED_EVENT_TYPES = [
   "checkout.session.completed",
+  "checkout.session.async_payment_succeeded",
+  "checkout.session.async_payment_failed",
+  "payment_intent.processing",
   "payment_intent.succeeded",
   "payment_intent.payment_failed",
   "payment_intent.canceled",
@@ -138,7 +161,7 @@ export class DbError extends Error {
   }
 }
 
-type PaymentStatus = "pending" | "succeeded" | "failed" | "cancelled";
+type PaymentStatus = "pending" | "processing" | "succeeded" | "failed" | "cancelled";
 
 const RECEIVED = new Set(["succeeded", "partially_refunded", "refunded"]);
 
@@ -167,7 +190,14 @@ export async function handleEvent(ctx: WebhookContext): Promise<Outcome> {
   const object = ctx.event.data.object;
   switch (ctx.event.type) {
     case "checkout.session.completed":
+    case "checkout.session.async_payment_succeeded":
       return await onCheckoutSessionCompleted(ctx, object as Stripe.Checkout.Session);
+    case "checkout.session.async_payment_failed":
+      return await onCheckoutSessionCompleted(ctx, object as Stripe.Checkout.Session, {
+        asyncFailed: true,
+      });
+    case "payment_intent.processing":
+      return await onPaymentIntent(ctx, object as Stripe.PaymentIntent, "processing");
     case "payment_intent.succeeded":
       return await onPaymentIntent(ctx, object as Stripe.PaymentIntent, "succeeded");
     case "payment_intent.payment_failed":
@@ -282,6 +312,31 @@ async function latestCharge(
   return await ctx.stripe.charges.retrieve(id, {}, onAccount(connectedAccount(ctx)));
 }
 
+/**
+ * Whether the intent lets the customer pay with something other than a card
+ * (a Checkout Session with dynamic payment methods: ACH, pay-later). Only
+ * then can a failure's method differ from a card.
+ */
+function offersNonCardMethods(pi: Pick<Stripe.PaymentIntent, "payment_method_types">): boolean {
+  return (pi.payment_method_types ?? []).some((t) =>
+    t !== "card" && t !== "card_present" && t !== "interac_present"
+  );
+}
+
+/** The intent's latest charge, when Stripe has one (null otherwise; a missing charge is never fatal). */
+async function chargeIfAny(
+  ctx: WebhookContext,
+  pi: Stripe.PaymentIntent,
+): Promise<Stripe.Charge | null> {
+  if (!pi.latest_charge) return null;
+  try {
+    return await latestCharge(ctx, pi);
+  } catch (err) {
+    if (isMissingResource(err)) return null;
+    throw err;
+  }
+}
+
 /** Total actually charged by a PaymentIntent (received for successes). */
 function intentTotal(pi: Stripe.PaymentIntent, status: PaymentStatus): number {
   if (status === "succeeded" && pi.amount_received > 0) return pi.amount_received;
@@ -300,6 +355,8 @@ interface PaymentWrite {
   paidAt?: string | null;
   /** The Stripe customer paying (fallback owner when the linked records are gone). */
   stripeCustomer?: string | null;
+  /** Stripe's payment method type (payments.stripe_method_type), when known. */
+  stripeMethodType?: string | null;
 }
 
 /**
@@ -321,7 +378,10 @@ async function recordPayment(
       requested_tip_cents: write.md.tipCents,
     });
   }
-  const card: CardDetails | null = chargeCard(write.charge);
+  // Card / bank account details and the method Stripe actually used (P-31:
+  // us_bank_account -> ach_debit, affirm / klarna / ... -> bnpl).
+  const details = chargeMethod(write.charge);
+  const methodType = write.stripeMethodType ?? stripeMethodTypeOf(write.charge);
   const upsert = async (md: CrmMetadata) =>
     await rpc<PaymentRow>(ctx, "upsert_stripe_payment", {
       p_shop_id: write.shopId,
@@ -330,23 +390,25 @@ async function recordPayment(
       p_amount_cents: split.amountCents,
       p_tip_cents: split.tipCents,
       p_kind: md.kind,
-      p_method: card?.method ?? write.method,
+      p_method: details?.method ?? write.method,
       p_invoice_id: md.invoiceId,
       p_job_id: md.jobId,
       p_customer_id: md.customerId,
       p_membership_id: md.membershipId,
       p_charge_id: chargeId(write.charge?.id),
       p_checkout_session_id: write.checkoutSessionId ?? null,
-      p_card_brand: card?.brand ?? null,
-      p_card_last4: card?.last4 ?? null,
+      p_card_brand: details?.brand ?? null,
+      p_card_last4: details?.last4 ?? null,
       p_paid_at: write.status === "succeeded"
         ? (write.paidAt ?? isoFromUnix(write.charge?.created) ?? isoFromUnix(ctx.event.created))
         : null,
+      p_stripe_method_type: methodType,
     });
 
   // A payment whose links cannot be written as they are is recovered at most
   // once per cause, then retried once more; anything else fails the delivery.
-  let md = write.md;
+  // A payer merged into another customer (P-20) pays as the surviving one.
+  let md = await followMergedCustomer(ctx, write.shopId, write.md);
   let row: PaymentRow | null = null;
   const notes: string[] = [];
   const recovered = new Set<string>();
@@ -399,17 +461,54 @@ async function recordPayment(
     );
   }
 
-  const otherMethod = nonCardMethodType(write.charge);
+  const otherMethod = unmappedMethodType(write.charge);
   if (otherMethod) {
-    ctx.log.warn("stripe_non_card_payment", {
+    ctx.log.warn("stripe_unmapped_payment_method", {
       payment_intent: write.paymentIntentId,
       payment_id: row.id,
       payment_method_type: otherMethod,
     });
-    notes.push(`Stripe payment method: ${otherMethod.replaceAll("_", " ")} (not a card)`);
+    notes.push(`Stripe payment method: ${otherMethod.replaceAll("_", " ")} (recorded as card)`);
   }
   if (notes.length > 0) await annotatePayment(ctx, row, notes.join(". "));
   return row;
+}
+
+/** Most merge hops followed (a merged customer's target merged again, ...). */
+const MAX_MERGE_HOPS = 5;
+
+/**
+ * P-20: money for a customer who was merged into another (a link opened
+ * before the merge) belongs to the surviving customer, the same person: the
+ * metadata's customer follows customers.merged_into_id. Unchanged when the
+ * customer was never merged (one lookup) or no longer exists.
+ */
+async function followMergedCustomer(
+  ctx: WebhookContext,
+  shopId: string,
+  md: CrmMetadata,
+): Promise<CrmMetadata> {
+  let current = md.customerId;
+  const seen = new Set<string>();
+  for (let hop = 0; current !== null && hop < MAX_MERGE_HOPS; hop++) {
+    seen.add(current);
+    const { data, error } = await ctx.admin
+      .from("customers")
+      .select("id, merged_into_id")
+      .eq("id", current)
+      .eq("shop_id", shopId)
+      .maybeSingle<{ id: string; merged_into_id: string | null }>();
+    if (error) throw new DbError("customers lookup", error);
+    const next = data?.merged_into_id ?? null;
+    if (next === null || seen.has(next)) break;
+    current = next;
+  }
+  if (current === md.customerId) return md;
+  ctx.log.info("stripe_payment_merged_customer", {
+    from_customer: md.customerId,
+    to_customer: current,
+  });
+  return { ...md, customerId: current };
 }
 
 const LINK_TABLES = [
@@ -679,8 +778,8 @@ async function saveCard(
 }
 
 /**
- * A card paid with `setup_future_usage` (e.g. a deposit that saves the card)
- * is attached to the Stripe customer: remember it for the payment's customer,
+ * A card paid with `setup_future_usage` (on the intent, or on its card
+ * options as the Checkout links set it) is attached to the Stripe customer: remember it for the payment's customer,
  * but only when that customer IS the card's Stripe customer (saveCard). A
  * payment relinked away from its payer (leaveChangedParent / dropDeletedLinks
  * falling back to the job's current customer) records the money there, never
@@ -693,9 +792,23 @@ async function saveCardFromIntent(
   charge: Stripe.Charge | null,
   payment: PaymentRow,
 ): Promise<void> {
-  if (!pi.setup_future_usage || !stripeCustomerId(pi.customer)) return;
+  if (!intentSavesCard(pi) || !stripeCustomerId(pi.customer)) return;
   const pmId = paymentMethodId(pi.payment_method);
   const card = chargeCard(charge);
+  // A Link payment is its own payment method type: the card options' saving
+  // does not apply to it and the card on file is card-only. The public links
+  // no longer offer Link (NO_LINK_WALLET); a link opened before that, or a
+  // Link payment Stripe still let through, is flagged so a missing card on
+  // file can be traced.
+  if (!card && charge?.payment_method_details?.type === "link") {
+    ctx.log.warn("stripe_card_not_saved", {
+      reason: "link_payment",
+      payment_intent: pi.id,
+      payment_id: payment.id,
+      shop_id: shopId,
+    });
+    return;
+  }
   if (!pmId || !card || card.method !== "card" || !payment.customer_id) return;
   // A redelivery can arrive after the customer removed the card again.
   const pm = await retrievePaymentMethod(ctx, pmId);
@@ -745,6 +858,13 @@ async function onPaymentIntent(
   if (owner !== "ours") return ignore(ctx, owner, { payment_intent: piId, shop_id: shopId });
   const md = readMetadata(pi.metadata);
   noteProblems(ctx, md);
+  // An online gift card sale is a gift_card_orders purchase, never a payment row.
+  if (md.giftCardOrderId !== null) {
+    if (status !== "succeeded") {
+      return ignore(ctx, "gift_card_not_paid", { payment_intent: piId, status });
+    }
+    return await giftCardSold(ctx, shopId, md.giftCardOrderId, pi);
+  }
   if (!hasLinkage(md)) return ignore(ctx, "no_linkage", { payment_intent: piId });
   const total = intentTotal(pi, status);
   if (!Number.isSafeInteger(total) || total <= 0) return ignore(ctx, "zero_amount");
@@ -766,20 +886,32 @@ async function onPaymentIntent(
   // It never creates one: payment rows are money records (they keep the job
   // and customer from being deleted and the job's customer from changing),
   // and a declined public deposit or an abandoned intent moved no money.
-  if (recorded !== "succeeded" && !(await tracksIntent(ctx, shopId, piId))) {
+  // A processing payment (an ACH debit clearing for days, P-31) is money on
+  // its way: it is recorded, in flight, so nothing charges the balance twice.
+  const moving = recorded === "succeeded" || recorded === "processing";
+  const tracked = moving ? null : await trackedMethod(ctx, shopId, piId);
+  if (!moving && tracked === null) {
     return ignore(ctx, "no_money_received", { payment_intent: piId, status });
   }
 
-  const charge = status === "succeeded" ? await latestCharge(ctx, pi) : null;
+  // Money that moved records the charge (method, brand / last4). A failure
+  // only keeps the row's method right: an ACH debit that failed after
+  // processing stays ach_debit (its failed charge says so), a declined card
+  // keeps no card details (a declined sheet stays confirmable, see above).
+  const charge = moving ? await latestCharge(ctx, pi) : null;
+  const failedCharge = !moving && offersNonCardMethods(pi) ? await chargeIfAny(ctx, pi) : null;
   const payment = await recordPayment(ctx, {
     shopId,
     paymentIntentId: piId,
     status: recorded,
     totalCents: total,
     md,
-    method: intentMethod(pi),
+    method: moving
+      ? intentMethod(pi)
+      : (chargeMethod(failedCharge)?.method ?? tracked ?? intentMethod(pi)),
     charge,
     stripeCustomer: stripeCustomerId(pi.customer),
+    stripeMethodType: stripeMethodTypeOf(charge ?? failedCharge, pi),
   });
   if (!payment) return ignore(ctx, "linkage_deleted", { payment_intent: piId });
   if (status === "succeeded") {
@@ -807,7 +939,7 @@ interface SheetRow {
   job_id: string | null;
   customer_id: string;
   kind: "deposit" | "payment" | "membership";
-  method: "card" | "card_present";
+  method: PaymentMethodKind;
   amount_cents: number;
   tip_cents: number;
   stripe_payment_intent_id: string;
@@ -818,7 +950,8 @@ interface SheetRow {
  * or balance <= 0), the invoice's other PaymentSheets still waiting for a card
  * (another device, a sheet left open) are cancelled in Stripe (idempotency key
  * sheet_cancel:<pi>) and recorded cancelled, so they can no longer overpay
- * it. Only payment_sheet intents in requires_payment_method /
+ * it. Only PaymentSheet and Terminal / Tap to Pay intents (sources
+ * payment_sheet / terminal) in requires_payment_method /
  * requires_confirmation are touched; anything else (processing, 3DS in
  * progress, other flows) is left to the payments sweep. Deposits need no
  * pass of their own: a deposit payment attaches to the job's invoice
@@ -862,7 +995,10 @@ async function cancelSiblingSheets(
         {},
         account,
       );
-      if (intent.metadata?.source !== "payment_sheet" || !WAITING_SHEET.has(intent.status)) {
+      if (
+        !DEVICE_INTENT_SOURCES.has(intent.metadata?.source ?? "") ||
+        !WAITING_SHEET.has(intent.status)
+      ) {
         continue;
       }
       await ctx.stripe.paymentIntents.cancel(
@@ -899,31 +1035,49 @@ async function cancelSiblingSheets(
   }
 }
 
-/** Is there a payment row for this intent in the shop? */
-async function tracksIntent(ctx: WebhookContext, shopId: string, piId: string): Promise<boolean> {
+/** The method of this intent's payment row in the shop, or null when there is none. */
+async function trackedMethod(
+  ctx: WebhookContext,
+  shopId: string,
+  piId: string,
+): Promise<PaymentMethodKind | null> {
   const { data, error } = await ctx.admin
     .from("payments")
-    .select("id")
+    .select("id, method")
     .eq("stripe_payment_intent_id", piId)
     .eq("shop_id", shopId)
-    .maybeSingle<{ id: string }>();
+    .maybeSingle<{ id: string; method: string | null }>();
   if (error) throw new DbError("payments lookup", error);
-  return data !== null;
+  if (!data) return null;
+  const method = data.method;
+  return method === "card_present" || method === "ach_debit" || method === "bnpl" ? method : "card";
 }
 
 // ---------------------------------------------------------------------------
 // checkout.session.completed
 // ---------------------------------------------------------------------------
 
+/**
+ * checkout.session.completed, and the outcome of a Checkout paid with an
+ * asynchronous method (ACH debit, P-31): async_payment_succeeded (the money
+ * settled: payment_status 'paid') and async_payment_failed (the debit was
+ * returned before it settled: the processing payment becomes failed).
+ */
 async function onCheckoutSessionCompleted(
   ctx: WebhookContext,
   session: Stripe.Checkout.Session,
+  options: { asyncFailed?: boolean } = {},
 ): Promise<Outcome> {
   const shopId = await shopForAccount(ctx);
   if (!shopId) return ignore(ctx, "unknown_account");
   // Fail fast on a foreign session before calling Stripe.
   if (ownership(shopId, session.metadata) === "shop_mismatch") {
     return ignore(ctx, "shop_mismatch", { shop_id: shopId });
+  }
+  if (options.asyncFailed) {
+    return session.mode === "payment"
+      ? await checkoutPayment(ctx, shopId, session, { failed: true })
+      : ignore(ctx, "unsupported_mode");
   }
   switch (session.mode) {
     case "payment":
@@ -941,11 +1095,14 @@ async function checkoutPayment(
   ctx: WebhookContext,
   shopId: string,
   session: Stripe.Checkout.Session,
+  options: { failed?: boolean } = {},
 ): Promise<Outcome> {
-  let status: PaymentStatus;
-  if (session.payment_status === "paid") status = "succeeded";
-  else if (session.payment_status === "unpaid") status = "pending"; // async method still clearing
-  else return ignore(ctx, "no_payment_required");
+  if (!options.failed && session.payment_status === "no_payment_required") {
+    return ignore(ctx, "no_payment_required");
+  }
+  if (!options.failed && session.payment_status !== "paid" && session.payment_status !== "unpaid") {
+    return ignore(ctx, "no_payment_required");
+  }
   const piId = paymentIntentId(session.payment_intent);
   if (!piId) return ignore(ctx, "no_payment_intent");
 
@@ -956,23 +1113,51 @@ async function checkoutPayment(
   if (owner !== "ours") return ignore(ctx, owner, { payment_intent: piId, shop_id: shopId });
   const md = readMetadata(mergeMetadata(session.metadata, pi.metadata));
   noteProblems(ctx, md);
+  if (md.giftCardOrderId !== null) {
+    if (options.failed || session.payment_status !== "paid" || pi.status !== "succeeded") {
+      return ignore(ctx, "gift_card_not_paid", { payment_intent: piId });
+    }
+    return await giftCardSold(ctx, shopId, md.giftCardOrderId, pi);
+  }
   if (!hasLinkage(md)) return ignore(ctx, "no_linkage", { payment_intent: piId });
+
+  // paid -> succeeded. unpaid: an asynchronous method (ACH debit) is
+  // clearing -> processing (money in flight for days), or still waiting for
+  // the customer to verify the bank account -> pending. A failed async
+  // payment (async_payment_failed) only updates a row we already track.
+  let status: PaymentStatus;
+  if (options.failed) status = pi.status === "succeeded" ? "succeeded" : "failed";
+  else if (session.payment_status === "paid") status = "succeeded";
+  else if (pi.status === "succeeded") status = "succeeded";
+  else if (pi.status === "processing") status = "processing";
+  else if (pi.status === "canceled") status = "cancelled";
+  else status = "pending";
+  const tracked = status === "failed" || status === "cancelled"
+    ? await trackedMethod(ctx, shopId, piId)
+    : null;
+  if ((status === "failed" || status === "cancelled") && tracked === null) {
+    return ignore(ctx, "no_money_received", { payment_intent: piId, status });
+  }
   const total = intentTotal(pi, status);
   if (!Number.isSafeInteger(total) || total <= 0) return ignore(ctx, "zero_amount");
 
   // An unpaid (clearing) session already has its charge for bank debits:
-  // read it too, so a non-card method is flagged while it is still pending.
-  const charge = await latestCharge(ctx, pi);
+  // read it too, so the method (ach_debit) is right while it is processing.
+  const charge = await chargeIfAny(ctx, pi);
+  const received = status === "succeeded" || status === "processing" || status === "pending";
   const payment = await recordPayment(ctx, {
     shopId,
     paymentIntentId: piId,
     status,
     totalCents: total,
     md,
-    method: intentMethod(pi),
-    charge,
+    method: received
+      ? intentMethod(pi)
+      : (chargeMethod(charge)?.method ?? tracked ?? intentMethod(pi)),
+    charge: received ? charge : null,
     checkoutSessionId: checkoutSessionId(session.id),
     stripeCustomer: stripeCustomerId(pi.customer) ?? stripeCustomerId(session.customer),
+    stripeMethodType: stripeMethodTypeOf(charge, pi),
   });
   if (!payment) return ignore(ctx, "linkage_deleted", { payment_intent: piId });
   if (status === "succeeded") {
@@ -1018,6 +1203,131 @@ async function checkoutSubscription(
   const md = readMetadata(mergeMetadata(session.metadata, sub.metadata));
   noteProblems(ctx, md);
   return await syncSubscription(ctx, shopId, sub, md.membershipId);
+}
+
+// ---------------------------------------------------------------------------
+// Gift card sales (P-13): gift_card_orders, never payments rows
+// ---------------------------------------------------------------------------
+
+interface GiftOrderRow {
+  id: string;
+  shop_id: string;
+  status: string;
+  gift_card_id: string | null;
+}
+
+/** The gift card order of this shop, or null (another shop's id or deleted). */
+async function giftOrder(
+  ctx: WebhookContext,
+  shopId: string,
+  orderId: string,
+): Promise<GiftOrderRow | null> {
+  const { data, error } = await ctx.admin
+    .from("gift_card_orders")
+    .select("id, shop_id, status, gift_card_id")
+    .eq("id", orderId)
+    .eq("shop_id", shopId)
+    .maybeSingle<GiftOrderRow>();
+  if (error) throw new DbError("gift_card_orders lookup", error);
+  return data;
+}
+
+/**
+ * An online gift card purchase was paid (checkout.session.completed /
+ * payment_intent.succeeded with metadata kind 'gift_card'):
+ * gift_card_order_paid (0066) issues the card once (idempotent: a replay
+ * returns the card it already issued) and queues its delivery. The sale is
+ * the shop's revenue from a gift card order, never a payments row: the money
+ * is tender only when the card is redeemed on an invoice. A refund that
+ * arrived first is applied right after.
+ */
+async function giftCardSold(
+  ctx: WebhookContext,
+  shopId: string,
+  orderId: string,
+  pi: Stripe.PaymentIntent,
+): Promise<Outcome> {
+  const piId = paymentIntentId(pi.id);
+  if (!piId) return ignore(ctx, "invalid_object");
+  const order = await giftOrder(ctx, shopId, orderId);
+  if (!order) return ignore(ctx, "gift_card_order_not_found", { payment_intent: piId });
+  const received = pi.amount_received;
+  if (!Number.isSafeInteger(received) || received <= 0) return ignore(ctx, "zero_amount");
+  let result: { gift_card_id?: string; first_time?: boolean } | null;
+  try {
+    result = await rpc(ctx, "gift_card_order_paid", {
+      p_order_id: order.id,
+      p_payment_intent_id: piId,
+      p_amount_received_cents: received,
+    });
+  } catch (err) {
+    // 22023: the amount does not match the order's price, or the intent
+    // already issued another shop's card; P0002: the order is gone. No retry
+    // can change either: staff sort it out in Stripe (the money is there).
+    if (err instanceof DbError && (err.code === "22023" || err.code === "P0002")) {
+      ctx.log.error("gift_card_order_unpaid", {
+        payment_intent: piId,
+        order_id: order.id,
+        code: err.code,
+        amount_received_cents: received,
+      });
+      return ignore(ctx, "gift_card_order_rejected", { payment_intent: piId });
+    }
+    throw err;
+  }
+  const charge = await chargeIfAny(ctx, pi);
+  if ((charge?.amount_refunded ?? 0) > 0) await giftCardRefunded(ctx, piId, charge);
+  return applied(
+    ctx,
+    result?.first_time === false ? "gift_card_already_issued" : "gift_card_issued",
+    {
+      payment_intent: piId,
+      order_id: order.id,
+      gift_card_id: result?.gift_card_id ?? null,
+    },
+  );
+}
+
+/**
+ * A gift card purchase was refunded (in the Stripe dashboard):
+ * gift_card_order_refunded (0066) takes the refunded share of the value off
+ * the card (and voids an unused card refunded in full). It only ever raises
+ * the refunded total; a refund that later failed is not given back to the
+ * card (logged for staff).
+ */
+async function giftCardRefunded(
+  ctx: WebhookContext,
+  piId: string,
+  charge: Stripe.Charge | null,
+): Promise<Outcome> {
+  const refunded = charge?.amount_refunded ?? 0;
+  if (!Number.isSafeInteger(refunded) || refunded <= 0) return ignore(ctx, "nothing_refunded");
+  try {
+    const result = await rpc<{ removed_cents?: number; unrecovered_cents?: number } | null>(
+      ctx,
+      "gift_card_order_refunded",
+      { p_payment_intent_id: piId, p_refunded_total_cents: refunded },
+    );
+    if ((result?.unrecovered_cents ?? 0) > 0) {
+      // Part of the refunded value was already spent on invoices.
+      ctx.log.warn("gift_card_refund_unrecovered", {
+        payment_intent: piId,
+        unrecovered_cents: result?.unrecovered_cents,
+      });
+    }
+    return applied(ctx, "gift_card_refunded", {
+      payment_intent: piId,
+      refunded_cents_total: refunded,
+      removed_cents: result?.removed_cents ?? 0,
+    });
+  } catch (err) {
+    // P0002: no card was issued for this intent (not paid yet, or not a sale
+    // of this platform); 22023: a total outside the order's price.
+    if (err instanceof DbError && (err.code === "P0002" || err.code === "22023")) {
+      return ignore(ctx, "gift_card_refund_unmatched", { payment_intent: piId, code: err.code });
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,8 +1419,9 @@ async function onPaymentMethodDetached(
 
 /**
  * A Stripe customer was deleted: its cards can no longer be charged. Every
- * card saved for the shop's customer mapped to it is re-read and removed
- * unless Stripe shows it attached to another (live) customer.
+ * card saved for the shop's customer mapped to it (or saved on it and moved
+ * by a customer merge) is re-read and removed unless Stripe shows it
+ * attached to another (live) customer.
  */
 async function onCustomerDeleted(ctx: WebhookContext, cus: Stripe.Customer): Promise<Outcome> {
   const shopId = await shopForAccount(ctx);
@@ -1118,16 +1429,31 @@ async function onCustomerDeleted(ctx: WebhookContext, cus: Stripe.Customer): Pro
   const cusId = stripeCustomerId(cus.id);
   if (!cusId) return ignore(ctx, "invalid_object");
   const customerId = await customerByStripeId(ctx, shopId, cusId);
-  if (!customerId) return ignore(ctx, "unknown_customer");
-  const { data, error } = await ctx.admin
+  // Cards saved on this Stripe customer: those of the CRM customer it maps
+  // to, and cards a customer merge (P-20) moved to another customer, which
+  // keep their Stripe customer (customer_payment_methods.stripe_customer_id).
+  const cards = new Set<string>();
+  if (customerId) {
+    const { data, error } = await ctx.admin
+      .from("customer_payment_methods")
+      .select("stripe_payment_method_id")
+      .eq("shop_id", shopId)
+      .eq("customer_id", customerId)
+      .returns<{ stripe_payment_method_id: string }[]>();
+    if (error) throw new DbError("customer_payment_methods lookup", error);
+    for (const row of data ?? []) cards.add(row.stripe_payment_method_id);
+  }
+  const moved = await ctx.admin
     .from("customer_payment_methods")
     .select("stripe_payment_method_id")
     .eq("shop_id", shopId)
-    .eq("customer_id", customerId)
+    .eq("stripe_customer_id", cusId)
     .returns<{ stripe_payment_method_id: string }[]>();
-  if (error) throw new DbError("customer_payment_methods lookup", error);
+  if (moved.error) throw new DbError("customer_payment_methods lookup", moved.error);
+  for (const row of moved.data ?? []) cards.add(row.stripe_payment_method_id);
+  if (!customerId && cards.size === 0) return ignore(ctx, "unknown_customer");
   let removed = 0;
-  for (const { stripe_payment_method_id: pmId } of data ?? []) {
+  for (const pmId of cards) {
     const pm = await retrievePaymentMethod(ctx, pmId);
     const owner = stripeCustomerId(pm?.customer);
     if (owner && owner !== cusId) continue;
@@ -1220,6 +1546,20 @@ async function reconcileChargeRefunds(
     if (owner === "ours") {
       md = readMetadata(pi.metadata);
       noteProblems(ctx, md);
+      // A gift card sale has no payment row: the card's value follows the refund.
+      if (!existing && md.giftCardOrderId !== null) {
+        const order = await giftOrder(ctx, shopId, md.giftCardOrderId);
+        if (!order) return ignore(ctx, "gift_card_order_not_found", { payment_intent: piId });
+        if (!order.gift_card_id && pi.status === "succeeded") {
+          // refunded before the sale was recorded: issue the card first
+          await giftCardSold(ctx, shopId, order.id, { ...pi, latest_charge: charge });
+          return applied(ctx, "gift_card_refunded", {
+            payment_intent: piId,
+            refunded_cents_total: charge.amount_refunded,
+          });
+        }
+        return await giftCardRefunded(ctx, piId, charge);
+      }
       if (!existing && !hasLinkage(md)) return ignore(ctx, "no_linkage", { payment_intent: piId });
     } else if (existing) {
       // e.g. a membership payment without intent metadata: keep its own split
@@ -1230,6 +1570,7 @@ async function reconcileChargeRefunds(
         customerId: existing.customer_id,
         membershipId: existing.membership_id,
         kind: existing.kind,
+        giftCardOrderId: null,
         tipCents: existing.tip_cents,
         problems: [],
       };
@@ -1698,6 +2039,7 @@ async function onInvoicePaid(ctx: WebhookContext, invoice: Stripe.Invoice): Prom
         customerId: null,
         membershipId: membership.id,
         kind: "membership",
+        giftCardOrderId: null,
         tipCents: 0,
         problems: [],
       },

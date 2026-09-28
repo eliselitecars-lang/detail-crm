@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   blockEventId,
+  closureShadeEventId,
   columnEventInputs,
   describeRow,
   eventTitle,
+  hasCustomContent,
   isCalendarView,
   isGridView,
   jobEventId,
@@ -36,6 +38,11 @@ function row(overrides: Partial<CalendarRow> = {}): CalendarRow {
     assigned_member_ids: ['m-1'],
     member_id: null,
     title: 'Jane Doe',
+    event_kind: 'job',
+    series_id: null,
+    color: null,
+    service_lat: null,
+    service_lng: null,
     ...overrides,
   };
 }
@@ -52,8 +59,8 @@ describe('calendar model', () => {
   });
 
   it('keeps shop-wide blocks for every member and member blocks for that member', () => {
-    const shopBlock = row({ event_type: 'blocked_time', member_id: null });
-    const memberBlock = row({ event_type: 'blocked_time', member_id: 'm-1' });
+    const shopBlock = row({ event_type: 'blocked_time', customer_name: null, member_id: null });
+    const memberBlock = row({ event_type: 'blocked_time', customer_name: null, member_id: 'm-1' });
     expect(matchesFilters(shopBlock, { memberId: 'm-9', resourceId: 'bay-9' })).toBe(true);
     expect(matchesFilters(memberBlock, { memberId: 'm-1', resourceId: null })).toBe(true);
     expect(matchesFilters(memberBlock, { memberId: 'm-2', resourceId: null })).toBe(false);
@@ -64,13 +71,20 @@ describe('calendar model', () => {
       [
         row(),
         row({ id: 'job-2', is_busy_block: true, job_number: null, status: null, title: null }),
-        row({ id: 'blk-1', event_type: 'blocked_time', title: 'Holiday', member_id: null }),
+        row({
+          id: 'blk-1',
+          event_type: 'blocked_time',
+          customer_name: null,
+          title: 'Holiday',
+          member_id: null,
+        }),
       ],
       NO_FILTERS,
       true,
     );
-    expect(events).toHaveLength(3);
-    const [job, busy, block] = events;
+    // a closure is a clickable block plus the shading behind the jobs
+    expect(events).toHaveLength(4);
+    const [job, busy, shade, block] = events;
     expect(job).toMatchObject({
       id: 'job:job-1',
       title: '#1001 · Jane Doe',
@@ -84,7 +98,19 @@ describe('calendar model', () => {
       editable: false,
       interactive: false,
     });
-    expect(block).toMatchObject({ id: 'block:blk-1', display: 'background', title: 'Holiday' });
+    expect(shade).toMatchObject({
+      id: closureShadeEventId('blk-1', '2026-09-28T14:00:00Z'),
+      display: 'background',
+      extendedProps: { kind: 'closed', background: true },
+    });
+    expect(block).toMatchObject({
+      id: blockEventId('blk-1', '2026-09-28T14:00:00Z'),
+      title: 'Holiday',
+      extendedProps: { kind: 'closed', blockId: 'blk-1' },
+    });
+    expect(block).not.toHaveProperty('display');
+    expect(hasCustomContent(block?.extendedProps ?? {})).toBe(true);
+    expect(hasCustomContent(shade?.extendedProps ?? {})).toBe(false);
   });
 
   it('only lets managers move open jobs', () => {
@@ -99,12 +125,14 @@ describe('calendar model', () => {
 
   it('round-trips event ids', () => {
     expect(jobIdFromEventId(jobEventId('abc'))).toBe('abc');
-    expect(jobIdFromEventId(blockEventId('abc'))).toBeNull();
+    expect(jobIdFromEventId(blockEventId('abc', '2026-09-28T14:00:00Z'))).toBeNull();
   });
 
   it('titles and describes rows without leaking busy-block details', () => {
     expect(eventTitle(row({ title: null }))).toBe('#1001');
-    expect(eventTitle(row({ event_type: 'blocked_time', title: null }))).toBe('Blocked');
+    expect(eventTitle(row({ event_type: 'blocked_time', customer_name: null, title: null }))).toBe(
+      'Blocked',
+    );
     expect(describeRow(row({ is_busy_block: true }))).toMatch(/Busy/);
     expect(
       describeRow(row({ location_type: 'mobile', service_address: '1 Main St, Birmingham' })),
@@ -156,7 +184,7 @@ describe('resource view', () => {
       row(),
       row({ id: 'job-2', resource_id: 'bay-old' }),
       row({ id: 'job-3', resource_id: 'gone' }),
-      row({ id: 'blk', event_type: 'blocked_time', resource_id: 'ignored' }),
+      row({ id: 'blk', event_type: 'blocked_time', customer_name: null, resource_id: 'ignored' }),
     ];
     expect(resourceColumns(RESOURCES, rows, null)).toEqual([
       { id: 'bay-1', name: 'Bay 1', inactive: false },
@@ -173,23 +201,40 @@ describe('resource view', () => {
     ]);
   });
 
-  it('puts each job in its resource column and blocked time in every column', () => {
+  it('puts each job in its resource column; calendar events once, closures shade every column', () => {
     const rows = [
       row(),
       row({ id: 'job-2', resource_id: null }),
-      row({ id: 'blk', event_type: 'blocked_time', title: 'Holiday' }),
+      row({ id: 'blk', event_type: 'blocked_time', customer_name: null, title: 'Holiday' }),
+      row({
+        id: 'off',
+        event_type: 'blocked_time',
+        event_kind: 'time_off',
+        customer_name: null,
+        member_id: 'm-1',
+        title: 'Dentist',
+      }),
     ];
     const ids = (column: string | null) =>
       columnEventInputs(rows, NO_FILTERS, column, true).map((e) => e.id);
-    expect(ids('bay-1')).toEqual(['job:job-1', 'block:blk']);
-    expect(ids(null)).toEqual(['job:job-2', 'block:blk']);
-    expect(ids('van-1')).toEqual(['block:blk']);
+    const at = '2026-09-28T14:00:00Z';
+    const shade = closureShadeEventId('blk', at);
+    const blk = blockEventId('blk', at);
+    const off = blockEventId('off', at);
+    // bay / van columns: their jobs and the closure's shading only
+    expect(ids('bay-1')).toEqual(['job:job-1', shade]);
+    expect(ids('van-1')).toEqual([shade]);
+    // the event blocks (time off, the closure itself) appear once
+    expect(ids(null)).toEqual(['job:job-2', shade, blk, off]);
     // the team filter still applies inside a column
     expect(
       columnEventInputs(rows, { memberId: 'm-2', resourceId: null }, 'bay-1', true).map(
         (e) => e.id,
       ),
-    ).toEqual(['block:blk']);
+    ).toEqual([shade]);
+    expect(
+      columnEventInputs(rows, { memberId: 'm-2', resourceId: null }, null, true).map((e) => e.id),
+    ).toEqual([shade, blk]);
   });
 
   it('shows the business day ± 1 h, widened so no job is cut off (shop clock)', () => {

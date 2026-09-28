@@ -44,6 +44,7 @@ describe('billingLabel', () => {
     expect(billingLabel('$49.00', 'month', 1)).toBe('$49.00 / month');
     expect(billingLabel('$120.00', 'month', 3)).toBe('$120.00 every 3 months');
     expect(billingLabel('$499.00', 'year', 1)).toBe('$499.00 / year');
+    expect(billingLabel('$25.00', 'week', 2)).toBe('$25.00 every 2 weeks');
   });
 });
 
@@ -154,6 +155,9 @@ describe('MembershipsPage', () => {
     await user.clear(discount);
     await user.type(discount, '10');
     await user.click(await within(dialog).findByRole('checkbox', { name: 'Maintenance wash' }));
+    await user.type(within(dialog).getByLabelText(/Included visits per billing period/), '2');
+    await user.click(within(dialog).getByRole('switch', { name: 'Sell online' }));
+    await user.type(within(dialog).getByLabelText(/^Terms/), 'Cancel any time.');
     await user.click(within(dialog).getByRole('button', { name: 'Create plan' }));
     await waitFor(() =>
       expect(builders.membership_plans?.some((b) => b.insert.mock.calls.length > 0)).toBe(true),
@@ -168,8 +172,40 @@ describe('MembershipsPage', () => {
       included_service_ids: ['svc-1'],
       discount_bps: 1000,
       active: true,
+      online_joinable: true,
+      included_uses_per_period: 2,
+      terms: 'Cancel any time.',
       shop_id: 'shop-1',
     });
+  });
+
+  it('offers weekly billing every 1 to 4 weeks only', async () => {
+    setTableResult('membership_plans', { data: [] });
+    setTableResult('services', { data: [] });
+    const { user } = renderRoute(<MembershipsPage />, {
+      path: '/app/memberships?tab=plans',
+      routePath: '/app/memberships',
+    });
+    await user.click((await screen.findAllByRole('button', { name: 'New plan' }))[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'New membership plan' });
+    await user.selectOptions(within(dialog).getByLabelText(/^Billed/), 'week');
+    const frequency = within(dialog).getByLabelText(/Frequency/);
+    expect(
+      within(frequency)
+        .getAllByRole('option')
+        .map((o) => o.textContent),
+    ).toEqual(['Every week', 'Every 2 weeks', 'Every 3 weeks', 'Every 4 weeks']);
+  });
+
+  it('shows the online join page link when a plan is sold online', async () => {
+    setTableResult('membership_plans', { data: [planRow({ online_joinable: true })] });
+    renderRoute(<MembershipsPage />, {
+      path: '/app/memberships?tab=plans',
+      routePath: '/app/memberships',
+    });
+    expect(await screen.findByText('Online join page')).toBeInTheDocument();
+    expect(screen.getByText(/\/join\/glacier/)).toBeInTheDocument();
+    expect(screen.getAllByText('Online').length).toBeGreaterThan(0);
   });
 
   it('lists plans with billing and discount', async () => {

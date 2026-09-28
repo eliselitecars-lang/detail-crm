@@ -47,6 +47,7 @@ jobs:
       CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
       WEB_EMBED_PATHS: ${{ vars.WEB_EMBED_PATHS }}
       WEB_EMBED_ANCESTORS: ${{ vars.WEB_EMBED_ANCESTORS }}
+      WEB_TRACKING_PATHS: ${{ vars.WEB_TRACKING_PATHS }}
       # Operator details on /privacy and /terms (optional: the pages use
       # neutral wording without them). Public values: they ship in the build.
       VITE_LEGAL_ENTITY_NAME: ${{ vars.LEGAL_ENTITY_NAME }}

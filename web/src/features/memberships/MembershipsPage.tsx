@@ -5,6 +5,7 @@ import {
   Badge,
   Button,
   Card,
+  CopyField,
   DropdownMenu,
   EmptyState,
   ErrorState,
@@ -12,6 +13,8 @@ import {
   LoadingState,
   PageHeader,
   Pagination,
+  QrCode,
+  SectionCard,
   Select,
   StatusBadge,
   statusLabel,
@@ -31,7 +34,9 @@ import {
   billingLabel,
   MEMBERSHIP_STATUSES,
   SUBSCRIBER_PAGE_SIZE,
+  usageText,
   useArchivePlan,
+  useMembershipUsage,
   usePlans,
   useSubscribers,
   type MembershipStatus,
@@ -203,6 +208,12 @@ function SubscribersTab({
           )}
         </span>
       ),
+    },
+    {
+      key: 'usage',
+      header: 'This period',
+      hideOnMobile: true,
+      cell: (m) => <UsageCell membership={m} />,
     },
     {
       key: 'period',
@@ -379,16 +390,31 @@ function PlansTab({ onEdit, onNew }: { onEdit: (plan: PlanRow) => void; onNew: (
       cell: (p) => (p.discount_bps > 0 ? `${formatBps(p.discount_bps)} off` : '—'),
     },
     {
+      key: 'uses',
+      header: 'Visits / period',
+      hideOnMobile: true,
+      cell: (p) =>
+        p.included_service_ids.length === 0
+          ? '—'
+          : p.included_uses_per_period === null
+            ? 'Unlimited'
+            : String(p.included_uses_per_period),
+    },
+    {
       key: 'status',
       header: 'Status',
-      cell: (p) =>
-        p.archived_at ? (
-          <Badge tone="neutral">Archived</Badge>
-        ) : p.active ? (
-          <Badge tone="success">Active</Badge>
-        ) : (
-          <Badge tone="neutral">Hidden</Badge>
-        ),
+      cell: (p) => (
+        <span className="inline-flex flex-wrap items-center justify-end gap-1.5 md:justify-start">
+          {p.archived_at ? (
+            <Badge tone="neutral">Archived</Badge>
+          ) : p.active ? (
+            <Badge tone="success">Active</Badge>
+          ) : (
+            <Badge tone="neutral">Hidden</Badge>
+          )}
+          {p.online_joinable && p.active && !p.archived_at && <Badge tone="info">Online</Badge>}
+        </span>
+      ),
     },
     ...(canManage
       ? [
@@ -418,38 +444,82 @@ function PlansTab({ onEdit, onNew }: { onEdit: (plan: PlanRow) => void; onNew: (
       : []),
   ];
 
+  const sellsOnline = (plans.data ?? []).some(
+    (p) => p.online_joinable && p.active && p.archived_at === null,
+  );
+
   return (
-    <Card>
-      <div className="flex flex-wrap items-center justify-between gap-3 p-4">
-        <Switch
-          checked={showArchived}
-          onCheckedChange={setShowArchived}
-          label="Show archived plans"
+    <div className="flex flex-col gap-4">
+      {sellsOnline && <JoinPageCard />}
+      <Card>
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <Switch
+            checked={showArchived}
+            onCheckedChange={setShowArchived}
+            label="Show archived plans"
+          />
+        </div>
+        {plans.isPending ? (
+          <LoadingState variant="rows" rows={4} label="Loading plans…" />
+        ) : plans.isError ? (
+          <ErrorState
+            error={plans.error}
+            onRetry={() => void plans.refetch()}
+            retrying={plans.isRefetching}
+          />
+        ) : plans.data.length === 0 ? (
+          <EmptyState
+            icon={<BadgePercent aria-hidden="true" />}
+            title="No membership plans yet"
+            description="Create a plan with a recurring price, included services and a member discount."
+            action={canManage ? <Button onClick={onNew}>New plan</Button> : undefined}
+          />
+        ) : (
+          <Table
+            caption="Membership plans"
+            columns={columns}
+            rows={plans.data}
+            getRowId={(p) => p.id}
+          />
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/** Uses of the included services this billing period (plans with included services). */
+function UsageCell({ membership }: { membership: SubscriberRow }) {
+  const tracked =
+    membership.plan !== null &&
+    (membership.status === 'active' || membership.status === 'past_due');
+  const usage = useMembershipUsage(membership.id, tracked);
+  if (!tracked) return <span className="text-muted">—</span>;
+  if (usage.isPending) return <span className="text-muted">…</span>;
+  if (usage.isError) return <span className="text-muted">Unavailable</span>;
+  const full =
+    usage.data.uses_per_period !== null &&
+    usage.data.uses_this_period >= usage.data.uses_per_period;
+  return <span className={full ? 'text-warning-ink' : undefined}>{usageText(usage.data)}</span>;
+}
+
+/** The shop's public join page: link + QR for the counter or the website. */
+function JoinPageCard() {
+  const { shop } = useShop();
+  const url = `${window.location.origin}/join/${encodeURIComponent(shop.slug)}`;
+  return (
+    <SectionCard
+      title="Online join page"
+      description="Plans marked “Sell online” are listed here. Customers join and pay by card."
+    >
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+        <CopyField label="Join page link" value={url} className="min-w-0 flex-1" />
+        <QrCode
+          value={url}
+          label="QR code for your membership join page"
+          fileName={`${shop.slug}-memberships`}
+          size={120}
         />
       </div>
-      {plans.isPending ? (
-        <LoadingState variant="rows" rows={4} label="Loading plans…" />
-      ) : plans.isError ? (
-        <ErrorState
-          error={plans.error}
-          onRetry={() => void plans.refetch()}
-          retrying={plans.isRefetching}
-        />
-      ) : plans.data.length === 0 ? (
-        <EmptyState
-          icon={<BadgePercent aria-hidden="true" />}
-          title="No membership plans yet"
-          description="Create a plan with a recurring price, included services and a member discount."
-          action={canManage ? <Button onClick={onNew}>New plan</Button> : undefined}
-        />
-      ) : (
-        <Table
-          caption="Membership plans"
-          columns={columns}
-          rows={plans.data}
-          getRowId={(p) => p.id}
-        />
-      )}
-    </Card>
+    </SectionCard>
   );
 }

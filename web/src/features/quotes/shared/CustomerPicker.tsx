@@ -8,17 +8,26 @@ export interface CustomerComboboxProps {
   value: PickerCustomer | null;
   onChange: (customer: PickerCustomer | null) => void;
   disabled?: boolean;
+  /** Customers never offered (e.g. the customer being merged). */
+  excludeIds?: readonly string[];
 }
 
 /** Searchable customer picker (use inside <FormField label="Customer">). */
-export function CustomerCombobox({ value, onChange, disabled }: CustomerComboboxProps) {
+export function CustomerCombobox({
+  value,
+  onChange,
+  disabled,
+  excludeIds = [],
+}: CustomerComboboxProps) {
   const [query, setQuery] = useState('');
   const search = useCustomerSearch(query);
+  const found = search.data ?? [];
+  const options = excludeIds.length === 0 ? found : found.filter((c) => !excludeIds.includes(c.id));
   return (
     <Combobox<PickerCustomer>
       value={value}
       onChange={onChange}
-      options={search.data ?? []}
+      options={options}
       loading={search.isFetching}
       onQueryChange={setQuery}
       getOptionValue={(c) => c.id}

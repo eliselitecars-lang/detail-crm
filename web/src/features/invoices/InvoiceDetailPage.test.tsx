@@ -385,7 +385,7 @@ describe('InvoiceDetailPage', () => {
   });
 
   it('technicians (when allowed) can collect but not charge cards, refund, void or send', async () => {
-    setup({ role: 'technician' });
+    const { user } = setup({ role: 'technician' });
     await screen.findByRole('heading', { name: 'Invoice #2001', level: 1 });
     expect(screen.getByRole('button', { name: 'Record payment' })).toBeInTheDocument();
     // the pay link is the customer's credential: technicians never fetch it
@@ -393,7 +393,12 @@ describe('InvoiceDetailPage', () => {
     expect(supabase.rpc).not.toHaveBeenCalledWith('invoice_link_token', expect.anything());
     expect(screen.queryByRole('button', { name: 'Charge card' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Resend|Send invoice/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'More invoice actions' })).not.toBeInTheDocument();
+    // the only extra action is the PDF (collectors may open their job's invoice)
+    await user.click(screen.getByRole('button', { name: 'More invoice actions' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Download PDF',
+    ]);
+    await user.keyboard('{Escape}');
     await screen.findByRole('list', { name: 'Payments' });
     expect(screen.queryByRole('button', { name: /^Refund/ })).not.toBeInTheDocument();
   });

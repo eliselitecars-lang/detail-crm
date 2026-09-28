@@ -151,7 +151,7 @@ async function setup(page: Page, options: { enabled?: boolean; catalog?: typeof 
     rpc: {
       public_shop_profile: profile(options),
       public_booking_catalog: options.catalog ?? CATALOG,
-      get_available_slots: ({ body }) => {
+      public_booking_slots: ({ body }) => {
         slotRequests.push(body);
         return slotsFor((body as { p_from: string }).p_from);
       },
@@ -236,9 +236,10 @@ test.describe('online booking', () => {
     await slots.first().click();
     await expect(slots.first()).toHaveAttribute('aria-pressed', 'true');
     expect(slotRequests[0]).toMatchObject({
-      p_shop_slug: SLUG,
+      p_slug: SLUG,
       p_service_ids: [DETAIL, WAX],
       p_vehicle_category_id: SEDAN,
+      p_location_type: 'shop',
     });
     await page.getByRole('button', { name: 'Continue' }).click();
 

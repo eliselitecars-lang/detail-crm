@@ -170,6 +170,30 @@ final class VINTests: XCTestCase {
         XCTAssertEqual(VIN.modelYear("1M8GDM9AXKP042788"), 1989)
         XCTAssertEqual(VIN.modelYear("5YJ3E1EA7LF000316"), 2020)
     }
+
+    func testScanCandidatesFromBarcodePayloads() {
+        XCTAssertEqual(VIN.candidates(in: "1HGCM82633A004352"), ["1HGCM82633A004352"])
+        // Code 39 door-jamb labels prefix an "I".
+        XCTAssertEqual(VIN.candidates(in: "I1HGCM82633A004352").first, "1HGCM82633A004352")
+        XCTAssertEqual(VIN.candidates(in: "1hgcm82633a004352\n").first, "1HGCM82633A004352")
+    }
+
+    func testScanCandidatesFromText() {
+        XCTAssertEqual(VIN.candidates(in: "VIN: 1HGCM82633A004352 MFD 03/03").first, "1HGCM82633A004352")
+        XCTAssertEqual(VIN.candidates(in: "VIN 1HG CM826 33A 004352").first, "1HGCM82633A004352")
+        XCTAssertEqual(VIN.candidates(in: "1HGCM-82633-A004352").first, "1HGCM82633A004352")
+        // OCR read the zero as the letter O: corrected.
+        XCTAssertEqual(VIN.candidates(in: "1HGCM82633AOO4352").first, "1HGCM82633A004352")
+    }
+
+    func testScanCandidatesPutVerifiedFirst() {
+        // Wrong check digit is still offered (for confirmation) but after a
+        // verified one, and duplicates are dropped.
+        let found = VIN.candidates(in: "1HGCM82643A004352 1HGCM82633A004352 1HGCM82633A004352")
+        XCTAssertEqual(found, ["1HGCM82633A004352", "1HGCM82643A004352"])
+        XCTAssertTrue(VIN.candidates(in: "no vin here").isEmpty)
+        XCTAssertTrue(VIN.candidates(in: "1HGCM82633A00435").isEmpty)
+    }
 }
 
 final class ValidationTests: XCTestCase {

@@ -255,6 +255,7 @@ test.describe('catalog', () => {
       name: 'Interior QC',
       service_id: SVC,
       items: [{ label: 'Vacuum carpets' }, { label: 'Wipe dash' }],
+      required: false,
       shop_id: SHOP.id,
     });
   });

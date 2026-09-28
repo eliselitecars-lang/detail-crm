@@ -21,6 +21,10 @@ function service(id: string, name: string, extra: Record<string, unknown> = {}) 
     sort: 10,
     image_path: null,
     archived_at: null,
+    commission_kind: 'none',
+    commission_value: 0,
+    min_before_photos: 0,
+    min_after_photos: 0,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
     ...extra,
@@ -28,8 +32,24 @@ function service(id: string, name: string, extra: Record<string, unknown> = {}) 
 }
 
 const categories = [
-  { id: 'cat-1', shop_id: 'shop-1', name: 'Exterior', sort: 10, created_at: '', updated_at: '' },
-  { id: 'cat-2', shop_id: 'shop-1', name: 'Interior', sort: 20, created_at: '', updated_at: '' },
+  {
+    id: 'cat-1',
+    shop_id: 'shop-1',
+    name: 'Exterior',
+    sort: 10,
+    bookable_weekdays: null,
+    created_at: '',
+    updated_at: '',
+  },
+  {
+    id: 'cat-2',
+    shop_id: 'shop-1',
+    name: 'Interior',
+    sort: 20,
+    bookable_weekdays: [1, 3],
+    created_at: '',
+    updated_at: '',
+  },
 ];
 
 function renderAs(role: 'owner' | 'manager' | 'technician', path = '/app/catalog') {
@@ -110,6 +130,75 @@ describe('CatalogPage', () => {
       online_bookable: false,
       active: true,
       sort: 0,
+      min_before_photos: 0,
+      min_after_photos: 0,
+      commission_kind: 'none',
+      commission_value: 0,
+    });
+  });
+
+  it('sets photo minimums and a service commission (owners only)', async () => {
+    const { user } = renderAs('owner');
+    await screen.findByRole('table', { name: 'Catalog items' });
+    await user.click(screen.getByRole('button', { name: 'New item' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New catalog item' });
+    await user.type(within(dialog).getByRole('textbox', { name: /Name/ }), 'Ceramic Coating');
+    const after = within(dialog).getByRole('textbox', { name: /Minimum “after” photos/ });
+    await user.clear(after);
+    await user.type(after, '4');
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: 'Commission' }),
+      'percent',
+    );
+    await user.click(within(dialog).getByRole('button', { name: 'Create' }));
+    expect(
+      await within(dialog).findByText('Enter a percentage between 0 and 100.'),
+    ).toBeInTheDocument();
+    await user.type(within(dialog).getByRole('textbox', { name: /Percent of the line/ }), '12.5');
+    await user.click(within(dialog).getByRole('button', { name: 'Create' }));
+    await waitFor(() => {
+      const insert = builders.services?.find((b) => b.insert.mock.calls.length > 0);
+      expect(insert?.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          min_after_photos: 4,
+          min_before_photos: 0,
+          commission_kind: 'percent',
+          commission_value: 1250,
+        }),
+      );
+    });
+  });
+
+  it('never sends commission columns for managers', async () => {
+    const { user } = renderAs('manager');
+    await screen.findByRole('table', { name: 'Catalog items' });
+    await user.click(screen.getByRole('button', { name: 'New item' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New catalog item' });
+    expect(within(dialog).queryByRole('combobox', { name: 'Commission' })).not.toBeInTheDocument();
+    await user.type(within(dialog).getByRole('textbox', { name: /Name/ }), 'Interior Refresh');
+    await user.click(within(dialog).getByRole('button', { name: 'Create' }));
+    await waitFor(() => {
+      const insert = builders.services?.find((b) => b.insert.mock.calls.length > 0);
+      expect(insert?.insert).toHaveBeenCalledTimes(1);
+    });
+    const insert = builders.services?.find((b) => b.insert.mock.calls.length > 0);
+    const values = insert?.insert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(values).not.toHaveProperty('commission_kind');
+    expect(values).not.toHaveProperty('commission_value');
+  });
+
+  it('limits a category to online booking weekdays', async () => {
+    const { user } = renderAs('manager', '/app/catalog?tab=categories');
+    const list = await screen.findByRole('list', { name: 'Service categories' });
+    expect(within(list).getByText(/Online booking: Mon, Wed/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Online booking days for Exterior' }));
+    const dialog = await screen.findByRole('dialog', { name: /Online booking days · Exterior/ });
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Sunday' }));
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Saturday' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Save days' }));
+    await waitFor(() => {
+      const updates = (builders.service_categories ?? []).flatMap((b) => b.update.mock.calls);
+      expect(updates).toContainEqual([{ bookable_weekdays: [1, 2, 3, 4, 5] }]);
     });
   });
 
@@ -157,6 +246,7 @@ describe('CatalogPage', () => {
         name: 'Exterior QC',
         service_id: 'svc-1',
         items: [{ label: 'Glass streak-free' }, { label: 'Wheels clean' }],
+        required: false,
       });
     });
   });
@@ -206,7 +296,7 @@ describe('CatalogPage', () => {
     renderAs('manager', '/app/catalog?tab=categories');
     const list = await screen.findByRole('list', { name: 'Service categories' });
     expect(await screen.findByText('Couldn’t count items per category')).toBeInTheDocument();
-    expect(within(list).getAllByText('Item count unavailable')).toHaveLength(2);
+    expect(within(list).getAllByText(/Item count unavailable/)).toHaveLength(2);
     expect(within(list).queryByText('0 items')).not.toBeInTheDocument();
   });
 });

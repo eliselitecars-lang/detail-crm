@@ -61,6 +61,8 @@ struct Shop: Codable, Identifiable, Hashable, Sendable {
     var invoiceDueDays: Int
     var createdAt: Date
     var updatedAt: Date
+    /// Technicians on a job may publish and send its customer report (P-8).
+    var techsCanShareReports: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -88,6 +90,7 @@ struct Shop: Codable, Identifiable, Hashable, Sendable {
         case invoiceDueDays = "invoice_due_days"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case techsCanShareReports = "techs_can_share_reports"
     }
 
     /// Explicit column list for `.select(...)` (keeps `sms_from_number` and
@@ -97,7 +100,7 @@ struct Shop: Codable, Identifiable, Hashable, Sendable {
         "address_line1", "address_line2", "city", "region", "postal_code", "country",
         "lat", "lng", "timezone", "currency", "logo_path", "brand_color", "business_type",
         "tax_rate_bps", "techs_can_collect_payments", "review_url", "invoice_due_days",
-        "created_at", "updated_at",
+        "created_at", "updated_at", "techs_can_share_reports",
     ].joined(separator: ",")
 
     /// Calendar math and formatting in the shop's time zone.
@@ -107,7 +110,10 @@ struct Shop: Codable, Identifiable, Hashable, Sendable {
 
     /// Role-dependent switches (SPEC §3).
     var policy: ShopPolicy {
-        ShopPolicy(techsCanCollectPayments: techsCanCollectPayments)
+        ShopPolicy(
+            techsCanCollectPayments: techsCanCollectPayments,
+            techsCanShareReports: techsCanShareReports ?? false
+        )
     }
 
     /// Single-line address for display and map links, if any part is set.

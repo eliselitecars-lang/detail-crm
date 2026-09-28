@@ -5,8 +5,9 @@
 //  One conversation: message bubbles (inbound left, outbound right, with
 //  delivery status and times in the shop time zone), an opt-out banner,
 //  and a composer for free-form texts/emails or shop templates. Inbound
-//  messages are marked read when shown. Refreshes every 15 seconds while
-//  open.
+//  messages are marked read when shown. Refreshes as soon as a message of
+//  the shop arrives or changes (Realtime, P-26), and every 15 seconds while
+//  the live channel is down.
 //
 
 import SwiftUI
@@ -15,6 +16,7 @@ import DetailCore
 struct InboxThreadView: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(JobsRealtimeHub.self) private var realtime
 
     @State private var key: MessageThreadKey
     @State private var customer: Customer?
@@ -77,8 +79,13 @@ struct InboxThreadView: View {
             while !Task.isCancelled {
                 await loadMessages(isBackground: isBackground)
                 isBackground = true
-                try? await Task.sleep(for: .seconds(15))
+                // Realtime brings new messages and delivery updates at once;
+                // the poll covers a dropped channel.
+                try? await Task.sleep(for: .seconds(realtime.isLive ? 90 : 15))
             }
+        }
+        .onChange(of: realtime.revision(.messages)) { _, _ in
+            Task { await loadMessages(isBackground: true) }
         }
         .sheet(isPresented: $showingTemplates) {
             if let customer {

@@ -5,10 +5,17 @@
  * errors back to the step that can fix them. No prices are summed here —
  * the server prices everything.
  */
+import { fromDraft, type CustomData, type CustomFieldDraft } from '@/lib/customFields';
 import { toAppError } from '@/lib/errors';
 import { addLocalDays, formatInTz, localDaysBetween, shopToday } from '@/lib/dates';
 import { normalizePhone } from '@/lib/phone';
-import type { BookingCatalog, CatalogAddon, CatalogService, ShopProfile } from './api';
+import type {
+  BookingCatalog,
+  BookingQuestion,
+  CatalogAddon,
+  CatalogService,
+  ShopProfile,
+} from './api';
 
 export type StepId = 'vehicle' | 'services' | 'time' | 'details' | 'review';
 
@@ -59,6 +66,10 @@ export interface WizardState {
   addonIds: string[];
   slot: SlotChoice | null;
   details: DetailsInput;
+  /** Answers to the shop's booking questions (draft values, by question key). */
+  answers: CustomFieldDraft;
+  /** A coupon / referral code from the link (?coupon=), applied on the details step. */
+  couponPrefill: string;
 }
 
 export function defaultLocation(businessType: ShopProfile['business_type']): LocationChoice {
@@ -71,6 +82,8 @@ export function initialWizardState(profile: ShopProfile): WizardState {
     serviceIds: [],
     addonIds: [],
     slot: null,
+    answers: {},
+    couponPrefill: '',
     details: {
       firstName: '',
       lastName: '',
@@ -151,6 +164,137 @@ export function pruneSelection(
   });
   const allowed = new Set(eligibleAddons(catalog, serviceIds, state.categoryId).map((a) => a.id));
   return { serviceIds, addonIds: state.addonIds.filter((id) => allowed.has(id)) };
+}
+
+// ---------------------------------------------------------------------------
+// Links into the wizard: /book/<slug>?services=<id,...>&category=<id>
+// &coupon=<code>&link=<token>&embed=1 (service follow-ups' rebook links,
+// referral links, private booking links, the website embed)
+// ---------------------------------------------------------------------------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface BookingPrefill {
+  serviceIds: string[];
+  categoryId: string | null;
+  coupon: string | null;
+  linkToken: string | null;
+  embed: boolean;
+}
+
+/** Query parameters the wizard reads once when it opens (the URL is then cleaned). */
+export const PREFILL_PARAMS = ['services', 'category', 'coupon'] as const;
+
+export function readPrefill(params: URLSearchParams): BookingPrefill {
+  const ids = (params.get('services') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => UUID_RE.test(s));
+  const category = params.get('category')?.trim() ?? '';
+  const coupon = params.get('coupon')?.trim() ?? '';
+  const link = params.get('link')?.trim() ?? '';
+  return {
+    serviceIds: [...new Set(ids.map((s) => s.toLowerCase()))].slice(0, 50),
+    categoryId: UUID_RE.test(category) ? category.toLowerCase() : null,
+    coupon: COUPON_RE.test(coupon) ? coupon : null,
+    linkToken: UUID_RE.test(link) ? link.toLowerCase() : null,
+    embed: params.get('embed') === '1',
+  };
+}
+
+/**
+ * The wizard's starting state for a prefill: the vehicle size when the shop
+ * has it, the services / add-ons the catalog offers for that size (unknown or
+ * unpriced ids are ignored), and the coupon to apply later.
+ */
+export function applyPrefill(
+  state: WizardState,
+  catalog: BookingCatalog,
+  prefill: BookingPrefill,
+): WizardState {
+  const categoryId =
+    prefill.categoryId && catalog.vehicle_categories.some((c) => c.id === prefill.categoryId)
+      ? prefill.categoryId
+      : null;
+  const serviceIds = prefill.serviceIds.filter((id) => catalog.services.some((s) => s.id === id));
+  const addonIds = prefill.serviceIds.filter((id) => catalog.addons.some((a) => a.id === id));
+  // Without a size, prices resolve only once one is chosen: keep the ids and
+  // prune when the size changes (VehicleStep), as for a manual pick.
+  const pruned =
+    catalog.vehicle_categories.length === 0 || categoryId !== null
+      ? pruneSelection(catalog, { serviceIds, addonIds, categoryId })
+      : { serviceIds, addonIds };
+  return {
+    ...state,
+    vehicle: { ...state.vehicle, categoryId },
+    ...pruned,
+    couponPrefill: prefill.coupon ?? '',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Booking questions (0088)
+// ---------------------------------------------------------------------------
+
+/** Questions for this booking: location_scope null (both) or the chosen location. */
+export function visibleQuestions(
+  questions: readonly BookingQuestion[],
+  location: LocationChoice,
+): BookingQuestion[] {
+  return questions.filter((q) => q.location_scope === null || q.location_scope === location);
+}
+
+/** Answers to send (only the visible questions, validated like the server). */
+export function answersFor(
+  questions: readonly BookingQuestion[],
+  draft: CustomFieldDraft,
+): { answers: CustomData; errors: Record<string, string> } {
+  const { data, errors } = fromDraft(questions, draft, { enforceRequired: true });
+  return { answers: data, errors };
+}
+
+// ---------------------------------------------------------------------------
+// Category weekdays (0053): services of a category may start online only on
+// its bookable_weekdays. The slot engine enforces it; the time step says so.
+// ---------------------------------------------------------------------------
+
+export interface WeekdayRestriction {
+  /** Categories that restrict the chosen services. */
+  categories: string[];
+  /** Weekdays (0 = Sunday) every chosen service allows. */
+  weekdays: number[];
+}
+
+export function weekdayRestriction(
+  catalog: BookingCatalog,
+  itemIds: readonly string[],
+): WeekdayRestriction | null {
+  const items = [...catalog.services, ...catalog.addons].filter((i) => itemIds.includes(i.id));
+  const cats = new Set(items.map((i) => i.category_id).filter((id): id is string => id !== null));
+  const restricted = catalog.service_categories.filter(
+    (c) => cats.has(c.id) && c.bookable_weekdays !== null,
+  );
+  if (restricted.length === 0) return null;
+  let allowed = [0, 1, 2, 3, 4, 5, 6];
+  for (const c of restricted) allowed = allowed.filter((d) => c.bookable_weekdays?.includes(d));
+  return { categories: restricted.map((c) => c.name), weekdays: allowed };
+}
+
+const WEEKDAY_NAMES = [
+  'Sundays',
+  'Mondays',
+  'Tuesdays',
+  'Wednesdays',
+  'Thursdays',
+  'Fridays',
+  'Saturdays',
+];
+
+/** "Mondays and Wednesdays" / "Tuesdays, Thursdays and Saturdays". */
+export function describeBookableDays(weekdays: readonly number[]): string {
+  const names = [...weekdays].sort((a, b) => a - b).map((d) => WEEKDAY_NAMES[d] ?? '');
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} and ${names.at(-1) ?? ''}`;
 }
 
 export interface ServiceGroup {
@@ -367,13 +511,24 @@ export type BookingPayload = {
   };
   notes: string | null;
   coupon_code: string | null;
+  /** A private booking link (0053/0054): its services instead of online_bookable. */
+  link_token?: string;
+  /** Answers to the booking questions, by key (0054 → jobs.custom_data). */
+  answers?: CustomData;
 };
 
 const orNull = (value: string) => (value.trim() === '' ? null : value.trim());
 
+export interface PayloadExtras {
+  linkToken?: string | null;
+  /** The questions shown for this booking (validated answers are sent). */
+  questions?: readonly BookingQuestion[];
+}
+
 export function buildPayload(
   state: WizardState,
   businessType: ShopProfile['business_type'],
+  extras: PayloadExtras = {},
 ): BookingPayload {
   if (!state.slot) throw new Error('A time must be chosen before booking.');
   const { details, vehicle } = state;
@@ -411,6 +566,16 @@ export function buildPayload(
         : { type: 'shop' },
     notes: orNull(details.notes),
     coupon_code: orNull(details.couponCode),
+    ...(extras.linkToken ? { link_token: extras.linkToken } : {}),
+    ...(extras.questions && extras.questions.length > 0
+      ? (() => {
+          const { answers } = answersFor(
+            visibleQuestions(extras.questions, location),
+            state.answers,
+          );
+          return Object.keys(answers).length > 0 ? { answers } : {};
+        })()
+      : {}),
   };
 }
 
@@ -431,7 +596,11 @@ export interface ClassifiedBookingError {
  * create_online_booking error codes (0042 header): 23P01, 55000, PT429,
  * PT404 (unknown shop or saved vehicle; older servers raised P0002), 22023.
  */
-export function classifyBookingError(error: unknown): ClassifiedBookingError {
+export function classifyBookingError(
+  error: unknown,
+  /** Labels of the booking questions, so "<label> is required" goes back to details. */
+  questionLabels: readonly string[] = [],
+): ClassifiedBookingError {
   const appError = toAppError(error);
   const code = appError.code ?? '';
   const message = appError.message;
@@ -447,10 +616,16 @@ export function classifyBookingError(error: unknown): ClassifiedBookingError {
     return { kind: 'rate_limited', message, step: null };
   }
   if (code === 'PT404' || code === 'P0002') return { kind: 'not_found', message, step: null };
+  if (code === '23514' && /booking question|is required/i.test(message)) {
+    return { kind: 'field', message, step: 'details' };
+  }
   if (code === '22023') {
     const text = message.toLowerCase();
     let step: StepId | null = null;
-    if (/starts_at|time zone|daylight|time is no longer/.test(text)) step = 'time';
+    const aboutQuestion = questionLabels.some((label) => text.startsWith(label.toLowerCase()));
+    if (aboutQuestion || /booking question|answers/.test(text)) step = 'details';
+    else if (/starts_at|time zone|daylight|time is no longer|not available on/.test(text))
+      step = 'time';
     else if (/not offered for this vehicle/.test(text)) step = 'services';
     else if (
       /service area|address|city|postal|region|mobile service|coupon|name|email|phone|notes|contact/.test(

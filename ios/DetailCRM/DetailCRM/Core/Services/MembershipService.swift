@@ -40,6 +40,11 @@ enum MembershipService {
         var intervalCount: Int = 1
         var discountBps: Int = 0
         var active: Bool = true
+        /// Offered on the shop's public join page.
+        var onlineJoinable: Bool = false
+        /// Included visits per billing period; nil = unlimited.
+        var includedUsesPerPeriod: Int?
+        var terms: String = ""
 
         init() {}
 
@@ -52,8 +57,14 @@ enum MembershipService {
             intervalCount = plan.intervalCount
             discountBps = plan.discountBps
             active = plan.active
+            onlineJoinable = plan.onlineJoinable
+            includedUsesPerPeriod = plan.includedUsesPerPeriod
+            terms = plan.terms ?? ""
         }
     }
+
+    /// Longest plan terms the server accepts.
+    static let maxTermsLength = 5_000
 
     /// Creates or updates a plan; returns its id.
     @discardableResult
@@ -61,7 +72,15 @@ enum MembershipService {
         let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw AppError.invalidInput("Enter a plan name.") }
         guard draft.priceCents > 0 else { throw AppError.invalidInput("Enter the plan price.") }
-        let count = draft.interval == .year ? 1 : min(max(draft.intervalCount, 1), 12)
+        let range = draft.interval.planCountRange
+        let count = min(max(draft.intervalCount, range.lowerBound), range.upperBound)
+        if let uses = draft.includedUsesPerPeriod, !(1...MembershipPlan.maxUsesPerPeriod).contains(uses) {
+            throw AppError.invalidInput("Included visits must be from 1 to \(MembershipPlan.maxUsesPerPeriod) per period.")
+        }
+        let terms = draft.terms.trimmedNonEmpty
+        if let terms, terms.count > maxTermsLength {
+            throw AppError.invalidInput("Keep the plan terms under 5,000 characters.")
+        }
         let fields = MembershipPlanPayload(
             name: name,
             planDescription: draft.planDescription.trimmedNonEmpty,
@@ -69,7 +88,10 @@ enum MembershipService {
             interval: draft.interval.rawValue,
             intervalCount: count,
             discountBps: min(max(draft.discountBps, 0), 10_000),
-            active: draft.active
+            active: draft.active,
+            onlineJoinable: draft.onlineJoinable,
+            includedUsesPerPeriod: draft.includedUsesPerPeriod,
+            terms: terms
         )
         if let planID = draft.planID {
             try await Supa.client
@@ -172,6 +194,15 @@ enum MembershipService {
         )
     }
 
+    /// Included visits used in the membership's current billing period
+    /// (`membership_usage`, managers+).
+    static func usage(membershipID: UUID) async throws -> Membership.Usage {
+        try await Supa.client
+            .rpc("membership_usage", params: ["p_membership_id": membershipID.uuidString])
+            .execute()
+            .value
+    }
+
     /// Cancels now, or at the end of the paid period.
     static func cancel(shopID: UUID, membershipID: UUID, atPeriodEnd: Bool) async throws -> MoneyMembershipCancelResult {
         struct Body: Encodable {
@@ -201,6 +232,9 @@ private struct MembershipPlanPayload: Encodable {
     let intervalCount: Int
     let discountBps: Int
     let active: Bool
+    let onlineJoinable: Bool
+    let includedUsesPerPeriod: Int?
+    let terms: String?
 
     enum PlanKeys: String, CodingKey {
         case name
@@ -210,6 +244,9 @@ private struct MembershipPlanPayload: Encodable {
         case intervalCount = "interval_count"
         case discountBps = "discount_bps"
         case active
+        case onlineJoinable = "online_joinable"
+        case includedUsesPerPeriod = "included_uses_per_period"
+        case terms
     }
 
     func encode(to encoder: Encoder) throws {
@@ -221,6 +258,10 @@ private struct MembershipPlanPayload: Encodable {
         try c.encode(intervalCount, forKey: .intervalCount)
         try c.encode(discountBps, forKey: .discountBps)
         try c.encode(active, forKey: .active)
+        try c.encode(onlineJoinable, forKey: .onlineJoinable)
+        // Explicit nulls: "unlimited" / no terms clear the saved values.
+        try c.encode(includedUsesPerPeriod, forKey: .includedUsesPerPeriod)
+        try c.encode(terms, forKey: .terms)
     }
 }
 

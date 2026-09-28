@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import Supabase
 import DetailCore
 
 // MARK: - Customer
@@ -49,6 +50,8 @@ struct Customer: Codable, Identifiable, Hashable, Sendable {
         case instagram
         case walkIn = "walk_in"
         case other
+        /// Created by a CSV import (P-5, comms 0087).
+        case imported = "import"
 
         var id: String { rawValue }
 
@@ -62,6 +65,7 @@ struct Customer: Codable, Identifiable, Hashable, Sendable {
             case .instagram: return "Instagram"
             case .walkIn: return "Walk-in"
             case .other: return "Other"
+            case .imported: return "Imported"
             }
         }
     }
@@ -94,6 +98,15 @@ struct Customer: Codable, Identifiable, Hashable, Sendable {
     var archivedAt: Date?
     var createdAt: Date
     var updatedAt: Date
+    /// Answers to the shop's customer fields (P-9): {key: value}, validated
+    /// by the server against `custom_fields`.
+    var customData: [String: AnyJSON]?
+    /// The customer's referral code (P-29), server-set once a referral link
+    /// was created for them.
+    var referralCode: String?
+    /// Set on a duplicate that was merged into another customer (server-set;
+    /// the duplicate is archived and its records moved).
+    var mergedIntoID: UUID?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -120,6 +133,9 @@ struct Customer: Codable, Identifiable, Hashable, Sendable {
         case archivedAt = "archived_at"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case customData = "custom_data"
+        case referralCode = "referral_code"
+        case mergedIntoID = "merged_into_id"
     }
 
     /// Explicit column list for `.select(...)` (Stripe/portal link columns
@@ -129,6 +145,7 @@ struct Customer: Codable, Identifiable, Hashable, Sendable {
         "address_line1", "address_line2", "city", "region", "postal_code", "country",
         "notes", "tags", "lifecycle", "source", "sms_opt_in", "email_opt_in",
         "sms_opted_out_at", "email_opted_out_at", "archived_at", "created_at", "updated_at",
+        "custom_data", "referral_code", "merged_into_id",
     ].joined(separator: ",")
 
     /// "First Last", else the company, else "Unnamed customer" (the database
@@ -603,7 +620,7 @@ struct CustomerMembershipSummary: Codable, Identifiable, Hashable, Sendable {
     var vehicleID: UUID?
     var status: MembershipStatus
     var priceCents: Int
-    /// `month` | `year` (`membership_interval`)
+    /// `week` | `month` | `year` (`membership_interval`)
     var interval: String
     var intervalCount: Int
     var currentPeriodEnd: Date?
@@ -627,10 +644,11 @@ struct CustomerMembershipSummary: Codable, Identifiable, Hashable, Sendable {
 
     static let selectColumns = "id,plan_id,vehicle_id,status,price_cents,interval,interval_count,current_period_end,cancel_at_period_end,started_at,created_at"
 
-    /// "per month", "every 3 months", "per year", "every 2 years".
+    /// "per week", "every 2 weeks", "per month", "every 3 months", "per year".
+    /// An interval this build doesn't know yet shows no cadence rather
+    /// than a wrong one.
     var cadenceText: String {
-        let unit = interval == "year" ? "year" : "month"
-        return intervalCount <= 1 ? "per \(unit)" : "every \(intervalCount) \(unit)s"
+        MembershipPlanInterval(rawValue: interval)?.billingText(count: intervalCount) ?? ""
     }
 }
 

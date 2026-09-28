@@ -59,6 +59,9 @@ final class AppState {
     /// Why the user was signed out (an expired session), for the sign-in
     /// screen; cleared by the next sign-in or the user's own sign-out.
     private(set) var signInNotice: String?
+    /// A tapped push notification waiting for the main tabs to open it
+    /// (JobsPushRouter / MainTabView).
+    var pendingPush: JobsPushRouter.Pending?
 
     @ObservationIgnored private var authListener: Task<Void, Never>?
     @ObservationIgnored private var sessionGate = SessionExpiryGate()
@@ -185,6 +188,9 @@ final class AppState {
             current = nil
             profile = nil
         }
+        // Videos another account left pending on this iPhone (e.g. after
+        // its session expired) are deleted, never sent under this user.
+        JobsResumableUploader.discardAll(keepingUserID: userID)
         self.userID = userID
         self.userEmail = email
         await bootstrap()
@@ -268,10 +274,18 @@ final class AppState {
     /// emits `.signedOut`, before the server call returns.
     private func performSignOut(scope: SignOutScope, notice: String?) async {
         signInNotice = notice
+        // Stop pushes to this device for the account while the session may
+        // still work (bounded wait; falls back to leaving APNs).
+        await JobsPushRegistrar.shared.detachBeforeSignOut()
         do {
             try await AuthService.signOut(scope: scope)
         } catch {
             Self.log.error("Sign out failed: \(error.localizedDescription, privacy: .public)")
+        }
+        // A deliberate sign-out (not an expired session) leaves no recorded
+        // video behind; an expired session keeps them for the same user.
+        if notice == nil {
+            JobsResumableUploader.discardAll(keepingUserID: nil)
         }
         clearSession()
         sessionGate.finishSignOut()
@@ -311,6 +325,9 @@ final class AppState {
     }
 
     private func clearSession() {
+        JobsPushRegistrar.shared.userSignedOut()
+        pendingPush = nil
+        Task { await JobsRealtimeHub.shared.stop() }
         userID = nil
         userEmail = nil
         profile = nil

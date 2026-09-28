@@ -65,6 +65,7 @@ Deno.test("payment_sheet: manager gets a PaymentSheet for the balance on the con
     p_method: "card",
     p_invoice_id: INVOICE,
     p_customer_id: CUSTOMER,
+    p_stripe_method_type: "card",
   });
   const rpc = f.db.requests.find((r) => r.target === "upsert_stripe_payment");
   assertEquals(rpc?.role, "service_role");
@@ -659,4 +660,195 @@ Deno.test("remove_saved_card: manager+ only, the customer must be in the shop", 
   );
   assertEquals(f.stripeCalls().length, 0);
   assertEquals(f.db.table("customer_payment_methods").length, 3);
+});
+
+// ---------------------------------------------------------------------------
+// Parity: merged customers' cards (P-20), ACH / pay-later refunds (P-31),
+// grouped invoices (P-7)
+// ---------------------------------------------------------------------------
+
+Deno.test("charge_saved_card: a card moved by a customer merge charges its own Stripe customer", async () => {
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Target" },
+    cards: [{
+      id: "40000000-0000-4000-8000-0000000000a1",
+      shop_id: SHOP,
+      customer_id: CUSTOMER,
+      stripe_payment_method_id: "pm_1Merged",
+      brand: "visa",
+      last4: "1881",
+      is_default: true,
+      // saved on the duplicate's Stripe customer before the merge
+      stripe_customer_id: "cus_1Duplicate",
+    }],
+  });
+  const res = await f.call({ ...charge, request_nonce: "merge-0001" }, "manager");
+  assertEquals((await res.json()).card_last4, "1881");
+  const pi = f.stripe("POST", "/payment_intents")[0];
+  assertEquals(pi?.form.get("customer"), "cus_1Duplicate");
+  assertEquals(pi?.form.get("payment_method"), "pm_1Merged");
+  // a card without the column falls back to the customer's Stripe customer
+  const legacy = fixture({ customer: { stripe_customer_id: "cus_1Saved" } });
+  await (await legacy.call(charge, "manager")).body?.cancel();
+  assertEquals(legacy.stripe("POST", "/payment_intents")[0]?.form.get("customer"), "cus_1Saved");
+  // no Stripe customer at all: nothing to charge
+  const none = fixture({
+    cards: [{
+      id: "40000000-0000-4000-8000-0000000000a2",
+      shop_id: SHOP,
+      customer_id: CUSTOMER,
+      stripe_payment_method_id: "pm_1Orphan",
+      brand: "visa",
+      last4: "0000",
+      is_default: true,
+      stripe_customer_id: null,
+    }],
+  });
+  assertEquals((await errorOf(await none.call(charge, "manager")))[2], {
+    reason: "no_saved_card",
+  });
+});
+
+Deno.test("refund: ACH debits and pay-later payments are refunded through Stripe too", async () => {
+  for (const method of ["ach_debit", "bnpl", "card_present"]) {
+    const id = "ffffffff-ffff-4fff-8fff-0000000000b1";
+    const f = fixture({
+      payments: [{
+        id,
+        shop_id: SHOP,
+        invoice_id: INVOICE,
+        method,
+        status: "succeeded",
+        amount_cents: 10_000,
+        tip_cents: 500,
+        refunded_cents: 0,
+        stripe_payment_intent_id: "pi_1Paid",
+      }],
+    });
+    const res = await f.call({ ...refundBody, payment_id: id }, "owner");
+    assertEquals(res.status, 200, method);
+    await res.body?.cancel();
+    assertEquals(f.stripe("POST", "/refunds")[0]?.form.get("payment_intent"), "pi_1Paid");
+  }
+  // an ACH debit still clearing cannot be refunded yet
+  const clearing = fixture({
+    payments: [{
+      id: "ffffffff-ffff-4fff-8fff-0000000000b2",
+      shop_id: SHOP,
+      invoice_id: INVOICE,
+      method: "ach_debit",
+      status: "processing",
+      amount_cents: 10_000,
+      tip_cents: 0,
+      refunded_cents: 0,
+      stripe_payment_intent_id: "pi_1Clearing",
+    }],
+  });
+  assertEquals(
+    (await errorOf(
+      await clearing.call(
+        { ...refundBody, payment_id: "ffffffff-ffff-4fff-8fff-0000000000b2" },
+        "owner",
+      ),
+    ))[2],
+    { reason: "not_refundable" },
+  );
+  // gift card tender is never refunded through Stripe
+  const gift = fixture({
+    payments: [{
+      id: "ffffffff-ffff-4fff-8fff-0000000000b3",
+      shop_id: SHOP,
+      invoice_id: INVOICE,
+      method: "gift_card",
+      status: "succeeded",
+      amount_cents: 1_000,
+      tip_cents: 0,
+      refunded_cents: 0,
+      stripe_payment_intent_id: null,
+    }],
+  });
+  assertEquals(
+    (await errorOf(
+      await gift.call(
+        { ...refundBody, payment_id: "ffffffff-ffff-4fff-8fff-0000000000b3" },
+        "owner",
+      ),
+    ))[2],
+    { reason: "not_a_card_payment" },
+  );
+});
+
+Deno.test("cancel_open_payments (job): a job billed on a grouped invoice releases that invoice's links", async () => {
+  const GROUPED = "eeeeeeee-eeee-4eee-8eee-0000000000f1";
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    invoice: { status: "void" },
+    extraInvoices: [{
+      id: GROUPED,
+      shop_id: SHOP,
+      number: 2100,
+      job_id: null,
+      customer_id: CUSTOMER,
+      status: "open",
+      balance_cents: 3_000,
+      public_token: "99999999-9999-4999-8999-0000000000f1",
+    }],
+    invoiceJobs: [{
+      id: "31000000-0000-4000-8000-0000000000f1",
+      shop_id: SHOP,
+      invoice_id: GROUPED,
+      job_id: "dddddddd-dddd-4ddd-8ddd-000000000001",
+      voided: false,
+    }],
+    sessions: [
+      {
+        id: "cs_1GroupedPay",
+        object: "checkout.session",
+        status: "open",
+        mode: "payment",
+        customer: "cus_1Saved",
+        metadata: { shop_id: SHOP, invoice_id: GROUPED, kind: "payment" },
+      },
+    ],
+  });
+  const res = await f.call(
+    {
+      action: "cancel_open_payments",
+      shop_id: SHOP,
+      job_id: "dddddddd-dddd-4ddd-8ddd-000000000001",
+    },
+    "manager",
+  );
+  const body = await res.json();
+  assertEquals([body.invoice_id, body.sessions_expired], [GROUPED, 1]);
+  assertEquals(f.stripe("POST", "/checkout/sessions/cs_1GroupedPay/expire").length, 1);
+});
+
+Deno.test("remove_saved_card: a merged-in card is detached from its own Stripe customer", async () => {
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Target" },
+    cards: [{
+      id: "40000000-0000-4000-8000-0000000000a3",
+      shop_id: SHOP,
+      customer_id: CUSTOMER,
+      stripe_payment_method_id: "pm_1Merged",
+      brand: "visa",
+      last4: "1881",
+      is_default: true,
+      stripe_customer_id: "cus_1Duplicate",
+    }],
+    paymentMethods: { pm_1Merged: { customer: "cus_1Duplicate" } },
+  });
+  const res = await f.call(
+    {
+      action: "remove_saved_card",
+      shop_id: SHOP,
+      customer_id: CUSTOMER,
+      payment_method_id: "pm_1Merged",
+    },
+    "manager",
+  );
+  assertEquals(await res.json(), { removed: true });
+  assertEquals(f.stripe("POST", "/payment_methods/pm_1Merged/detach").length, 1);
+  assertEquals(f.db.table("customer_payment_methods").length, 0);
 });

@@ -8,6 +8,7 @@ import {
   Input,
   MoneyInput,
   RadioGroup,
+  Switch,
   useToast,
 } from '@/components/ui';
 import { errorMessage } from '@/lib/errors';
@@ -126,6 +127,7 @@ export function CompensationDialog({
     defaultValues: {
       hourlyRateCents: current?.hourly_rate_cents ?? 0,
       commission: bpsToPercentInput(current?.commission_bps ?? 0),
+      salesCommission: bpsToPercentInput(current?.sales_commission_bps ?? 0),
     },
   });
 
@@ -135,6 +137,7 @@ export function CompensationDialog({
         member_id: member.member_id,
         hourly_rate_cents: values.hourlyRateCents,
         commission_bps: values.commission,
+        sales_commission_bps: values.salesCommission,
       });
       onClose();
     } catch {
@@ -192,6 +195,13 @@ export function CompensationDialog({
         >
           <Input inputMode="decimal" {...register('commission')} />
         </FormField>
+        <FormField
+          label="Sales commission (%)"
+          error={errors.salesCommission?.message}
+          help="Share of the jobs they sold (the job’s “Sold by”), before tax. 0 for none."
+        >
+          <Input inputMode="decimal" {...register('salesCommission')} />
+        </FormField>
       </form>
     </Dialog>
   );
@@ -201,13 +211,17 @@ export function CompensationDialog({
 
 export function MemberDetailsDialog({
   member,
+  bookable,
   onClose,
 }: {
   member: TeamMember;
+  /** shop_members.bookable; undefined while unknown (the switch is hidden). */
+  bookable: boolean | undefined;
   onClose: () => void;
 }) {
   const toast = useToast();
   const update = useUpdateMember();
+  const [takesBookings, setTakesBookings] = useState(bookable ?? true);
   const {
     register,
     handleSubmit,
@@ -230,6 +244,9 @@ export function MemberDetailsDialog({
         patch: {
           display_name: values.displayName.trim(),
           calendar_color: values.calendarColor.trim() === '' ? null : values.calendarColor.trim(),
+          ...(bookable !== undefined && takesBookings !== bookable
+            ? { bookable: takesBookings }
+            : {}),
         },
       });
       toast.success('Saved');
@@ -284,6 +301,14 @@ export function MemberDetailsDialog({
             <Input {...register('calendarColor')} placeholder="#1F6FEB" maxLength={7} />
           </div>
         </FormField>
+        {bookable !== undefined && (
+          <Switch
+            label="Counts toward online booking capacity"
+            description="When online booking counts your team’s availability (Settings → Booking), each active member with this on can take one online booking at a time; their time off lowers it."
+            checked={takesBookings}
+            onCheckedChange={setTakesBookings}
+          />
+        )}
       </form>
     </Dialog>
   );

@@ -30,6 +30,7 @@ import { useShop } from '@/features/shop/shopContext';
 import { useDeleteEntry, useTimeEntries, useTimesheetMembers } from './api';
 import { ClockCard } from './components/ClockCard';
 import { EntryDialog } from './components/EntryDialog';
+import { GeoLinks } from './components/GeoLinks';
 import {
   entryDurationMs,
   formatDuration,
@@ -140,6 +141,11 @@ export default function TimesheetsPage() {
       ),
     },
     { key: 'source', header: 'Source', hideOnMobile: true, cell: (e) => SOURCE_LABELS[e.source] },
+    {
+      key: 'where',
+      header: 'Location',
+      cell: (e) => <GeoLinks entry={e} compact />,
+    },
     {
       key: 'notes',
       header: 'Notes',

@@ -1,7 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute, signedInAuth } from '@/test/render';
-import { mockRpc, pgError, resetSupabaseMock } from '@/test/supabaseMock';
+import {
+  mockRpc,
+  pgError,
+  resetSupabaseMock,
+  setFunctionResult,
+  supabase,
+} from '@/test/supabaseMock';
+import { navigation } from '@/features/public-docs/shared/checkout';
 import type { PortalOverview } from './api';
 import PortalPage from './PortalPage';
 import { MEMBERSHIP_REFRESH_MS } from './returnNotice';
@@ -112,7 +119,10 @@ describe('PortalPage', () => {
     });
     render();
     const upcoming = await screen.findByRole('list', { name: 'Upcoming appointments' });
-    expect(calls.map((c) => c.fn)).toEqual(['portal_claim_customers', 'portal_overview']);
+    expect(calls.map((c) => c.fn).slice(0, 2)).toEqual([
+      'portal_claim_customers',
+      'portal_overview',
+    ]);
     const job = within(upcoming).getByRole('link');
     expect(job).toHaveAttribute('href', `/booking/${JOB_TOKEN}`);
     expect(job).toHaveTextContent('Thu, Oct 1, 2026 · 9:00 – 10:30 AM');
@@ -237,5 +247,127 @@ describe('PortalPage', () => {
       'href',
       '/account',
     );
+  });
+
+  describe('self-service', () => {
+    const MEMBERSHIP = '77777777-7777-4777-8777-777777777777';
+    const membership = {
+      id: MEMBERSHIP,
+      shop_name: 'Glacier Detailing',
+      shop_slug: 'glacier',
+      plan_name: 'Monthly wash club',
+      status: 'active',
+      price_cents: 4900,
+      interval: 'month',
+      interval_count: 1,
+      current_period_end: '2026-10-15T05:00:00Z',
+      cancel_at_period_end: false,
+      uses_per_period: 2,
+      uses_this_period: 1,
+      can_cancel: true,
+    };
+
+    it('cancels a membership at the end of the period', async () => {
+      const calls = mockRpc({
+        portal_claim_customers: { data: 1 },
+        portal_overview: { data: overview() },
+        portal_memberships: { data: [membership] },
+      });
+      setFunctionResult('payments', {
+        data: {
+          membership_id: MEMBERSHIP,
+          status: 'active',
+          cancel_at_period_end: true,
+          current_period_end: '2026-10-15T05:00:00Z',
+        },
+      });
+      const { user } = render();
+      const list = await screen.findByRole('list', { name: 'Memberships' });
+      expect(within(list).getByText(/1 of 2 visits used this period/)).toBeInTheDocument();
+      expect(within(list).getByText(/Renews Oct 15, 2026/)).toBeInTheDocument();
+      await user.click(within(list).getByRole('button', { name: 'Cancel membership' }));
+      const dialog = await screen.findByRole('alertdialog', { name: /Cancel Monthly wash club/ });
+      expect(dialog).toHaveTextContent('It stays active until Oct 15, 2026');
+      await user.click(within(dialog).getByRole('button', { name: 'Cancel at period end' }));
+      await waitFor(() =>
+        expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+          body: { action: 'portal_membership_cancel', membership_id: MEMBERSHIP },
+        }),
+      );
+      await waitFor(() =>
+        expect(calls.filter((c) => c.fn === 'portal_memberships').length).toBeGreaterThan(1),
+      );
+    });
+
+    it('opens the billing portal for the card and receipts', async () => {
+      mockRpc({
+        portal_claim_customers: { data: 1 },
+        portal_overview: { data: overview() },
+        portal_memberships: { data: [membership] },
+      });
+      setFunctionResult('payments', { data: { url: 'https://billing.stripe.com/p/session/x' } });
+      const assign = vi.spyOn(navigation, 'assign').mockImplementation(() => undefined);
+      const { user } = render();
+      await user.click(await screen.findByRole('button', { name: 'Card & billing history' }));
+      await waitFor(() =>
+        expect(assign).toHaveBeenCalledWith('https://billing.stripe.com/p/session/x'),
+      );
+      expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+        body: { action: 'portal_billing_portal', membership_id: MEMBERSHIP },
+      });
+    });
+
+    it('lists job reports, documents and the referral code', async () => {
+      mockRpc({
+        portal_claim_customers: { data: 1 },
+        portal_overview: { data: overview() },
+        portal_memberships: { data: [] },
+        portal_job_reports: {
+          data: [
+            {
+              shop_name: 'Glacier Detailing',
+              job_number: 1040,
+              completed_at: '2026-09-18T20:00:00Z',
+              published_at: '2026-09-18T21:00:00Z',
+              report_path: '/r/88888888-8888-4888-8888-888888888888',
+            },
+          ],
+        },
+        portal_documents: {
+          data: [
+            {
+              id: 'doc-9',
+              shop_name: 'Glacier Detailing',
+              file_name: 'Warranty.pdf',
+              content_type: 'application/pdf',
+              size_bytes: 1024,
+              job_number: 1040,
+              created_at: '2026-09-18T21:00:00Z',
+            },
+          ],
+        },
+        portal_referrals: {
+          data: [
+            {
+              shop_name: 'Glacier Detailing',
+              code: 'ANA-4K7Q',
+              share_url: 'https://app.example.com/book/glacier?coupon=ANA-4K7Q',
+              credits_earned_cents: 2500,
+              credit_balance_cents: 1000,
+            },
+          ],
+        },
+      });
+      render();
+      const reports = await screen.findByRole('list', { name: 'Job reports' });
+      expect(within(reports).getByRole('link', { name: /Appointment #1040/ })).toHaveAttribute(
+        'href',
+        '/r/88888888-8888-4888-8888-888888888888',
+      );
+      const docs = await screen.findByRole('list', { name: 'Documents' });
+      expect(within(docs).getByText('Warranty.pdf')).toBeInTheDocument();
+      expect(await screen.findByLabelText('Your code')).toHaveTextContent('ANA-4K7Q');
+      expect(screen.getByText(/Earned so far: \$25\.00/)).toBeInTheDocument();
+    });
   });
 });

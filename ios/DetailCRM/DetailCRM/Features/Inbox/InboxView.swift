@@ -6,8 +6,10 @@
 //  templated job messages from the job screen). Conversations come from the
 //  server (`inbox_threads`: latest message + unread count per customer or
 //  unknown sender), 50 at a time; scrolling to the end loads older ones.
-//  The first page refreshes on appear, every 30 seconds while visible and
-//  on pull to refresh (older pages already loaded are kept).
+//  The first page refreshes on appear, whenever a message arrives or
+//  changes (Realtime, P-26), every 30 seconds while the live channel is
+//  down (every 2 minutes while it is up) and on pull to refresh (older
+//  pages already loaded are kept).
 //
 
 import SwiftUI
@@ -16,6 +18,7 @@ import DetailCore
 struct InboxView: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(JobsRealtimeHub.self) private var realtime
 
     @State private var state: LoadState<InboxListData> = .idle
     @State private var loadingOlder = false
@@ -64,11 +67,17 @@ struct InboxView: View {
             while !Task.isCancelled {
                 await load(isBackground: isBackground)
                 isBackground = true
-                try? await Task.sleep(for: .seconds(30))
+                // Live updates carry new messages; the poll is the fallback
+                // while the realtime channel is down.
+                try? await Task.sleep(for: .seconds(realtime.isLive ? 120 : 30))
             }
         }
         .refreshable {
             await load()
+        }
+        .onChange(of: realtime.revision(.messages)) { _, _ in
+            guard appState.can(.useInbox) else { return }
+            Task { await load(isBackground: true) }
         }
         .navigationDestination(for: MessageThread.self) { thread in
             InboxThreadView(key: thread.key)

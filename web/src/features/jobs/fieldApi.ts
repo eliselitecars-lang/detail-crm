@@ -129,12 +129,62 @@ export function useCreateInvoice(jobId: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Deposit follow-ups (P-3, 0085: document_followup_status kind 'deposit')
+// ---------------------------------------------------------------------------
+
+const followupStatusSchema = z.object({
+  kind: z.string(),
+  stage: z.string().nullable().optional(),
+  enabled: z.boolean(),
+  paused: z.boolean(),
+  attempts_sent: z.number(),
+  max_attempts: z.number(),
+  last_sent_at: z.string().nullable(),
+  next_at: z.string().nullable(),
+});
+
+export type FollowupStatus = z.infer<typeof followupStatusSchema>;
+
+/** Automatic deposit reminders of this job (managers+). */
+export function useDepositFollowup(jobId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: jobKeys.part(shopId, jobId, 'deposit-followup'),
+    enabled,
+    queryFn: async (): Promise<FollowupStatus> =>
+      followupStatusSchema.parse(
+        unwrap(await supabase.rpc('document_followup_status', { p_kind: 'deposit', p_id: jobId })),
+      ),
+  });
+}
+
+export function useSetDepositFollowupsPaused(jobId: string) {
+  const queryClient = useQueryClient();
+  const { shopId } = useShop();
+  const key = jobKeys.part(shopId, jobId, 'deposit-followup');
+  return useMutation({
+    mutationFn: async (paused: boolean): Promise<FollowupStatus> =>
+      followupStatusSchema.parse(
+        unwrap(
+          await supabase.rpc('set_document_followups_paused', {
+            p_kind: 'deposit',
+            p_id: jobId,
+            p_paused: paused,
+          }),
+        ),
+      ),
+    onSuccess: (status) => queryClient.setQueryData(key, status),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Checklist
 // ---------------------------------------------------------------------------
 
 export type ChecklistItem = Pick<
   Row<'job_checklist_items'>,
-  'id' | 'label' | 'sort' | 'done_at' | 'done_by' | 'template_id'
+  'id' | 'label' | 'sort' | 'done_at' | 'done_by' | 'template_id' | 'required'
 >;
 
 export function useChecklist(jobId: string) {
@@ -145,7 +195,7 @@ export function useChecklist(jobId: string) {
       unwrapList(
         await supabase
           .from('job_checklist_items')
-          .select('id, label, sort, done_at, done_by, template_id')
+          .select('id, label, sort, done_at, done_by, template_id, required')
           .eq('shop_id', shopId)
           .eq('job_id', jobId)
           .order('sort')
@@ -194,11 +244,37 @@ export function useAddChecklistItem(jobId: string) {
   const { shopId } = useShop();
   const invalidate = useInvalidateJob(jobId);
   return useMutation({
-    mutationFn: async ({ label, sort }: { label: string; sort: number }) => {
+    mutationFn: async ({
+      label,
+      sort,
+      required = false,
+    }: {
+      label: string;
+      sort: number;
+      required?: boolean;
+    }) => {
       unwrap(
         await supabase
           .from('job_checklist_items')
-          .insert({ shop_id: shopId, job_id: jobId, label: label.trim(), sort }),
+          .insert({ shop_id: shopId, job_id: jobId, label: label.trim(), sort, required }),
+      );
+    },
+    onSettled: invalidate,
+  });
+}
+
+/** Managers flag an item as required to complete the job (P-11); technicians can't. */
+export function useSetChecklistItemRequired(jobId: string) {
+  const { shopId } = useShop();
+  const invalidate = useInvalidateJob(jobId);
+  return useMutation({
+    mutationFn: async ({ id, required }: { id: string; required: boolean }) => {
+      unwrap(
+        await supabase
+          .from('job_checklist_items')
+          .update({ required })
+          .eq('shop_id', shopId)
+          .eq('id', id),
       );
     },
     onSettled: invalidate,
@@ -256,9 +332,39 @@ export function useApplyChecklistTemplate(jobId: string) {
 
 export type JobPhoto = Pick<
   Row<'job_photos'>,
-  'id' | 'storage_path' | 'kind' | 'caption' | 'uploaded_by' | 'created_at'
-> & { url: string | null };
+  | 'id'
+  | 'storage_path'
+  | 'kind'
+  | 'caption'
+  | 'uploaded_by'
+  | 'created_at'
+  | 'customer_visible'
+  | 'duration_seconds'
+  | 'poster_path'
+> & {
+  /** Images live in job-photos, videos in job-media (0071). */
+  mediaType: 'image' | 'video';
+  bucket: 'job-photos' | 'job-media';
+  url: string | null;
+  posterUrl: string | null;
+};
 
+type PhotoRow = Pick<
+  Row<'job_photos'>,
+  | 'id'
+  | 'storage_path'
+  | 'kind'
+  | 'caption'
+  | 'uploaded_by'
+  | 'created_at'
+  | 'customer_visible'
+  | 'media_type'
+  | 'bucket'
+  | 'duration_seconds'
+  | 'poster_path'
+>;
+
+/** Photos and videos of the job with short-lived signed URLs (posters for videos). */
 export function usePhotos(jobId: string) {
   const { shopId } = useShop();
   return useQuery({
@@ -266,20 +372,64 @@ export function usePhotos(jobId: string) {
     // signed URLs expire after an hour; refresh well before that
     staleTime: 30 * 60_000,
     queryFn: async (): Promise<JobPhoto[]> => {
-      const rows = unwrapList(
+      const rows: PhotoRow[] = unwrapList(
         await supabase
           .from('job_photos')
-          .select('id, storage_path, kind, caption, uploaded_by, created_at')
+          .select(
+            'id, storage_path, kind, caption, uploaded_by, created_at, customer_visible, media_type, bucket, duration_seconds, poster_path',
+          )
           .eq('shop_id', shopId)
           .eq('job_id', jobId)
           .order('created_at'),
       );
-      const urls = await signedUrls(
-        'job-photos',
-        rows.map((r) => r.storage_path),
-      );
-      return rows.map((r) => ({ ...r, url: urls.get(r.storage_path) ?? null }));
+      const isVideo = (r: PhotoRow) => r.media_type === 'video';
+      const [imageUrls, videoUrls] = await Promise.all([
+        signedUrls('job-photos', [
+          ...rows.filter((r) => !isVideo(r)).map((r) => r.storage_path),
+          ...rows.map((r) => r.poster_path).filter((p): p is string => !!p),
+        ]),
+        signedUrls(
+          'job-media',
+          rows.filter(isVideo).map((r) => r.storage_path),
+        ),
+      ]);
+      return rows.map((r) => {
+        const video = isVideo(r);
+        return {
+          id: r.id,
+          storage_path: r.storage_path,
+          kind: r.kind,
+          caption: r.caption,
+          uploaded_by: r.uploaded_by,
+          created_at: r.created_at,
+          customer_visible: r.customer_visible === true,
+          duration_seconds: r.duration_seconds ?? null,
+          poster_path: r.poster_path ?? null,
+          mediaType: video ? 'video' : 'image',
+          bucket: video ? 'job-media' : 'job-photos',
+          url: (video ? videoUrls : imageUrls).get(r.storage_path) ?? null,
+          posterUrl: r.poster_path ? (imageUrls.get(r.poster_path) ?? null) : null,
+        };
+      });
     },
+  });
+}
+
+/**
+ * set_job_photo_visibility (0072): which photos / videos the customer sees on
+ * the job report. Staff on the job (managers, assigned technicians).
+ */
+export function useSetPhotoVisibility(jobId: string) {
+  const invalidate = useInvalidateJob(jobId);
+  return useMutation({
+    mutationFn: async ({ ids, visible }: { ids: string[]; visible: boolean }): Promise<number> => {
+      if (ids.length === 0) return 0;
+      const count = unwrap(
+        await supabase.rpc('set_job_photo_visibility', { p_photo_ids: ids, p_visible: visible }),
+      );
+      return typeof count === 'number' ? count : 0;
+    },
+    onSettled: invalidate,
   });
 }
 
@@ -317,7 +467,7 @@ export function useDeletePhoto(jobId: string) {
   const { shopId } = useShop();
   const invalidate = useInvalidateJob(jobId);
   return useMutation({
-    mutationFn: async (photo: Pick<JobPhoto, 'id' | 'storage_path'>) => {
+    mutationFn: async (photo: Pick<JobPhoto, 'id' | 'storage_path' | 'bucket'>) => {
       const rows = unwrapList(
         await supabase
           .from('job_photos')
@@ -329,7 +479,8 @@ export function useDeletePhoto(jobId: string) {
       if (rows.length === 0) {
         throw new AppError('You can only delete photos you uploaded.', { kind: 'permission' });
       }
-      await removeObject('job-photos', photo.storage_path);
+      // (a video's file and poster are also queued for the storage purge by the server)
+      await removeObject(photo.bucket, photo.storage_path);
     },
     onSettled: invalidate,
   });
@@ -361,6 +512,8 @@ const inspectionSchema = z.object({
   customer_signature_path: z.string().nullable(),
   signed_by_name: z.string().nullable(),
   signed_at: z.string().nullable(),
+  /** The customer signed from the job report link (P-8); server-set. */
+  signed_remotely: z.boolean().default(false),
   created_at: z.string(),
   marks: z.array(markSchema),
 });
@@ -381,7 +534,7 @@ export function useInspections(jobId: string) {
         await supabase
           .from('inspections')
           .select(
-            'id, job_id, vehicle_id, kind, mileage, fuel_level, notes, customer_signature_path, signed_by_name, signed_at, created_at, marks:inspection_marks(id, view, x, y, damage, note, photo_path, created_at)',
+            'id, job_id, vehicle_id, kind, mileage, fuel_level, notes, customer_signature_path, signed_by_name, signed_at, signed_remotely, created_at, marks:inspection_marks(id, view, x, y, damage, note, photo_path, created_at)',
           )
           .eq('shop_id', shopId)
           .eq('job_id', jobId)

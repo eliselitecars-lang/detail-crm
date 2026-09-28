@@ -37,6 +37,7 @@ const SHOP: ShopSettings = {
   business_type: 'fixed',
   tax_rate_bps: 0,
   techs_can_collect_payments: false,
+  techs_can_share_reports: false,
   review_url: 'https://g.page/r/glacier',
   quote_terms: null,
   invoice_terms: null,
@@ -97,10 +98,27 @@ describe('settings navigation & access', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it('keeps technicians out of settings entirely', async () => {
+  it('shows technicians only their calendar feed', async () => {
     renderSettings('/app/settings/business', { role: 'technician' });
     expect(await screen.findByText('You don’t have access to this page')).toBeVisible();
-    expect(screen.queryByRole('navigation', { name: 'Settings' })).not.toBeInTheDocument();
+    const nav = screen.getByRole('navigation', { name: 'Settings' });
+    expect(
+      within(nav)
+        .getAllByRole('link')
+        .map((l) => l.textContent),
+    ).toEqual(['Calendar feed']);
+  });
+
+  it('sends technicians from /app/settings to their calendar feed', async () => {
+    setTableResult('calendar_feed_tokens', { data: null });
+    const { router } = renderSettings('/app/settings', { role: 'technician' });
+    expect(
+      await screen.findByRole('heading', { name: 'Calendar feed', level: 2 }, { timeout: 5000 }),
+    ).toBeVisible();
+    expect(router.state.location.pathname).toBe('/app/settings/calendar-feed');
+    expect(await screen.findByText('No calendar feed yet')).toBeVisible();
+    // only managers may subscribe to every job
+    expect(screen.queryByRole('switch', { name: /Include every job/ })).not.toBeInTheDocument();
   });
 });
 
@@ -176,6 +194,14 @@ describe('BookingSettingsPage', () => {
         booking_message: null,
         cancellation_policy: null,
         allow_client_cancel_hours: 24,
+        max_concurrent_shop: null,
+        max_concurrent_mobile: null,
+        count_member_availability: false,
+        allow_multi_day: false,
+        multi_day_max_days: 2,
+        quote_self_schedule: false,
+        meta_pixel_id: null,
+        ga4_measurement_id: null,
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
       },
@@ -188,6 +214,13 @@ describe('BookingSettingsPage', () => {
       `${window.location.origin}/book/glacier-detailing`,
     );
     expect(screen.getByText('Booking off')).toBeVisible();
+  });
+
+  it('tells shops what their tracking tags see and to keep Meta’s advanced matching off', async () => {
+    renderSettings('/app/settings/booking');
+    const tracking = await screen.findByRole('region', { name: 'Tracking' });
+    expect(tracking).toHaveTextContent(/never give them names, emails, phone numbers or booking/);
+    expect(tracking).toHaveTextContent(/keep “Automatic advanced matching” off/);
   });
 
   it('validates and saves a percent deposit as basis points', async () => {
@@ -224,6 +257,7 @@ const template = (over: Partial<MessageTemplate>): MessageTemplate => ({
   body: 'Reminder from {{shop_name}}',
   enabled: true,
   offset_minutes: -1440,
+  reminder_offsets_minutes: null,
   updated_at: '2026-01-01T00:00:00Z',
   ...over,
 });
@@ -249,7 +283,7 @@ describe('TemplatesPage', () => {
     const preview = within(dialog).getByRole('region', { name: 'Preview' });
     expect(preview).toHaveTextContent('Reminder from Glacier Detailing');
 
-    const amount = within(dialog).getByLabelText('Send timing amount');
+    const amount = within(dialog).getByLabelText('Reminder 1 amount');
     await user.clear(amount);
     await user.type(amount, '2');
 
@@ -266,6 +300,7 @@ describe('TemplatesPage', () => {
       expect(update?.update).toHaveBeenCalledWith({
         body: 'Reminder from {{shop_name}} {{customer_first_name}}',
         offset_minutes: -2880,
+        reminder_offsets_minutes: null,
       });
       expect(update?.eq).toHaveBeenCalledWith('id', 'sms-1');
     });
@@ -442,6 +477,11 @@ describe('CouponsPage', () => {
         max_redemptions: 50,
         online_only: false,
         active: true,
+        service_ids: null,
+        min_subtotal_cents: null,
+        once_per_customer: false,
+        customer_id: null,
+        new_customers_only: false,
         shop_id: 'shop-1',
       });
     });
@@ -488,10 +528,14 @@ describe('BlockedTimesPage', () => {
     await waitFor(() => {
       const insert = builders.blocked_times?.find((b) => b.insert.mock.calls.length > 0);
       expect(insert?.insert).toHaveBeenCalledWith({
+        kind: 'closed',
         member_id: null,
+        title: null,
         starts_at: '2026-12-24T06:00:00.000Z',
         ends_at: '2026-12-26T06:00:00.000Z',
         reason: 'Holiday',
+        affects_capacity: true,
+        recurrence: null,
         shop_id: 'shop-1',
       });
     });

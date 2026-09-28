@@ -192,6 +192,16 @@ function released(counts: Partial<Record<'cancelled' | 'succeeded' | 'in_progres
   };
 }
 
+/** set_job_status (0073): records the call and moves the fixture job like the server. */
+function statusRpc(job: Row, calls: Row[]): Handler {
+  return ({ body }) => {
+    const args = body as Row;
+    calls.push(args);
+    if (typeof args.p_status === 'string') job.status = args.p_status;
+    return job;
+  };
+}
+
 /** Table handlers for the job detail page. */
 function detailTables(job: Row, patches: Row[], photos: Row[]) {
   return {
@@ -340,6 +350,138 @@ test.describe('jobs', () => {
     ]);
   });
 
+  test('owner creates a repeating job: preview, create_job_series, then the series banner', async ({
+    page,
+  }) => {
+    const seriesCalls: Json[] = [];
+    const previews: Json[] = [];
+    const job = jobRow({ location_type: 'shop', series_id: 'series-1', series_seq: 1 });
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        ...detailTables(job, [], []),
+        shop_members: [ownerMember],
+        customers: [CUSTOMER],
+        vehicles: [VEHICLE],
+        vehicle_categories: [{ id: CATEGORY_ID, name: 'Car', sort: 1 }],
+        services: [
+          {
+            id: SERVICE_ID,
+            name: 'Full detail',
+            kind: 'service',
+            duration_minutes: 150,
+            category_id: null,
+            description: null,
+            sort: 1,
+          },
+        ],
+        service_categories: [],
+        job_series: [
+          {
+            id: 'series-1',
+            freq: 'week',
+            interval: 2,
+            by_weekday: [1],
+            month_mode: null,
+            month_day: null,
+            month_nth: null,
+            month_weekday: null,
+            start_date: '2026-09-28',
+            local_start: '09:00:00',
+            duration_minutes: 150,
+            until_date: null,
+            max_occurrences: 6,
+            active: true,
+            ended_at: null,
+          },
+        ],
+      },
+      rpc: {
+        shop_team: TEAM,
+        job_payment_summary: [SUMMARY],
+        price_services: {
+          vehicle_category_id: CATEGORY_ID,
+          tax_rate_bps: 0,
+          duration_minutes: 150,
+          priced: true,
+          lines: [
+            {
+              service_id: SERVICE_ID,
+              name: 'Full detail',
+              kind: 'service',
+              taxable: true,
+              duration_minutes: 150,
+              catalog_price_cents: 24000,
+              unit_price_cents: 24000,
+              membership_included: false,
+              note: null,
+            },
+          ],
+          memberships: [],
+          suggested_discount_kind: 'none',
+          suggested_discount_value: 0,
+          totals: { subtotal_cents: 24000, discount_cents: 0, tax_cents: 0, total_cents: 24000 },
+        },
+        job_series_preview: ({ body }) => {
+          previews.push(body as Json);
+          return [
+            { seq: 1, starts_at: '2026-09-28T14:00:00Z', ends_at: '2026-09-28T16:30:00Z' },
+            { seq: 2, starts_at: '2026-10-12T14:00:00Z', ends_at: '2026-10-12T16:30:00Z' },
+          ];
+        },
+        create_job_series: ({ body }) => {
+          seriesCalls.push(body as Json);
+          return {
+            series_id: 'series-1',
+            jobs_created: 6,
+            first_job_id: JOB_ID,
+            generated_through: '2026-12-07',
+          };
+        },
+      },
+      storage: photoStorage([]),
+    });
+
+    await page.goto('/app/jobs/new?start=2026-09-28T14:00:00.000Z');
+    await page.getByRole('combobox', { name: 'Customer' }).fill('Jane');
+    await page.getByRole('option', { name: /Jane Doe/ }).click();
+    await page.getByText('2021 Honda Civic (Blue)').click();
+    await page.getByRole('checkbox', { name: /Full detail/ }).check();
+    await expect(page.getByLabel('End time')).toHaveValue('11:30');
+    await page.getByRole('checkbox', { name: /Repeat this job/ }).check();
+    const repeat = page.getByRole('region', { name: 'Repeat' });
+    await expect(repeat.getByRole('button', { name: 'Monday' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await repeat.getByLabel('Repeat every').selectOption('2');
+    await repeat.getByRole('radio', { name: 'After a number of visits' }).check();
+    await repeat.getByLabel(/Number of visits/).fill('6');
+    await expect(repeat.getByText('Mon, Oct 12, 2026')).toBeVisible();
+    expect(previews.length).toBeGreaterThan(0);
+
+    await page.getByRole('button', { name: 'Create repeating job' }).click();
+    await expect(page).toHaveURL(new RegExp(`/app/jobs/${JOB_ID}$`));
+    expect(seriesCalls[0]).toMatchObject({
+      p_shop_id: SHOP.id,
+      p_series: {
+        customer_id: CUSTOMER_ID,
+        vehicle_id: VEHICLE_ID,
+        freq: 'week',
+        interval: 2,
+        by_weekday: [1],
+        start_date: '2026-09-28',
+        local_start: '09:00',
+        duration_minutes: 150,
+        max_occurrences: 6,
+        template_lines: [{ service_id: SERVICE_ID, quantity: 1 }],
+      },
+    });
+    await expect(page.getByText(/Repeats every 2 weeks on Mon · 6 visits/)).toBeVisible();
+    await expect(page.getByText(/Visit 1 of 6/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Edit repeat' })).toBeVisible();
+  });
+
   test('owner filters the jobs list and opens a job', async ({ page }) => {
     const queries: string[] = [];
     const job = jobRow();
@@ -400,13 +542,18 @@ test.describe('jobs', () => {
 
   test('owner moves the status, edits notes and uploads a before photo', async ({ page }) => {
     const patches: Row[] = [];
+    const statuses: Row[] = [];
     const photos: Row[] = [];
     const uploads: string[] = [];
     const job = jobRow();
     await mockSupabase(page, {
       user: OWNER,
       tables: { ...detailTables(job, patches, photos), shop_members: [ownerMember] },
-      rpc: { shop_team: TEAM, job_payment_summary: [SUMMARY] },
+      rpc: {
+        shop_team: TEAM,
+        job_payment_summary: [SUMMARY],
+        set_job_status: statusRpc(job, statuses),
+      },
       storage: photoStorage(uploads),
     });
 
@@ -418,7 +565,7 @@ test.describe('jobs', () => {
     );
 
     await page.getByRole('button', { name: 'Mark as Confirmed' }).click();
-    await expect.poll(() => patches).toContainEqual({ status: 'confirmed' });
+    await expect.poll(() => statuses).toContainEqual({ p_job_id: JOB_ID, p_status: 'confirmed' });
     await expect(page.getByRole('button', { name: 'Move back to Scheduled' })).toBeVisible();
 
     await page.getByLabel('Internal notes').fill('Bring the extractor');
@@ -630,14 +777,18 @@ test.describe('jobs', () => {
   });
 
   test('cancelling a job releases its open card payments first', async ({ page }) => {
-    const patches: Row[] = [];
+    const statuses: Row[] = [];
     const releases: unknown[] = [];
     let processing = 1;
     const job = jobRow();
     await mockSupabase(page, {
       user: OWNER,
-      tables: { ...detailTables(job, patches, []), shop_members: [ownerMember] },
-      rpc: { shop_team: TEAM, job_payment_summary: [SUMMARY] },
+      tables: { ...detailTables(job, [], []), shop_members: [ownerMember] },
+      rpc: {
+        shop_team: TEAM,
+        job_payment_summary: [SUMMARY],
+        set_job_status: statusRpc(job, statuses),
+      },
       functions: {
         payments: ({ body }) => {
           releases.push(body);
@@ -655,11 +806,11 @@ test.describe('jobs', () => {
     await expect(
       dialog.getByText('A card payment is in progress — wait for it to finish.'),
     ).toBeVisible();
-    expect(patches).toEqual([]);
+    expect(statuses).toEqual([]);
 
     processing = 0;
     await dialog.getByRole('button', { name: 'Cancel job' }).click();
-    await expect.poll(() => patches).toContainEqual({ status: 'cancelled', cancel_reason: null });
+    await expect.poll(() => statuses).toContainEqual({ p_job_id: JOB_ID, p_status: 'cancelled' });
     expect(releases).toEqual([
       { action: 'cancel_open_payments', shop_id: SHOP.id, job_id: JOB_ID },
       { action: 'cancel_open_payments', shop_id: SHOP.id, job_id: JOB_ID },
@@ -670,12 +821,12 @@ test.describe('jobs', () => {
     page,
   }) => {
     const sent: unknown[] = [];
-    const patches: Row[] = [];
+    const statuses: Row[] = [];
     const job = jobRow();
     await mockSupabase(page, {
       user: TECH,
-      tables: { ...detailTables(job, patches, []), shop_members: [techMember] },
-      rpc: { shop_team: TEAM },
+      tables: { ...detailTables(job, [], []), shop_members: [techMember] },
+      rpc: { shop_team: TEAM, set_job_status: statusRpc(job, statuses) },
       functions: {
         messaging: ({ body }) => {
           sent.push(body);
@@ -705,7 +856,7 @@ test.describe('jobs', () => {
     });
 
     await page.getByRole('button', { name: 'Mark as On the way' }).click();
-    await expect.poll(() => patches).toContainEqual({ status: 'en_route' });
+    await expect.poll(() => statuses).toContainEqual({ p_job_id: JOB_ID, p_status: 'en_route' });
 
     const overflow = await page.evaluate(
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,

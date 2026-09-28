@@ -1,11 +1,14 @@
 /**
- * Online booking (/book/:slug) and the customer's booking page
- * (/booking/:token). Everything goes through the public SECURITY DEFINER
- * RPCs of 0007 (get_available_slots) and 0042 (public_shop_profile,
- * public_booking_catalog, public_validate_coupon, create_online_booking,
- * public_get_booking, public_cancel_booking) plus the payments edge function
- * (booking_deposit_checkout). Prices, totals, taxes and deposits are always
- * the server's: the wizard never sends or sums prices.
+ * Online booking (/book/:slug, private links /book/:slug?link=<token>) and
+ * the customer's booking page (/booking/:token). Everything goes through the
+ * public SECURITY DEFINER RPCs: 0042 (public_shop_profile,
+ * public_booking_catalog, create_online_booking, public_get_booking,
+ * public_cancel_booking), 0053 (public_booking_slots, public_booking_link),
+ * 0062 (public_validate_coupon), 0075 (public_booking_documents), 0088
+ * (public_booking_questions, tracking ids) plus the payments
+ * (booking_deposit_checkout) and public-media (booking_documents) edge
+ * functions. Prices, totals, taxes and deposits are always the server's: the
+ * wizard never sends or sums prices.
  */
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
@@ -28,7 +31,12 @@ import {
   zLocationType,
   zText,
 } from '@/features/public-docs/shared/schemas';
-import type { BookingPayload } from './model';
+import {
+  fetchBookingDocumentMedia,
+  MEDIA_REFRESH_MS,
+  MEDIA_STALE_MS,
+} from '@/features/job-report/media';
+import type { BookingPayload, LocationChoice } from './model';
 
 export const bookingKeys = {
   profile: (slug: string) => publicKey('shop-profile', slug),
@@ -36,6 +44,10 @@ export const bookingKeys = {
   slots: (slug: string, args: SlotArgs | null) => publicKey('booking-slots', slug, args),
   preview: (slug: string, args: PreviewArgs | null) => publicKey('booking-preview', slug, args),
   booking: (token: string) => publicKey('booking', token),
+  link: (token: string) => publicKey('booking-link', token),
+  questions: (slug: string) => publicKey('booking-questions', slug),
+  documents: (token: string) => publicKey('booking-documents', token),
+  documentMedia: (token: string) => publicKey('booking-document-media', token),
 };
 
 function retryTransient(failureCount: number, error: unknown): boolean {
@@ -78,6 +90,11 @@ export const shopProfileSchema = z.object({
     cancellation_policy: zText,
     allow_client_cancel_hours: zIntOrNull,
   }),
+  /** The shop's Meta Pixel / GA4 ids (0088); null while booking is off. */
+  tracking: z
+    .object({ meta_pixel_id: zText, ga4_measurement_id: zText })
+    .nullish()
+    .transform((v) => v ?? { meta_pixel_id: null, ga4_measurement_id: null }),
 });
 export type ShopProfile = z.output<typeof shopProfileSchema>;
 
@@ -114,7 +131,17 @@ const catalogItemSchema = z.object({
 
 export const catalogSchema = z.object({
   vehicle_categories: z.array(z.object({ id: z.string(), name: z.string() })),
-  service_categories: z.array(z.object({ id: z.string(), name: z.string() })),
+  service_categories: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      /** Local weekdays (0 = Sunday) services of this category can start online; null = every day. */
+      bookable_weekdays: z
+        .array(z.number().int().min(0).max(6))
+        .nullish()
+        .transform((v) => v ?? null),
+    }),
+  ),
   services: z.array(
     catalogItemSchema.extend({
       includes: z.array(z.string()),
@@ -126,6 +153,30 @@ export const catalogSchema = z.object({
 export type BookingCatalog = z.output<typeof catalogSchema>;
 export type CatalogService = BookingCatalog['services'][number];
 export type CatalogAddon = BookingCatalog['addons'][number];
+
+/** public_booking_link (0053): a private link's name, note and catalog (its services only). */
+export const bookingLinkSchema = z.object({
+  slug: z.string(),
+  name: z.string(),
+  note: zText,
+  expires_at: zText,
+  catalog: catalogSchema,
+});
+export type BookingLink = z.output<typeof bookingLinkSchema>;
+
+export function useBookingLink(token: string | null) {
+  return useQuery({
+    queryKey: bookingKeys.link(token ?? ''),
+    queryFn: async () =>
+      parseDocument(
+        bookingLinkSchema,
+        unwrap(await supabase.rpc('public_booking_link', { p_token: token ?? '' })),
+      ),
+    enabled: token !== null,
+    retry: retryTransient,
+    staleTime: 5 * 60_000,
+  });
+}
 
 export function useBookingCatalog(slug: string, enabled: boolean) {
   return useQuery({
@@ -153,20 +204,27 @@ export interface SlotArgs {
   /** Shop-local dates, inclusive. */
   from: string;
   to: string;
+  /** Where the work happens (per-location capacity; 'both' shops pass the customer's pick). */
+  locationType: LocationChoice;
+  /** A private booking link's token (its services instead of online_bookable). */
+  linkToken: string | null;
 }
 
+/** public_booking_slots (0053): availability v2 with location type and private links. */
 export function useAvailableSlots(slug: string, args: SlotArgs | null) {
   return useQuery({
     queryKey: bookingKeys.slots(slug, args),
     queryFn: async () => {
       if (!args) return [];
       return unwrap(
-        await supabase.rpc('get_available_slots', {
-          p_shop_slug: slug,
+        await supabase.rpc('public_booking_slots', {
+          p_slug: slug,
           p_service_ids: [...args.serviceIds],
-          ...(args.vehicleCategoryId ? { p_vehicle_category_id: args.vehicleCategoryId } : {}),
           p_from: args.from,
           p_to: args.to,
+          ...(args.vehicleCategoryId ? { p_vehicle_category_id: args.vehicleCategoryId } : {}),
+          p_location_type: args.locationType,
+          ...(args.linkToken ? { p_link_token: args.linkToken } : {}),
         }),
       );
     },
@@ -193,6 +251,8 @@ export const couponPreviewSchema = z.object({
   discount_cents: zCentsValue,
   tax_cents: zCentsValue,
   total_cents: zCentsValue,
+  /** Plain-language coupon limits (0062), e.g. "for new customers only". */
+  restrictions_text: zText,
 });
 export type CouponPreview = z.output<typeof couponPreviewSchema>;
 
@@ -203,6 +263,9 @@ export interface PreviewArgs {
   vehicleCategoryId: string | null;
   /** Coupon code ("" = none: the server answers with undiscounted totals). */
   code: string;
+  /** Location of the work (auto-applied fees depend on it). */
+  locationType: LocationChoice;
+  linkToken: string | null;
 }
 
 async function fetchPreview(slug: string, args: PreviewArgs): Promise<CouponPreview> {
@@ -214,9 +277,44 @@ async function fetchPreview(slug: string, args: PreviewArgs): Promise<CouponPrev
         p_code: args.code,
         p_service_ids: [...args.serviceIds],
         ...(args.vehicleCategoryId ? { p_vehicle_category_id: args.vehicleCategoryId } : {}),
+        p_location_type: args.locationType,
+        ...(args.linkToken ? { p_link_token: args.linkToken } : {}),
       }),
     ),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Booking questions (0088): the shop's job custom fields shown online
+// ---------------------------------------------------------------------------
+
+export const bookingQuestionSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  type: z.enum(['text', 'textarea', 'number', 'select', 'multiselect', 'checkbox', 'date']),
+  options: z
+    .array(z.string())
+    .nullish()
+    .transform((v) => v ?? []),
+  help_text: zText,
+  required: z.boolean(),
+  /** 'shop' | 'mobile' = only for that location; null = both. */
+  location_scope: zLocationType.nullish().transform((v) => v ?? null),
+});
+export type BookingQuestion = z.output<typeof bookingQuestionSchema>;
+
+/** Answers the booking page's questions (answers even while booking is off). */
+export function useBookingQuestions(slug: string) {
+  return useQuery({
+    queryKey: bookingKeys.questions(slug),
+    queryFn: async () =>
+      parseDocument(
+        z.array(bookingQuestionSchema),
+        unwrap(await supabase.rpc('public_booking_questions', { p_slug: slug })) ?? [],
+      ),
+    retry: retryTransient,
+    staleTime: 5 * 60_000,
+  });
 }
 
 /**
@@ -408,5 +506,47 @@ export function useDepositCheckout(token: string) {
       navigation.assign(session.url);
       return session;
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Documents shared on a booking (0075 + public-media)
+// ---------------------------------------------------------------------------
+
+export const bookingDocumentRowSchema = z.object({
+  id: z.string(),
+  file_name: z.string(),
+  content_type: zText,
+  size_bytes: z
+    .number()
+    .int()
+    .nullish()
+    .transform((v) => v ?? null),
+  created_at: zText,
+});
+export type BookingDocumentRow = z.output<typeof bookingDocumentRowSchema>;
+
+export function useBookingDocuments(token: string, enabled: boolean) {
+  return useQuery({
+    queryKey: bookingKeys.documents(token),
+    queryFn: async () =>
+      parseDocument(
+        z.array(bookingDocumentRowSchema),
+        unwrap(await supabase.rpc('public_booking_documents', { p_token: token })) ?? [],
+      ),
+    enabled,
+    retry: retryTransient,
+  });
+}
+
+/** Short-lived download links for the booking's documents (refreshed before they expire). */
+export function useBookingDocumentMedia(token: string, enabled: boolean) {
+  return useQuery({
+    queryKey: bookingKeys.documentMedia(token),
+    queryFn: () => fetchBookingDocumentMedia(token),
+    enabled,
+    retry: retryTransient,
+    staleTime: MEDIA_STALE_MS,
+    refetchInterval: MEDIA_REFRESH_MS,
   });
 }

@@ -19,6 +19,12 @@ export const TIME_ENTRY_KINDS = Constants.public.Enums.time_entry_kind;
 export type TimeEntryKind = (typeof TIME_ENTRY_KINDS)[number];
 export type TimeEntrySource = (typeof Constants.public.Enums.time_entry_source)[number];
 
+/** Optional geo column (missing on older rows / fixtures → null). */
+const zGeo = z
+  .number()
+  .nullish()
+  .transform((v) => v ?? null);
+
 export const timeEntrySchema = z.object({
   id: z.string(),
   member_id: z.string(),
@@ -29,11 +35,47 @@ export const timeEntrySchema = z.object({
   source: z.enum(Constants.public.Enums.time_entry_source),
   notes: z.string().nullable(),
   job: z.object({ id: z.string(), number: z.number() }).nullable(),
+  // Where the device was at clock in / out (P-24, iPhone app; never editable).
+  clock_in_lat: zGeo,
+  clock_in_lng: zGeo,
+  clock_in_accuracy_m: zGeo,
+  clock_out_lat: zGeo,
+  clock_out_lng: zGeo,
+  clock_out_accuracy_m: zGeo,
 });
 export type TimeEntry = z.infer<typeof timeEntrySchema>;
 
 export const TIME_ENTRY_COLUMNS =
-  'id, member_id, job_id, kind, clock_in, clock_out, source, notes, job:jobs!time_entries_job_fk(id, number)';
+  'id, member_id, job_id, kind, clock_in, clock_out, source, notes, clock_in_lat, clock_in_lng, clock_in_accuracy_m, clock_out_lat, clock_out_lng, clock_out_accuracy_m, job:jobs!time_entries_job_fk(id, number)';
+
+export interface GeoStamp {
+  lat: number;
+  lng: number;
+  /** Meters, when the device reported it. */
+  accuracyM: number | null;
+}
+
+/** The clock-in / clock-out location of an entry, when one was recorded. */
+export function geoStamp(entry: Partial<TimeEntry>, which: 'in' | 'out'): GeoStamp | null {
+  const lat = which === 'in' ? entry.clock_in_lat : entry.clock_out_lat;
+  const lng = which === 'in' ? entry.clock_in_lng : entry.clock_out_lng;
+  const accuracy = which === 'in' ? entry.clock_in_accuracy_m : entry.clock_out_accuracy_m;
+  if (lat === null || lat === undefined || lng === null || lng === undefined) return null;
+  return { lat, lng, accuracyM: accuracy ?? null };
+}
+
+/** Google Maps search link for a point (opens the map; nothing is sent from this page). */
+export function mapLink(stamp: Pick<GeoStamp, 'lat' | 'lng'>): string {
+  const q = `${stamp.lat.toFixed(6)},${stamp.lng.toFixed(6)}`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+}
+
+/** "±12 m" / "±1.2 km" / "" (unknown). */
+export function formatAccuracy(meters: number | null): string {
+  if (meters === null || !Number.isFinite(meters)) return '';
+  if (meters >= 1000) return `±${(meters / 1000).toFixed(1)} km`;
+  return `±${Math.round(meters)} m`;
+}
 
 export const MAX_RANGE_DAYS = 92;
 

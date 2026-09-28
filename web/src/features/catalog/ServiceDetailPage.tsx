@@ -15,6 +15,7 @@ import {
   useToast,
 } from '@/components/ui';
 import { errorMessage } from '@/lib/errors';
+import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import {
   useAddonSoleLinks,
@@ -25,11 +26,20 @@ import {
   useServiceUsage,
   useUpdateService,
 } from './api';
+import { ConsumablesCard } from './components/ConsumablesCard';
+import { FollowupsCard } from './components/FollowupsCard';
 import { PriceGrid } from './components/PriceGrid';
 import { AddonsCard, PackageItemsCard } from './components/RelationsCards';
 import { ServiceFormDialog } from './components/ServiceFormDialog';
 import { ServiceImageCard } from './components/ServiceImageCard';
-import { describeUsage, formatDuration, KIND_LABELS, usageTotal, type ServiceRow } from './model';
+import {
+  describeCommission,
+  describeUsage,
+  formatDuration,
+  KIND_LABELS,
+  usageTotal,
+  type ServiceRow,
+} from './model';
 
 const BACK = { to: '/app/catalog', label: 'Catalog' };
 
@@ -61,6 +71,10 @@ export default function ServiceDetailPage() {
 
 function ServiceDetail({ service }: { service: ServiceRow }) {
   const canManage = useCan('catalog.manage');
+  const canSeePay = useCan('compensation.view');
+  const canSeeInventory = useCan('inventory.view');
+  const canManageInventory = useCan('inventory.manage');
+  const { currency } = useShop();
   const categories = useCategories();
   const toast = useToast();
   const update = useUpdateService(service.id);
@@ -169,6 +183,27 @@ function ServiceDetail({ service }: { service: ServiceRow }) {
                   label: 'Bookable online',
                   value: service.online_bookable ? 'Yes' : 'No',
                 },
+                ...(service.kind !== 'product'
+                  ? [
+                      {
+                        key: 'photos',
+                        label: 'Photos to complete',
+                        value:
+                          (service.min_before_photos ?? 0) + (service.min_after_photos ?? 0) === 0
+                            ? 'No minimum'
+                            : `${service.min_before_photos} before · ${service.min_after_photos} after`,
+                      },
+                    ]
+                  : []),
+                ...(canSeePay
+                  ? [
+                      {
+                        key: 'commission',
+                        label: 'Service commission',
+                        value: describeCommission(service, currency) ?? 'None',
+                      },
+                    ]
+                  : []),
                 { key: 'sort', label: 'Sort order', value: String(service.sort) },
                 {
                   key: 'description',
@@ -183,6 +218,12 @@ function ServiceDetail({ service }: { service: ServiceRow }) {
           <PriceGrid service={service} canManage={canManage} />
           {service.kind === 'package' && (
             <PackageItemsCard service={service} canManage={canManage} />
+          )}
+          {canManage && service.kind !== 'product' && (
+            <FollowupsCard service={service} canManage={canManage} />
+          )}
+          {canSeeInventory && service.kind !== 'product' && (
+            <ConsumablesCard service={service} canManage={canManageInventory} />
           )}
         </div>
         <div className="flex min-w-0 flex-col gap-5">

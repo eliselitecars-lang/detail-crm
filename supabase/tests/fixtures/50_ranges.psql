@@ -1,0 +1,12 @@
+-- Which later migration ranges are applied (psql variables for \if).
+-- The scheduling range (0050-0059) is merged and deployable before money,
+-- ops and comms, so `scripts/test_db.sh --ranges 0001-0059 --tests '50_*'`
+-- must pass: 50_* files wrap the sections that exercise a later range's
+-- behaviour in `\if :has_money` / `\if :has_ops` / `\if :has_comms`.
+--   has_money  money 0060-0069 (price_services_core's p_starts_at, 0069)
+--   has_ops    ops 0070-0078 (documents, 0071)
+--   has_comms  comms 0080-0089 (custom_fields, 0081)
+select to_regprocedure('public.price_services_core(uuid,uuid,uuid,uuid[],uuid,boolean,timestamptz)') is not null as has_money,
+       to_regclass('public.documents') is not null as has_ops,
+       to_regclass('public.custom_fields') is not null as has_comms
+\gset

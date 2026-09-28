@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { AppError } from '@/lib/errors';
 import {
+  answersFor,
+  applyPrefill,
   buildPayload,
+  describeBookableDays,
+  readPrefill,
+  visibleQuestions,
+  weekdayRestriction,
   canGoToNextWeek,
   canGoToPreviousWeek,
   classifyBookingError,
@@ -271,5 +277,107 @@ describe('classifyBookingError', () => {
     );
     expect(step('Enter a valid email address.')).toBe('details');
     expect(step('This coupon has expired.')).toBe('details');
+  });
+});
+
+describe('links into the wizard (prefill)', () => {
+  it('reads only well-formed ids and codes', () => {
+    const p = readPrefill(
+      new URLSearchParams(
+        `services=${WASH.toUpperCase()},bad,${WAX}&category=${SEDAN}&coupon=FRIEND-7K2&link=nope&embed=1`,
+      ),
+    );
+    expect(p).toEqual({
+      serviceIds: [WASH, WAX],
+      categoryId: SEDAN,
+      coupon: 'FRIEND-7K2',
+      linkToken: null,
+      embed: true,
+    });
+    expect(readPrefill(new URLSearchParams('coupon=<script>')).coupon).toBeNull();
+  });
+
+  it('applies what the catalog offers for that size', () => {
+    const state = applyPrefill(initialWizardState(profileFixture()), catalogFixture(), {
+      serviceIds: [WASH, WAX, 'ffffffff-ffff-4fff-8fff-ffffffffffff'],
+      categoryId: TRUCK,
+      coupon: 'SAVE5',
+      linkToken: null,
+      embed: false,
+    });
+    expect(state.vehicle.categoryId).toBe(TRUCK);
+    expect(state.serviceIds).toEqual([WASH]);
+    expect(state.addonIds).toEqual([WAX]);
+    expect(state.couponPrefill).toBe('SAVE5');
+    const unknownSize = applyPrefill(initialWizardState(profileFixture()), catalogFixture(), {
+      serviceIds: [COAT],
+      categoryId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      coupon: null,
+      linkToken: null,
+      embed: false,
+    });
+    expect(unknownSize.vehicle.categoryId).toBeNull();
+    expect(unknownSize.serviceIds).toEqual([COAT]);
+  });
+});
+
+describe('booking questions and weekdays', () => {
+  const questions = [
+    {
+      key: 'gate_code',
+      label: 'Gate code',
+      type: 'text' as const,
+      options: [],
+      help_text: null,
+      required: true,
+      location_scope: 'mobile' as const,
+    },
+    {
+      key: 'pets',
+      label: 'Pets',
+      type: 'checkbox' as const,
+      options: [],
+      help_text: null,
+      required: false,
+      location_scope: null,
+    },
+  ];
+
+  it('shows questions for the location and validates the answers', () => {
+    expect(visibleQuestions(questions, 'shop').map((q) => q.key)).toEqual(['pets']);
+    expect(visibleQuestions(questions, 'mobile').map((q) => q.key)).toEqual(['gate_code', 'pets']);
+    expect(answersFor(questions, {}).errors).toEqual({ gate_code: 'Gate code is required' });
+    expect(answersFor(questions, { gate_code: ' 12 ', pets: true }).answers).toEqual({
+      gate_code: '12',
+      pets: true,
+    });
+  });
+
+  it('only sends answers to the questions shown', () => {
+    const state = {
+      ...initialWizardState(profileFixture({ business_type: 'fixed' })),
+      slot: { startsAt: '2026-10-01T14:00:00.000Z', endsAt: '2026-10-01T15:30:00.000Z' },
+      answers: { gate_code: '9', pets: true },
+    };
+    const payload = buildPayload(state, 'fixed', { questions, linkToken: null });
+    expect(payload.answers).toEqual({ pets: true });
+    expect(payload).not.toHaveProperty('link_token');
+  });
+
+  it('sends a question error back to the details step', () => {
+    const error = Object.assign(new Error('Gate code is required'), { code: '22023' });
+    expect(classifyBookingError(error, ['Gate code']).step).toBe('details');
+  });
+
+  it('describes category weekday limits', () => {
+    const catalog = catalogFixture();
+    expect(weekdayRestriction(catalog, [WASH])).toBeNull();
+    catalog.service_categories = [{ id: 'sc-1', name: 'Detailing', bookable_weekdays: [5, 1] }];
+    expect(weekdayRestriction(catalog, [WASH, WAX])).toEqual({
+      categories: ['Detailing'],
+      weekdays: [1, 5],
+    });
+    expect(describeBookableDays([1, 5])).toBe('Mondays and Fridays');
+    expect(describeBookableDays([0, 2, 4])).toBe('Sundays, Tuesdays and Thursdays');
   });
 });

@@ -12,13 +12,16 @@ describe('visibleNav', () => {
     'Calendar',
     'Jobs',
     'Customers',
+    'Tasks',
     'Quotes',
     'Invoices',
     'Payments',
     'Memberships',
+    'Gift cards',
     'Messages',
     'Campaigns',
     'Reports',
+    'Inventory',
     'Team',
     'Timesheets',
     'Catalog',
@@ -36,9 +39,11 @@ describe('visibleNav', () => {
       'Dashboard',
       'Calendar',
       'Jobs',
+      'Tasks',
       'Reports',
       'Timesheets',
       'Catalog',
+      'Settings',
     ]);
     expect(labels('technician', true)).toEqual(labels('technician'));
   });

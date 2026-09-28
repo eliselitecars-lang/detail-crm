@@ -4,7 +4,7 @@ import { formatCents } from '@/lib/money';
 import { EdgeFunctionError } from '@/features/quotes/shared/edge';
 import { newRequestNonce } from '@/features/quotes/shared/format';
 import {
-  isCardMethod,
+  isStripeMethod,
   paymentMethodLabel,
   refundableCents,
 } from '@/features/payments/paymentFormat';
@@ -25,9 +25,11 @@ export function RefundDialog({ payment, onClose, currency }: RefundDialogProps) 
       title="Refund payment"
       description={
         payment
-          ? isCardMethod(payment.method)
+          ? isStripeMethod(payment.method)
             ? `Refunds ${paymentMethodLabel(payment)} through Stripe. It can take 5–10 days to reach the customer.`
-            : `Records money handed back for this ${paymentMethodLabel(payment).toLowerCase()} payment.`
+            : payment.method === 'gift_card'
+              ? 'Puts the amount back on the gift card or store credit it was paid with.'
+              : `Records money handed back for this ${paymentMethodLabel(payment).toLowerCase()} payment.`
           : undefined
       }
       size="sm"

@@ -1,4 +1,4 @@
-import { Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useRef, useState } from 'react';
 import {
   Button,
@@ -6,6 +6,7 @@ import {
   Dialog,
   EmptyState,
   FormField,
+  IconButton,
   Input,
   Select,
   Switch,
@@ -25,8 +26,13 @@ import {
 } from '../api';
 import { DURATION_UNITS, type DurationUnit } from '../schemas';
 import {
+  MAX_REMINDERS,
   draftFromRow,
   insertPlaceholder,
+  reminderOffsetsOf,
+  remindersError,
+  remindersFromDrafts,
+  remindersPatch,
   isEmptyPatch,
   offsetDraftFrom,
   offsetError,
@@ -73,6 +79,22 @@ export function TemplateEditorDialog({
   const [drafts, setDrafts] = useState<Partial<Record<TemplateChannel, ChannelDraft>>>({});
   const storedOffset = rows.find((r) => r.offset_minutes !== null)?.offset_minutes ?? null;
   const [offsetState, setOffsetState] = useState<OffsetDraft>(() => offsetDraftFrom(storedOffset));
+  const storedReminders = reminderOffsetsOf(rows);
+  const storedRemindersKey = storedReminders.join(',');
+  const [reminderState, setReminderState] = useState<{ base: string; items: OffsetDraft[] }>(
+    () => ({ base: storedRemindersKey, items: storedReminders.map(offsetDraftFrom) }),
+  );
+  const reminderDrafts =
+    reminderState.base === storedRemindersKey
+      ? reminderState.items
+      : storedReminders.map(offsetDraftFrom);
+  const setReminderDrafts = (items: OffsetDraft[]) =>
+    setReminderState({ base: storedRemindersKey, items });
+  const multi = meta.multipleReminders === true;
+  const nextReminders = multi ? remindersFromDrafts(meta, reminderDrafts) : null;
+  const remindersProblem = multi ? remindersError(meta, reminderDrafts) : undefined;
+  const remindersChanged =
+    multi && nextReminders !== null && nextReminders.join(',') !== storedRemindersKey;
   const [showErrors, setShowErrors] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -87,16 +109,16 @@ export function TemplateEditorDialog({
   const edit = (row: MessageTemplate, patch: Partial<ChannelDraft>) =>
     setDrafts((prev) => ({ ...prev, [row.channel]: { ...draftFor(row), ...patch } }));
 
-  const nextOffset = meta.timing
-    ? offsetFromInput(meta, offsetDraft.value, offsetDraft.unit)
-    : null;
+  const nextOffset =
+    meta.timing && !multi ? offsetFromInput(meta, offsetDraft.value, offsetDraft.unit) : null;
   const offsetChanged =
-    meta.timing !== undefined && nextOffset !== null && nextOffset !== storedOffset;
-  const offsetProblem = offsetError(meta, offsetDraft);
+    meta.timing !== undefined && !multi && nextOffset !== null && nextOffset !== storedOffset;
+  const offsetProblem = multi ? remindersProblem : offsetError(meta, offsetDraft);
   const changed = rows.filter((row) => !isEmptyPatch(patchFor(row, draftFor(row))));
   const dirty =
     changed.length > 0 ||
     offsetChanged ||
+    remindersChanged ||
     (meta.timing !== undefined && offsetProblem !== undefined);
 
   const save = async () => {
@@ -113,11 +135,14 @@ export function TemplateEditorDialog({
     }
     setSaving(true);
     try {
-      let offsetSaved = !offsetChanged;
+      let offsetSaved = !offsetChanged && !remindersChanged;
       for (const row of rows) {
         const patch = patchFor(row, draftFor(row));
         if (!offsetSaved) {
-          patch.offset_minutes = nextOffset;
+          // One row carries the schedule; the server copies it to the other channel.
+          if (remindersChanged && nextReminders)
+            Object.assign(patch, remindersPatch(nextReminders));
+          else patch.offset_minutes = nextOffset;
           offsetSaved = true;
         }
         if (!isEmptyPatch(patch)) await update.mutateAsync({ id: row.id, patch });
@@ -180,7 +205,7 @@ export function TemplateEditorDialog({
       }
     >
       <div className="flex flex-col gap-4">
-        {meta.timing && (
+        {meta.timing && !multi && (
           <fieldset disabled={!canEdit} className="flex min-w-0 flex-col gap-1.5">
             <legend className="text-ink mb-1.5 text-sm font-medium">When to send</legend>
             <div className="flex flex-wrap items-center gap-2">
@@ -220,6 +245,84 @@ export function TemplateEditorDialog({
             )}
           </fieldset>
         )}
+        {meta.timing && multi && (
+          <fieldset disabled={!canEdit} className="flex min-w-0 flex-col gap-2">
+            <legend className="text-ink mb-1.5 text-sm font-medium">When to send</legend>
+            <ul className="flex flex-col gap-2">
+              {reminderDrafts.map((draft, index) => (
+                <li key={index} className="flex flex-wrap items-center gap-2">
+                  <div className="w-24 shrink-0">
+                    <Input
+                      aria-label={`Reminder ${index + 1} amount`}
+                      inputMode="numeric"
+                      value={draft.value}
+                      aria-invalid={showErrors && remindersProblem ? true : undefined}
+                      onChange={(event) =>
+                        setReminderDrafts(
+                          reminderDrafts.map((d, i) =>
+                            i === index ? { ...d, value: event.target.value } : d,
+                          ),
+                        )
+                      }
+                    />
+                  </div>
+                  <Select
+                    aria-label={`Reminder ${index + 1} unit`}
+                    className="w-32"
+                    value={draft.unit}
+                    options={DURATION_UNITS.map((u) => ({ value: u, label: UNIT_LABELS[u] }))}
+                    onChange={(event) => {
+                      const unit = DURATION_UNITS.find((u) => u === event.target.value);
+                      if (unit) {
+                        setReminderDrafts(
+                          reminderDrafts.map((d, i) => (i === index ? { ...d, unit } : d)),
+                        );
+                      }
+                    }}
+                  />
+                  <span className="text-muted text-sm">before the appointment starts</span>
+                  {reminderDrafts.length > 1 && canEdit && (
+                    <IconButton
+                      label={`Remove reminder ${index + 1}`}
+                      variant="ghost"
+                      size="sm"
+                      icon={<X aria-hidden="true" />}
+                      onClick={() =>
+                        setReminderDrafts(reminderDrafts.filter((_, i) => i !== index))
+                      }
+                    />
+                  )}
+                </li>
+              ))}
+            </ul>
+            {canEdit && reminderDrafts.length < MAX_REMINDERS && (
+              <div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leadingIcon={<Plus className="size-4" aria-hidden="true" />}
+                  onClick={() =>
+                    setReminderDrafts([...reminderDrafts, { base: null, value: '', unit: 'hours' }])
+                  }
+                >
+                  Add another reminder
+                </Button>
+              </div>
+            )}
+            {remindersProblem &&
+            (showErrors || reminderDrafts.some((d) => d.value.trim() !== '')) ? (
+              <p role="alert" className="text-danger-ink text-xs font-medium">
+                {remindersProblem}
+              </p>
+            ) : (
+              <p className="text-muted text-xs">
+                Up to {MAX_REMINDERS} reminders, e.g. 2 days and 2 hours before. They apply to both
+                the text and the email; a customer never gets two at once.
+              </p>
+            )}
+          </fieldset>
+        )}
+        {meta.timingNote && <p className="text-muted text-sm">{meta.timingNote}</p>}
         <Tabs label="Message channel" items={items} value={channel} onChange={setChannel} />
       </div>
     </Dialog>

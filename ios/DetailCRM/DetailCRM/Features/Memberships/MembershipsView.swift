@@ -300,8 +300,15 @@ struct MembershipMemberRow: View {
                 }
             }
             Spacer(minLength: Theme.Spacing.sm)
-            if let plan {
-                MoneyText(cents: plan.priceCents, currencyCode: currencyCode, size: .small)
+            if let price = membership.price(plan: plan) {
+                VStack(alignment: .trailing, spacing: Theme.Spacing.xxs) {
+                    MoneyText(cents: price, currencyCode: currencyCode, size: .small)
+                    if let billing = membership.billingText(plan: plan) {
+                        Text(billing)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
             }
             Image(systemName: "chevron.right")
                 .foregroundStyle(Theme.textTertiary)
@@ -384,6 +391,8 @@ private struct MembershipPlanRow: View {
                         .foregroundStyle(Theme.textPrimary)
                     if !plan.active {
                         StatusBadge(text: "Inactive", tone: .neutral)
+                    } else if plan.onlineJoinable {
+                        StatusBadge(text: "Online", tone: .info)
                     }
                 }
                 if let description = plan.planDescription?.trimmedNonEmpty {
@@ -399,6 +408,11 @@ private struct MembershipPlanRow: View {
                 }
                 if !plan.includedServiceIDs.isEmpty {
                     Text("\(plan.includedServiceIDs.count) included service\(plan.includedServiceIDs.count == 1 ? "" : "s")")
+                        .font(Theme.Typography.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                if let uses = plan.usesText {
+                    Text(uses)
                         .font(Theme.Typography.footnote)
                         .foregroundStyle(Theme.textSecondary)
                 }

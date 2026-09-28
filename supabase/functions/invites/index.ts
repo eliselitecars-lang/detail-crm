@@ -36,7 +36,7 @@ import { createActionRouter, jsonAction } from "../_shared/actions.ts";
 import { requireShopRole, requireUser, ROLES } from "../_shared/auth.ts";
 import { fromWithDisplayName } from "../_shared/email.ts";
 import type { Env } from "../_shared/env.ts";
-import { errors, HttpError } from "../_shared/errors.ts";
+import { errors, HttpError, subscriptionRefusal } from "../_shared/errors.ts";
 import { PROVIDER_TIMEOUT_MS, withTimeout } from "../_shared/fetch_timeout.ts";
 import { createHandler } from "../_shared/http.ts";
 import { links } from "../_shared/links.ts";
@@ -100,8 +100,14 @@ function dbFailure(operation: string, cause: unknown): Error {
   return new Error(`${operation} failed`, { cause });
 }
 
-/** invite_member refusals -> stable codes (SQL text is only logged). */
-function inviteRefusal(error: { code?: string | null }): Error {
+/**
+ * invite_member refusals -> stable codes (SQL text is only logged), except
+ * the plan's seat limit (PT402, 0102): `402 payment_required`, reason
+ * `seat_limit`, with the database's own sentence.
+ */
+function inviteRefusal(error: { code?: string | null; message?: string | null }): Error {
+  const limited = subscriptionRefusal(error);
+  if (limited) return limited;
   switch (error.code) {
     case "42501":
       return new HttpError("forbidden", "Only owners and admins can invite team members.", {

@@ -1,7 +1,16 @@
 import { useState } from 'react';
-import { Button, Checkbox, Dialog, FormField, Input, Textarea, useToast } from '@/components/ui';
+import {
+  Button,
+  Checkbox,
+  Dialog,
+  FormField,
+  Input,
+  RadioGroup,
+  Textarea,
+  useToast,
+} from '@/components/ui';
 import { formatCents } from '@/lib/money';
-import { useSetQuoteStatus } from '../api';
+import { useSetQuoteStatus, type QuoteOptionRow } from '../api';
 import type { DocLine } from '../shared/lines';
 
 export interface RecordResponseDialogProps {
@@ -12,6 +21,10 @@ export interface RecordResponseDialogProps {
   /** The quote's lines: optional ones get a "customer chose this" checkbox on approval. */
   lines: readonly DocLine[];
   currency: string;
+  /** Proposal options: approving records which one the customer chose. */
+  options?: readonly QuoteOptionRow[];
+  /** Preselected option (the quote's current choice). */
+  defaultOptionId?: string | null;
 }
 
 /** Staff record an approval/decline the customer gave in person or by phone. */
@@ -21,8 +34,11 @@ export function RecordResponseDialog({
   onClose,
   lines,
   currency,
+  options = [],
+  defaultOptionId = null,
 }: RecordResponseDialogProps) {
   const hasOptional = lines.some((line) => line.optional);
+  const hasOptions = options.length > 0;
   return (
     <Dialog
       open={response !== null}
@@ -31,9 +47,11 @@ export function RecordResponseDialog({
       description={
         response === 'declined'
           ? 'Use this when the customer declined outside the online quote page.'
-          : hasOptional
-            ? 'Use this when the customer approved in person or by phone. Tick the optional items they chose; unticked ones are left off the job.'
-            : 'Use this when the customer approved in person or by phone.'
+          : hasOptions
+            ? 'Use this when the customer approved in person or by phone. Choose the option they picked; the other options are left off the job.'
+            : hasOptional
+              ? 'Use this when the customer approved in person or by phone. Tick the optional items they chose; unticked ones are left off the job.'
+              : 'Use this when the customer approved in person or by phone.'
       }
       size="sm"
     >
@@ -44,6 +62,8 @@ export function RecordResponseDialog({
           onClose={onClose}
           lines={lines}
           currency={currency}
+          options={options}
+          defaultOptionId={defaultOptionId}
         />
       )}
     </Dialog>
@@ -56,24 +76,43 @@ function ResponseForm({
   onClose,
   lines,
   currency,
+  options,
+  defaultOptionId,
 }: {
   quoteId: string;
   response: 'approved' | 'declined';
   onClose: () => void;
   lines: readonly DocLine[];
   currency: string;
+  options: readonly QuoteOptionRow[];
+  defaultOptionId: string | null;
 }) {
   const toast = useToast();
   const setStatus = useSetQuoteStatus(quoteId);
   const [text, setText] = useState('');
-  const optionalLines = response === 'approved' ? lines.filter((line) => line.optional) : [];
+  const hasOptions = options.length > 0;
+  const [optionId, setOptionId] = useState<string>(() =>
+    defaultOptionId && options.some((o) => o.id === defaultOptionId) ? defaultOptionId : '',
+  );
+  const [optionError, setOptionError] = useState<string | null>(null);
+  // Optional items the customer can pick: shared ones, plus those of the chosen option.
+  const optionalLines =
+    response === 'approved'
+      ? lines.filter(
+          (line) => line.optional && (line.option_id === null || line.option_id === optionId),
+        )
+      : [];
   const [chosen, setChosen] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(optionalLines.map((line) => [line.id, line.selected])),
+    Object.fromEntries(lines.filter((l) => l.optional).map((line) => [line.id, line.selected])),
   );
   const tooLong = response === 'approved' ? text.length > 200 : text.length > 1000;
 
   const submit = async () => {
     if (tooLong) return;
+    if (response === 'approved' && hasOptions && !optionId) {
+      setOptionError('Choose the option the customer approved.');
+      return;
+    }
     try {
       await setStatus.mutateAsync(
         response === 'approved'
@@ -83,6 +122,7 @@ function ResponseForm({
               selectedOptionalLineIds: optionalLines
                 .filter((line) => chosen[line.id] ?? line.selected)
                 .map((line) => line.id),
+              optionId: hasOptions ? optionId : null,
             }
           : { status: 'declined', declinedReason: text.trim() || null },
       );
@@ -102,6 +142,22 @@ function ResponseForm({
         void submit();
       }}
     >
+      {response === 'approved' && hasOptions && (
+        <RadioGroup<string>
+          label="Option the customer chose"
+          value={optionId}
+          onChange={(value) => {
+            setOptionId(value);
+            setOptionError(null);
+          }}
+          options={options.map((option) => ({
+            value: option.id,
+            label: option.name,
+            description: formatCents(option.total_cents, { currency }),
+          }))}
+          {...(optionError ? { error: optionError } : {})}
+        />
+      )}
       {optionalLines.length > 0 && (
         <fieldset className="flex flex-col gap-2">
           <legend className="text-ink mb-1 text-sm font-medium">

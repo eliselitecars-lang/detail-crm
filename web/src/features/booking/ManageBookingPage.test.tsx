@@ -1,10 +1,17 @@
 import { screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute } from '@/test/render';
 import { navigation } from '@/features/public-docs/shared/checkout';
-import { mockRpc, pgError, resetSupabaseMock, supabase } from '@/test/supabaseMock';
+import {
+  mockRpc,
+  pgError,
+  resetSupabaseMock,
+  setFunctionResult,
+  supabase,
+} from '@/test/supabaseMock';
 import ManageBookingPage from './ManageBookingPage';
-import { bookingDocFixture, TOKEN } from './testFixtures';
+import { bookingDocFixture, profileFixture, TOKEN } from './testFixtures';
+import { resetTrackingForTests } from './tracking';
 
 vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
@@ -14,6 +21,16 @@ function render(path = `/booking/${TOKEN}`) {
 
 beforeEach(() => {
   resetSupabaseMock();
+  resetTrackingForTests();
+  sessionStorage.clear();
+});
+
+afterEach(() => {
+  document.head.querySelectorAll('script[src^="https://"]').forEach((s) => s.remove());
+  const w = window as Window & { fbq?: unknown; gtag?: unknown; dataLayer?: unknown };
+  delete w.fbq;
+  delete w.gtag;
+  delete w.dataLayer;
 });
 
 describe('ManageBookingPage', () => {
@@ -115,6 +132,11 @@ describe('ManageBookingPage', () => {
     render();
     expect(await screen.findByText('This booking was cancelled')).toBeInTheDocument();
     expect(screen.queryByText('Balance')).not.toBeInTheDocument();
+    // "Book again" opens the booking page in a new document without a referrer,
+    // so the booking page's tags never see this page's token.
+    const again = screen.getByRole('link', { name: 'Book again' });
+    expect(again).toHaveAttribute('href', '/book/glacier');
+    expect(again).toHaveAttribute('rel', 'noreferrer');
   });
 
   it('shows the balance on an open booking', async () => {
@@ -177,5 +199,150 @@ describe('ManageBookingPage', () => {
     render('/booking/not-a-token');
     expect(await screen.findByText('We couldn’t find this booking')).toBeInTheDocument();
     expect(calls).toHaveLength(0);
+  });
+
+  it('lists documents the shop shared, with short-lived download links', async () => {
+    mockRpc({
+      public_get_booking: { data: bookingDocFixture() },
+      public_booking_documents: {
+        data: [
+          {
+            id: 'doc-1',
+            file_name: 'Coating warranty.pdf',
+            content_type: 'application/pdf',
+            size_bytes: 204800,
+            created_at: '2026-09-02T15:00:00Z',
+          },
+        ],
+      },
+    });
+    setFunctionResult('public-media', {
+      data: {
+        expires_in: 600,
+        items: [
+          {
+            ref_id: 'doc-1',
+            kind: 'document',
+            url: 'https://unit-test.supabase.co/storage/v1/object/sign/documents/x?token=t',
+          },
+        ],
+      },
+    });
+    render();
+    const card = await screen.findByRole('region', { name: 'Documents' });
+    expect(within(card).getByText('Coating warranty.pdf')).toBeInTheDocument();
+    expect(within(card).getByText(/PDF · 200 KB/)).toBeInTheDocument();
+    const open = await within(card).findByRole('link', { name: /Open Coating warranty\.pdf/ });
+    expect(open).toHaveAttribute(
+      'href',
+      'https://unit-test.supabase.co/storage/v1/object/sign/documents/x?token=t',
+    );
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('public-media', {
+      body: { action: 'booking_documents', token: TOKEN },
+    });
+  });
+
+  it('shows nothing extra when no documents were shared', async () => {
+    mockRpc({
+      public_get_booking: { data: bookingDocFixture() },
+      public_booking_documents: { data: [] },
+    });
+    render();
+    await screen.findByRole('heading', { name: 'Booking #1042', level: 1 });
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('public_booking_documents', { p_token: TOKEN }),
+    );
+    expect(screen.queryByRole('region', { name: 'Documents' })).not.toBeInTheDocument();
+    expect(supabase.functions.invoke).not.toHaveBeenCalledWith('public-media', expect.anything());
+  });
+
+  it('reports a paid deposit to GA4, then stops the tag; token links leave the page meanwhile', async () => {
+    mockRpc({
+      public_get_booking: {
+        data: bookingDocFixture({
+          deposit: {
+            required_cents: 3000,
+            paid_cents: 3000,
+            due_cents: 0,
+            status: 'paid',
+            payment_pending: false,
+            card_payments_enabled: true,
+          },
+        }),
+      },
+      public_shop_profile: {
+        data: profileFixture({
+          tracking: { meta_pixel_id: '1234567890', ga4_measurement_id: 'G-ABC123' },
+        }),
+      },
+      public_booking_documents: {
+        data: [
+          {
+            id: 'doc-1',
+            file_name: 'Coating warranty.pdf',
+            content_type: 'application/pdf',
+            size_bytes: 204800,
+            created_at: '2026-09-02T15:00:00Z',
+          },
+        ],
+      },
+    });
+    setFunctionResult('public-media', {
+      data: {
+        expires_in: 600,
+        items: [
+          {
+            ref_id: 'doc-1',
+            kind: 'document',
+            url: 'https://unit-test.supabase.co/storage/v1/object/sign/documents/x?token=t',
+          },
+        ],
+      },
+    });
+    const { user, router } = render(`/booking/${TOKEN}?paid=1`);
+    const w = window as unknown as Window & {
+      fbq?: unknown;
+      dataLayer?: unknown[];
+    } & Record<string, unknown>;
+    const events = () => (w.dataLayer ?? []).map((a) => Array.from(a as ArrayLike<unknown>));
+    await waitFor(() => expect(events().some((e) => e[1] === 'purchase')).toBe(true));
+    // Only GA4, and with a page location that has no token.
+    expect(w.fbq).toBeUndefined();
+    expect(JSON.stringify(events())).not.toContain(TOKEN);
+
+    // While the tag is on: the signed file link is a button and the form
+    // link is a full page load (never pushed into this document).
+    const card = await screen.findByRole('region', { name: 'Documents' });
+    const open = await within(card).findByRole('button', { name: /Open Coating warranty\.pdf/ });
+    const windowOpen = vi.spyOn(window, 'open').mockReturnValue(null);
+    await user.click(open);
+    expect(windowOpen).toHaveBeenCalledWith(
+      'https://unit-test.supabase.co/storage/v1/object/sign/documents/x?token=t',
+      '_blank',
+      'noopener,noreferrer',
+    );
+    let prevented: boolean | null = null;
+    const record = (event: Event) => {
+      prevented = event.defaultPrevented;
+      event.preventDefault();
+    };
+    window.addEventListener('click', record);
+    try {
+      await user.click(screen.getByRole('link', { name: /Sign Vehicle waiver/ }));
+    } finally {
+      window.removeEventListener('click', record);
+    }
+    expect(prevented).toBe(false);
+    expect(router.state.location.pathname).toBe(`/booking/${TOKEN}`);
+
+    // GA4 confirms the hit: the tag is switched off and links are normal again.
+    const purchase = events().find((e) => e[1] === 'purchase');
+    (purchase?.[2] as { event_callback: () => void }).event_callback();
+    expect(w['ga-disable-G-ABC123']).toBe(true);
+    expect(
+      await within(card).findByRole('link', { name: /Open Coating warranty\.pdf/ }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('link', { name: /Sign Vehicle waiver/ }));
+    expect(router.state.location.pathname).toBe('/f/dddddddd-dddd-4ddd-8ddd-dddddddddddd');
   });
 });

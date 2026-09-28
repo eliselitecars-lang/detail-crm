@@ -1,13 +1,14 @@
 // In-process fake of the Supabase Management API + the Stripe webhook
-// endpoints API, stateful enough to run scripts/deploy/deploy_backend.sh end
-// to end (test/deploy_backend.test.mjs). Every request is recorded.
+// endpoints API + the deployed `billing` function (sync_plans), stateful
+// enough to run scripts/deploy/deploy_backend.sh end to end
+// (test/deploy_backend.test.mjs). Every request is recorded.
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 
 const sha = (v) => createHash('sha256').update(v, 'utf8').digest('hex');
 
-export async function startFakeApi({ ref, deployedFile, token = 'sbp_fake', stripeKey }) {
+export async function startFakeApi({ ref, deployedFile, token = 'sbp_fake', stripeKey, cronSecret }) {
   const state = {
     requests: [],
     secrets: new Map(),
@@ -19,6 +20,11 @@ export async function startFakeApi({ ref, deployedFile, token = 'sbp_fake', stri
     vault: [],
     endpoints: new Map(),
     endpointCreates: 0,
+    // platform_config billing keys (set_billing_config) and billing sync_plans calls
+    billingConfig: new Map(),
+    billingConfigCalls: [],
+    syncCalls: [],
+    syncResponse: { status: 200, body: { upserted: 2, deactivated: 0, skipped: [], warnings: [] } },
   };
   const server = createServer(async (req, res) => {
     const chunks = [];
@@ -90,6 +96,16 @@ export async function startFakeApi({ ref, deployedFile, token = 'sbp_fake', stri
       return send(405, {});
     }
 
+    // ------------------------------------------------ the deployed billing function
+    if (path === '/functions/v1/billing') {
+      state.syncCalls.push({ secretOk: req.headers['x-cron-secret'] === cronSecret, body });
+      if (req.headers['x-cron-secret'] !== cronSecret) {
+        return send(401, { error: 'Invalid cron credentials.', code: 'unauthorized', request_id: 'r1' });
+      }
+      if (body?.action !== 'sync_plans') return send(400, { error: 'Unknown action.', code: 'unknown_action', request_id: 'r2' });
+      return send(state.syncResponse.status, state.syncResponse.body);
+    }
+
     // ------------------------------------------------ Management API
     if (req.headers.authorization !== `Bearer ${token}`) return send(401, { message: 'Unauthorized' });
     const m = /^\/v1\/projects\/([^/]+)(\/.*)?$/.exec(path);
@@ -152,6 +168,16 @@ export async function startFakeApi({ ref, deployedFile, token = 'sbp_fake', stri
         state.vaultValues = { functionsUrl: fnUrl, cronSecret: secret };
         state.cronJobs = [...q.matchAll(/cron\.schedule\(\s*'([^']+)'/g)].map((x) => ({ jobname: x[1], active: true }));
         return send(201, []);
+      }
+      const setBilling = /select public\.set_billing_config\(p_enabled => (true|false), p_trial_days => (\d+)\)/.exec(q);
+      if (setBilling) {
+        state.billingConfigCalls.push({ enabled: setBilling[1] === 'true', trialDays: Number(setBilling[2]) });
+        state.billingConfig.set('billing_enabled', setBilling[1]);
+        state.billingConfig.set('billing_trial_days', setBilling[2]);
+        return send(201, [{ set_billing_config: null }]);
+      }
+      if (/from public\.platform_config/.test(q) && /billing_enabled/.test(q)) {
+        return send(201, [...state.billingConfig.entries()].sort().map(([key, value]) => ({ key, value })));
       }
       if (/from public\.platform_config/.test(q)) return send(201, state.platformConfig ? [{ value: state.platformConfig }] : []);
       if (/from cron\.job/.test(q)) return send(201, state.cronJobs);

@@ -2,8 +2,9 @@
 //  QuoteLineSheets.swift
 //  DetailCRM
 //
-//  Quote builder sheets: edit one line (custom or catalog-priced) and pick
-//  catalog services to add (prices come from `price_services`).
+//  Quote builder sheets: edit one line (custom, catalog-priced or a preset
+//  fee, and which proposal option it belongs to), pick catalog services to
+//  add (prices come from `price_services`) and pick a preset fee.
 //
 
 import SwiftUI
@@ -15,6 +16,8 @@ struct QuoteLineEditorSheet: View {
     let line: QuoteDraftLine
     let isNew: Bool
     let currencyCode: String
+    /// The quote's proposal options; empty hides the option picker.
+    var options: [MoneyQuoteOption.Draft] = []
     let onSave: (QuoteDraftLine) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -26,6 +29,8 @@ struct QuoteLineEditorSheet: View {
     @State private var discountText = ""
     @State private var taxable = true
     @State private var isOptional = false
+    /// nil = shared by every option.
+    @State private var optionLocalID: UUID?
     @State private var didSetUp = false
     @State private var errorText: String?
 
@@ -49,8 +54,25 @@ struct QuoteLineEditorSheet: View {
                 } header: {
                     Text("Price")
                 } footer: {
-                    if line.serviceID != nil {
+                    if line.feeID != nil {
+                        Text("A preset fee at the amount set for your shop; change it here for this quote only.")
+                    } else if line.serviceID != nil {
                         Text("Priced from your catalog; change it here for this quote only.")
+                    }
+                }
+                if !options.isEmpty {
+                    Section {
+                        Picker("Belongs to", selection: $optionLocalID) {
+                            Text("Every option").tag(UUID?.none)
+                            ForEach(options, id: \.localID) { option in
+                                Text(option.name.trimmedNonEmpty ?? "Untitled option").tag(Optional(option.localID))
+                            }
+                        }
+                        .themedRow()
+                    } header: {
+                        Text("Option")
+                    } footer: {
+                        Text("Items in every option are shared; otherwise the item is only in the chosen option.")
                     }
                 }
                 Section {
@@ -99,6 +121,7 @@ struct QuoteLineEditorSheet: View {
             : ""
         taxable = line.taxable
         isOptional = line.isOptional
+        optionLocalID = line.optionLocalID
     }
 
     private func submit() {
@@ -136,9 +159,20 @@ struct QuoteLineEditorSheet: View {
             updated.isSelected = false
         }
         updated.isOptional = isOptional
+        updated.optionLocalID = optionLocalID
         if price != line.unitPriceCents {
             // A price typed by staff replaces the catalog note.
             updated.pricingNote = nil
+        }
+        // A new fee line stays exactly as the server adds it unless edited.
+        if updated.feeIsPristine {
+            updated.feeIsPristine = updated.name == line.name
+                && updated.lineDescription == line.lineDescription
+                && updated.quantity == line.quantity
+                && updated.unitPriceCents == line.unitPriceCents
+                && updated.discountCents == line.discountCents
+                && updated.taxable == line.taxable
+                && updated.isOptional == line.isOptional
         }
         onSave(updated)
         dismiss()
@@ -302,5 +336,104 @@ private struct QuoteServiceRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+// MARK: - Preset fees (P-21)
+
+/// Picks one of the shop's preset fees (travel, disposal, …) for the quote.
+/// Fees and their amounts are set up by owners/admins on the web; the line
+/// is priced by the server (`add_fee_line`) when the quote is saved.
+struct MoneyFeePickerSheet: View {
+    let onPick: (JobsShopFee) -> Void
+
+    @Environment(AppState.self) private var appState
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var state: LoadState<[JobsShopFee]> = .idle
+
+    var body: some View {
+        NavigationStack {
+            LoadStateView(state, loadingLabel: "Loading fees…", retry: { await load() }) { fees in
+                list(fees)
+            }
+            .screenBackground()
+            .navigationTitle("Add a fee")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .task { await load() }
+        }
+    }
+
+    @ViewBuilder
+    private func list(_ fees: [JobsShopFee]) -> some View {
+        if fees.isEmpty {
+            EmptyStateView(
+                systemImage: "tag",
+                title: "No preset fees",
+                message: "Owners and admins add fees such as travel or disposal in Settings on the web."
+            )
+        } else {
+            List {
+                Section {
+                    ForEach(fees) { fee in
+                        Button {
+                            onPick(fee)
+                            dismiss()
+                        } label: {
+                            MoneyFeePickerSheet.Row(fee: fee, currencyCode: appState.currencyCode)
+                        }
+                        .buttonStyle(.plain)
+                        .themedRow()
+                    }
+                } footer: {
+                    Text("A fee is added as its own line at the amount set for the shop. You can still edit or remove it here.")
+                }
+            }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+        }
+    }
+
+    private func load() async {
+        guard let shopID = try? appState.requireShopID() else { return }
+        state.beginLoading()
+        let result = await LoadState<[JobsShopFee]>.result {
+            try await JobService.fees(shopID: shopID).filter(\.isSelectable)
+        }
+        state.apply(result)
+    }
+
+    /// One fee: name, tax and automatic rule, amount.
+    struct Row: View {
+        let fee: JobsShopFee
+        let currencyCode: String
+
+        var body: some View {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.md) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                    Text(fee.name)
+                        .font(Theme.Typography.body)
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(details)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Spacer(minLength: Theme.Spacing.sm)
+                MoneyText(cents: fee.amountCents, currencyCode: currencyCode, size: .small)
+            }
+            .padding(.vertical, Theme.Spacing.xs)
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
+            .accessibilityHint("Adds this fee to the quote")
+        }
+
+        private var details: String {
+            [fee.taxable ? "Taxed" : "Not taxed", fee.autoApplyText].compactMap { $0 }.joined(separator: " · ")
+        }
     }
 }

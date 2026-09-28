@@ -4,9 +4,11 @@
 //
 //  Calendar tab: Agenda / Day / Week over `calendar_events` for the
 //  visible range, in the SHOP time zone. Prev / next / Today / jump to a
-//  date; the + button (roles that create jobs) presents the New Job flow.
-//  Technicians see other people's jobs as anonymous busy blocks — the
-//  server decides that, this screen only renders it.
+//  date; the + menu (managers+) adds a job or a calendar event (time off,
+//  meeting, consultation, reminder, closed), and managers tap an event to
+//  edit it. The map button opens the day's mobile route. Technicians see
+//  other people's jobs as anonymous busy blocks — the server decides that,
+//  this screen only renders it. Realtime job changes refresh the range.
 //
 
 import SwiftUI
@@ -23,6 +25,7 @@ struct CalendarRangeData: Hashable, Sendable {
 struct CalendarHomeView: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(JobsRealtimeHub.self) private var realtime
 
     @State private var mode: CalendarMode = .day
     @State private var anchor: Date = Date()
@@ -32,6 +35,7 @@ struct CalendarHomeView: View {
     @State private var showingDatePicker = false
     @State private var showingNewJob = false
     @State private var newJobStart: Date?
+    @State private var eventSheet: JobsCalendarEventSheet.Target?
 
     private var clock: ShopClock { appState.clock }
 
@@ -84,6 +88,21 @@ struct CalendarHomeView: View {
         }) {
             NewJobView(prefillStart: newJobStart, prefillCustomerID: nil)
         }
+        .sheet(item: $eventSheet) { target in
+            JobsCalendarEventSheet(target: target) {
+                Task { await load(reset: false) }
+            }
+        }
+        // Someone scheduled, moved or cancelled a job (Realtime).
+        .onChange(of: realtime.revision(.jobs)) { _, _ in
+            Task { await load(reset: false) }
+        }
+    }
+
+    /// Managers open calendar events to edit them.
+    private var openEvent: ((CalendarEvent) -> Void)? {
+        guard appState.can(.editJobs) else { return nil }
+        return { event in eventSheet = .edit(event.id) }
     }
 
     // MARK: - Content (AnyView seam: the mode views are large generic trees)
@@ -94,6 +113,7 @@ struct CalendarHomeView: View {
         let cancelledShown = includeCancelled
         let currentClock = clock
         let colors = memberColors
+        let onOpenEvent = openEvent
         return AnyView(
             LoadStateView(state, loadingLabel: "Loading calendar…", retry: { await load(reset: true) }) { data in
                 if data.range == currentRange && data.includeCancelled == cancelledShown {
@@ -106,7 +126,8 @@ struct CalendarHomeView: View {
                         onSelectDay: { day in
                             anchor = day
                             mode = .day
-                        }
+                        },
+                        onOpenEvent: onOpenEvent
                     )
                 } else {
                     LoadingStateView(label: "Loading calendar…")
@@ -128,16 +149,48 @@ struct CalendarHomeView: View {
             .accessibilityLabel("Calendar filters")
         }
         ToolbarItem(placement: .topBarTrailing) {
+            NavigationLink {
+                JobsDayMapView(day: mapDay)
+            } label: {
+                Image(systemName: "map")
+            }
+            .accessibilityLabel("Map of the day's mobile jobs")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             if appState.can(.createJobs) {
-                Button {
-                    newJobStart = suggestedNewJobStart()
-                    showingNewJob = true
+                Menu {
+                    Button {
+                        newJobStart = suggestedNewJobStart()
+                        showingNewJob = true
+                    } label: {
+                        Label("New job", systemImage: "wrench.and.screwdriver")
+                    }
+                    Button {
+                        eventSheet = .new(start: suggestedEventStart())
+                    } label: {
+                        Label("New event or time off", systemImage: "calendar.badge.plus")
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
-                .accessibilityLabel("New job")
+                .accessibilityLabel("Add to the calendar")
             }
         }
+    }
+
+    /// The day the map opens on: the shown day in Day mode, else today.
+    private var mapDay: Date {
+        mode == .day ? clock.startOfDay(anchor) : clock.startOfDay(Date())
+    }
+
+    /// 9:00 on the shown day (Day mode), else the next whole hour.
+    private func suggestedEventStart() -> Date {
+        if mode == .day, !clock.isSameDay(anchor, Date()), let nine = clock.date(on: anchor, timeString: "09:00") {
+            return nine
+        }
+        let now = Date()
+        let hour = clock.calendar.dateInterval(of: .hour, for: now)?.end ?? now
+        return hour
     }
 
     // MARK: - Actions
@@ -220,6 +273,7 @@ private struct CalendarModeContent: View {
     let memberColors: [UUID: String]
     let onRefresh: () async -> Void
     let onSelectDay: (Date) -> Void
+    let onOpenEvent: ((CalendarEvent) -> Void)?
 
     var body: some View {
         switch mode {
@@ -233,7 +287,8 @@ private struct CalendarModeContent: View {
                     ),
                     clock: clock,
                     memberColors: memberColors,
-                    onRefresh: onRefresh
+                    onRefresh: onRefresh,
+                    onOpenEvent: onOpenEvent
                 )
             )
         case .day, .week:
@@ -244,7 +299,8 @@ private struct CalendarModeContent: View {
                     clock: clock,
                     memberColors: memberColors,
                     onRefresh: onRefresh,
-                    onSelectDay: onSelectDay
+                    onSelectDay: onSelectDay,
+                    onOpenEvent: onOpenEvent
                 )
                 // One identity per mode + range: a new range (or Day <-> Week
                 // on the same start) gets a fresh timeline and first-hour scroll.

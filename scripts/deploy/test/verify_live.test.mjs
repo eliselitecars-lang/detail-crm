@@ -14,8 +14,8 @@ const SERVICE = 'service-key-SECRET-for-tests';
 const TOKEN = 'sbp_verify_SECRET';
 const APP = 'https://app.example.com';
 
-async function verify({ faults = [], args = [], management = true, service = true } = {}) {
-  const live = await startFakeLive({ ref: REF, anon: ANON, service: SERVICE, token: TOKEN, app: APP, faults });
+async function verify({ faults = [], args = [], management = true, service = true, env: extraEnv = {}, billing } = {}) {
+  const live = await startFakeLive({ ref: REF, anon: ANON, service: SERVICE, token: TOKEN, app: APP, faults, billing });
   try {
     const env = {
       PATH: process.env.PATH,
@@ -26,6 +26,7 @@ async function verify({ faults = [], args = [], management = true, service = tru
       DEPLOY_SUPABASE_API_BASE: live.url,
       ...(management ? { SUPABASE_ACCESS_TOKEN: TOKEN } : {}),
       ...(service ? { SUPABASE_SERVICE_ROLE_KEY: SERVICE } : {}),
+      ...extraEnv,
     };
     return await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [SCRIPT, ...args], { env });
@@ -46,7 +47,22 @@ describe('verify_live.mjs', () => {
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /0 failed/);
     assert.match(r.out, /KNOWN rest: an unknown public token answers 4xx/);
-    for (const name of ['anon cannot read tenant tables', 'verify_jwt=true', 'CORS allows exactly', 'job-photos and signatures are not public', 'realtime: websocket', 'deployed functions carry', 'cron jobs']) {
+    for (const name of [
+      'anon cannot read tenant tables',
+      'verify_jwt=true',
+      'CORS allows exactly',
+      'job-photos and signatures are not public',
+      'realtime: websocket',
+      'deployed functions carry',
+      'cron jobs',
+      'fn billing: plans without a user session is 401',
+      'fn billing: a client-sent price on checkout is 400',
+      'fn billing: sync_plans without x-cron-secret is 401',
+      'fn billing-webhook: an unsigned request is 400 invalid_signature',
+      'fn billing-webhook: a forged signature is 400',
+      'fn billing-webhook: verify_jwt=false',
+      'management: billing config',
+    ]) {
       assert.match(r.out, new RegExp(`PASS  [^\\n]*${name.replace(/[()]/g, '\\$&')}`), `${name}:\n${r.out}`);
     }
     assert.ok(!r.out.includes(SERVICE) && !r.out.includes(TOKEN), 'keys must not be printed');
@@ -81,6 +97,27 @@ describe('verify_live.mjs', () => {
       assert.match(r.out, expect);
     });
   }
+
+  test('billing: a missing billing webhook secret is a SKIP while billing is off, a FAIL when it is on', async () => {
+    const off = await verify({ faults: ['billing-secret-missing'] });
+    assert.equal(off.code, 0, off.out);
+    assert.match(off.out, /SKIP  fn billing-webhook: a forged signature[^\n]*STRIPE_BILLING_WEBHOOK_SECRET is not set/);
+    const on = await verify({ faults: ['billing-secret-missing'], env: { BILLING_ENABLED: 'true' }, billing: { enabled: true, trialDays: 0 } });
+    assert.equal(on.code, 1, on.out);
+    assert.match(on.out, /FAIL  fn billing-webhook: a forged signature[\s\S]*server_misconfigured/);
+  });
+
+  test('billing: the project config must match the deploy inputs; billing deployed with verify_jwt=true is caught', async () => {
+    const ok = await verify({ env: { BILLING_ENABLED: 'true', BILLING_TRIAL_DAYS: '14' }, billing: { enabled: true, trialDays: 14 } });
+    assert.equal(ok.code, 0, ok.out);
+    assert.match(ok.out, /PASS  management: billing config[^\n]*billing ON, trial 14 day\(s\)/);
+    const mismatch = await verify({ env: { BILLING_ENABLED: 'true' }, billing: { enabled: false, trialDays: 0 } });
+    assert.equal(mismatch.code, 1, mismatch.out);
+    assert.match(mismatch.out, /FAIL  management: billing config[\s\S]*billing is off in the project but BILLING_ENABLED=true/);
+    const jwt = await verify({ faults: ['billing-verify-jwt'] });
+    assert.equal(jwt.code, 1, jwt.out);
+    assert.match(jwt.out, /FAIL  fn billing: verify_jwt=false[\s\S]*deployed with verify_jwt=true/);
+  });
 
   test('catches a site_url that is not APP_BASE_URL without the Management API', async () => {
     const r = await verify({ faults: ['site-url-localhost'], management: false });

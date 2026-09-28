@@ -41,7 +41,10 @@ Deno.test("invoice_checkout: anonymous payer gets a session for exactly the DB b
   assertEquals(form.get("line_items[0][price_data][currency]"), "usd");
   assertEquals(form.get("line_items[0][price_data][product_data][name]"), "Invoice #2001");
   assertEquals(form.get("line_items[1][price_data][unit_amount]"), null);
-  assertEquals(form.get("payment_intent_data[setup_future_usage]"), "off_session");
+  // P-31: the card is saved through the card options (a top-level
+  // setup_future_usage would hide pay-later and restrict bank debits).
+  assertEquals(form.get("payment_intent_data[setup_future_usage]"), null);
+  assertEquals(form.get("payment_method_options[card][setup_future_usage]"), "off_session");
   // 2.5% of 12,345 = 308.625 -> 309 (round half away from zero)
   assertEquals(form.get("payment_intent_data[application_fee_amount]"), "309");
   for (const prefix of ["payment_intent_data[metadata]", "metadata"]) {
@@ -479,14 +482,246 @@ Deno.test("invoice_checkout: a replayed session that was already paid is 409, ne
   assertEquals(f.stripe("POST", "/checkout/sessions").length, 1);
 });
 
-Deno.test("public checkouts are card-only", async () => {
+Deno.test("public pay links use the account's enabled methods and save cards (P-31)", async () => {
   const f = fixture();
   await (await f.call(checkout)).body?.cancel();
   await (await f.call(deposit)).body?.cancel();
   const creates = f.stripe("POST", "/checkout/sessions");
   assertEquals(creates.length, 2);
   for (const call of creates) {
-    assertEquals(call.form.get("payment_method_types[0]"), "card");
-    assertEquals(call.form.get("payment_method_types[1]"), null);
+    // dynamic payment methods: cards and wallets always, ACH / pay-later when enabled
+    assertEquals(call.form.get("payment_method_types[0]"), null);
+    assertEquals(call.form.get("payment_method_options[card][setup_future_usage]"), "off_session");
+    assertEquals(call.form.get("payment_intent_data[setup_future_usage]"), null);
+    // Link is its own payment method type that the card options would not
+    // save: it is not offered, so a paid link always leaves a card on file
+    assertEquals(call.form.get("wallet_options[link][display]"), "never");
   }
+});
+
+// ---------------------------------------------------------------------------
+// quote_deposit_checkout (P-16)
+// ---------------------------------------------------------------------------
+
+const QUOTE = "70000000-0000-4000-8000-000000000001";
+const QUOTE_TOKEN = "99999999-9999-4999-8999-0000000000a1";
+const quoteDeposit = { action: "quote_deposit_checkout", token: QUOTE_TOKEN };
+
+function scheduledQuote(extra: Record<string, unknown> = {}) {
+  return {
+    id: QUOTE,
+    shop_id: SHOP,
+    public_token: QUOTE_TOKEN,
+    customer_id: CUSTOMER,
+    status: "converted",
+    converted_job_id: JOB,
+    self_scheduled_at: "2026-09-27T11:00:00.000Z",
+    ...extra,
+  };
+}
+
+Deno.test("quote_deposit_checkout: the self-scheduled job's deposit, back to the quote page", async () => {
+  const f = fixture({ quotes: [scheduledQuote()] });
+  const res = await f.call({ ...quoteDeposit, request_nonce: "quote-0001" });
+  assertEquals(await res.json(), {
+    url: "https://checkout.stripe.com/c/pay/cs_test_1",
+    expires_at: 1_900_000_000,
+    amount_cents: 5_000,
+    tip_cents: 0,
+    currency: "usd",
+  });
+  // the deposit due comes from the booking summary of the quote's job
+  assertEquals(
+    f.rpcCalls.find((c) => c.name === "public_get_booking")?.args,
+    { p_token: JOB_TOKEN },
+  );
+  const form = f.stripe("POST", "/checkout/sessions")[0]?.form;
+  assertEquals(form?.get("line_items[0][price_data][unit_amount]"), "5000");
+  assertEquals(form?.get("payment_method_types[0]"), null);
+  assertEquals(form?.get("payment_method_options[card][setup_future_usage]"), "off_session");
+  assertEquals(form?.get("wallet_options[link][display]"), "never");
+  for (const prefix of ["payment_intent_data[metadata]", "metadata"]) {
+    assertEquals(form?.get(`${prefix}[kind]`), "deposit");
+    assertEquals(form?.get(`${prefix}[job_id]`), JOB);
+    assertEquals(form?.get(`${prefix}[quote_id]`), QUOTE);
+    assertEquals(form?.get(`${prefix}[source]`), "quote_deposit_checkout");
+  }
+  assertEquals(form?.get("success_url"), `https://app.example.com/q/${QUOTE_TOKEN}?paid=1`);
+  assertEquals(form?.get("cancel_url"), `https://app.example.com/q/${QUOTE_TOKEN}?canceled=1`);
+  assert(f.db.requests.every((r) => r.role === "service_role"));
+});
+
+Deno.test("quote_deposit_checkout: only a quote the customer scheduled on its page", async () => {
+  // converted by staff (no self_scheduled_at): the job is never exposed here
+  const staff = fixture({ quotes: [scheduledQuote({ self_scheduled_at: null })] });
+  assertEquals(await errorOf(await staff.call(quoteDeposit)), [409, "conflict", {
+    reason: "not_scheduled",
+  }]);
+  // approved but not scheduled yet
+  const approved = fixture({
+    quotes: [
+      scheduledQuote({ status: "approved", converted_job_id: null, self_scheduled_at: null }),
+    ],
+  });
+  assertEquals((await errorOf(await approved.call(quoteDeposit)))[2], { reason: "not_scheduled" });
+  // drafts and unknown tokens are not found
+  const draft = fixture({ quotes: [scheduledQuote({ status: "draft" })] });
+  assertEquals((await errorOf(await draft.call(quoteDeposit)))[0], 404);
+  const unknown = fixture({ quotes: [] });
+  assertEquals((await errorOf(await unknown.call(quoteDeposit)))[0], 404);
+  assertEquals(
+    (await errorOf(await unknown.call({ ...quoteDeposit, token: "nope" })))[1],
+    "validation_failed",
+  );
+  for (const f of [staff, approved, draft, unknown]) {
+    assertEquals(f.stripe("POST", "/checkout/sessions").length, 0);
+  }
+});
+
+Deno.test("quote_deposit_checkout: a job moved to another customer is not offered", async () => {
+  // Staff moved the self-scheduled job to another customer of the shop: the
+  // old quote link must not open a Checkout on that customer (their Stripe
+  // customer, email and saved card), nor expire their own deposit links —
+  // the same rule as money_public_quote_json (0067).
+  const moved = fixture({
+    quotes: [scheduledQuote()],
+    job: { customer_id: "cccccccc-cccc-4ccc-8ccc-000000000003" },
+  });
+  assertEquals(await errorOf(await moved.call(quoteDeposit)), [409, "conflict", {
+    reason: "booking_closed",
+  }]);
+  assertEquals(moved.stripeCalls().length, 0);
+  assertEquals(moved.rpcCalls.filter((c) => c.name === "public_get_booking").length, 0);
+});
+
+Deno.test("quote_deposit_checkout: the booking deposit rules apply", async () => {
+  // a payment on its way (card attempt, ACH processing) blocks a second one
+  const pending = fixture({ quotes: [scheduledQuote()], depositPending: true });
+  assertEquals((await errorOf(await pending.call(quoteDeposit)))[2], {
+    reason: "payment_in_progress",
+  });
+  // nothing due
+  const paid = fixture({ quotes: [scheduledQuote()], depositDue: 0 });
+  assertEquals((await errorOf(await paid.call(quoteDeposit)))[2], { reason: "deposit_not_due" });
+  // a cancelled appointment takes no deposit
+  const cancelled = fixture({ quotes: [scheduledQuote()], job: { status: "cancelled" } });
+  assertEquals((await errorOf(await cancelled.call(quoteDeposit)))[2], {
+    reason: "booking_closed",
+  });
+  // strict body: no amounts from the client
+  assertEquals(
+    (await errorOf(await paid.call({ ...quoteDeposit, amount_cents: 100 })))[1],
+    "validation_failed",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Multi-job (grouped) invoices (P-7) and ACH still clearing (P-31)
+// ---------------------------------------------------------------------------
+
+const GROUPED = "eeeeeeee-eeee-4eee-8eee-0000000000f1";
+const JOB2 = "dddddddd-dddd-4ddd-8ddd-000000000002";
+
+function grouped(extra: Record<string, unknown> = {}) {
+  return fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    // the single-job invoice is void; the job is billed on a grouped invoice
+    invoice: { status: "void" },
+    extraInvoices: [{
+      id: GROUPED,
+      shop_id: SHOP,
+      number: 2100,
+      job_id: null,
+      customer_id: CUSTOMER,
+      status: "open",
+      balance_cents: 3_000,
+      public_token: "99999999-9999-4999-8999-0000000000f1",
+    }],
+    extraJobs: [{
+      id: JOB2,
+      shop_id: SHOP,
+      number: 1002,
+      customer_id: CUSTOMER,
+      status: "completed",
+      public_token: "99999999-9999-4999-8999-0000000000f2",
+    }],
+    invoiceJobs: [
+      {
+        id: "31000000-0000-4000-8000-0000000000f1",
+        shop_id: SHOP,
+        invoice_id: GROUPED,
+        job_id: JOB,
+        voided: false,
+      },
+      {
+        id: "31000000-0000-4000-8000-0000000000f2",
+        shop_id: SHOP,
+        invoice_id: GROUPED,
+        job_id: JOB2,
+        voided: false,
+      },
+    ],
+    ...extra,
+  });
+}
+
+Deno.test("booking_deposit_checkout: capped by the job's grouped invoice", async () => {
+  const f = grouped();
+  const res = await f.call(deposit);
+  assertEquals((await res.json()).amount_cents, 3_000);
+});
+
+Deno.test("invoice_checkout: a grouped invoice expires every billed job's deposit links", async () => {
+  const f = grouped({
+    sessions: [
+      openSession("cs_1Dep1", { job_id: JOB, kind: "deposit" }),
+      openSession("cs_1Dep2", { job_id: JOB2, kind: "deposit" }),
+      openSession("cs_1Other", { job_id: "dddddddd-dddd-4ddd-8ddd-000000000099", kind: "deposit" }),
+    ],
+  });
+  const res = await f.call({
+    action: "invoice_checkout",
+    token: "99999999-9999-4999-8999-0000000000f1",
+  });
+  assertEquals((await res.json()).amount_cents, 3_000);
+  const expired = f.stripe("POST", "/checkout/sessions/:id/expire").map((c) =>
+    c.url.pathname.split("/").at(-2)
+  );
+  assertEquals(expired.sort(), ["cs_1Dep1", "cs_1Dep2"]);
+  const form = f.stripe("POST", "/checkout/sessions")[0]?.form;
+  // a grouped invoice has no single job to tag
+  assertEquals(form?.get("metadata[job_id]"), null);
+  assertEquals(form?.get("metadata[invoice_id]"), GROUPED);
+});
+
+Deno.test("invoice_checkout: ACH debits still clearing are not charged again", async () => {
+  const processing = {
+    id: "ffffffff-ffff-4fff-8fff-00000000a0c2",
+    shop_id: SHOP,
+    invoice_id: INVOICE,
+    job_id: JOB,
+    customer_id: CUSTOMER,
+    kind: "payment",
+    method: "ach_debit",
+    status: "processing",
+    amount_cents: 2_345,
+    tip_cents: 0,
+    refunded_cents: 0,
+    stripe_payment_intent_id: "pi_1Ach",
+  };
+  const f = fixture({ payments: [processing] });
+  const res = await f.call(checkout);
+  assertEquals((await res.json()).amount_cents, 10_000);
+  assertEquals(
+    f.stripe("POST", "/checkout/sessions")[0]?.form.get("line_items[0][price_data][unit_amount]"),
+    "10000",
+  );
+  // the whole balance clearing: nothing to pay now
+  const covered = fixture({ payments: [{ ...processing, amount_cents: 12_345 }] });
+  assertEquals((await errorOf(await covered.call(checkout)))[2], {
+    reason: "payment_in_progress",
+  });
+  // a deposit is capped the same way (its invoice owes 10,000 not yet on its way)
+  const dep = fixture({ payments: [{ ...processing, amount_cents: 12_000 }], depositDue: 5_000 });
+  assertEquals((await (await dep.call(deposit)).json()).amount_cents, 345);
 });

@@ -5,7 +5,7 @@ import listPlugin from '@fullcalendar/list';
 import luxonPlugin from '@fullcalendar/luxon3';
 import FullCalendar from '@fullcalendar/react';
 import timeGridPlugin from '@fullcalendar/timegrid';
-import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
+import { CalendarPlus, ChevronLeft, ChevronRight, Plus } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import {
@@ -40,12 +40,18 @@ import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import { useReschedule, useResources, useTeam } from '@/features/jobs/api';
 import { useBusinessHours, useCalendarEvents, type CalendarRange } from './api';
+import { DayMapView } from './DayMapView';
+import { EventContent } from './EventContent';
+import { EventDialog, type EventDialogTarget } from './EventDialog';
 import {
   CALENDAR_VIEWS,
+  eventMeta,
+  hasCustomContent,
   isCalendarView,
   isGridView,
   jobIdFromEventId,
   LEGEND_STATUSES,
+  matchesFilters,
   resourceColumns,
   resourceDayBounds,
   scrollTimeFor,
@@ -69,6 +75,8 @@ interface PendingMove {
   toEnd: string;
   /** Set when the job also moves to another bay / van (resource view). */
   toResource?: { id: string | null; name: string; fromName: string };
+  /** An occurrence of a repeating job: only this visit moves. */
+  repeats: boolean;
   revert: () => void;
   settle?: () => void;
 }
@@ -83,6 +91,7 @@ export default function CalendarPage() {
   const { shopId, timezone } = useShop();
   const canManage = useCan('jobs.manage');
   const canAdmin = useCan('settings.manage');
+  const canManageEvents = useCan('blockedTimes.manage');
   const navigate = useNavigate();
   const toast = useToast();
   const calendarRef = useRef<FullCalendar>(null);
@@ -94,10 +103,14 @@ export default function CalendarPage() {
   // shown day. Each seeds the other when the user switches between them.
   const [visible, setVisible] = useState<{ start: LocalDate; end: LocalDate } | null>(null);
   const [focusDate, setFocusDate] = useState<LocalDate>(() => shopToday(timezone));
+  /** The bay / van view and the day map show one day (focusDate). */
   const resourceMode = !isGridView(view);
+  const bayMode = view === 'resourceDay';
+  const mapMode = view === 'dayMap';
   const [filters, setFilters] = useState<CalendarFilters>({ memberId: null, resourceId: null });
   const [includeCancelled, setIncludeCancelled] = useState(false);
   const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
+  const [eventTarget, setEventTarget] = useState<EventDialogTarget | null>(null);
 
   useRealtime({ table: 'jobs', shopId });
   const activeRange = useMemo(
@@ -113,8 +126,13 @@ export default function CalendarPage() {
   const rows = useMemo(() => events.data ?? [], [events.data]);
   const rowsById = useMemo(() => new Map(rows.map((r) => [r.id, r])), [rows]);
   const eventInputs = useMemo(
-    () => toEventInputs(rows, filters, canManage),
-    [rows, filters, canManage],
+    () => toEventInputs(rows, filters, canManage, canManageEvents),
+    [rows, filters, canManage, canManageEvents],
+  );
+  /** The day map lists what the Team member / Bay filters leave (as the grid does). */
+  const mapRows = useMemo(
+    () => (mapMode ? rows.filter((r) => matchesFilters(r, filters)) : []),
+    [mapMode, rows, filters],
   );
   const businessHours = useMemo(() => toBusinessHours(hours.data ?? []), [hours.data]);
   const jobCount = eventInputs.filter(
@@ -138,6 +156,13 @@ export default function CalendarPage() {
     if (!resourceMode) api()?.changeView(next);
   };
 
+  /** A new event starts on the shown day, or today when it is on screen. */
+  const newEventDate = (): LocalDate => {
+    if (resourceMode || !visible) return focusDate;
+    const now = shopToday(timezone);
+    return now >= visible.start && now < visible.end ? now : visible.start;
+  };
+
   const goToday = () => (resourceMode ? setFocusDate(shopToday(timezone)) : api()?.today());
   const step = (days: -1 | 1) =>
     resourceMode
@@ -156,8 +181,23 @@ export default function CalendarPage() {
     setRange((prev) => (prev && prev.from === next.from && prev.to === next.to ? prev : next));
   };
 
+  /** A calendar event (blocked time) opens its dialog for managers. */
+  const openBlock = (extendedProps: Record<string, unknown>): boolean => {
+    const meta = eventMeta(extendedProps);
+    if (!meta || meta.kind === 'job' || !meta.blockId || !meta.occurrenceStart) return false;
+    if (canManageEvents) {
+      setEventTarget({
+        mode: 'edit',
+        blockId: meta.blockId,
+        occurrenceStart: meta.occurrenceStart,
+      });
+    }
+    return true;
+  };
+
   const onEventClick = (info: EventClickArg) => {
     info.jsEvent.preventDefault();
+    if (openBlock(info.event.extendedProps)) return;
     const jobId = jobIdFromEventId(info.event.id);
     const row = jobId ? rowsById.get(jobId) : undefined;
     if (!jobId || !row || row.is_busy_block) return;
@@ -179,6 +219,7 @@ export default function CalendarPage() {
       fromEnd: row.ends_at,
       toStart: start.toISOString(),
       toEnd: end.toISOString(),
+      repeats: row.series_id !== null,
       revert: info.revert,
     });
   };
@@ -215,6 +256,7 @@ export default function CalendarPage() {
       fromEnd: row.ends_at,
       toStart: move.start,
       toEnd: move.end,
+      repeats: row.series_id !== null,
       ...(changesResource && move.toResourceId !== undefined
         ? {
             toResource: {
@@ -285,11 +327,29 @@ export default function CalendarPage() {
         title="Calendar"
         description={`Times shown in the shop’s time zone (${timezone}).`}
         actions={
-          canManage ? (
-            <Link to="/app/jobs/new" className={buttonClasses({ variant: 'primary' })}>
-              <Plus className="size-4" aria-hidden="true" />
-              New job
-            </Link>
+          canManage || canManageEvents ? (
+            <div className="flex flex-wrap gap-2">
+              {canManageEvents && (
+                <Button
+                  variant="secondary"
+                  leadingIcon={<CalendarPlus className="size-4" aria-hidden="true" />}
+                  onClick={() =>
+                    setEventTarget({
+                      mode: 'new',
+                      start: { date: newEventDate(), time: '09:00' },
+                    })
+                  }
+                >
+                  New event
+                </Button>
+              )}
+              {canManage && (
+                <Link to="/app/jobs/new" className={buttonClasses({ variant: 'primary' })}>
+                  <Plus className="size-4" aria-hidden="true" />
+                  New job
+                </Link>
+              )}
+            </div>
           ) : undefined
         }
       />
@@ -385,7 +445,8 @@ export default function CalendarPage() {
             Loading jobs…
           </p>
         )}
-        {events.isSuccess && jobCount === 0 && (
+        {/* the day map has its own empty state */}
+        {events.isSuccess && jobCount === 0 && !mapMode && (
           <p role="status" className="text-muted px-4 pt-3 text-sm">
             No jobs in this range
             {filters.memberId || filters.resourceId ? ' for these filters' : ''}.
@@ -393,7 +454,7 @@ export default function CalendarPage() {
           </p>
         )}
 
-        {resourceMode && resources.isError && (
+        {bayMode && resources.isError && (
           <ErrorState
             compact
             title="Couldn’t load bays and vans"
@@ -402,7 +463,7 @@ export default function CalendarPage() {
             retrying={resources.isRefetching}
           />
         )}
-        {resourceMode && resources.isSuccess && activeResources.length === 0 && (
+        {bayMode && resources.isSuccess && activeResources.length === 0 && (
           <p role="status" className="text-muted px-4 pt-3 text-sm">
             No bays or vans set up yet — every job shows under “{UNASSIGNED_COLUMN_NAME}”.
             {canAdmin && (
@@ -417,7 +478,17 @@ export default function CalendarPage() {
         )}
 
         <div className="p-2 sm:p-3" aria-busy={events.isFetching}>
-          {resourceMode ? (
+          {mapMode ? (
+            events.isSuccess ? (
+              <DayMapView
+                key={focusDate}
+                date={focusDate}
+                rows={mapRows}
+                timezone={timezone}
+                onOpenJob={(jobId) => void navigate(`/app/jobs/${jobId}`)}
+              />
+            ) : null
+          ) : resourceMode ? (
             resources.isPending ? (
               <p role="status" className="text-muted px-2 py-6 text-sm">
                 Loading bays and vans…
@@ -434,6 +505,7 @@ export default function CalendarPage() {
                 slotMinTime={bounds.slotMinTime}
                 slotMaxTime={bounds.slotMaxTime}
                 onOpenJob={(jobId) => void navigate(`/app/jobs/${jobId}`)}
+                onOpenEvent={openBlock}
                 onMove={onResourceMove}
                 onSelect={onResourceSelect}
               />
@@ -462,6 +534,9 @@ export default function CalendarPage() {
               eventClick={onEventClick}
               eventDrop={onMoved}
               eventResize={onMoved}
+              eventContent={(arg) =>
+                hasCustomContent(arg.event.extendedProps) ? <EventContent arg={arg} /> : true
+              }
               select={onSelect}
               noEventsText="No jobs in this range"
             />
@@ -495,6 +570,8 @@ export default function CalendarPage() {
         </ul>
       </Card>
 
+      {eventTarget && <EventDialog target={eventTarget} onClose={() => setEventTarget(null)} />}
+
       <ConfirmDialog
         open={pendingMove !== null}
         onClose={cancelMove}
@@ -515,6 +592,12 @@ export default function CalendarPage() {
                 <span className="block">
                   Bay / van: <strong>{pendingMove.toResource.name}</strong> (was{' '}
                   {pendingMove.toResource.fromName})
+                </span>
+              )}
+              {pendingMove.repeats && (
+                <span className="mt-2 block">
+                  This is a repeating job: only this visit moves. To change the following visits,
+                  open the job and edit its schedule.
                 </span>
               )}
             </>

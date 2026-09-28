@@ -7,7 +7,10 @@ import {
   entryFormToWrite,
   formatClock,
   formatDuration,
+  formatAccuracy,
   formatHoursDecimal,
+  geoStamp,
+  mapLink,
   rangeError,
   splitByShopDay,
   summarize,
@@ -29,6 +32,12 @@ const entry = (over: Partial<TimeEntry>): TimeEntry => ({
   source: 'app',
   notes: null,
   job: null,
+  clock_in_lat: null,
+  clock_in_lng: null,
+  clock_in_accuracy_m: null,
+  clock_out_lat: null,
+  clock_out_lng: null,
+  clock_out_accuracy_m: null,
   ...over,
 });
 
@@ -218,5 +227,19 @@ describe('entry edit patch', () => {
       notes: 'fixed',
     });
     expect(entryEditPatch(v, TZ, dst)).toEqual({ notes: 'fixed' });
+  });
+});
+
+describe('geostamps', () => {
+  it('reads recorded locations and builds map links', () => {
+    const e = entry({ clock_in_lat: 41.8781, clock_in_lng: -87.6298, clock_in_accuracy_m: 12.4 });
+    expect(geoStamp(e, 'in')).toEqual({ lat: 41.8781, lng: -87.6298, accuracyM: 12.4 });
+    expect(geoStamp(e, 'out')).toBeNull();
+    expect(mapLink({ lat: 41.8781, lng: -87.6298 })).toBe(
+      'https://www.google.com/maps/search/?api=1&query=41.878100%2C-87.629800',
+    );
+    expect(formatAccuracy(12.4)).toBe('±12 m');
+    expect(formatAccuracy(1540)).toBe('±1.5 km');
+    expect(formatAccuracy(null)).toBe('');
   });
 });

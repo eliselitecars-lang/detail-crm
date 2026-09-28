@@ -21,39 +21,67 @@ export type Database = {
     Tables: {
       blocked_times: {
         Row: {
+          affects_capacity: boolean | null
+          color: string | null
           created_at: string
           created_by: string | null
+          customer_id: string | null
           ends_at: string
           id: string
+          kind: Database["public"]["Enums"]["calendar_event_kind"]
           member_id: string | null
+          names_customer: boolean
           reason: string | null
+          recurrence: Json | null
           shop_id: string
           starts_at: string
+          title: string | null
           updated_at: string
         }
         Insert: {
+          affects_capacity?: boolean | null
+          color?: string | null
           created_at?: string
           created_by?: string | null
+          customer_id?: string | null
           ends_at: string
           id?: string
+          kind?: Database["public"]["Enums"]["calendar_event_kind"]
           member_id?: string | null
+          names_customer?: boolean
           reason?: string | null
+          recurrence?: Json | null
           shop_id: string
           starts_at: string
+          title?: string | null
           updated_at?: string
         }
         Update: {
+          affects_capacity?: boolean | null
+          color?: string | null
           created_at?: string
           created_by?: string | null
+          customer_id?: string | null
           ends_at?: string
           id?: string
+          kind?: Database["public"]["Enums"]["calendar_event_kind"]
           member_id?: string | null
+          names_customer?: boolean
           reason?: string | null
+          recurrence?: Json | null
           shop_id?: string
           starts_at?: string
+          title?: string | null
           updated_at?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "blocked_times_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
           {
             foreignKeyName: "blocked_times_member_fk"
             columns: ["shop_id", "member_id"]
@@ -70,20 +98,78 @@ export type Database = {
           },
         ]
       }
+      booking_links: {
+        Row: {
+          active: boolean
+          created_at: string
+          created_by: string | null
+          expires_at: string | null
+          id: string
+          name: string
+          note: string | null
+          service_ids: string[]
+          shop_id: string
+          token: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          name: string
+          note?: string | null
+          service_ids: string[]
+          shop_id: string
+          token?: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string
+          name?: string
+          note?: string | null
+          service_ids?: string[]
+          shop_id?: string
+          token?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "booking_links_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       booking_settings: {
         Row: {
           allow_client_cancel_hours: number
+          allow_multi_day: boolean
           auto_confirm: boolean
           booking_message: string | null
           buffer_minutes: number
           cancellation_policy: string | null
+          count_member_availability: boolean
           created_at: string
           deposit_type: Database["public"]["Enums"]["deposit_type"]
           deposit_value: number
           enabled: boolean
+          ga4_measurement_id: string | null
           lead_time_minutes: number
           max_concurrent_jobs: number
+          max_concurrent_mobile: number | null
+          max_concurrent_shop: number | null
           max_days_ahead: number
+          meta_pixel_id: string | null
+          multi_day_max_days: number
+          quote_self_schedule: boolean
           require_deposit: boolean
           service_area_postal_codes: string[]
           shop_id: string
@@ -92,17 +178,25 @@ export type Database = {
         }
         Insert: {
           allow_client_cancel_hours?: number
+          allow_multi_day?: boolean
           auto_confirm?: boolean
           booking_message?: string | null
           buffer_minutes?: number
           cancellation_policy?: string | null
+          count_member_availability?: boolean
           created_at?: string
           deposit_type?: Database["public"]["Enums"]["deposit_type"]
           deposit_value?: number
           enabled?: boolean
+          ga4_measurement_id?: string | null
           lead_time_minutes?: number
           max_concurrent_jobs?: number
+          max_concurrent_mobile?: number | null
+          max_concurrent_shop?: number | null
           max_days_ahead?: number
+          meta_pixel_id?: string | null
+          multi_day_max_days?: number
+          quote_self_schedule?: boolean
           require_deposit?: boolean
           service_area_postal_codes?: string[]
           shop_id: string
@@ -111,17 +205,25 @@ export type Database = {
         }
         Update: {
           allow_client_cancel_hours?: number
+          allow_multi_day?: boolean
           auto_confirm?: boolean
           booking_message?: string | null
           buffer_minutes?: number
           cancellation_policy?: string | null
+          count_member_availability?: boolean
           created_at?: string
           deposit_type?: Database["public"]["Enums"]["deposit_type"]
           deposit_value?: number
           enabled?: boolean
+          ga4_measurement_id?: string | null
           lead_time_minutes?: number
           max_concurrent_jobs?: number
+          max_concurrent_mobile?: number | null
+          max_concurrent_shop?: number | null
           max_days_ahead?: number
+          meta_pixel_id?: string | null
+          multi_day_max_days?: number
+          quote_self_schedule?: boolean
           require_deposit?: boolean
           service_area_postal_codes?: string[]
           shop_id?: string
@@ -169,6 +271,54 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "business_hours_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      calendar_feed_tokens: {
+        Row: {
+          created_at: string
+          id: string
+          include_all: boolean
+          last_accessed_at: string | null
+          member_id: string
+          revoked_at: string | null
+          shop_id: string
+          token: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          include_all?: boolean
+          last_accessed_at?: string | null
+          member_id: string
+          revoked_at?: string | null
+          shop_id: string
+          token?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          include_all?: boolean
+          last_accessed_at?: string | null
+          member_id?: string
+          revoked_at?: string | null
+          shop_id?: string
+          token?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "calendar_feed_tokens_member_fk"
+            columns: ["shop_id", "member_id"]
+            isOneToOne: false
+            referencedRelation: "shop_members"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "calendar_feed_tokens_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
             referencedRelation: "shops"
@@ -306,6 +456,7 @@ export type Database = {
           id: string
           items: NonNullable<Json>
           name: string
+          required: boolean
           service_id: string | null
           shop_id: string
           updated_at: string
@@ -315,6 +466,7 @@ export type Database = {
           id?: string
           items?: NonNullable<Json>
           name: string
+          required?: boolean
           service_id?: string | null
           shop_id: string
           updated_at?: string
@@ -324,6 +476,7 @@ export type Database = {
           id?: string
           items?: NonNullable<Json>
           name?: string
+          required?: boolean
           service_id?: string | null
           shop_id?: string
           updated_at?: string
@@ -338,6 +491,47 @@ export type Database = {
           },
           {
             foreignKeyName: "checklist_templates_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_requests: {
+        Row: {
+          created_at: string
+          fingerprint: string
+          id: string
+          kind: string
+          nonce: string
+          result: Json | null
+          shop_id: string
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          fingerprint: string
+          id?: string
+          kind: string
+          nonce: string
+          result?: Json | null
+          shop_id: string
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          fingerprint?: string
+          id?: string
+          kind?: string
+          nonce?: string
+          result?: Json | null
+          shop_id?: string
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_requests_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
             referencedRelation: "shops"
@@ -422,34 +616,106 @@ export type Database = {
           },
         ]
       }
+      coupon_redemptions: {
+        Row: {
+          coupon_id: string
+          created_at: string
+          customer_id: string
+          id: string
+          job_id: string
+          once_per_customer: boolean
+          shop_id: string
+        }
+        Insert: {
+          coupon_id: string
+          created_at?: string
+          customer_id: string
+          id?: string
+          job_id: string
+          once_per_customer: boolean
+          shop_id: string
+        }
+        Update: {
+          coupon_id?: string
+          created_at?: string
+          customer_id?: string
+          id?: string
+          job_id?: string
+          once_per_customer?: boolean
+          shop_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "coupon_redemptions_coupon_fk"
+            columns: ["shop_id", "coupon_id"]
+            isOneToOne: false
+            referencedRelation: "coupons"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "coupon_redemptions_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "coupon_redemptions_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "coupon_redemptions_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       coupons: {
         Row: {
           active: boolean
           code: string
           created_at: string
+          customer_id: string | null
           description: string | null
           ends_at: string | null
           id: string
           kind: Database["public"]["Enums"]["coupon_kind"]
           max_redemptions: number | null
+          min_subtotal_cents: number | null
+          new_customers_only: boolean
+          once_per_customer: boolean
           online_only: boolean
           redemptions: number
+          referrer_customer_id: string | null
+          service_ids: string[] | null
           shop_id: string
           starts_at: string | null
           updated_at: string
           value: number
+          coupon_restrictions_text: string | null
         }
         Insert: {
           active?: boolean
           code: string
           created_at?: string
+          customer_id?: string | null
           description?: string | null
           ends_at?: string | null
           id?: string
           kind: Database["public"]["Enums"]["coupon_kind"]
           max_redemptions?: number | null
+          min_subtotal_cents?: number | null
+          new_customers_only?: boolean
+          once_per_customer?: boolean
           online_only?: boolean
           redemptions?: number
+          referrer_customer_id?: string | null
+          service_ids?: string[] | null
           shop_id: string
           starts_at?: string | null
           updated_at?: string
@@ -459,13 +725,19 @@ export type Database = {
           active?: boolean
           code?: string
           created_at?: string
+          customer_id?: string | null
           description?: string | null
           ends_at?: string | null
           id?: string
           kind?: Database["public"]["Enums"]["coupon_kind"]
           max_redemptions?: number | null
+          min_subtotal_cents?: number | null
+          new_customers_only?: boolean
+          once_per_customer?: boolean
           online_only?: boolean
           redemptions?: number
+          referrer_customer_id?: string | null
+          service_ids?: string[] | null
           shop_id?: string
           starts_at?: string | null
           updated_at?: string
@@ -473,7 +745,86 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "coupons_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "coupons_referrer_fk"
+            columns: ["shop_id", "referrer_customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
             foreignKeyName: "coupons_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      custom_fields: {
+        Row: {
+          archived_at: string | null
+          created_at: string
+          entity: Database["public"]["Enums"]["custom_field_entity"]
+          help_text: string | null
+          id: string
+          key: string
+          label: string
+          location_scope: Database["public"]["Enums"]["location_type"] | null
+          options: string[]
+          required: boolean
+          shop_id: string
+          show_in_booking: boolean
+          show_in_lead_form: boolean
+          sort: number
+          type: Database["public"]["Enums"]["custom_field_type"]
+          updated_at: string
+        }
+        Insert: {
+          archived_at?: string | null
+          created_at?: string
+          entity: Database["public"]["Enums"]["custom_field_entity"]
+          help_text?: string | null
+          id?: string
+          key: string
+          label: string
+          location_scope?: Database["public"]["Enums"]["location_type"] | null
+          options?: string[]
+          required?: boolean
+          shop_id: string
+          show_in_booking?: boolean
+          show_in_lead_form?: boolean
+          sort?: number
+          type: Database["public"]["Enums"]["custom_field_type"]
+          updated_at?: string
+        }
+        Update: {
+          archived_at?: string | null
+          created_at?: string
+          entity?: Database["public"]["Enums"]["custom_field_entity"]
+          help_text?: string | null
+          id?: string
+          key?: string
+          label?: string
+          location_scope?: Database["public"]["Enums"]["location_type"] | null
+          options?: string[]
+          required?: boolean
+          shop_id?: string
+          show_in_booking?: boolean
+          show_in_lead_form?: boolean
+          sort?: number
+          type?: Database["public"]["Enums"]["custom_field_type"]
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "custom_fields_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
             referencedRelation: "shops"
@@ -492,6 +843,7 @@ export type Database = {
           is_default: boolean
           last4: string | null
           shop_id: string
+          stripe_customer_id: string | null
           stripe_payment_method_id: string
           updated_at: string
         }
@@ -505,6 +857,7 @@ export type Database = {
           is_default?: boolean
           last4?: string | null
           shop_id: string
+          stripe_customer_id?: string | null
           stripe_payment_method_id: string
           updated_at?: string
         }
@@ -518,6 +871,7 @@ export type Database = {
           is_default?: boolean
           last4?: string | null
           shop_id?: string
+          stripe_customer_id?: string | null
           stripe_payment_method_id?: string
           updated_at?: string
         }
@@ -547,6 +901,7 @@ export type Database = {
           company: string | null
           country: string | null
           created_at: string
+          custom_data: NonNullable<Json>
           email: string | null
           email_opt_in: boolean
           email_opted_out_at: string | null
@@ -556,11 +911,13 @@ export type Database = {
           lat: number | null
           lifecycle: Database["public"]["Enums"]["customer_lifecycle"]
           lng: number | null
+          merged_into_id: string | null
           notes: string | null
           phone: string | null
           phone_unverified: boolean
           portal_user_id: string | null
           postal_code: string | null
+          referral_code: string | null
           region: string | null
           search_text: string | null
           shop_id: string
@@ -571,6 +928,7 @@ export type Database = {
           stripe_customer_id: string | null
           tags: string[]
           updated_at: string
+          merge_customer_summary: Json | null
         }
         Insert: {
           address_line1?: string | null
@@ -580,6 +938,7 @@ export type Database = {
           company?: string | null
           country?: string | null
           created_at?: string
+          custom_data?: NonNullable<Json>
           email?: string | null
           email_opt_in?: boolean
           email_opted_out_at?: string | null
@@ -589,11 +948,13 @@ export type Database = {
           lat?: number | null
           lifecycle?: Database["public"]["Enums"]["customer_lifecycle"]
           lng?: number | null
+          merged_into_id?: string | null
           notes?: string | null
           phone?: string | null
           phone_unverified?: boolean
           portal_user_id?: string | null
           postal_code?: string | null
+          referral_code?: string | null
           region?: string | null
           search_text?: never
           shop_id: string
@@ -613,6 +974,7 @@ export type Database = {
           company?: string | null
           country?: string | null
           created_at?: string
+          custom_data?: NonNullable<Json>
           email?: string | null
           email_opt_in?: boolean
           email_opted_out_at?: string | null
@@ -622,11 +984,13 @@ export type Database = {
           lat?: number | null
           lifecycle?: Database["public"]["Enums"]["customer_lifecycle"]
           lng?: number | null
+          merged_into_id?: string | null
           notes?: string | null
           phone?: string | null
           phone_unverified?: boolean
           portal_user_id?: string | null
           postal_code?: string | null
+          referral_code?: string | null
           region?: string | null
           search_text?: never
           shop_id?: string
@@ -640,9 +1004,246 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "customers_merged_into_fk"
+            columns: ["shop_id", "merged_into_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
             foreignKeyName: "customers_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      device_push_tokens: {
+        Row: {
+          apns_env: string
+          app_version: string | null
+          bundle_id: string
+          created_at: string
+          disabled_at: string | null
+          disabled_reason: string | null
+          id: string
+          last_seen_at: string
+          platform: string
+          token: string
+          user_id: string
+        }
+        Insert: {
+          apns_env: string
+          app_version?: string | null
+          bundle_id: string
+          created_at?: string
+          disabled_at?: string | null
+          disabled_reason?: string | null
+          id?: string
+          last_seen_at?: string
+          platform?: string
+          token: string
+          user_id: string
+        }
+        Update: {
+          apns_env?: string
+          app_version?: string | null
+          bundle_id?: string
+          created_at?: string
+          disabled_at?: string | null
+          disabled_reason?: string | null
+          id?: string
+          last_seen_at?: string
+          platform?: string
+          token?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      document_followup_log: {
+        Row: {
+          attempt: number
+          created_at: string
+          doc_id: string
+          doc_kind: string
+          due_at: string
+          id: string
+          message_ids: string[]
+          outcome: string
+          processed_at: string
+          shop_id: string
+        }
+        Insert: {
+          attempt: number
+          created_at?: string
+          doc_id: string
+          doc_kind: string
+          due_at: string
+          id?: string
+          message_ids?: string[]
+          outcome: string
+          processed_at: string
+          shop_id: string
+        }
+        Update: {
+          attempt?: number
+          created_at?: string
+          doc_id?: string
+          doc_kind?: string
+          due_at?: string
+          id?: string
+          message_ids?: string[]
+          outcome?: string
+          processed_at?: string
+          shop_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "document_followup_log_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      documents: {
+        Row: {
+          content_type: string
+          created_at: string
+          customer_id: string | null
+          customer_visible: boolean
+          file_name: string
+          id: string
+          job_id: string | null
+          shop_id: string
+          size_bytes: number
+          storage_path: string
+          updated_at: string
+          uploaded_by: string | null
+        }
+        Insert: {
+          content_type: string
+          created_at?: string
+          customer_id?: string | null
+          customer_visible?: boolean
+          file_name: string
+          id?: string
+          job_id?: string | null
+          shop_id: string
+          size_bytes: number
+          storage_path: string
+          updated_at?: string
+          uploaded_by?: string | null
+        }
+        Update: {
+          content_type?: string
+          created_at?: string
+          customer_id?: string | null
+          customer_visible?: boolean
+          file_name?: string
+          id?: string
+          job_id?: string | null
+          shop_id?: string
+          size_bytes?: number
+          storage_path?: string
+          updated_at?: string
+          uploaded_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "documents_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "documents_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "documents_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      followup_settings: {
+        Row: {
+          created_at: string
+          deposit_enabled: boolean
+          deposit_first_after_hours: number
+          deposit_max_attempts: number
+          deposit_repeat_every_hours: number
+          invoice_enabled: boolean
+          invoice_first_after_hours: number
+          invoice_max_attempts: number
+          invoice_repeat_every_hours: number
+          overdue_enabled: boolean
+          overdue_first_after_days: number
+          overdue_max_attempts: number
+          overdue_repeat_every_days: number
+          quote_enabled: boolean
+          quote_first_after_hours: number
+          quote_max_attempts: number
+          quote_repeat_every_hours: number
+          shop_id: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          deposit_enabled?: boolean
+          deposit_first_after_hours?: number
+          deposit_max_attempts?: number
+          deposit_repeat_every_hours?: number
+          invoice_enabled?: boolean
+          invoice_first_after_hours?: number
+          invoice_max_attempts?: number
+          invoice_repeat_every_hours?: number
+          overdue_enabled?: boolean
+          overdue_first_after_days?: number
+          overdue_max_attempts?: number
+          overdue_repeat_every_days?: number
+          quote_enabled?: boolean
+          quote_first_after_hours?: number
+          quote_max_attempts?: number
+          quote_repeat_every_hours?: number
+          shop_id: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          deposit_enabled?: boolean
+          deposit_first_after_hours?: number
+          deposit_max_attempts?: number
+          deposit_repeat_every_hours?: number
+          invoice_enabled?: boolean
+          invoice_first_after_hours?: number
+          invoice_max_attempts?: number
+          invoice_repeat_every_hours?: number
+          overdue_enabled?: boolean
+          overdue_first_after_days?: number
+          overdue_max_attempts?: number
+          overdue_repeat_every_days?: number
+          quote_enabled?: boolean
+          quote_first_after_hours?: number
+          quote_max_attempts?: number
+          quote_repeat_every_hours?: number
+          shop_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "followup_settings_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: true
             referencedRelation: "shops"
             referencedColumns: ["id"]
           },
@@ -778,6 +1379,374 @@ export type Database = {
           },
         ]
       }
+      gift_card_attempts: {
+        Row: {
+          attempt_key: string
+          created_at: string
+          id: string
+          shop_id: string
+          succeeded: boolean
+        }
+        Insert: {
+          attempt_key: string
+          created_at?: string
+          id?: string
+          shop_id: string
+          succeeded: boolean
+        }
+        Update: {
+          attempt_key?: string
+          created_at?: string
+          id?: string
+          shop_id?: string
+          succeeded?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "gift_card_attempts_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      gift_card_orders: {
+        Row: {
+          created_at: string
+          gift_card_id: string | null
+          id: string
+          message: string | null
+          price_cents: number
+          purchaser_email: string
+          purchaser_name: string
+          recipient_email: string
+          recipient_name: string | null
+          refunded_cents: number
+          shop_id: string
+          signer_ip: unknown
+          status: string
+          stripe_checkout_session_id: string | null
+          token: string
+          updated_at: string
+          value_cents: number
+        }
+        Insert: {
+          created_at?: string
+          gift_card_id?: string | null
+          id?: string
+          message?: string | null
+          price_cents: number
+          purchaser_email: string
+          purchaser_name: string
+          recipient_email: string
+          recipient_name?: string | null
+          refunded_cents?: number
+          shop_id: string
+          signer_ip?: unknown
+          status?: string
+          stripe_checkout_session_id?: string | null
+          token?: string
+          updated_at?: string
+          value_cents: number
+        }
+        Update: {
+          created_at?: string
+          gift_card_id?: string | null
+          id?: string
+          message?: string | null
+          price_cents?: number
+          purchaser_email?: string
+          purchaser_name?: string
+          recipient_email?: string
+          recipient_name?: string | null
+          refunded_cents?: number
+          shop_id?: string
+          signer_ip?: unknown
+          status?: string
+          stripe_checkout_session_id?: string | null
+          token?: string
+          updated_at?: string
+          value_cents?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "gift_card_orders_card_fk"
+            columns: ["shop_id", "gift_card_id"]
+            isOneToOne: false
+            referencedRelation: "gift_cards"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "gift_card_orders_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      gift_card_settings: {
+        Row: {
+          allow_custom_amount: boolean
+          expires_months: number | null
+          max_custom_cents: number
+          min_custom_cents: number
+          offers: NonNullable<Json>
+          online_enabled: boolean
+          shop_id: string
+          terms: string | null
+          updated_at: string
+        }
+        Insert: {
+          allow_custom_amount?: boolean
+          expires_months?: number | null
+          max_custom_cents?: number
+          min_custom_cents?: number
+          offers?: NonNullable<Json>
+          online_enabled?: boolean
+          shop_id: string
+          terms?: string | null
+          updated_at?: string
+        }
+        Update: {
+          allow_custom_amount?: boolean
+          expires_months?: number | null
+          max_custom_cents?: number
+          min_custom_cents?: number
+          offers?: NonNullable<Json>
+          online_enabled?: boolean
+          shop_id?: string
+          terms?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "gift_card_settings_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: true
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      gift_card_transactions: {
+        Row: {
+          amount_cents: number
+          balance_after_cents: number
+          created_at: string
+          created_by: string | null
+          gift_card_id: string
+          id: string
+          kind: Database["public"]["Enums"]["gift_card_txn_kind"]
+          note: string | null
+          payment_id: string | null
+          shop_id: string
+        }
+        Insert: {
+          amount_cents: number
+          balance_after_cents: number
+          created_at?: string
+          created_by?: string | null
+          gift_card_id: string
+          id?: string
+          kind: Database["public"]["Enums"]["gift_card_txn_kind"]
+          note?: string | null
+          payment_id?: string | null
+          shop_id: string
+        }
+        Update: {
+          amount_cents?: number
+          balance_after_cents?: number
+          created_at?: string
+          created_by?: string | null
+          gift_card_id?: string
+          id?: string
+          kind?: Database["public"]["Enums"]["gift_card_txn_kind"]
+          note?: string | null
+          payment_id?: string | null
+          shop_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "gift_card_transactions_card_fk"
+            columns: ["shop_id", "gift_card_id"]
+            isOneToOne: false
+            referencedRelation: "gift_cards"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "gift_card_transactions_payment_fk"
+            columns: ["shop_id", "payment_id"]
+            isOneToOne: false
+            referencedRelation: "payments"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "gift_card_transactions_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      gift_cards: {
+        Row: {
+          balance_cents: number
+          code_hash: string
+          code_last4: string
+          created_at: string
+          expires_at: string | null
+          id: string
+          initial_cents: number
+          issued_by: string | null
+          issued_via: string
+          kind: string
+          message: string | null
+          owner_customer_id: string | null
+          purchaser_customer_id: string | null
+          recipient_email: string | null
+          recipient_name: string | null
+          shop_id: string
+          sold_price_cents: number | null
+          status: Database["public"]["Enums"]["gift_card_status"]
+          stripe_payment_intent_id: string | null
+          updated_at: string
+          void_reason: string | null
+          voided_at: string | null
+        }
+        Insert: {
+          balance_cents: number
+          code_hash: string
+          code_last4: string
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          initial_cents: number
+          issued_by?: string | null
+          issued_via: string
+          kind?: string
+          message?: string | null
+          owner_customer_id?: string | null
+          purchaser_customer_id?: string | null
+          recipient_email?: string | null
+          recipient_name?: string | null
+          shop_id: string
+          sold_price_cents?: number | null
+          status?: Database["public"]["Enums"]["gift_card_status"]
+          stripe_payment_intent_id?: string | null
+          updated_at?: string
+          void_reason?: string | null
+          voided_at?: string | null
+        }
+        Update: {
+          balance_cents?: number
+          code_hash?: string
+          code_last4?: string
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          initial_cents?: number
+          issued_by?: string | null
+          issued_via?: string
+          kind?: string
+          message?: string | null
+          owner_customer_id?: string | null
+          purchaser_customer_id?: string | null
+          recipient_email?: string | null
+          recipient_name?: string | null
+          shop_id?: string
+          sold_price_cents?: number | null
+          status?: Database["public"]["Enums"]["gift_card_status"]
+          stripe_payment_intent_id?: string | null
+          updated_at?: string
+          void_reason?: string | null
+          voided_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "gift_cards_owner_fk"
+            columns: ["shop_id", "owner_customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "gift_cards_purchaser_fk"
+            columns: ["shop_id", "purchaser_customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "gift_cards_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      import_batches: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          created_count: number
+          error_count: number
+          errors: NonNullable<Json>
+          file_name: string | null
+          id: string
+          kind: string
+          row_count: number
+          shop_id: string
+          skipped_count: number
+          status: string
+          updated_at: string
+          updated_count: number
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          created_count?: number
+          error_count?: number
+          errors?: NonNullable<Json>
+          file_name?: string | null
+          id?: string
+          kind: string
+          row_count?: number
+          shop_id: string
+          skipped_count?: number
+          status: string
+          updated_at?: string
+          updated_count?: number
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          created_count?: number
+          error_count?: number
+          errors?: NonNullable<Json>
+          file_name?: string | null
+          id?: string
+          kind?: string
+          row_count?: number
+          shop_id?: string
+          skipped_count?: number
+          status?: string
+          updated_at?: string
+          updated_count?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "import_batches_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       inspection_marks: {
         Row: {
           created_at: string
@@ -849,6 +1818,7 @@ export type Database = {
           shop_id: string
           signed_at: string | null
           signed_by_name: string | null
+          signed_remotely: boolean
           updated_at: string
           vehicle_id: string | null
         }
@@ -865,6 +1835,7 @@ export type Database = {
           shop_id: string
           signed_at?: string | null
           signed_by_name?: string | null
+          signed_remotely?: boolean
           updated_at?: string
           vehicle_id?: string | null
         }
@@ -881,6 +1852,7 @@ export type Database = {
           shop_id?: string
           signed_at?: string | null
           signed_by_name?: string | null
+          signed_remotely?: boolean
           updated_at?: string
           vehicle_id?: string | null
         }
@@ -980,13 +1952,130 @@ export type Database = {
           },
         ]
       }
+      inventory_movements: {
+        Row: {
+          allocation: Json | null
+          created_at: string
+          created_by: string | null
+          id: string
+          job_id: string | null
+          kind: Database["public"]["Enums"]["inventory_movement_kind"]
+          note: string | null
+          product_id: string
+          quantity: number
+          shop_id: string
+          unit_cost_cents: number | null
+        }
+        Insert: {
+          allocation?: Json | null
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          job_id?: string | null
+          kind: Database["public"]["Enums"]["inventory_movement_kind"]
+          note?: string | null
+          product_id: string
+          quantity: number
+          shop_id: string
+          unit_cost_cents?: number | null
+        }
+        Update: {
+          allocation?: Json | null
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          job_id?: string | null
+          kind?: Database["public"]["Enums"]["inventory_movement_kind"]
+          note?: string | null
+          product_id?: string
+          quantity?: number
+          shop_id?: string
+          unit_cost_cents?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inventory_movements_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "inventory_movements_product_fk"
+            columns: ["shop_id", "product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "inventory_movements_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      invoice_jobs: {
+        Row: {
+          created_at: string
+          id: string
+          invoice_id: string
+          job_id: string
+          shop_id: string
+          voided: boolean
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          invoice_id: string
+          job_id: string
+          shop_id: string
+          voided?: boolean
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          invoice_id?: string
+          job_id?: string
+          shop_id?: string
+          voided?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "invoice_jobs_invoice_fk"
+            columns: ["shop_id", "invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "invoice_jobs_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "invoice_jobs_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       invoice_line_items: {
         Row: {
           created_at: string
           description: string | null
           discount_cents: number
+          discount_eligible: boolean
+          fee_id: string | null
           id: string
           invoice_id: string
+          job_id: string | null
+          membership_id: string | null
           name: string
           quantity: number
           service_id: string | null
@@ -1002,8 +2091,12 @@ export type Database = {
           created_at?: string
           description?: string | null
           discount_cents?: number
+          discount_eligible?: boolean
+          fee_id?: string | null
           id?: string
           invoice_id: string
+          job_id?: string | null
+          membership_id?: string | null
           name: string
           quantity?: number
           service_id?: string | null
@@ -1019,8 +2112,12 @@ export type Database = {
           created_at?: string
           description?: string | null
           discount_cents?: number
+          discount_eligible?: boolean
+          fee_id?: string | null
           id?: string
           invoice_id?: string
+          job_id?: string | null
+          membership_id?: string | null
           name?: string
           quantity?: number
           service_id?: string | null
@@ -1034,10 +2131,31 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "invoice_line_items_fee_fk"
+            columns: ["shop_id", "fee_id"]
+            isOneToOne: false
+            referencedRelation: "shop_fees"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
             foreignKeyName: "invoice_line_items_invoice_fk"
             columns: ["shop_id", "invoice_id"]
             isOneToOne: false
             referencedRelation: "invoices"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "invoice_line_items_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "invoice_line_items_membership_fk"
+            columns: ["shop_id", "membership_id"]
+            isOneToOne: false
+            referencedRelation: "memberships"
             referencedColumns: ["shop_id", "id"]
           },
           {
@@ -1074,6 +2192,7 @@ export type Database = {
           discount_kind: Database["public"]["Enums"]["discount_kind"]
           discount_value: number
           due_at: string | null
+          followups_paused: boolean
           id: string
           internal_notes: string | null
           issued_at: string | null
@@ -1105,6 +2224,7 @@ export type Database = {
           discount_kind?: Database["public"]["Enums"]["discount_kind"]
           discount_value?: number
           due_at?: string | null
+          followups_paused?: boolean
           id?: string
           internal_notes?: string | null
           issued_at?: string | null
@@ -1136,6 +2256,7 @@ export type Database = {
           discount_kind?: Database["public"]["Enums"]["discount_kind"]
           discount_value?: number
           due_at?: string | null
+          followups_paused?: boolean
           id?: string
           internal_notes?: string | null
           issued_at?: string | null
@@ -1238,7 +2359,9 @@ export type Database = {
           message_ids: string[]
           outcome: string
           processed_at: string
+          reminder_offset_minutes: number | null
           scheduled_for: string | null
+          service_followup_id: string | null
           shop_id: string
         }
         Insert: {
@@ -1251,7 +2374,9 @@ export type Database = {
           message_ids?: string[]
           outcome: string
           processed_at: string
+          reminder_offset_minutes?: number | null
           scheduled_for?: string | null
+          service_followup_id?: string | null
           shop_id: string
         }
         Update: {
@@ -1264,7 +2389,9 @@ export type Database = {
           message_ids?: string[]
           outcome?: string
           processed_at?: string
+          reminder_offset_minutes?: number | null
           scheduled_for?: string | null
+          service_followup_id?: string | null
           shop_id?: string
         }
         Relationships: [
@@ -1280,6 +2407,13 @@ export type Database = {
             columns: ["shop_id", "job_id"]
             isOneToOne: false
             referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "job_automation_log_service_followup_fk"
+            columns: ["shop_id", "service_followup_id"]
+            isOneToOne: false
+            referencedRelation: "service_followups"
             referencedColumns: ["shop_id", "id"]
           },
           {
@@ -1299,6 +2433,7 @@ export type Database = {
           id: string
           job_id: string
           label: string
+          required: boolean
           shop_id: string
           sort: number
           template_id: string | null
@@ -1312,6 +2447,7 @@ export type Database = {
           id?: string
           job_id: string
           label: string
+          required?: boolean
           shop_id: string
           sort?: number
           template_id?: string | null
@@ -1325,6 +2461,7 @@ export type Database = {
           id?: string
           job_id?: string
           label?: string
+          required?: boolean
           shop_id?: string
           sort?: number
           template_id?: string | null
@@ -1355,14 +2492,65 @@ export type Database = {
           },
         ]
       }
+      job_gate_overrides: {
+        Row: {
+          blockers: NonNullable<Json>
+          created_at: string
+          id: string
+          job_id: string
+          overridden_by: string | null
+          reason: string | null
+          shop_id: string
+          to_status: Database["public"]["Enums"]["job_status"]
+        }
+        Insert: {
+          blockers: NonNullable<Json>
+          created_at?: string
+          id?: string
+          job_id: string
+          overridden_by?: string | null
+          reason?: string | null
+          shop_id: string
+          to_status: Database["public"]["Enums"]["job_status"]
+        }
+        Update: {
+          blockers?: NonNullable<Json>
+          created_at?: string
+          id?: string
+          job_id?: string
+          overridden_by?: string | null
+          reason?: string | null
+          shop_id?: string
+          to_status?: Database["public"]["Enums"]["job_status"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "job_gate_overrides_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "job_gate_overrides_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       job_line_items: {
         Row: {
           created_at: string
           description: string | null
           discount_cents: number
+          discount_eligible: boolean
           duration_minutes: number
+          fee_id: string | null
           id: string
           job_id: string
+          membership_id: string | null
           name: string
           quantity: number
           service_id: string | null
@@ -1378,9 +2566,12 @@ export type Database = {
           created_at?: string
           description?: string | null
           discount_cents?: number
+          discount_eligible?: boolean
           duration_minutes?: number
+          fee_id?: string | null
           id?: string
           job_id: string
+          membership_id?: string | null
           name: string
           quantity?: number
           service_id?: string | null
@@ -1396,9 +2587,12 @@ export type Database = {
           created_at?: string
           description?: string | null
           discount_cents?: number
+          discount_eligible?: boolean
           duration_minutes?: number
+          fee_id?: string | null
           id?: string
           job_id?: string
+          membership_id?: string | null
           name?: string
           quantity?: number
           service_id?: string | null
@@ -1412,10 +2606,24 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "job_line_items_fee_fk"
+            columns: ["shop_id", "fee_id"]
+            isOneToOne: false
+            referencedRelation: "shop_fees"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
             foreignKeyName: "job_line_items_job_fk"
             columns: ["shop_id", "job_id"]
             isOneToOne: false
             referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "job_line_items_membership_fk"
+            columns: ["shop_id", "membership_id"]
+            isOneToOne: false
+            referencedRelation: "memberships"
             referencedColumns: ["shop_id", "id"]
           },
           {
@@ -1443,33 +2651,48 @@ export type Database = {
       }
       job_photos: {
         Row: {
+          bucket: string
           caption: string | null
           created_at: string
+          customer_visible: boolean
+          duration_seconds: number | null
           id: string
           job_id: string
           kind: Database["public"]["Enums"]["job_photo_kind"]
+          media_type: string
+          poster_path: string | null
           shop_id: string
           storage_path: string
           updated_at: string
           uploaded_by: string | null
         }
         Insert: {
+          bucket?: string
           caption?: string | null
           created_at?: string
+          customer_visible?: boolean
+          duration_seconds?: number | null
           id?: string
           job_id: string
           kind?: Database["public"]["Enums"]["job_photo_kind"]
+          media_type?: string
+          poster_path?: string | null
           shop_id: string
           storage_path: string
           updated_at?: string
           uploaded_by?: string | null
         }
         Update: {
+          bucket?: string
           caption?: string | null
           created_at?: string
+          customer_visible?: boolean
+          duration_seconds?: number | null
           id?: string
           job_id?: string
           kind?: Database["public"]["Enums"]["job_photo_kind"]
+          media_type?: string
+          poster_path?: string | null
           shop_id?: string
           storage_path?: string
           updated_at?: string
@@ -1489,6 +2712,266 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "shops"
             referencedColumns: ["id"]
+          },
+        ]
+      }
+      job_reports: {
+        Row: {
+          created_at: string
+          first_viewed_at: string | null
+          id: string
+          include_inspections: boolean
+          job_id: string
+          message: string | null
+          photo_kinds: Database["public"]["Enums"]["job_photo_kind"][]
+          published_at: string
+          published_by: string | null
+          revoked_at: string | null
+          shop_id: string
+          token: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          first_viewed_at?: string | null
+          id?: string
+          include_inspections?: boolean
+          job_id: string
+          message?: string | null
+          photo_kinds?: Database["public"]["Enums"]["job_photo_kind"][]
+          published_at?: string
+          published_by?: string | null
+          revoked_at?: string | null
+          shop_id: string
+          token?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          first_viewed_at?: string | null
+          id?: string
+          include_inspections?: boolean
+          job_id?: string
+          message?: string | null
+          photo_kinds?: Database["public"]["Enums"]["job_photo_kind"][]
+          published_at?: string
+          published_by?: string | null
+          revoked_at?: string | null
+          shop_id?: string
+          token?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "job_reports_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "job_reports_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      job_series: {
+        Row: {
+          active: boolean
+          assignee_member_ids: string[]
+          by_weekday: number[]
+          created_at: string
+          created_by: string | null
+          customer_id: string
+          duration_minutes: number
+          ended_at: string | null
+          freq: string
+          generated_through: string | null
+          held_dates: string[]
+          id: string
+          internal_notes: string | null
+          interval: number
+          local_start: string
+          location_type: Database["public"]["Enums"]["location_type"]
+          max_occurrences: number | null
+          month_day: number | null
+          month_mode: string | null
+          month_nth: number | null
+          month_weekday: number | null
+          notes: string | null
+          resource_id: string | null
+          seq_offset: number
+          service_address_line1: string | null
+          service_address_line2: string | null
+          service_city: string | null
+          service_lat: number | null
+          service_lng: number | null
+          service_postal_code: string | null
+          service_region: string | null
+          shop_id: string
+          skipped_dates: string[]
+          skipped_seqs: number[]
+          start_date: string
+          template_lines: NonNullable<Json>
+          until_date: string | null
+          updated_at: string
+          vehicle_id: string | null
+          job_series_lock_memberships: undefined | null
+          job_series_normalize: {
+            active: boolean
+            assignee_member_ids: string[]
+            by_weekday: number[]
+            created_at: string
+            created_by: string | null
+            customer_id: string
+            duration_minutes: number
+            ended_at: string | null
+            freq: string
+            generated_through: string | null
+            held_dates: string[]
+            id: string
+            internal_notes: string | null
+            interval: number
+            local_start: string
+            location_type: Database["public"]["Enums"]["location_type"]
+            max_occurrences: number | null
+            month_day: number | null
+            month_mode: string | null
+            month_nth: number | null
+            month_weekday: number | null
+            notes: string | null
+            resource_id: string | null
+            seq_offset: number
+            service_address_line1: string | null
+            service_address_line2: string | null
+            service_city: string | null
+            service_lat: number | null
+            service_lng: number | null
+            service_postal_code: string | null
+            service_region: string | null
+            shop_id: string
+            skipped_dates: string[]
+            skipped_seqs: number[]
+            start_date: string
+            template_lines: NonNullable<Json>
+            until_date: string | null
+            updated_at: string
+            vehicle_id: string | null
+          } | null
+        }
+        Insert: {
+          active?: boolean
+          assignee_member_ids?: string[]
+          by_weekday?: number[]
+          created_at?: string
+          created_by?: string | null
+          customer_id: string
+          duration_minutes: number
+          ended_at?: string | null
+          freq: string
+          generated_through?: string | null
+          held_dates?: string[]
+          id?: string
+          internal_notes?: string | null
+          interval?: number
+          local_start: string
+          location_type?: Database["public"]["Enums"]["location_type"]
+          max_occurrences?: number | null
+          month_day?: number | null
+          month_mode?: string | null
+          month_nth?: number | null
+          month_weekday?: number | null
+          notes?: string | null
+          resource_id?: string | null
+          seq_offset?: number
+          service_address_line1?: string | null
+          service_address_line2?: string | null
+          service_city?: string | null
+          service_lat?: number | null
+          service_lng?: number | null
+          service_postal_code?: string | null
+          service_region?: string | null
+          shop_id: string
+          skipped_dates?: string[]
+          skipped_seqs?: number[]
+          start_date: string
+          template_lines?: NonNullable<Json>
+          until_date?: string | null
+          updated_at?: string
+          vehicle_id?: string | null
+        }
+        Update: {
+          active?: boolean
+          assignee_member_ids?: string[]
+          by_weekday?: number[]
+          created_at?: string
+          created_by?: string | null
+          customer_id?: string
+          duration_minutes?: number
+          ended_at?: string | null
+          freq?: string
+          generated_through?: string | null
+          held_dates?: string[]
+          id?: string
+          internal_notes?: string | null
+          interval?: number
+          local_start?: string
+          location_type?: Database["public"]["Enums"]["location_type"]
+          max_occurrences?: number | null
+          month_day?: number | null
+          month_mode?: string | null
+          month_nth?: number | null
+          month_weekday?: number | null
+          notes?: string | null
+          resource_id?: string | null
+          seq_offset?: number
+          service_address_line1?: string | null
+          service_address_line2?: string | null
+          service_city?: string | null
+          service_lat?: number | null
+          service_lng?: number | null
+          service_postal_code?: string | null
+          service_region?: string | null
+          shop_id?: string
+          skipped_dates?: string[]
+          skipped_seqs?: number[]
+          start_date?: string
+          template_lines?: NonNullable<Json>
+          until_date?: string | null
+          updated_at?: string
+          vehicle_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "job_series_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "job_series_resource_fk"
+            columns: ["shop_id", "resource_id"]
+            isOneToOne: false
+            referencedRelation: "resources"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "job_series_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "job_series_vehicle_fk"
+            columns: ["shop_id", "vehicle_id"]
+            isOneToOne: false
+            referencedRelation: "vehicles"
+            referencedColumns: ["shop_id", "id"]
           },
         ]
       }
@@ -1523,7 +3006,9 @@ export type Database = {
           coupon_id: string | null
           created_at: string
           created_by: string | null
+          custom_data: NonNullable<Json>
           customer_id: string
+          deposit_followups_paused: boolean
           deposit_required_cents: number
           discount_cents: number
           discount_kind: Database["public"]["Enums"]["discount_kind"]
@@ -1539,8 +3024,12 @@ export type Database = {
           reminder_sent_at: string | null
           resource_id: string | null
           review_requested_at: string | null
+          route_position: number | null
           scheduled_end: string | null
           scheduled_start: string | null
+          series_detached: boolean
+          series_id: string | null
+          series_seq: number | null
           service_address_line1: string | null
           service_address_line2: string | null
           service_city: string | null
@@ -1549,6 +3038,7 @@ export type Database = {
           service_postal_code: string | null
           service_region: string | null
           shop_id: string
+          sold_by_member_id: string | null
           source: Database["public"]["Enums"]["job_source"]
           started_at: string | null
           status: Database["public"]["Enums"]["job_status"]
@@ -1568,7 +3058,9 @@ export type Database = {
           coupon_id?: string | null
           created_at?: string
           created_by?: string | null
+          custom_data?: NonNullable<Json>
           customer_id: string
+          deposit_followups_paused?: boolean
           deposit_required_cents?: number
           discount_cents?: number
           discount_kind?: Database["public"]["Enums"]["discount_kind"]
@@ -1584,8 +3076,12 @@ export type Database = {
           reminder_sent_at?: string | null
           resource_id?: string | null
           review_requested_at?: string | null
+          route_position?: number | null
           scheduled_end?: string | null
           scheduled_start?: string | null
+          series_detached?: boolean
+          series_id?: string | null
+          series_seq?: number | null
           service_address_line1?: string | null
           service_address_line2?: string | null
           service_city?: string | null
@@ -1594,6 +3090,7 @@ export type Database = {
           service_postal_code?: string | null
           service_region?: string | null
           shop_id: string
+          sold_by_member_id?: string | null
           source?: Database["public"]["Enums"]["job_source"]
           started_at?: string | null
           status?: Database["public"]["Enums"]["job_status"]
@@ -1613,7 +3110,9 @@ export type Database = {
           coupon_id?: string | null
           created_at?: string
           created_by?: string | null
+          custom_data?: NonNullable<Json>
           customer_id?: string
+          deposit_followups_paused?: boolean
           deposit_required_cents?: number
           discount_cents?: number
           discount_kind?: Database["public"]["Enums"]["discount_kind"]
@@ -1629,8 +3128,12 @@ export type Database = {
           reminder_sent_at?: string | null
           resource_id?: string | null
           review_requested_at?: string | null
+          route_position?: number | null
           scheduled_end?: string | null
           scheduled_start?: string | null
+          series_detached?: boolean
+          series_id?: string | null
+          series_seq?: number | null
           service_address_line1?: string | null
           service_address_line2?: string | null
           service_city?: string | null
@@ -1639,6 +3142,7 @@ export type Database = {
           service_postal_code?: string | null
           service_region?: string | null
           shop_id?: string
+          sold_by_member_id?: string | null
           source?: Database["public"]["Enums"]["job_source"]
           started_at?: string | null
           status?: Database["public"]["Enums"]["job_status"]
@@ -1679,6 +3183,13 @@ export type Database = {
             referencedColumns: ["shop_id", "id"]
           },
           {
+            foreignKeyName: "jobs_series_fk"
+            columns: ["shop_id", "series_id"]
+            isOneToOne: false
+            referencedRelation: "job_series"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
             foreignKeyName: "jobs_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
@@ -1686,7 +3197,171 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "jobs_sold_by_fk"
+            columns: ["shop_id", "sold_by_member_id"]
+            isOneToOne: false
+            referencedRelation: "shop_members"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
             foreignKeyName: "jobs_vehicle_fk"
+            columns: ["shop_id", "vehicle_id"]
+            isOneToOne: false
+            referencedRelation: "vehicles"
+            referencedColumns: ["shop_id", "id"]
+          },
+        ]
+      }
+      lead_forms: {
+        Row: {
+          active: boolean
+          archived_at: string | null
+          ask_message: boolean
+          ask_vehicle: boolean
+          auto_reply: boolean
+          created_at: string
+          default_source: Database["public"]["Enums"]["customer_source"]
+          field_ids: string[]
+          headline: string | null
+          id: string
+          intro: string | null
+          name: string
+          notify_staff: boolean
+          shop_id: string
+          success_message: string | null
+          token: string
+          updated_at: string
+          comms_lead_form_fields: {
+            archived_at: string | null
+            created_at: string
+            entity: Database["public"]["Enums"]["custom_field_entity"]
+            help_text: string | null
+            id: string
+            key: string
+            label: string
+            location_scope: Database["public"]["Enums"]["location_type"] | null
+            options: string[]
+            required: boolean
+            shop_id: string
+            show_in_booking: boolean
+            show_in_lead_form: boolean
+            sort: number
+            type: Database["public"]["Enums"]["custom_field_type"]
+            updated_at: string
+          } | null
+        }
+        Insert: {
+          active?: boolean
+          archived_at?: string | null
+          ask_message?: boolean
+          ask_vehicle?: boolean
+          auto_reply?: boolean
+          created_at?: string
+          default_source?: Database["public"]["Enums"]["customer_source"]
+          field_ids?: string[]
+          headline?: string | null
+          id?: string
+          intro?: string | null
+          name: string
+          notify_staff?: boolean
+          shop_id: string
+          success_message?: string | null
+          token?: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          archived_at?: string | null
+          ask_message?: boolean
+          ask_vehicle?: boolean
+          auto_reply?: boolean
+          created_at?: string
+          default_source?: Database["public"]["Enums"]["customer_source"]
+          field_ids?: string[]
+          headline?: string | null
+          id?: string
+          intro?: string | null
+          name?: string
+          notify_staff?: boolean
+          shop_id?: string
+          success_message?: string | null
+          token?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lead_forms_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      lead_submissions: {
+        Row: {
+          answers: NonNullable<Json>
+          created_at: string
+          customer_id: string
+          id: string
+          lead_form_id: string | null
+          matched_existing: boolean
+          message: string | null
+          shop_id: string
+          signer_ip: unknown
+          vehicle_id: string | null
+          vehicle_info: Json | null
+        }
+        Insert: {
+          answers?: NonNullable<Json>
+          created_at?: string
+          customer_id: string
+          id?: string
+          lead_form_id?: string | null
+          matched_existing: boolean
+          message?: string | null
+          shop_id: string
+          signer_ip?: unknown
+          vehicle_id?: string | null
+          vehicle_info?: Json | null
+        }
+        Update: {
+          answers?: NonNullable<Json>
+          created_at?: string
+          customer_id?: string
+          id?: string
+          lead_form_id?: string | null
+          matched_existing?: boolean
+          message?: string | null
+          shop_id?: string
+          signer_ip?: unknown
+          vehicle_id?: string | null
+          vehicle_info?: Json | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lead_submissions_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "lead_submissions_form_fk"
+            columns: ["shop_id", "lead_form_id"]
+            isOneToOne: false
+            referencedRelation: "lead_forms"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "lead_submissions_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "lead_submissions_vehicle_fk"
             columns: ["shop_id", "vehicle_id"]
             isOneToOne: false
             referencedRelation: "vehicles"
@@ -1700,6 +3375,7 @@ export type Database = {
           created_at: string
           hourly_rate_cents: number
           member_id: string
+          sales_commission_bps: number
           shop_id: string
           updated_at: string
         }
@@ -1708,6 +3384,7 @@ export type Database = {
           created_at?: string
           hourly_rate_cents?: number
           member_id: string
+          sales_commission_bps?: number
           shop_id: string
           updated_at?: string
         }
@@ -1716,6 +3393,7 @@ export type Database = {
           created_at?: string
           hourly_rate_cents?: number
           member_id?: string
+          sales_commission_bps?: number
           shop_id?: string
           updated_at?: string
         }
@@ -1736,6 +3414,45 @@ export type Database = {
           },
         ]
       }
+      member_notification_prefs: {
+        Row: {
+          member_id: string
+          muted_until: string | null
+          push_kinds: Database["public"]["Enums"]["notification_kind"][]
+          shop_id: string
+          updated_at: string
+        }
+        Insert: {
+          member_id: string
+          muted_until?: string | null
+          push_kinds?: Database["public"]["Enums"]["notification_kind"][]
+          shop_id: string
+          updated_at?: string
+        }
+        Update: {
+          member_id?: string
+          muted_until?: string | null
+          push_kinds?: Database["public"]["Enums"]["notification_kind"][]
+          shop_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "member_notification_prefs_member_fk"
+            columns: ["shop_id", "member_id"]
+            isOneToOne: false
+            referencedRelation: "shop_members"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "member_notification_prefs_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       membership_plans: {
         Row: {
           active: boolean
@@ -1745,14 +3462,17 @@ export type Database = {
           discount_bps: number
           id: string
           included_service_ids: string[]
+          included_uses_per_period: number | null
           interval: Database["public"]["Enums"]["membership_interval"]
           interval_count: number
           name: string
+          online_joinable: boolean
           price_cents: number
           shop_id: string
           sort: number
           stripe_price_id: string | null
           stripe_product_id: string | null
+          terms: string | null
           updated_at: string
         }
         Insert: {
@@ -1763,14 +3483,17 @@ export type Database = {
           discount_bps?: number
           id?: string
           included_service_ids?: string[]
+          included_uses_per_period?: number | null
           interval?: Database["public"]["Enums"]["membership_interval"]
           interval_count?: number
           name: string
+          online_joinable?: boolean
           price_cents: number
           shop_id: string
           sort?: number
           stripe_price_id?: string | null
           stripe_product_id?: string | null
+          terms?: string | null
           updated_at?: string
         }
         Update: {
@@ -1781,14 +3504,17 @@ export type Database = {
           discount_bps?: number
           id?: string
           included_service_ids?: string[]
+          included_uses_per_period?: number | null
           interval?: Database["public"]["Enums"]["membership_interval"]
           interval_count?: number
           name?: string
+          online_joinable?: boolean
           price_cents?: number
           shop_id?: string
           sort?: number
           stripe_price_id?: string | null
           stripe_product_id?: string | null
+          terms?: string | null
           updated_at?: string
         }
         Relationships: [
@@ -1902,6 +3628,7 @@ export type Database = {
           id: string
           key: Database["public"]["Enums"]["message_template_key"]
           offset_minutes: number | null
+          reminder_offsets_minutes: number[] | null
           shop_id: string
           subject: string | null
           updated_at: string
@@ -1914,6 +3641,7 @@ export type Database = {
           id?: string
           key: Database["public"]["Enums"]["message_template_key"]
           offset_minutes?: number | null
+          reminder_offsets_minutes?: number[] | null
           shop_id: string
           subject?: string | null
           updated_at?: string
@@ -1926,6 +3654,7 @@ export type Database = {
           id?: string
           key?: Database["public"]["Enums"]["message_template_key"]
           offset_minutes?: number | null
+          reminder_offsets_minutes?: number[] | null
           shop_id?: string
           subject?: string | null
           updated_at?: string
@@ -1954,8 +3683,10 @@ export type Database = {
           error: string | null
           from_address: string | null
           id: string
+          invoice_id: string | null
           job_id: string | null
           provider_message_id: string | null
+          quote_id: string | null
           read_at: string | null
           request_nonce: string | null
           send_after: string
@@ -1983,8 +3714,10 @@ export type Database = {
           error?: string | null
           from_address?: string | null
           id?: string
+          invoice_id?: string | null
           job_id?: string | null
           provider_message_id?: string | null
+          quote_id?: string | null
           read_at?: string | null
           request_nonce?: string | null
           send_after?: string
@@ -2012,8 +3745,10 @@ export type Database = {
           error?: string | null
           from_address?: string | null
           id?: string
+          invoice_id?: string | null
           job_id?: string | null
           provider_message_id?: string | null
+          quote_id?: string | null
           read_at?: string | null
           request_nonce?: string | null
           send_after?: string
@@ -2044,10 +3779,24 @@ export type Database = {
             referencedColumns: ["shop_id", "id"]
           },
           {
+            foreignKeyName: "messages_invoice_fk"
+            columns: ["shop_id", "invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
             foreignKeyName: "messages_job_fk"
             columns: ["shop_id", "job_id"]
             isOneToOne: false
             referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "messages_quote_fk"
+            columns: ["shop_id", "quote_id"]
+            isOneToOne: false
+            referencedRelation: "quotes"
             referencedColumns: ["shop_id", "id"]
           },
           {
@@ -2068,6 +3817,8 @@ export type Database = {
           invoice_id: string | null
           job_id: string | null
           kind: Database["public"]["Enums"]["notification_kind"]
+          push_attempts: number
+          pushed_at: string | null
           quote_id: string | null
           read_at: string | null
           shop_id: string
@@ -2082,6 +3833,8 @@ export type Database = {
           invoice_id?: string | null
           job_id?: string | null
           kind: Database["public"]["Enums"]["notification_kind"]
+          push_attempts?: number
+          pushed_at?: string | null
           quote_id?: string | null
           read_at?: string | null
           shop_id: string
@@ -2096,6 +3849,8 @@ export type Database = {
           invoice_id?: string | null
           job_id?: string | null
           kind?: Database["public"]["Enums"]["notification_kind"]
+          push_attempts?: number
+          pushed_at?: string | null
           quote_id?: string | null
           read_at?: string | null
           shop_id?: string
@@ -2218,6 +3973,7 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
           stripe_payment_intent_id: string | null
           tip_cents: number
           updated_at: string
@@ -2243,6 +3999,7 @@ export type Database = {
           status?: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id?: string | null
           stripe_checkout_session_id?: string | null
+          stripe_method_type?: string | null
           stripe_payment_intent_id?: string | null
           tip_cents?: number
           updated_at?: string
@@ -2268,6 +4025,7 @@ export type Database = {
           status?: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id?: string | null
           stripe_checkout_session_id?: string | null
+          stripe_method_type?: string | null
           stripe_payment_intent_id?: string | null
           tip_cents?: number
           updated_at?: string
@@ -2331,6 +4089,125 @@ export type Database = {
         }
         Relationships: []
       }
+      platform_plans: {
+        Row: {
+          active: boolean
+          amount_cents: number
+          created_at: string
+          currency: string
+          description: string | null
+          features: string[]
+          id: string
+          interval: string
+          interval_count: number
+          max_members: number | null
+          name: string
+          sort: number
+          stripe_price_id: string
+          stripe_product_id: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          amount_cents: number
+          created_at?: string
+          currency: string
+          description?: string | null
+          features?: string[]
+          id?: string
+          interval: string
+          interval_count?: number
+          max_members?: number | null
+          name: string
+          sort?: number
+          stripe_price_id: string
+          stripe_product_id: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          amount_cents?: number
+          created_at?: string
+          currency?: string
+          description?: string | null
+          features?: string[]
+          id?: string
+          interval?: string
+          interval_count?: number
+          max_members?: number | null
+          name?: string
+          sort?: number
+          stripe_price_id?: string
+          stripe_product_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      products: {
+        Row: {
+          active: boolean
+          archived_at: string | null
+          created_at: string
+          id: string
+          low_stock_notified_at: string | null
+          name: string
+          notes: string | null
+          on_hand: number
+          reorder_at: number | null
+          reorder_qty: number | null
+          shop_id: string
+          sku: string | null
+          supplier: string | null
+          unit: string
+          unit_cost_cents: number
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          archived_at?: string | null
+          created_at?: string
+          id?: string
+          low_stock_notified_at?: string | null
+          name: string
+          notes?: string | null
+          on_hand?: number
+          reorder_at?: number | null
+          reorder_qty?: number | null
+          shop_id: string
+          sku?: string | null
+          supplier?: string | null
+          unit: string
+          unit_cost_cents?: number
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          archived_at?: string | null
+          created_at?: string
+          id?: string
+          low_stock_notified_at?: string | null
+          name?: string
+          notes?: string | null
+          on_hand?: number
+          reorder_at?: number | null
+          reorder_qty?: number | null
+          shop_id?: string
+          sku?: string | null
+          supplier?: string | null
+          unit?: string
+          unit_cost_cents?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "products_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           avatar_path: string | null
@@ -2363,9 +4240,13 @@ export type Database = {
           created_at: string
           description: string | null
           discount_cents: number
+          discount_eligible: boolean
           duration_minutes: number
+          fee_id: string | null
           id: string
+          membership_id: string | null
           name: string
+          option_id: string | null
           optional: boolean
           quantity: number
           quote_id: string
@@ -2383,9 +4264,13 @@ export type Database = {
           created_at?: string
           description?: string | null
           discount_cents?: number
+          discount_eligible?: boolean
           duration_minutes?: number
+          fee_id?: string | null
           id?: string
+          membership_id?: string | null
           name: string
+          option_id?: string | null
           optional?: boolean
           quantity?: number
           quote_id: string
@@ -2403,9 +4288,13 @@ export type Database = {
           created_at?: string
           description?: string | null
           discount_cents?: number
+          discount_eligible?: boolean
           duration_minutes?: number
+          fee_id?: string | null
           id?: string
+          membership_id?: string | null
           name?: string
+          option_id?: string | null
           optional?: boolean
           quantity?: number
           quote_id?: string
@@ -2420,6 +4309,27 @@ export type Database = {
           vehicle_id?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "quote_line_items_fee_fk"
+            columns: ["shop_id", "fee_id"]
+            isOneToOne: false
+            referencedRelation: "shop_fees"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "quote_line_items_membership_fk"
+            columns: ["shop_id", "membership_id"]
+            isOneToOne: false
+            referencedRelation: "memberships"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "quote_line_items_option_fk"
+            columns: ["shop_id", "option_id"]
+            isOneToOne: false
+            referencedRelation: "quote_options"
+            referencedColumns: ["shop_id", "id"]
+          },
           {
             foreignKeyName: "quote_line_items_quote_fk"
             columns: ["shop_id", "quote_id"]
@@ -2450,6 +4360,66 @@ export type Database = {
           },
         ]
       }
+      quote_options: {
+        Row: {
+          created_at: string
+          description: string | null
+          discount_cents: number
+          id: string
+          name: string
+          quote_id: string
+          shop_id: string
+          sort: number
+          subtotal_cents: number
+          tax_cents: number
+          total_cents: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          discount_cents?: number
+          id?: string
+          name: string
+          quote_id: string
+          shop_id: string
+          sort?: number
+          subtotal_cents?: number
+          tax_cents?: number
+          total_cents?: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          discount_cents?: number
+          id?: string
+          name?: string
+          quote_id?: string
+          shop_id?: string
+          sort?: number
+          subtotal_cents?: number
+          tax_cents?: number
+          total_cents?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "quote_options_quote_fk"
+            columns: ["shop_id", "quote_id"]
+            isOneToOne: false
+            referencedRelation: "quotes"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "quote_options_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       quotes: {
         Row: {
           approved_at: string | null
@@ -2465,11 +4435,15 @@ export type Database = {
           discount_kind: Database["public"]["Enums"]["discount_kind"]
           discount_value: number
           expired_at: string | null
+          followups_paused: boolean
           id: string
           internal_notes: string | null
           notes: string | null
           number: number
           public_token: string
+          selected_option_id: string | null
+          self_schedule: boolean
+          self_scheduled_at: string | null
           sent_at: string | null
           shop_id: string
           status: Database["public"]["Enums"]["quote_status"]
@@ -2482,6 +4456,8 @@ export type Database = {
           valid_until: string | null
           vehicle_id: string | null
           viewed_at: string | null
+          quote_schedule_needs: Record<string, unknown> | null
+          quote_self_schedule_reason: string | null
         }
         Insert: {
           approved_at?: string | null
@@ -2497,11 +4473,15 @@ export type Database = {
           discount_kind?: Database["public"]["Enums"]["discount_kind"]
           discount_value?: number
           expired_at?: string | null
+          followups_paused?: boolean
           id?: string
           internal_notes?: string | null
           notes?: string | null
           number?: number
           public_token?: string
+          selected_option_id?: string | null
+          self_schedule?: boolean
+          self_scheduled_at?: string | null
           sent_at?: string | null
           shop_id: string
           status?: Database["public"]["Enums"]["quote_status"]
@@ -2529,11 +4509,15 @@ export type Database = {
           discount_kind?: Database["public"]["Enums"]["discount_kind"]
           discount_value?: number
           expired_at?: string | null
+          followups_paused?: boolean
           id?: string
           internal_notes?: string | null
           notes?: string | null
           number?: number
           public_token?: string
+          selected_option_id?: string | null
+          self_schedule?: boolean
+          self_scheduled_at?: string | null
           sent_at?: string | null
           shop_id?: string
           status?: Database["public"]["Enums"]["quote_status"]
@@ -2563,6 +4547,13 @@ export type Database = {
             referencedColumns: ["shop_id", "id"]
           },
           {
+            foreignKeyName: "quotes_selected_option_fk"
+            columns: ["shop_id", "selected_option_id"]
+            isOneToOne: false
+            referencedRelation: "quote_options"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
             foreignKeyName: "quotes_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
@@ -2575,6 +4566,126 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "vehicles"
             referencedColumns: ["shop_id", "id"]
+          },
+        ]
+      }
+      referral_credits: {
+        Row: {
+          amount_cents: number
+          coupon_id: string | null
+          created_at: string
+          gift_card_id: string | null
+          id: string
+          job_id: string | null
+          referee_customer_id: string
+          referrer_customer_id: string
+          shop_id: string
+          status: string
+        }
+        Insert: {
+          amount_cents: number
+          coupon_id?: string | null
+          created_at?: string
+          gift_card_id?: string | null
+          id?: string
+          job_id?: string | null
+          referee_customer_id: string
+          referrer_customer_id: string
+          shop_id: string
+          status: string
+        }
+        Update: {
+          amount_cents?: number
+          coupon_id?: string | null
+          created_at?: string
+          gift_card_id?: string | null
+          id?: string
+          job_id?: string | null
+          referee_customer_id?: string
+          referrer_customer_id?: string
+          shop_id?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "referral_credits_card_fk"
+            columns: ["shop_id", "gift_card_id"]
+            isOneToOne: false
+            referencedRelation: "gift_cards"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "referral_credits_coupon_fk"
+            columns: ["shop_id", "coupon_id"]
+            isOneToOne: false
+            referencedRelation: "coupons"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "referral_credits_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "referral_credits_referee_fk"
+            columns: ["shop_id", "referee_customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "referral_credits_referrer_fk"
+            columns: ["shop_id", "referrer_customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "referral_credits_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      referral_settings: {
+        Row: {
+          enabled: boolean
+          referee_discount_kind: Database["public"]["Enums"]["coupon_kind"]
+          referee_discount_value: number
+          referrer_reward_cents: number
+          shop_id: string
+          terms: string | null
+          updated_at: string
+        }
+        Insert: {
+          enabled?: boolean
+          referee_discount_kind?: Database["public"]["Enums"]["coupon_kind"]
+          referee_discount_value?: number
+          referrer_reward_cents?: number
+          shop_id: string
+          terms?: string | null
+          updated_at?: string
+        }
+        Update: {
+          enabled?: boolean
+          referee_discount_kind?: Database["public"]["Enums"]["coupon_kind"]
+          referee_discount_value?: number
+          referrer_reward_cents?: number
+          shop_id?: string
+          terms?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "referral_settings_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: true
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -2670,6 +4781,7 @@ export type Database = {
       }
       service_categories: {
         Row: {
+          bookable_weekdays: number[] | null
           created_at: string
           id: string
           name: string
@@ -2678,6 +4790,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          bookable_weekdays?: number[] | null
           created_at?: string
           id?: string
           name: string
@@ -2686,6 +4799,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          bookable_weekdays?: number[] | null
           created_at?: string
           id?: string
           name?: string
@@ -2696,6 +4810,125 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "service_categories_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      service_consumables: {
+        Row: {
+          created_at: string
+          id: string
+          product_id: string
+          quantity: number
+          service_id: string
+          shop_id: string
+          updated_at: string
+          vehicle_category_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          product_id: string
+          quantity: number
+          service_id: string
+          shop_id: string
+          updated_at?: string
+          vehicle_category_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          product_id?: string
+          quantity?: number
+          service_id?: string
+          shop_id?: string
+          updated_at?: string
+          vehicle_category_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "service_consumables_category_fk"
+            columns: ["shop_id", "vehicle_category_id"]
+            isOneToOne: false
+            referencedRelation: "vehicle_categories"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "service_consumables_product_fk"
+            columns: ["shop_id", "product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "service_consumables_service_fk"
+            columns: ["shop_id", "service_id"]
+            isOneToOne: false
+            referencedRelation: "services"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "service_consumables_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      service_followups: {
+        Row: {
+          body: string
+          channel: Database["public"]["Enums"]["message_channel"]
+          created_at: string
+          enabled: boolean
+          id: string
+          offset_days: number
+          service_id: string
+          shop_id: string
+          sort: number
+          subject: string | null
+          updated_at: string
+        }
+        Insert: {
+          body: string
+          channel: Database["public"]["Enums"]["message_channel"]
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          offset_days: number
+          service_id: string
+          shop_id: string
+          sort?: number
+          subject?: string | null
+          updated_at?: string
+        }
+        Update: {
+          body?: string
+          channel?: Database["public"]["Enums"]["message_channel"]
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          offset_days?: number
+          service_id?: string
+          shop_id?: string
+          sort?: number
+          subject?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "service_followups_service_fk"
+            columns: ["shop_id", "service_id"]
+            isOneToOne: false
+            referencedRelation: "services"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "service_followups_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
             referencedRelation: "shops"
@@ -2763,12 +4996,16 @@ export type Database = {
           active: boolean
           archived_at: string | null
           category_id: string | null
+          commission_kind: Database["public"]["Enums"]["commission_kind"]
+          commission_value: number
           created_at: string
           description: string | null
           duration_minutes: number
           id: string
           image_path: string | null
           kind: Database["public"]["Enums"]["service_kind"]
+          min_after_photos: number
+          min_before_photos: number
           name: string
           online_bookable: boolean
           shop_id: string
@@ -2780,12 +5017,16 @@ export type Database = {
           active?: boolean
           archived_at?: string | null
           category_id?: string | null
+          commission_kind?: Database["public"]["Enums"]["commission_kind"]
+          commission_value?: number
           created_at?: string
           description?: string | null
           duration_minutes?: number
           id?: string
           image_path?: string | null
           kind?: Database["public"]["Enums"]["service_kind"]
+          min_after_photos?: number
+          min_before_photos?: number
           name: string
           online_bookable?: boolean
           shop_id: string
@@ -2797,12 +5038,16 @@ export type Database = {
           active?: boolean
           archived_at?: string | null
           category_id?: string | null
+          commission_kind?: Database["public"]["Enums"]["commission_kind"]
+          commission_value?: number
           created_at?: string
           description?: string | null
           duration_minutes?: number
           id?: string
           image_path?: string | null
           kind?: Database["public"]["Enums"]["service_kind"]
+          min_after_photos?: number
+          min_before_photos?: number
           name?: string
           online_bookable?: boolean
           shop_id?: string
@@ -2827,6 +5072,69 @@ export type Database = {
           },
         ]
       }
+      shop_billing: {
+        Row: {
+          cancel_at_period_end: boolean
+          comp_until: string | null
+          created_at: string
+          current_period_end: string | null
+          last_event_at: string | null
+          plan_id: string | null
+          shop_id: string
+          status: string
+          stripe_customer_id: string | null
+          stripe_subscription_id: string | null
+          trial_ends_at: string | null
+          trial_used: boolean
+          updated_at: string
+        }
+        Insert: {
+          cancel_at_period_end?: boolean
+          comp_until?: string | null
+          created_at?: string
+          current_period_end?: string | null
+          last_event_at?: string | null
+          plan_id?: string | null
+          shop_id: string
+          status?: string
+          stripe_customer_id?: string | null
+          stripe_subscription_id?: string | null
+          trial_ends_at?: string | null
+          trial_used?: boolean
+          updated_at?: string
+        }
+        Update: {
+          cancel_at_period_end?: boolean
+          comp_until?: string | null
+          created_at?: string
+          current_period_end?: string | null
+          last_event_at?: string | null
+          plan_id?: string | null
+          shop_id?: string
+          status?: string
+          stripe_customer_id?: string | null
+          stripe_subscription_id?: string | null
+          trial_ends_at?: string | null
+          trial_used?: boolean
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "shop_billing_plan_id_fkey"
+            columns: ["plan_id"]
+            isOneToOne: false
+            referencedRelation: "platform_plans"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shop_billing_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: true
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       shop_counters: {
         Row: {
           kind: Database["public"]["Enums"]["document_kind"]
@@ -2846,6 +5154,56 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "shop_counters_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      shop_fees: {
+        Row: {
+          active: boolean
+          amount_cents: number
+          archived_at: string | null
+          auto_apply: Database["public"]["Enums"]["fee_apply_location"]
+          created_at: string
+          id: string
+          name: string
+          shop_id: string
+          sort: number
+          taxable: boolean
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          amount_cents: number
+          archived_at?: string | null
+          auto_apply?: Database["public"]["Enums"]["fee_apply_location"]
+          created_at?: string
+          id?: string
+          name: string
+          shop_id: string
+          sort?: number
+          taxable?: boolean
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          amount_cents?: number
+          archived_at?: string | null
+          auto_apply?: Database["public"]["Enums"]["fee_apply_location"]
+          created_at?: string
+          id?: string
+          name?: string
+          shop_id?: string
+          sort?: number
+          taxable?: boolean
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "shop_fees_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
             referencedRelation: "shops"
@@ -2906,6 +5264,7 @@ export type Database = {
       shop_members: {
         Row: {
           active: boolean
+          bookable: boolean
           calendar_color: string | null
           created_at: string
           display_name: string
@@ -2918,6 +5277,7 @@ export type Database = {
         }
         Insert: {
           active?: boolean
+          bookable?: boolean
           calendar_color?: string | null
           created_at?: string
           display_name: string
@@ -2930,6 +5290,7 @@ export type Database = {
         }
         Update: {
           active?: boolean
+          bookable?: boolean
           calendar_color?: string | null
           created_at?: string
           display_name?: string
@@ -2952,19 +5313,46 @@ export type Database = {
       }
       shop_sms_numbers: {
         Row: {
+          business_info: NonNullable<Json>
           created_at: string
+          kind: string | null
+          last_checked_at: string | null
+          messaging_service_sid: string | null
           phone_number: string
+          rejection_reason: string | null
           shop_id: string
+          twilio_number_sid: string | null
+          updated_at: string
+          verification_sid: string | null
+          verification_status: string
         }
         Insert: {
+          business_info?: NonNullable<Json>
           created_at?: string
+          kind?: string | null
+          last_checked_at?: string | null
+          messaging_service_sid?: string | null
           phone_number: string
+          rejection_reason?: string | null
           shop_id: string
+          twilio_number_sid?: string | null
+          updated_at?: string
+          verification_sid?: string | null
+          verification_status?: string
         }
         Update: {
+          business_info?: NonNullable<Json>
           created_at?: string
+          kind?: string | null
+          last_checked_at?: string | null
+          messaging_service_sid?: string | null
           phone_number?: string
+          rejection_reason?: string | null
           shop_id?: string
+          twilio_number_sid?: string | null
+          updated_at?: string
+          verification_sid?: string | null
+          verification_status?: string
         }
         Relationships: [
           {
@@ -3014,6 +5402,38 @@ export type Database = {
           },
         ]
       }
+      shop_terminal_locations: {
+        Row: {
+          address_hash: string
+          created_at: string
+          shop_id: string
+          stripe_location_id: string
+          updated_at: string
+        }
+        Insert: {
+          address_hash: string
+          created_at?: string
+          shop_id: string
+          stripe_location_id: string
+          updated_at?: string
+        }
+        Update: {
+          address_hash?: string
+          created_at?: string
+          shop_id?: string
+          stripe_location_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "shop_terminal_locations_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: true
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       shops: {
         Row: {
           address_line1: string | null
@@ -3042,6 +5462,7 @@ export type Database = {
           sms_from_number: string | null
           tax_rate_bps: number
           techs_can_collect_payments: boolean
+          techs_can_share_reports: boolean
           timezone: string
           updated_at: string
           website: string | null
@@ -3073,6 +5494,7 @@ export type Database = {
           sms_from_number?: string | null
           tax_rate_bps?: number
           techs_can_collect_payments?: boolean
+          techs_can_share_reports?: boolean
           timezone: string
           updated_at?: string
           website?: string | null
@@ -3104,6 +5526,7 @@ export type Database = {
           sms_from_number?: string | null
           tax_rate_bps?: number
           techs_can_collect_payments?: boolean
+          techs_can_share_reports?: boolean
           timezone?: string
           updated_at?: string
           website?: string | null
@@ -3214,10 +5637,96 @@ export type Database = {
         }
         Relationships: []
       }
+      tasks: {
+        Row: {
+          assignee_member_id: string | null
+          created_at: string
+          created_by: string | null
+          customer_id: string | null
+          done_at: string | null
+          done_by: string | null
+          due_at: string | null
+          due_notified_at: string | null
+          id: string
+          job_id: string | null
+          notes: string | null
+          shop_id: string
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          assignee_member_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          customer_id?: string | null
+          done_at?: string | null
+          done_by?: string | null
+          due_at?: string | null
+          due_notified_at?: string | null
+          id?: string
+          job_id?: string | null
+          notes?: string | null
+          shop_id: string
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          assignee_member_id?: string | null
+          created_at?: string
+          created_by?: string | null
+          customer_id?: string | null
+          done_at?: string | null
+          done_by?: string | null
+          due_at?: string | null
+          due_notified_at?: string | null
+          id?: string
+          job_id?: string | null
+          notes?: string | null
+          shop_id?: string
+          title?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tasks_assignee_fk"
+            columns: ["shop_id", "assignee_member_id"]
+            isOneToOne: false
+            referencedRelation: "shop_members"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "tasks_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "tasks_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "tasks_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       time_entries: {
         Row: {
           clock_in: string
+          clock_in_accuracy_m: number | null
+          clock_in_lat: number | null
+          clock_in_lng: number | null
           clock_out: string | null
+          clock_out_accuracy_m: number | null
+          clock_out_lat: number | null
+          clock_out_lng: number | null
           created_at: string
           created_by: string | null
           id: string
@@ -3231,7 +5740,13 @@ export type Database = {
         }
         Insert: {
           clock_in: string
+          clock_in_accuracy_m?: number | null
+          clock_in_lat?: number | null
+          clock_in_lng?: number | null
           clock_out?: string | null
+          clock_out_accuracy_m?: number | null
+          clock_out_lat?: number | null
+          clock_out_lng?: number | null
           created_at?: string
           created_by?: string | null
           id?: string
@@ -3245,7 +5760,13 @@ export type Database = {
         }
         Update: {
           clock_in?: string
+          clock_in_accuracy_m?: number | null
+          clock_in_lat?: number | null
+          clock_in_lng?: number | null
           clock_out?: string | null
+          clock_out_accuracy_m?: number | null
+          clock_out_lat?: number | null
+          clock_out_lng?: number | null
           created_at?: string
           created_by?: string | null
           id?: string
@@ -3395,6 +5916,133 @@ export type Database = {
           },
         ]
       }
+      webhook_deliveries: {
+        Row: {
+          attempts: number
+          created_at: string
+          delivered_at: string | null
+          endpoint_id: string
+          event: string
+          id: string
+          integration_event_id: string | null
+          last_error: string | null
+          last_status_code: number | null
+          next_attempt_at: string
+          payload: NonNullable<Json>
+          shop_id: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          attempts?: number
+          created_at?: string
+          delivered_at?: string | null
+          endpoint_id: string
+          event: string
+          id?: string
+          integration_event_id?: string | null
+          last_error?: string | null
+          last_status_code?: number | null
+          next_attempt_at?: string
+          payload: NonNullable<Json>
+          shop_id: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          attempts?: number
+          created_at?: string
+          delivered_at?: string | null
+          endpoint_id?: string
+          event?: string
+          id?: string
+          integration_event_id?: string | null
+          last_error?: string | null
+          last_status_code?: number | null
+          next_attempt_at?: string
+          payload?: NonNullable<Json>
+          shop_id?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "webhook_deliveries_endpoint_fk"
+            columns: ["shop_id", "endpoint_id"]
+            isOneToOne: false
+            referencedRelation: "webhook_endpoints"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "webhook_deliveries_event_fk"
+            columns: ["shop_id", "integration_event_id"]
+            isOneToOne: false
+            referencedRelation: "integration_events"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "webhook_deliveries_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      webhook_endpoints: {
+        Row: {
+          active: boolean
+          consecutive_failures: number
+          created_at: string
+          created_by: string | null
+          description: string | null
+          disabled_at: string | null
+          events: string[]
+          id: string
+          secret: string
+          shop_id: string
+          updated_at: string
+          url: string
+          comms_webhook_json: Json | null
+        }
+        Insert: {
+          active?: boolean
+          consecutive_failures?: number
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          disabled_at?: string | null
+          events: string[]
+          id?: string
+          secret: string
+          shop_id: string
+          updated_at?: string
+          url: string
+        }
+        Update: {
+          active?: boolean
+          consecutive_failures?: number
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          disabled_at?: string | null
+          events?: string[]
+          id?: string
+          secret?: string
+          shop_id?: string
+          updated_at?: string
+          url?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "webhook_endpoints_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
@@ -3404,6 +6052,7 @@ export type Database = {
         Args: { p_token: string }
         Returns: {
           active: boolean
+          bookable: boolean
           calendar_color: string | null
           created_at: string
           display_name: string
@@ -3425,6 +6074,48 @@ export type Database = {
         Args: Record<PropertyKey, never>
         Returns: Json
       }
+      add_fee_line: {
+        Args: {
+          p_doc_id: string
+          p_doc_kind: string
+          p_fee_id: string
+          p_request_nonce?: string
+        }
+        Returns: string
+      }
+      adjust_gift_card: {
+        Args: { p_delta_cents: number; p_gift_card_id: string; p_note?: string }
+        Returns: {
+          balance_cents: number
+          code_hash: string
+          code_last4: string
+          created_at: string
+          expires_at: string | null
+          id: string
+          initial_cents: number
+          issued_by: string | null
+          issued_via: string
+          kind: string
+          message: string | null
+          owner_customer_id: string | null
+          purchaser_customer_id: string | null
+          recipient_email: string | null
+          recipient_name: string | null
+          shop_id: string
+          sold_price_cents: number | null
+          status: Database["public"]["Enums"]["gift_card_status"]
+          stripe_payment_intent_id: string | null
+          updated_at: string
+          void_reason: string | null
+          voided_at: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "gift_cards"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       app_url: { Args: { p_path: string }; Returns: string }
       apply_checklist_template: {
         Args: { p_job_id: string; p_template_id: string }
@@ -3435,6 +6126,7 @@ export type Database = {
           id: string
           job_id: string
           label: string
+          required: boolean
           shop_id: string
           sort: number
           template_id: string | null
@@ -3471,6 +6163,7 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
           stripe_payment_intent_id: string | null
           tip_cents: number
           updated_at: string
@@ -3510,6 +6203,7 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
           stripe_payment_intent_id: string | null
           tip_cents: number
           updated_at: string
@@ -3544,6 +6238,7 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
           stripe_payment_intent_id: string | null
           tip_cents: number
           updated_at: string
@@ -3559,6 +6254,106 @@ export type Database = {
         Args: { p_new: string; p_old: string }
         Returns: string
       }
+      billing_apply_subscription: {
+        Args: {
+          p_cancel_at_period_end: boolean
+          p_current_period_end: string
+          p_event_created: string
+          p_price_id: string
+          p_status: string
+          p_stripe_customer_id: string
+          p_subscription_id: string
+          p_trial_end: string
+        }
+        Returns: Json
+      }
+      billing_checkout_context: {
+        Args: { p_shop_id: string; p_user_id: string }
+        Returns: Json
+      }
+      billing_deactivate_plans_except: {
+        Args: { p_active_price_ids: string[] }
+        Returns: number
+      }
+      billing_enabled: { Args: Record<PropertyKey, never>; Returns: boolean }
+      billing_inactive_message: {
+        Args: Record<PropertyKey, never>
+        Returns: string
+      }
+      billing_is_end_user: {
+        Args: Record<PropertyKey, never>
+        Returns: boolean
+      }
+      billing_link_customer: {
+        Args: { p_shop_id: string; p_stripe_customer_id: string }
+        Returns: undefined
+      }
+      billing_max_members: { Args: { p_shop_id: string }; Returns: number }
+      billing_payment_failed: {
+        Args: { p_event_created: string; p_stripe_customer_id: string }
+        Returns: undefined
+      }
+      billing_seats_message: { Args: { p_max: number }; Returns: string }
+      billing_seats_used: {
+        Args: {
+          p_exclude_email?: string
+          p_exclude_user?: string
+          p_shop_id: string
+        }
+        Returns: number
+      }
+      billing_set_comp: {
+        Args: { p_shop_id: string; p_until: string }
+        Returns: undefined
+      }
+      billing_state: {
+        Args: {
+          p_billing_enabled: boolean
+          p_comp_until: string
+          p_current_period_end: string
+          p_now: string
+          p_status: string
+          p_trial_ends_at: string
+        }
+        Returns: Record<string, unknown>
+      }
+      billing_trial_days: { Args: Record<PropertyKey, never>; Returns: number }
+      billing_upsert_plan: {
+        Args: {
+          p_active: boolean
+          p_amount_cents: number
+          p_currency: string
+          p_description: string
+          p_features: string[]
+          p_interval: string
+          p_interval_count: number
+          p_max_members: number
+          p_name: string
+          p_sort: number
+          p_stripe_price_id: string
+          p_stripe_product_id: string
+        }
+        Returns: string
+      }
+      blocked_time_occurrences: {
+        Args: { p_from: string; p_shop_id: string; p_to: string }
+        Returns: {
+          affects_capacity: boolean
+          block_id: string
+          color: string | null
+          customer_id: string | null
+          ends_at: string
+          kind: Database["public"]["Enums"]["calendar_event_kind"]
+          member_id: string | null
+          names_customer: boolean
+          starts_at: string
+          title: string | null
+        }[]
+      }
+      booking_catalog_json: {
+        Args: { p_only: string[]; p_shop_id: string }
+        Returns: Json
+      }
       booking_check_bookable: {
         Args: {
           p_ids: string[]
@@ -3569,6 +6364,18 @@ export type Database = {
         Returns: undefined
       }
       booking_document_lines: { Args: { p_pricing: Json }; Returns: Json }
+      booking_document_media: {
+        Args: { p_token: string }
+        Returns: {
+          bucket: string
+          path: string
+          ref_id: string
+        }[]
+      }
+      booking_link_service_ids: {
+        Args: { p_shop_id: string; p_token: string }
+        Returns: string[]
+      }
       booking_parse_start: {
         Args: { p_raw: string; p_tz: string }
         Returns: string
@@ -3576,6 +6383,21 @@ export type Database = {
       booking_public_json: {
         Args: { p_job_id: string; p_now: string }
         Returns: Json
+      }
+      booking_slots_core: {
+        Args: {
+          p_category_ids?: string[]
+          p_duration_minutes: number
+          p_from: string
+          p_location_type?: Database["public"]["Enums"]["location_type"]
+          p_now: string
+          p_shop_id: string
+          p_to: string
+        }
+        Returns: {
+          ends_at: string
+          starts_at: string
+        }[]
       }
       calendar_events: {
         Args: {
@@ -3586,9 +6408,11 @@ export type Database = {
         }
         Returns: {
           assigned_member_ids: string[]
+          color: string | null
           customer_id: string | null
           customer_name: string | null
           ends_at: string
+          event_kind: string
           event_type: string
           id: string
           is_busy_block: boolean
@@ -3596,7 +6420,10 @@ export type Database = {
           location_type: Database["public"]["Enums"]["location_type"] | null
           member_id: string | null
           resource_id: string | null
+          series_id: string | null
           service_address: string | null
+          service_lat: number | null
+          service_lng: number | null
           starts_at: string
           status: Database["public"]["Enums"]["job_status"] | null
           title: string | null
@@ -3604,6 +6431,11 @@ export type Database = {
           vehicle_label: string | null
         }[]
       }
+      calendar_feed_events: {
+        Args: { p_now?: string; p_token: string }
+        Returns: Json
+      }
+      calendar_recurrence_valid: { Args: { p: Json }; Returns: boolean }
       campaign_audience_customers: {
         Args: {
           p_audience: Json
@@ -3672,6 +6504,7 @@ export type Database = {
           id: string
           job_id: string
           label: string
+          required: boolean
           shop_id: string
           sort: number
           template_id: string | null
@@ -3686,6 +6519,23 @@ export type Database = {
         }
       }
       checklist_items_valid: { Args: { p_items: Json }; Returns: boolean }
+      claim_push_batch: {
+        Args: { p_limit?: number; p_now?: string }
+        Returns: {
+          badge: number
+          body: string | null
+          customer_id: string | null
+          invoice_id: string | null
+          job_id: string | null
+          kind: Database["public"]["Enums"]["notification_kind"]
+          notification_id: string
+          quote_id: string | null
+          shop_id: string
+          title: string
+          tokens: Json
+          user_id: string
+        }[]
+      }
       claim_queued_messages: {
         Args: { p_limit?: number; p_now?: string }
         Returns: {
@@ -3697,6 +6547,7 @@ export type Database = {
           from_address: string | null
           id: string
           job_id: string | null
+          messaging_service_sid: string | null
           reply_to: string | null
           shop_id: string
           shop_name: string
@@ -3715,10 +6566,41 @@ export type Database = {
           request_id: number
         }[]
       }
+      claim_webhook_deliveries: {
+        Args: { p_limit?: number; p_now?: string }
+        Returns: {
+          attempts: number
+          endpoint_id: string
+          event: string
+          id: string
+          payload: Json
+          secret: string
+          url: string
+        }[]
+      }
+      client_request_claim: {
+        Args: {
+          p_fingerprint: string
+          p_kind: string
+          p_nonce: string
+          p_shop_id: string
+        }
+        Returns: {
+          request_id: string
+          result: Json
+        }[]
+      }
+      client_request_finish: {
+        Args: { p_request_id: string; p_result: Json }
+        Returns: undefined
+      }
       clock_in: {
         Args: {
+          p_accuracy_m?: number
           p_job_id?: string
           p_kind?: Database["public"]["Enums"]["time_entry_kind"]
+          p_lat?: number
+          p_lng?: number
           p_notes?: string
           p_now?: string
           p_shop_id: string
@@ -3726,7 +6608,13 @@ export type Database = {
         }
         Returns: {
           clock_in: string
+          clock_in_accuracy_m: number | null
+          clock_in_lat: number | null
+          clock_in_lng: number | null
           clock_out: string | null
+          clock_out_accuracy_m: number | null
+          clock_out_lat: number | null
+          clock_out_lng: number | null
           created_at: string
           created_by: string | null
           id: string
@@ -3747,14 +6635,23 @@ export type Database = {
       }
       clock_out: {
         Args: {
+          p_accuracy_m?: number
           p_kind?: Database["public"]["Enums"]["time_entry_kind"]
+          p_lat?: number
+          p_lng?: number
           p_notes?: string
           p_now?: string
           p_shop_id: string
         }
         Returns: {
           clock_in: string
+          clock_in_accuracy_m: number | null
+          clock_in_lat: number | null
+          clock_in_lng: number | null
           clock_out: string | null
+          clock_out_accuracy_m: number | null
+          clock_out_lat: number | null
+          clock_out_lng: number | null
           created_at: string
           created_by: string | null
           id: string
@@ -3780,10 +6677,26 @@ export type Database = {
         }
         Returns: string
       }
+      comms_custom_field_options_valid: {
+        Args: {
+          p_options: string[]
+          p_type: Database["public"]["Enums"]["custom_field_type"]
+        }
+        Returns: boolean
+      }
+      comms_custom_value_error: {
+        Args: {
+          p_options: string[]
+          p_type: Database["public"]["Enums"]["custom_field_type"]
+          p_value: Json
+        }
+        Returns: string
+      }
       comms_customer_vars: {
         Args: { p_customer_id: string; p_shop_id: string }
         Returns: Json
       }
+      comms_deposit_due_cents: { Args: { p_job_id: string }; Returns: number }
       comms_document_check_access: {
         Args: { p_shop_id: string; p_what: string }
         Returns: undefined
@@ -3799,6 +6712,182 @@ export type Database = {
       comms_email_with_unsubscribe: {
         Args: { p_body: string; p_link: string }
         Returns: string
+      }
+      comms_followup_candidates: {
+        Args: { p_doc_id?: string; p_doc_kind?: string; p_now: string }
+        Returns: {
+          base_at: string
+          customer_id: string
+          doc_id: string
+          doc_kind: string
+          first_after: string
+          in_days: boolean
+          invoice_id: string | null
+          job_id: string | null
+          key: Database["public"]["Enums"]["message_template_key"]
+          max_attempts: number
+          quote_id: string | null
+          repeat_every: string
+          shop_id: string
+          timezone: string
+        }[]
+      }
+      comms_followup_check: {
+        Args: { p_id: string; p_kind: string }
+        Returns: string
+      }
+      comms_followup_due_at: {
+        Args: {
+          p_attempt: number
+          p_base_at: string
+          p_first: string
+          p_in_days: boolean
+          p_repeat: string
+          p_timezone: string
+        }
+        Returns: string
+      }
+      comms_followup_status_json: {
+        Args: { p_id: string; p_kind: string; p_now: string }
+        Returns: Json
+      }
+      comms_grouped_invoice_job_amounts: {
+        Args: { p_invoice_id: string }
+        Returns: {
+          balance_cents: number
+          job_id: string
+          paid_cents: number
+          total_cents: number
+        }[]
+      }
+      comms_import_begin: {
+        Args: {
+          p_batch_id: string
+          p_dry_run: boolean
+          p_file_name: string
+          p_kind: string
+          p_rows: Json
+          p_shop_id: string
+        }
+        Returns: {
+          address_line1: string | null
+          address_line2: string | null
+          brand_color: string | null
+          business_type: Database["public"]["Enums"]["business_type"]
+          city: string | null
+          country: string
+          created_at: string
+          created_by: string | null
+          currency: string
+          email: string | null
+          id: string
+          invoice_due_days: number
+          invoice_terms: string | null
+          lat: number | null
+          lng: number | null
+          logo_path: string | null
+          name: string
+          phone: string | null
+          postal_code: string | null
+          quote_terms: string | null
+          region: string | null
+          review_url: string | null
+          slug: string
+          sms_from_number: string | null
+          tax_rate_bps: number
+          techs_can_collect_payments: boolean
+          techs_can_share_reports: boolean
+          timezone: string
+          updated_at: string
+          website: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shops"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      comms_import_flag: {
+        Args: {
+          p_default: boolean
+          p_key: string
+          p_label: string
+          p_obj: Json
+        }
+        Returns: boolean
+      }
+      comms_import_record: {
+        Args: {
+          p_batch_id: string
+          p_created: number
+          p_errors: Json
+          p_file_name: string
+          p_kind: string
+          p_rows: number
+          p_shop_id: string
+          p_skipped: number
+          p_updated: number
+        }
+        Returns: string
+      }
+      comms_import_tags: { Args: { p_value: Json }; Returns: string[] }
+      comms_import_yes: {
+        Args: { p_key: string; p_obj: Json }
+        Returns: boolean
+      }
+      comms_inbound_sms_customer: {
+        Args: { p_phone: string; p_shop_id: string }
+        Returns: {
+          address_line1: string | null
+          address_line2: string | null
+          archived_at: string | null
+          city: string | null
+          company: string | null
+          country: string | null
+          created_at: string
+          custom_data: NonNullable<Json>
+          email: string | null
+          email_opt_in: boolean
+          email_opted_out_at: string | null
+          first_name: string | null
+          id: string
+          last_name: string | null
+          lat: number | null
+          lifecycle: Database["public"]["Enums"]["customer_lifecycle"]
+          lng: number | null
+          merged_into_id: string | null
+          notes: string | null
+          phone: string | null
+          phone_unverified: boolean
+          portal_user_id: string | null
+          postal_code: string | null
+          referral_code: string | null
+          region: string | null
+          search_text: string | null
+          shop_id: string
+          sms_opt_in: boolean
+          sms_opted_out_at: string | null
+          sort_name: string | null
+          source: Database["public"]["Enums"]["customer_source"]
+          stripe_customer_id: string | null
+          tags: string[]
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "customers"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      comms_invoice_due_cents: {
+        Args: { p_invoice_id: string; p_now?: string }
+        Returns: number
+      }
+      comms_invoice_vars: {
+        Args: { p_invoice_id: string; p_now?: string }
+        Returns: Json
       }
       comms_is_appointment_key: {
         Args: { p_key: Database["public"]["Enums"]["message_template_key"] }
@@ -3816,14 +6905,97 @@ export type Database = {
         }
         Returns: boolean
       }
+      comms_job_services: { Args: { p_job_id: string }; Returns: string }
       comms_job_vars: { Args: { p_job_id: string }; Returns: Json }
       comms_key_required_link: {
         Args: { p_key: Database["public"]["Enums"]["message_template_key"] }
         Returns: string
       }
+      comms_lead_form_fields: {
+        Args: { p_form: Database["public"]["Tables"]["lead_forms"]["Row"] }
+        Returns: {
+          archived_at: string | null
+          created_at: string
+          entity: Database["public"]["Enums"]["custom_field_entity"]
+          help_text: string | null
+          id: string
+          key: string
+          label: string
+          location_scope: Database["public"]["Enums"]["location_type"] | null
+          options: string[]
+          required: boolean
+          shop_id: string
+          show_in_booking: boolean
+          show_in_lead_form: boolean
+          sort: number
+          type: Database["public"]["Enums"]["custom_field_type"]
+          updated_at: string
+        }[]
+        SetofOptions: {
+          from: "lead_forms"
+          to: "custom_fields"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      comms_live_lead_form: {
+        Args: { p_token: string }
+        Returns: {
+          active: boolean
+          archived_at: string | null
+          ask_message: boolean
+          ask_vehicle: boolean
+          auto_reply: boolean
+          created_at: string
+          default_source: Database["public"]["Enums"]["customer_source"]
+          field_ids: string[]
+          headline: string | null
+          id: string
+          intro: string | null
+          name: string
+          notify_staff: boolean
+          shop_id: string
+          success_message: string | null
+          token: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "lead_forms"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      comms_local_when: {
+        Args: { p_at: string; p_timezone: string }
+        Returns: string
+      }
+      comms_marketing_send_after: {
+        Args: { p_now: string; p_timezone: string }
+        Returns: string
+      }
+      comms_omit_lines_without: {
+        Args: { p_names: string[]; p_text: string; p_vars: Json }
+        Returns: string
+      }
       comms_omit_unavailable_values: {
         Args: { p_links?: boolean; p_text: string; p_vars: Json }
         Returns: string
+      }
+      comms_quote_vars: { Args: { p_quote_id: string }; Returns: Json }
+      comms_reminder_log_covers: {
+        Args: {
+          p_due_at: string
+          p_log_offset: number
+          p_log_processed_at: string
+          p_multi: boolean
+          p_offset: number
+        }
+        Returns: boolean
+      }
+      comms_reminder_offsets_valid: {
+        Args: { p_offset: number; p_offsets: number[] }
+        Returns: boolean
       }
       comms_render_parts: {
         Args: {
@@ -3862,7 +7034,53 @@ export type Database = {
         Returns: boolean
       }
       comms_uses_app_links: { Args: { p_text: string }; Returns: boolean }
+      comms_v2_optional_vars: {
+        Args: Record<PropertyKey, never>
+        Returns: string[]
+      }
       comms_valid_request_nonce: { Args: { p_nonce: string }; Returns: boolean }
+      comms_validate_custom_data: {
+        Args: {
+          p_entity: Database["public"]["Enums"]["custom_field_entity"]
+          p_new: Json
+          p_old: Json
+          p_shop_id: string
+        }
+        Returns: Json
+      }
+      comms_webhook_endpoint_for_admin: {
+        Args: { p_endpoint_id: string }
+        Returns: {
+          active: boolean
+          consecutive_failures: number
+          created_at: string
+          created_by: string | null
+          description: string | null
+          disabled_at: string | null
+          events: string[]
+          id: string
+          secret: string
+          shop_id: string
+          updated_at: string
+          url: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "webhook_endpoints"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      comms_webhook_events: { Args: { p_events: string[] }; Returns: string[] }
+      comms_webhook_json: {
+        Args: { p_w: Database["public"]["Tables"]["webhook_endpoints"]["Row"] }
+        Returns: Json
+      }
+      comms_webhook_secret: {
+        Args: Record<PropertyKey, never>
+        Returns: string
+      }
+      comms_webhook_url: { Args: { p_url: string }; Returns: string }
       comms_withdraw_reason: {
         Args: {
           p_msg: Database["public"]["Tables"]["messages"]["Row"]
@@ -3896,7 +7114,9 @@ export type Database = {
           coupon_id: string | null
           created_at: string
           created_by: string | null
+          custom_data: NonNullable<Json>
           customer_id: string
+          deposit_followups_paused: boolean
           deposit_required_cents: number
           discount_cents: number
           discount_kind: Database["public"]["Enums"]["discount_kind"]
@@ -3912,8 +7132,12 @@ export type Database = {
           reminder_sent_at: string | null
           resource_id: string | null
           review_requested_at: string | null
+          route_position: number | null
           scheduled_end: string | null
           scheduled_start: string | null
+          series_detached: boolean
+          series_id: string | null
+          series_seq: number | null
           service_address_line1: string | null
           service_address_line2: string | null
           service_city: string | null
@@ -3922,6 +7146,7 @@ export type Database = {
           service_postal_code: string | null
           service_region: string | null
           shop_id: string
+          sold_by_member_id: string | null
           source: Database["public"]["Enums"]["job_source"]
           started_at: string | null
           status: Database["public"]["Enums"]["job_status"]
@@ -3939,19 +7164,104 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      convert_quote_to_job_core: {
+        Args: {
+          p_end: string
+          p_location?: Json
+          p_quote_id: string
+          p_start: string
+          p_status: Database["public"]["Enums"]["job_status"]
+        }
+        Returns: {
+          appointment_set_at: string
+          cancel_reason: string | null
+          cancelled_at: string | null
+          completed_at: string | null
+          confirmed_at: string | null
+          coupon_id: string | null
+          created_at: string
+          created_by: string | null
+          custom_data: NonNullable<Json>
+          customer_id: string
+          deposit_followups_paused: boolean
+          deposit_required_cents: number
+          discount_cents: number
+          discount_kind: Database["public"]["Enums"]["discount_kind"]
+          discount_value: number
+          en_route_at: string | null
+          id: string
+          internal_notes: string | null
+          location_type: Database["public"]["Enums"]["location_type"]
+          notes: string | null
+          number: number
+          public_token: string
+          quote_id: string | null
+          reminder_sent_at: string | null
+          resource_id: string | null
+          review_requested_at: string | null
+          route_position: number | null
+          scheduled_end: string | null
+          scheduled_start: string | null
+          series_detached: boolean
+          series_id: string | null
+          series_seq: number | null
+          service_address_line1: string | null
+          service_address_line2: string | null
+          service_city: string | null
+          service_lat: number | null
+          service_lng: number | null
+          service_postal_code: string | null
+          service_region: string | null
+          shop_id: string
+          sold_by_member_id: string | null
+          source: Database["public"]["Enums"]["job_source"]
+          started_at: string | null
+          status: Database["public"]["Enums"]["job_status"]
+          subtotal_cents: number
+          tax_cents: number
+          tax_rate_bps: number
+          total_cents: number
+          updated_at: string
+          vehicle_id: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "jobs"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      coupon_booking_refused_message: {
+        Args: Record<PropertyKey, never>
+        Returns: string
+      }
+      coupon_customer_reason: {
+        Args: {
+          p_coupon: Database["public"]["Tables"]["coupons"]["Row"]
+          p_customer_id: string
+          p_job_id?: string
+        }
+        Returns: string
+      }
       coupon_redeem_for_job: {
         Args: { p_coupon_id: string; p_shop_id: string }
         Returns: {
           active: boolean
           code: string
           created_at: string
+          customer_id: string | null
           description: string | null
           ends_at: string | null
           id: string
           kind: Database["public"]["Enums"]["coupon_kind"]
           max_redemptions: number | null
+          min_subtotal_cents: number | null
+          new_customers_only: boolean
+          once_per_customer: boolean
           online_only: boolean
           redemptions: number
+          referrer_customer_id: string | null
+          service_ids: string[] | null
           shop_id: string
           starts_at: string | null
           updated_at: string
@@ -3968,12 +7278,37 @@ export type Database = {
         Args: { p_coupon_id: string; p_shop_id: string }
         Returns: undefined
       }
+      coupon_restriction_reason: {
+        Args: {
+          p_coupon: Database["public"]["Tables"]["coupons"]["Row"]
+          p_customer_id: string
+          p_lines: Json
+          p_now: string
+        }
+        Returns: string
+      }
+      coupon_restrictions_text: {
+        Args: { p_coupon: Database["public"]["Tables"]["coupons"]["Row"] }
+        Returns: string
+      }
+      coupon_rules_masked: {
+        Args: {
+          p_customer_id: string
+          p_shop_id: string
+          p_source: Database["public"]["Enums"]["job_source"]
+        }
+        Returns: boolean
+      }
       coupon_unavailable_reason: {
         Args: {
           p_coupon: Database["public"]["Tables"]["coupons"]["Row"]
           p_now: string
         }
         Returns: string
+      }
+      create_calendar_feed: {
+        Args: { p_include_all?: boolean; p_shop_id: string }
+        Returns: Json
       }
       create_invoice: {
         Args: {
@@ -3992,6 +7327,7 @@ export type Database = {
           discount_kind: Database["public"]["Enums"]["discount_kind"]
           discount_value: number
           due_at: string | null
+          followups_paused: boolean
           id: string
           internal_notes: string | null
           issued_at: string | null
@@ -4032,6 +7368,7 @@ export type Database = {
           discount_kind: Database["public"]["Enums"]["discount_kind"]
           discount_value: number
           due_at: string | null
+          followups_paused: boolean
           id: string
           internal_notes: string | null
           issued_at: string | null
@@ -4059,6 +7396,56 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      create_invoice_from_jobs: {
+        Args: {
+          p_customer_id: string
+          p_internal_notes?: string
+          p_job_ids: string[]
+          p_notes?: string
+        }
+        Returns: {
+          amount_paid_cents: number
+          balance_cents: number
+          created_at: string
+          created_by: string | null
+          customer_id: string
+          discount_cents: number
+          discount_kind: Database["public"]["Enums"]["discount_kind"]
+          discount_value: number
+          due_at: string | null
+          followups_paused: boolean
+          id: string
+          internal_notes: string | null
+          issued_at: string | null
+          job_id: string | null
+          notes: string | null
+          number: number
+          paid_at: string | null
+          public_token: string
+          sent_at: string | null
+          shop_id: string
+          status: Database["public"]["Enums"]["invoice_status"]
+          subtotal_cents: number
+          tax_cents: number
+          tax_rate_bps: number
+          terms: string | null
+          tip_cents: number
+          total_cents: number
+          updated_at: string
+          void_reason: string | null
+          voided_at: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "invoices"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      create_job_series: {
+        Args: { p_now?: string; p_series: Json; p_shop_id: string }
+        Returns: Json
       }
       create_membership: {
         Args: {
@@ -4093,7 +7480,44 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      create_membership_core: {
+        Args: {
+          p_customer_id: string
+          p_plan_id: string
+          p_vehicle_id?: string
+        }
+        Returns: {
+          cancel_at_period_end: boolean
+          cancelled_at: string | null
+          created_at: string
+          created_by: string | null
+          current_period_end: string | null
+          customer_id: string
+          id: string
+          interval: Database["public"]["Enums"]["membership_interval"]
+          interval_count: number
+          plan_id: string
+          price_cents: number
+          shop_id: string
+          started_at: string | null
+          status: Database["public"]["Enums"]["membership_status"]
+          stripe_price_id: string | null
+          stripe_subscription_id: string | null
+          updated_at: string
+          vehicle_id: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "memberships"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       create_online_booking: {
+        Args: { p_now?: string; p_payload: Json; p_slug: string }
+        Returns: Json
+      }
+      create_online_booking_core: {
         Args: { p_now?: string; p_payload: Json; p_slug: string }
         Returns: Json
       }
@@ -4135,6 +7559,7 @@ export type Database = {
           sms_from_number: string | null
           tax_rate_bps: number
           techs_can_collect_payments: boolean
+          techs_can_share_reports: boolean
           timezone: string
           updated_at: string
           website: string | null
@@ -4145,6 +7570,15 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      create_webhook_endpoint: {
+        Args: {
+          p_description?: string
+          p_events: string[]
+          p_shop_id: string
+          p_url: string
+        }
+        Returns: Json
       }
       customer_summary: {
         Args: { p_customer_id: string }
@@ -4179,7 +7613,23 @@ export type Database = {
           subject: string | null
         }[]
       }
+      delete_job_series: {
+        Args: { p_now?: string; p_series_id: string }
+        Returns: Json
+      }
+      delete_webhook_endpoint: {
+        Args: { p_endpoint_id: string }
+        Returns: undefined
+      }
+      document_followup_status: {
+        Args: { p_id: string; p_kind: string }
+        Returns: Json
+      }
       effective_now: { Args: { p_now: string }; Returns: string }
+      end_job_series: {
+        Args: { p_after_date: string; p_now?: string; p_series_id: string }
+        Returns: Json
+      }
       enqueue_customer_template: {
         Args: {
           p_channel?: Database["public"]["Enums"]["message_channel"]
@@ -4194,6 +7644,7 @@ export type Database = {
         }
         Returns: string
       }
+      enqueue_document_followups: { Args: { p_now?: string }; Returns: number }
       enqueue_document_message: {
         Args: {
           p_channel?: Database["public"]["Enums"]["message_channel"]
@@ -4204,6 +7655,26 @@ export type Database = {
         Returns: string
       }
       enqueue_due_automations: { Args: { p_now?: string }; Returns: number }
+      enqueue_message_core: {
+        Args: {
+          p_channel: Database["public"]["Enums"]["message_channel"]
+          p_customer_id: string
+          p_extra_vars?: Json
+          p_invoice_id?: string
+          p_job_id?: string
+          p_key: Database["public"]["Enums"]["message_template_key"]
+          p_quote_id?: string
+          p_request_nonce?: string
+          p_send_after?: string
+          p_sent_by?: string
+          p_shop_id: string
+          p_tpl_body: string
+          p_tpl_subject: string
+        }
+        Returns: string
+      }
+      enqueue_service_followups: { Args: { p_now?: string }; Returns: number }
+      enqueue_task_reminders: { Args: { p_now?: string }; Returns: number }
       enqueue_template_message: {
         Args: {
           p_channel?: Database["public"]["Enums"]["message_channel"]
@@ -4215,6 +7686,26 @@ export type Database = {
         Returns: string
       }
       expire_quotes: { Args: { p_now?: string }; Returns: number }
+      export_jobs: {
+        Args: { p_from: string; p_shop_id: string; p_to: string }
+        Returns: {
+          balance_cents: number
+          completed_local: string | null
+          customer_email: string | null
+          customer_name: string | null
+          customer_phone: string | null
+          location_type: Database["public"]["Enums"]["location_type"]
+          number: number
+          paid_cents: number
+          scheduled_local: string | null
+          service_address: string | null
+          services: string | null
+          source: Database["public"]["Enums"]["job_source"]
+          status: Database["public"]["Enums"]["job_status"]
+          total_cents: number
+          vehicle: string | null
+        }[]
+      }
       finish_storage_purge: {
         Args: { p_error?: string; p_now?: string; p_request_ids: number[] }
         Returns: number
@@ -4262,6 +7753,8 @@ export type Database = {
         Returns: string
       }
       format_phone: { Args: { p_e164: string }; Returns: string }
+      gen_gift_card_code: { Args: Record<PropertyKey, never>; Returns: string }
+      generate_series_jobs: { Args: { p_now?: string }; Returns: number }
       get_available_slots: {
         Args: {
           p_from: string
@@ -4276,12 +7769,147 @@ export type Database = {
           starts_at: string
         }[]
       }
+      get_or_create_referral_code: {
+        Args: { p_customer_id: string }
+        Returns: Json
+      }
+      gift_card_code_hash: {
+        Args: { p_code: string; p_shop_id: string }
+        Returns: string
+      }
+      gift_card_delivery_vars: {
+        Args: {
+          p_amount: number
+          p_code: string
+          p_message: string
+          p_recipient: string
+          p_sender: string
+          p_shop_id: string
+        }
+        Returns: Json
+      }
+      gift_card_issue_core: {
+        Args: {
+          p_amount_cents: number
+          p_expires_at: string
+          p_issued_via: string
+          p_kind: string
+          p_message: string
+          p_note: string
+          p_owner_id: string
+          p_payment_intent: string
+          p_purchaser_id: string
+          p_recipient_email: string
+          p_recipient_name: string
+          p_shop_id: string
+          p_sold_price_cents: number
+        }
+        Returns: Json
+      }
+      gift_card_log_attempt: {
+        Args: { p_key: string; p_shop_id: string; p_succeeded: boolean }
+        Returns: undefined
+      }
+      gift_card_match_customer: {
+        Args: {
+          p_email: string
+          p_name: string
+          p_shop_id: string
+          p_source: Database["public"]["Enums"]["customer_source"]
+        }
+        Returns: string
+      }
+      gift_card_normalize_code: { Args: { p_code: string }; Returns: string }
+      gift_card_offers_valid: { Args: { p: Json }; Returns: boolean }
+      gift_card_order_expired: { Args: { p_session_id: string }; Returns: Json }
+      gift_card_order_paid: {
+        Args: {
+          p_amount_received_cents: number
+          p_order_id: string
+          p_payment_intent_id: string
+        }
+        Returns: Json
+      }
+      gift_card_order_prepare: {
+        Args: { p_now?: string; p_payload: Json; p_slug: string }
+        Returns: Json
+      }
+      gift_card_order_refunded: {
+        Args: { p_payment_intent_id: string; p_refunded_total_cents: number }
+        Returns: Json
+      }
+      gift_card_recent_misses: {
+        Args: { p_key: string; p_shop_id: string }
+        Returns: number
+      }
+      gift_card_redeem_core: {
+        Args: {
+          p_amount: number
+          p_card: Database["public"]["Tables"]["gift_cards"]["Row"]
+          p_inv: Database["public"]["Tables"]["invoices"]["Row"]
+          p_note: string
+        }
+        Returns: {
+          amount_cents: number
+          card_brand: string | null
+          card_last4: string | null
+          created_at: string
+          customer_id: string
+          disputed_cents: number
+          id: string
+          invoice_id: string | null
+          job_id: string | null
+          kind: Database["public"]["Enums"]["payment_kind"]
+          membership_id: string | null
+          method: Database["public"]["Enums"]["payment_method"]
+          note: string | null
+          paid_at: string | null
+          recorded_by: string | null
+          refunded_cents: number
+          shop_id: string
+          status: Database["public"]["Enums"]["payment_status"]
+          stripe_charge_id: string | null
+          stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
+          stripe_payment_intent_id: string | null
+          tip_cents: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "payments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       has_shop_role: {
         Args: {
           p_roles: Database["public"]["Enums"]["shop_role"][]
           p_shop_id: string
         }
         Returns: boolean
+      }
+      import_customers: {
+        Args: {
+          p_batch_id?: string
+          p_dry_run?: boolean
+          p_file_name?: string
+          p_request_nonce?: string
+          p_rows: Json
+          p_shop_id: string
+        }
+        Returns: Json
+      }
+      import_services: {
+        Args: {
+          p_batch_id?: string
+          p_dry_run?: boolean
+          p_file_name?: string
+          p_request_nonce?: string
+          p_rows: Json
+          p_shop_id: string
+        }
+        Returns: Json
       }
       inbox_threads: {
         Args: { p_before?: string; p_limit?: number; p_shop_id: string }
@@ -4331,6 +7959,33 @@ export type Database = {
           p_shop_id: string
         }
         Returns: number
+      }
+      inventory_set_on_hand: {
+        Args: { p_on_hand: number; p_product_id: string }
+        Returns: {
+          active: boolean
+          archived_at: string | null
+          created_at: string
+          id: string
+          low_stock_notified_at: string | null
+          name: string
+          notes: string | null
+          on_hand: number
+          reorder_at: number | null
+          reorder_qty: number | null
+          shop_id: string
+          sku: string | null
+          supplier: string | null
+          unit: string
+          unit_cost_cents: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "products"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
       invite_member: {
         Args: {
@@ -4385,11 +8040,37 @@ export type Database = {
       is_valid_hex_color: { Args: { p: string }; Returns: boolean }
       is_valid_slug: { Args: { p: string }; Returns: boolean }
       is_valid_timezone: { Args: { p: string }; Returns: boolean }
+      is_valid_weekday_set: { Args: { p: number[] }; Returns: boolean }
       is_vehicle_on_assigned_job: {
         Args: { p_vehicle_id: string }
         Returns: boolean
       }
+      issue_gift_card: {
+        Args: {
+          p_amount_cents: number
+          p_kind?: string
+          p_owner_customer_id?: string
+          p_recipient?: Json
+          p_send?: boolean
+          p_shop_id: string
+          p_sold_price_cents?: number
+        }
+        Returns: Json
+      }
       job_booking_token: { Args: { p_job_id: string }; Returns: string }
+      job_completion_blockers: { Args: { p_job_id: string }; Returns: Json }
+      job_gate_blockers_for: {
+        Args: {
+          p_old: Database["public"]["Enums"]["job_status"]
+          p_state: Json
+          p_status: Database["public"]["Enums"]["job_status"]
+        }
+        Returns: Json
+      }
+      job_gate_state: {
+        Args: { p_job_id: string; p_shop_id: string }
+        Returns: Json
+      }
       job_payment_summary: {
         Args: { p_job_id: string }
         Returns: {
@@ -4398,6 +8079,7 @@ export type Database = {
           deposit_paid_cents: number
           deposit_required_cents: number
           invoice_id: string | null
+          invoice_job_count: number
           invoice_number: number | null
           invoice_status: Database["public"]["Enums"]["invoice_status"] | null
           job_id: string
@@ -4407,6 +8089,254 @@ export type Database = {
           tip_cents: number
           total_cents: number
         }[]
+      }
+      job_report_media: {
+        Args: { p_token: string }
+        Returns: {
+          bucket: string
+          kind: string
+          path: string
+          ref_id: string
+        }[]
+      }
+      job_report_public_json: { Args: { p_report_id: string }; Returns: Json }
+      job_series_apply: {
+        Args: {
+          p_base: Database["public"]["Tables"]["job_series"]["Row"]
+          p_in: Json
+          p_mode: string
+        }
+        Returns: {
+          active: boolean
+          assignee_member_ids: string[]
+          by_weekday: number[]
+          created_at: string
+          created_by: string | null
+          customer_id: string
+          duration_minutes: number
+          ended_at: string | null
+          freq: string
+          generated_through: string | null
+          held_dates: string[]
+          id: string
+          internal_notes: string | null
+          interval: number
+          local_start: string
+          location_type: Database["public"]["Enums"]["location_type"]
+          max_occurrences: number | null
+          month_day: number | null
+          month_mode: string | null
+          month_nth: number | null
+          month_weekday: number | null
+          notes: string | null
+          resource_id: string | null
+          seq_offset: number
+          service_address_line1: string | null
+          service_address_line2: string | null
+          service_city: string | null
+          service_lat: number | null
+          service_lng: number | null
+          service_postal_code: string | null
+          service_region: string | null
+          shop_id: string
+          skipped_dates: string[]
+          skipped_seqs: number[]
+          start_date: string
+          template_lines: NonNullable<Json>
+          until_date: string | null
+          updated_at: string
+          vehicle_id: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "job_series"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      job_series_for_edit: {
+        Args: { p_series_id: string }
+        Returns: {
+          active: boolean
+          assignee_member_ids: string[]
+          by_weekday: number[]
+          created_at: string
+          created_by: string | null
+          customer_id: string
+          duration_minutes: number
+          ended_at: string | null
+          freq: string
+          generated_through: string | null
+          held_dates: string[]
+          id: string
+          internal_notes: string | null
+          interval: number
+          local_start: string
+          location_type: Database["public"]["Enums"]["location_type"]
+          max_occurrences: number | null
+          month_day: number | null
+          month_mode: string | null
+          month_nth: number | null
+          month_weekday: number | null
+          notes: string | null
+          resource_id: string | null
+          seq_offset: number
+          service_address_line1: string | null
+          service_address_line2: string | null
+          service_city: string | null
+          service_lat: number | null
+          service_lng: number | null
+          service_postal_code: string | null
+          service_region: string | null
+          shop_id: string
+          skipped_dates: string[]
+          skipped_seqs: number[]
+          start_date: string
+          template_lines: NonNullable<Json>
+          until_date: string | null
+          updated_at: string
+          vehicle_id: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "job_series"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      job_series_generate: {
+        Args: { p_now: string; p_series_id: string; p_strict: boolean }
+        Returns: number
+      }
+      job_series_insert_occurrence: {
+        Args: {
+          p_d: string
+          p_pr: Json
+          p_s: Database["public"]["Tables"]["job_series"]["Row"]
+          p_seq: number
+          p_tz: string
+        }
+        Returns: string
+      }
+      job_series_lock_memberships: {
+        Args: { p_series: Database["public"]["Tables"]["job_series"]["Row"] }
+        Returns: undefined
+      }
+      job_series_lock_occurrence: {
+        Args: { p_job_id: string; p_now: string; p_series_id: string }
+        Returns: Record<string, unknown>
+      }
+      job_series_normalize: {
+        Args: { p: Database["public"]["Tables"]["job_series"]["Row"] }
+        Returns: {
+          active: boolean
+          assignee_member_ids: string[]
+          by_weekday: number[]
+          created_at: string
+          created_by: string | null
+          customer_id: string
+          duration_minutes: number
+          ended_at: string | null
+          freq: string
+          generated_through: string | null
+          held_dates: string[]
+          id: string
+          internal_notes: string | null
+          interval: number
+          local_start: string
+          location_type: Database["public"]["Enums"]["location_type"]
+          max_occurrences: number | null
+          month_day: number | null
+          month_mode: string | null
+          month_nth: number | null
+          month_weekday: number | null
+          notes: string | null
+          resource_id: string | null
+          seq_offset: number
+          service_address_line1: string | null
+          service_address_line2: string | null
+          service_city: string | null
+          service_lat: number | null
+          service_lng: number | null
+          service_postal_code: string | null
+          service_region: string | null
+          shop_id: string
+          skipped_dates: string[]
+          skipped_seqs: number[]
+          start_date: string
+          template_lines: NonNullable<Json>
+          until_date: string | null
+          updated_at: string
+          vehicle_id: string | null
+        }
+        SetofOptions: {
+          from: "job_series"
+          to: "job_series"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      job_series_occurrence_eligible: {
+        Args: {
+          p_job: Database["public"]["Tables"]["jobs"]["Row"]
+          p_now: string
+        }
+        Returns: boolean
+      }
+      job_series_preview: {
+        Args: { p_count?: number; p_series: Json; p_shop_id: string }
+        Returns: {
+          ends_at: string
+          seq: number
+          starts_at: string
+        }[]
+      }
+      job_series_price_lines: {
+        Args: {
+          p_series: Database["public"]["Tables"]["job_series"]["Row"]
+          p_starts_at?: string
+          p_strict: boolean
+        }
+        Returns: Json
+      }
+      job_series_remove_occurrence: {
+        Args: { p_job_id: string; p_now: string; p_series_id: string }
+        Returns: Record<string, unknown>
+      }
+      job_series_scan_end: {
+        Args: {
+          p_k: number
+          p_series: Database["public"]["Tables"]["job_series"]["Row"]
+        }
+        Returns: string
+      }
+      job_series_update_occurrence: {
+        Args: {
+          p_d: string
+          p_job_id: string
+          p_now: string
+          p_old_internal_notes: string
+          p_reassign: boolean
+          p_reprice: boolean
+          p_s: Database["public"]["Tables"]["job_series"]["Row"]
+          p_tz: string
+        }
+        Returns: boolean
+      }
+      job_series_write_assignees: {
+        Args: {
+          p_job_id: string
+          p_s: Database["public"]["Tables"]["job_series"]["Row"]
+        }
+        Returns: undefined
+      }
+      job_series_write_lines: {
+        Args: {
+          p_job_id: string
+          p_pr: Json
+          p_s: Database["public"]["Tables"]["job_series"]["Row"]
+        }
+        Returns: undefined
       }
       job_status_rank: {
         Args: { p_status: Database["public"]["Enums"]["job_status"] }
@@ -4449,6 +8379,37 @@ export type Database = {
         }
         Returns: number
       }
+      lookup_gift_card: {
+        Args: { p_code: string; p_shop_id: string }
+        Returns: Json
+      }
+      low_stock_products: {
+        Args: { p_shop_id: string }
+        Returns: {
+          active: boolean
+          archived_at: string | null
+          created_at: string
+          id: string
+          low_stock_notified_at: string | null
+          name: string
+          notes: string | null
+          on_hand: number
+          reorder_at: number | null
+          reorder_qty: number | null
+          shop_id: string
+          sku: string | null
+          supplier: string | null
+          unit: string
+          unit_cost_cents: number
+          updated_at: string
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "products"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       manages_user: { Args: { p_user_id: string }; Returns: boolean }
       mark_all_notifications_read: {
         Args: { p_shop_id: string }
@@ -4466,6 +8427,7 @@ export type Database = {
           discount_kind: Database["public"]["Enums"]["discount_kind"]
           discount_value: number
           due_at: string | null
+          followups_paused: boolean
           id: string
           internal_notes: string | null
           issued_at: string | null
@@ -4516,8 +8478,10 @@ export type Database = {
           error: string | null
           from_address: string | null
           id: string
+          invoice_id: string | null
           job_id: string | null
           provider_message_id: string | null
+          quote_id: string | null
           read_at: string | null
           request_nonce: string | null
           send_after: string
@@ -4539,6 +8503,10 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      mark_push_token_invalid: {
+        Args: { p_reason: string; p_token: string }
+        Returns: undefined
+      }
       mark_quote_sent: {
         Args: { p_quote_id: string }
         Returns: {
@@ -4555,11 +8523,15 @@ export type Database = {
           discount_kind: Database["public"]["Enums"]["discount_kind"]
           discount_value: number
           expired_at: string | null
+          followups_paused: boolean
           id: string
           internal_notes: string | null
           notes: string | null
           number: number
           public_token: string
+          selected_option_id: string | null
+          self_schedule: boolean
+          self_scheduled_at: string | null
           sent_at: string | null
           shop_id: string
           status: Database["public"]["Enums"]["quote_status"]
@@ -4583,6 +8555,72 @@ export type Database = {
       mark_stripe_event_processed: {
         Args: { p_error?: string; p_event_id: string; p_now?: string }
         Returns: undefined
+      }
+      mark_webhook_delivery: {
+        Args: {
+          p_error?: string
+          p_id: string
+          p_now?: string
+          p_status_code: number
+        }
+        Returns: undefined
+      }
+      membership_add_periods: {
+        Args: {
+          p_anchor: string
+          p_count: number
+          p_interval: Database["public"]["Enums"]["membership_interval"]
+          p_k: number
+        }
+        Returns: string
+      }
+      membership_join_prepare: {
+        Args: {
+          p_now?: string
+          p_payload: Json
+          p_plan_id: string
+          p_slug: string
+        }
+        Returns: Json
+      }
+      membership_period_bounds: {
+        Args: { p_at: string; p_membership_id: string }
+        Returns: unknown
+      }
+      membership_usage: {
+        Args: { p_at?: string; p_membership_id: string }
+        Returns: Json
+      }
+      membership_uses_in_period: {
+        Args: {
+          p_at?: string
+          p_exclude_line?: string
+          p_membership_id: string
+        }
+        Returns: number
+      }
+      merge_customer_conflicts: {
+        Args: {
+          p_source: Database["public"]["Tables"]["customers"]["Row"]
+          p_target: Database["public"]["Tables"]["customers"]["Row"]
+        }
+        Returns: Json
+      }
+      merge_customer_counts: {
+        Args: { p_customer_id: string; p_shop_id: string }
+        Returns: Json
+      }
+      merge_customer_summary: {
+        Args: { p_c: Database["public"]["Tables"]["customers"]["Row"] }
+        Returns: Json
+      }
+      merge_customers: {
+        Args: { p_source_id: string; p_target_id: string }
+        Returns: Json
+      }
+      merge_customers_preview: {
+        Args: { p_source_id: string; p_target_id: string }
+        Returns: Json
       }
       money_public_invoice_json: {
         Args: { p_invoice_id: string }
@@ -4613,6 +8651,18 @@ export type Database = {
       notification_kind_for_managers: {
         Args: { p_kind: Database["public"]["Enums"]["notification_kind"] }
         Returns: boolean
+      }
+      notify_member: {
+        Args: {
+          p_body?: string
+          p_customer_id?: string
+          p_job_id?: string
+          p_kind: Database["public"]["Enums"]["notification_kind"]
+          p_member_id: string
+          p_shop_id: string
+          p_title: string
+        }
+        Returns: string
       }
       notify_shop_staff: {
         Args: {
@@ -4705,7 +8755,19 @@ export type Database = {
         Args: Record<PropertyKey, never>
         Returns: string
       }
+      portal_document_media: {
+        Args: { p_document_id: string; p_user_id: string }
+        Returns: Json
+      }
+      portal_documents: { Args: Record<PropertyKey, never>; Returns: Json }
+      portal_job_reports: { Args: Record<PropertyKey, never>; Returns: Json }
+      portal_membership_access: {
+        Args: { p_membership_id: string; p_user_id: string }
+        Returns: Json
+      }
+      portal_memberships: { Args: Record<PropertyKey, never>; Returns: Json }
       portal_overview: { Args: Record<PropertyKey, never>; Returns: Json }
+      portal_referrals: { Args: Record<PropertyKey, never>; Returns: Json }
       postal_code_in_area: {
         Args: { p_area: string[]; p_postal: string }
         Returns: boolean
@@ -4769,12 +8831,42 @@ export type Database = {
           p_customer_id: string
           p_service_ids: string[]
           p_shop_id: string
+          p_starts_at?: string
           p_vehicle_category_id: string
           p_vehicle_id?: string
         }
         Returns: Json
       }
+      public_ack_inspection: {
+        Args: {
+          p_inspection_id: string
+          p_signature_path: string
+          p_signer_name: string
+          p_token: string
+        }
+        Returns: Json
+      }
+      public_billing_plans: { Args: Record<PropertyKey, never>; Returns: Json }
       public_booking_catalog: { Args: { p_slug: string }; Returns: Json }
+      public_booking_documents: { Args: { p_token: string }; Returns: Json }
+      public_booking_link: { Args: { p_token: string }; Returns: Json }
+      public_booking_questions: { Args: { p_slug: string }; Returns: Json }
+      public_booking_slots: {
+        Args: {
+          p_from: string
+          p_link_token?: string
+          p_location_type?: Database["public"]["Enums"]["location_type"]
+          p_now?: string
+          p_service_ids: string[]
+          p_slug: string
+          p_to: string
+          p_vehicle_category_id?: string
+        }
+        Returns: {
+          ends_at: string
+          starts_at: string
+        }[]
+      }
       public_cancel_booking: {
         Args: { p_now?: string; p_reason?: string; p_token: string }
         Returns: Json
@@ -4800,13 +8892,51 @@ export type Database = {
         }[]
       }
       public_get_invoice: { Args: { p_token: string }; Returns: Json }
+      public_get_job_report: { Args: { p_token: string }; Returns: Json }
+      public_get_lead_form: { Args: { p_token: string }; Returns: Json }
       public_get_quote: { Args: { p_token: string }; Returns: Json }
+      public_gift_card_offer: { Args: { p_slug: string }; Returns: Json }
+      public_gift_card_order_status: {
+        Args: { p_token: string }
+        Returns: Json
+      }
+      public_membership_plans: { Args: { p_slug: string }; Returns: Json }
+      public_quote_slots: {
+        Args: {
+          p_from: string
+          p_location_type?: Database["public"]["Enums"]["location_type"]
+          p_to: string
+          p_token: string
+        }
+        Returns: {
+          ends_at: string
+          starts_at: string
+        }[]
+      }
+      public_redeem_gift_card: {
+        Args: { p_amount_cents?: number; p_code: string; p_token: string }
+        Returns: Json
+      }
+      public_report_signature_upload_allowed: {
+        Args: { p_name: string }
+        Returns: boolean
+      }
       public_respond_quote: {
         Args: {
           p_action: string
           p_declined_reason?: string
+          p_option_id?: string
           p_selected_optional_line_ids?: string[]
           p_signer_name?: string
+          p_token: string
+        }
+        Returns: Json
+      }
+      public_schedule_quote: {
+        Args: {
+          p_location?: Json
+          p_now?: string
+          p_starts_at: string
           p_token: string
         }
         Returns: Json
@@ -4820,15 +8950,34 @@ export type Database = {
         }
         Returns: Json
       }
+      public_submit_lead: {
+        Args: { p_now?: string; p_payload: Json; p_token: string }
+        Returns: Json
+      }
       public_unsubscribe: { Args: { p_token: string }; Returns: boolean }
       public_unsubscribe_info: { Args: { p_token: string }; Returns: Json }
       public_validate_coupon: {
         Args: {
           p_code: string
+          p_link_token?: string
+          p_location_type?: Database["public"]["Enums"]["location_type"]
           p_now?: string
           p_service_ids: string[]
           p_slug: string
+          p_starts_at?: string
           p_vehicle_category_id?: string
+          p_vehicle_id?: string
+        }
+        Returns: Json
+      }
+      publish_job_report: {
+        Args: {
+          p_channel?: Database["public"]["Enums"]["message_channel"]
+          p_include_inspections?: boolean
+          p_job_id: string
+          p_message?: string
+          p_photo_kinds?: Database["public"]["Enums"]["job_photo_kind"][]
+          p_send?: boolean
         }
         Returns: Json
       }
@@ -4855,8 +9004,10 @@ export type Database = {
           error: string | null
           from_address: string | null
           id: string
+          invoice_id: string | null
           job_id: string | null
           provider_message_id: string | null
+          quote_id: string | null
           read_at: string | null
           request_nonce: string | null
           send_after: string
@@ -4888,6 +9039,25 @@ export type Database = {
         }
         Returns: undefined
       }
+      quote_effective_option: {
+        Args: { p_quote_id: string; p_selected: string }
+        Returns: string
+      }
+      quote_location_type: {
+        Args: {
+          p_business: Database["public"]["Enums"]["business_type"]
+          p_raw: string
+        }
+        Returns: Database["public"]["Enums"]["location_type"]
+      }
+      quote_schedule_needs: {
+        Args: { p_quote: Database["public"]["Tables"]["quotes"]["Row"] }
+        Returns: Record<string, unknown>
+      }
+      quote_self_schedule_reason: {
+        Args: { p_quote: Database["public"]["Tables"]["quotes"]["Row"] }
+        Returns: string
+      }
       quote_validity_end: {
         Args: { p_timezone: string; p_valid_until: string }
         Returns: string
@@ -4905,6 +9075,34 @@ export type Database = {
           opt_action: string | null
           shop_id: string
         }[]
+      }
+      record_inventory_movement: {
+        Args: {
+          p_kind: Database["public"]["Enums"]["inventory_movement_kind"]
+          p_note?: string
+          p_product_id: string
+          p_quantity: number
+          p_unit_cost_cents?: number
+        }
+        Returns: {
+          allocation: Json | null
+          created_at: string
+          created_by: string | null
+          id: string
+          job_id: string | null
+          kind: Database["public"]["Enums"]["inventory_movement_kind"]
+          note: string | null
+          product_id: string
+          quantity: number
+          shop_id: string
+          unit_cost_cents: number | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "inventory_movements"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
       record_manual_payment: {
         Args: {
@@ -4935,6 +9133,7 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
           stripe_payment_intent_id: string | null
           tip_cents: number
           updated_at: string
@@ -4942,6 +9141,35 @@ export type Database = {
         SetofOptions: {
           from: "*"
           to: "payments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      record_sms_number: {
+        Args: {
+          p_kind: string
+          p_messaging_service_sid: string
+          p_number_sid: string
+          p_phone_e164: string
+          p_shop_id: string
+        }
+        Returns: {
+          business_info: NonNullable<Json>
+          created_at: string
+          kind: string | null
+          last_checked_at: string | null
+          messaging_service_sid: string | null
+          phone_number: string
+          rejection_reason: string | null
+          shop_id: string
+          twilio_number_sid: string | null
+          updated_at: string
+          verification_sid: string | null
+          verification_status: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shop_sms_numbers"
           isOneToOne: true
           isSetofReturn: false
         }
@@ -4955,6 +9183,82 @@ export type Database = {
         }
         Returns: boolean
       }
+      redeem_customer_credit: {
+        Args: {
+          p_amount_cents?: number
+          p_gift_card_id: string
+          p_invoice_id: string
+        }
+        Returns: {
+          amount_cents: number
+          card_brand: string | null
+          card_last4: string | null
+          created_at: string
+          customer_id: string
+          disputed_cents: number
+          id: string
+          invoice_id: string | null
+          job_id: string | null
+          kind: Database["public"]["Enums"]["payment_kind"]
+          membership_id: string | null
+          method: Database["public"]["Enums"]["payment_method"]
+          note: string | null
+          paid_at: string | null
+          recorded_by: string | null
+          refunded_cents: number
+          shop_id: string
+          status: Database["public"]["Enums"]["payment_status"]
+          stripe_charge_id: string | null
+          stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
+          stripe_payment_intent_id: string | null
+          tip_cents: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "payments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      redeem_gift_card: {
+        Args: { p_amount_cents?: number; p_code: string; p_invoice_id: string }
+        Returns: {
+          amount_cents: number
+          card_brand: string | null
+          card_last4: string | null
+          created_at: string
+          customer_id: string
+          disputed_cents: number
+          id: string
+          invoice_id: string | null
+          job_id: string | null
+          kind: Database["public"]["Enums"]["payment_kind"]
+          membership_id: string | null
+          method: Database["public"]["Enums"]["payment_method"]
+          note: string | null
+          paid_at: string | null
+          recorded_by: string | null
+          refunded_cents: number
+          shop_id: string
+          status: Database["public"]["Enums"]["payment_status"]
+          stripe_charge_id: string | null
+          stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
+          stripe_payment_intent_id: string | null
+          tip_cents: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "payments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      referral_code_core: { Args: { p_customer_id: string }; Returns: Json }
+      referral_new_code: { Args: { p_shop_id: string }; Returns: string }
       refund_manual_payment: {
         Args: { p_amount_cents: number; p_payment_id: string }
         Returns: {
@@ -4978,6 +9282,7 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
           stripe_payment_intent_id: string | null
           tip_cents: number
           updated_at: string
@@ -4989,6 +9294,35 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      register_push_token: {
+        Args: {
+          p_apns_env: string
+          p_app_version?: string
+          p_bundle_id: string
+          p_token: string
+        }
+        Returns: {
+          apns_env: string
+          app_version: string | null
+          bundle_id: string
+          created_at: string
+          disabled_at: string | null
+          disabled_reason: string | null
+          id: string
+          last_seen_at: string
+          platform: string
+          token: string
+          user_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "device_push_tokens"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      release_push: { Args: { p_notification_id: string }; Returns: boolean }
+      release_sms_number: { Args: { p_shop_id: string }; Returns: undefined }
       remove_customer_payment_method: {
         Args: { p_shop_id: string; p_stripe_payment_method_id: string }
         Returns: boolean
@@ -5041,9 +9375,58 @@ export type Database = {
         }
         Returns: Json
       }
+      report_gift_cards: {
+        Args: { p_from: string; p_shop_id: string; p_to: string }
+        Returns: Json
+      }
+      report_job_profit: {
+        Args: { p_from: string; p_shop_id: string; p_to: string }
+        Returns: {
+          completed_at: string
+          customer_label: string
+          job_id: string
+          job_number: number
+          labor_cents: number | null
+          margin_bps: number | null
+          materials_cents: number
+          profit_cents: number | null
+          revenue_cents: number
+        }[]
+      }
+      report_lead_sources: {
+        Args: { p_from: string; p_shop_id: string; p_to: string }
+        Returns: {
+          converted_count: number
+          customers_count: number
+          first_job_revenue_cents: number
+          leads_count: number
+          revenue_cents: number
+          source: Database["public"]["Enums"]["customer_source"]
+        }[]
+      }
       report_local_start: {
         Args: { p_date: string; p_timezone: string }
         Returns: string
+      }
+      report_member_earnings: {
+        Args: {
+          p_from: string
+          p_member_id: string
+          p_shop_id: string
+          p_to: string
+        }
+        Returns: {
+          commission_cents: number
+          completed_at: string
+          customer_label: string | null
+          hours: number
+          job_id: string
+          job_number: number
+          revenue_share_cents: number
+          sales_commission_cents: number
+          service_commission_cents: number
+          tips_cents: number
+        }[]
       }
       report_outstanding: {
         Args: { p_now?: string; p_shop_id: string }
@@ -5064,6 +9447,10 @@ export type Database = {
           tip_refunds_cents: number
           tips_cents: number
         }[]
+      }
+      report_quote_conversion: {
+        Args: { p_from: string; p_shop_id: string; p_to: string }
+        Returns: Json
       }
       report_revenue: {
         Args: {
@@ -5106,6 +9493,18 @@ export type Database = {
           service_name: string
         }[]
       }
+      report_service_profit: {
+        Args: { p_from: string; p_shop_id: string; p_to: string }
+        Returns: {
+          gross_profit_cents: number
+          jobs_count: number
+          margin_bps: number | null
+          materials_cents: number
+          revenue_cents: number
+          service_id: string
+          service_name: string | null
+        }[]
+      }
       report_team: {
         Args: {
           p_from: string
@@ -5126,7 +9525,25 @@ export type Database = {
           pre_tax_revenue_cents: number
           revenue_cents: number
           role: Database["public"]["Enums"]["shop_role"]
+          sales_commission_cents: number | null
+          service_commission_cents: number | null
+          tips_cents: number | null
+          total_earnings_cents: number | null
           worked_seconds: number
+        }[]
+      }
+      report_team_job_rows: {
+        Args: { p_end: string; p_shop_id: string; p_start: string }
+        Returns: {
+          commission_base_share: number
+          is_assignee: boolean
+          job_id: string
+          member_id: string
+          pre_tax_share: number
+          revenue_share: number
+          sales_base: number
+          service_commission: number
+          tips: number
         }[]
       }
       report_vehicle_label: {
@@ -5143,6 +9560,7 @@ export type Database = {
           id: string
           key: Database["public"]["Enums"]["message_template_key"]
           offset_minutes: number | null
+          reminder_offsets_minutes: number[] | null
           shop_id: string
           subject: string | null
           updated_at: string
@@ -5154,7 +9572,10 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      revoke_calendar_feed: { Args: { p_shop_id: string }; Returns: boolean }
       revoke_invite: { Args: { p_invite_id: string }; Returns: undefined }
+      revoke_job_report: { Args: { p_report_id: string }; Returns: undefined }
+      rotate_webhook_secret: { Args: { p_endpoint_id: string }; Returns: Json }
       search_shop: {
         Args: { p_limit?: number; p_query: string; p_shop_id: string }
         Returns: {
@@ -5170,6 +9591,19 @@ export type Database = {
           title: string
         }[]
       }
+      send_test_webhook: { Args: { p_endpoint_id: string }; Returns: string }
+      series_occurrence_dates: {
+        Args: {
+          p_from: string
+          p_limit: number
+          p_series: Database["public"]["Tables"]["job_series"]["Row"]
+          p_to: string
+        }
+        Returns: {
+          d: string
+          seq: number
+        }[]
+      }
       service_price_for: {
         Args: { p_service_id: string; p_vehicle_category_id: string }
         Returns: {
@@ -5178,6 +9612,146 @@ export type Database = {
         }[]
       }
       set_app_base_url: { Args: { p_url: string }; Returns: string }
+      set_billing_config: {
+        Args: { p_enabled: boolean; p_trial_days: number }
+        Returns: undefined
+      }
+      set_document_followups_paused: {
+        Args: { p_id: string; p_kind: string; p_paused: boolean }
+        Returns: Json
+      }
+      set_job_coordinates: {
+        Args: {
+          p_address: Json
+          p_job_id: string
+          p_lat: number
+          p_lng: number
+        }
+        Returns: undefined
+      }
+      set_job_photo_visibility: {
+        Args: { p_photo_ids: string[]; p_visible: boolean }
+        Returns: number
+      }
+      set_job_status: {
+        Args: {
+          p_force?: boolean
+          p_job_id: string
+          p_reason?: string
+          p_status: Database["public"]["Enums"]["job_status"]
+        }
+        Returns: {
+          appointment_set_at: string
+          cancel_reason: string | null
+          cancelled_at: string | null
+          completed_at: string | null
+          confirmed_at: string | null
+          coupon_id: string | null
+          created_at: string
+          created_by: string | null
+          custom_data: NonNullable<Json>
+          customer_id: string
+          deposit_followups_paused: boolean
+          deposit_required_cents: number
+          discount_cents: number
+          discount_kind: Database["public"]["Enums"]["discount_kind"]
+          discount_value: number
+          en_route_at: string | null
+          id: string
+          internal_notes: string | null
+          location_type: Database["public"]["Enums"]["location_type"]
+          notes: string | null
+          number: number
+          public_token: string
+          quote_id: string | null
+          reminder_sent_at: string | null
+          resource_id: string | null
+          review_requested_at: string | null
+          route_position: number | null
+          scheduled_end: string | null
+          scheduled_start: string | null
+          series_detached: boolean
+          series_id: string | null
+          series_seq: number | null
+          service_address_line1: string | null
+          service_address_line2: string | null
+          service_city: string | null
+          service_lat: number | null
+          service_lng: number | null
+          service_postal_code: string | null
+          service_region: string | null
+          shop_id: string
+          sold_by_member_id: string | null
+          source: Database["public"]["Enums"]["job_source"]
+          started_at: string | null
+          status: Database["public"]["Enums"]["job_status"]
+          subtotal_cents: number
+          tax_cents: number
+          tax_rate_bps: number
+          total_cents: number
+          updated_at: string
+          vehicle_id: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "jobs"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      set_notification_prefs: {
+        Args: {
+          p_muted_until?: string
+          p_push_kinds: Database["public"]["Enums"]["notification_kind"][]
+          p_shop_id: string
+        }
+        Returns: {
+          member_id: string
+          muted_until: string | null
+          push_kinds: Database["public"]["Enums"]["notification_kind"][]
+          shop_id: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "member_notification_prefs"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      set_route_order: {
+        Args: { p_job_ids: string[]; p_shop_id: string }
+        Returns: number
+      }
+      set_sms_verification: {
+        Args: {
+          p_business_info?: Json
+          p_rejection_reason?: string
+          p_shop_id: string
+          p_status: string
+          p_verification_sid?: string
+        }
+        Returns: {
+          business_info: NonNullable<Json>
+          created_at: string
+          kind: string | null
+          last_checked_at: string | null
+          messaging_service_sid: string | null
+          phone_number: string
+          rejection_reason: string | null
+          shop_id: string
+          twilio_number_sid: string | null
+          updated_at: string
+          verification_sid: string | null
+          verification_status: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shop_sms_numbers"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       set_stripe_refund_total: {
         Args: {
           p_expected_refunded_cents: number
@@ -5206,6 +9780,7 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
           stripe_payment_intent_id: string | null
           tip_cents: number
           updated_at: string
@@ -5217,6 +9792,12 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      shop_billing_standing: {
+        Args: { p_shop_id: string }
+        Returns: Record<string, unknown>
+      }
+      shop_can_write: { Args: { p_shop_id: string }; Returns: boolean }
+      shop_entitlement: { Args: { p_shop_id: string }; Returns: Json }
       shop_role_of: {
         Args: { p_shop_id: string }
         Returns: Database["public"]["Enums"]["shop_role"]
@@ -5265,11 +9846,13 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      sms_provisioning_status: { Args: { p_shop_id: string }; Returns: Json }
       staff_record_quote_response: {
         Args: {
           p_action: string
           p_approved_by_name?: string
           p_declined_reason?: string
+          p_option_id?: string
           p_quote_id: string
           p_selected_optional_line_ids?: string[]
         }
@@ -5287,11 +9870,15 @@ export type Database = {
           discount_kind: Database["public"]["Enums"]["discount_kind"]
           discount_value: number
           expired_at: string | null
+          followups_paused: boolean
           id: string
           internal_notes: string | null
           notes: string | null
           number: number
           public_token: string
+          selected_option_id: string | null
+          self_schedule: boolean
+          self_scheduled_at: string | null
           sent_at: string | null
           shop_id: string
           status: Database["public"]["Enums"]["quote_status"]
@@ -5366,9 +9953,36 @@ export type Database = {
         }
       }
       template_vars_for_job: { Args: { p_job_id: string }; Returns: Json }
+      time_entry_check_geo: {
+        Args: { p_accuracy_m: number; p_lat: number; p_lng: number }
+        Returns: undefined
+      }
       transfer_ownership: {
         Args: { p_member_id: string; p_shop_id: string }
         Returns: undefined
+      }
+      unbilled_jobs: {
+        Args: { p_customer_id: string }
+        Returns: {
+          completed_at: string | null
+          job_id: string
+          number: number
+          paid_cents: number
+          scheduled_start: string | null
+          status: Database["public"]["Enums"]["job_status"]
+          total_cents: number
+          vehicle_label: string | null
+        }[]
+      }
+      unregister_push_token: { Args: { p_token: string }; Returns: boolean }
+      update_job_series: {
+        Args: {
+          p_from_job_id?: string
+          p_now?: string
+          p_patch: Json
+          p_series_id: string
+        }
+        Returns: Json
       }
       update_message_status_by_provider_id: {
         Args: {
@@ -5377,6 +9991,16 @@ export type Database = {
           p_status: Database["public"]["Enums"]["message_status"]
         }
         Returns: string
+      }
+      update_webhook_endpoint: {
+        Args: {
+          p_active: boolean
+          p_description?: string
+          p_endpoint_id: string
+          p_events: string[]
+          p_url: string
+        }
+        Returns: Json
       }
       upsert_customer_payment_method: {
         Args: {
@@ -5400,6 +10024,7 @@ export type Database = {
           is_default: boolean
           last4: string | null
           shop_id: string
+          stripe_customer_id: string | null
           stripe_payment_method_id: string
           updated_at: string
         }
@@ -5427,6 +10052,7 @@ export type Database = {
           p_payment_intent_id: string
           p_shop_id: string
           p_status: Database["public"]["Enums"]["payment_status"]
+          p_stripe_method_type?: string
           p_tip_cents?: number
         }
         Returns: {
@@ -5450,6 +10076,7 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"]
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
+          stripe_method_type: string | null
           stripe_payment_intent_id: string | null
           tip_cents: number
           updated_at: string
@@ -5457,6 +10084,47 @@ export type Database = {
         SetofOptions: {
           from: "*"
           to: "payments"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      user_can_read_notification: {
+        Args: {
+          p_kind: Database["public"]["Enums"]["notification_kind"]
+          p_shop_id: string
+          p_user_id: string
+        }
+        Returns: boolean
+      }
+      void_gift_card: {
+        Args: { p_gift_card_id: string; p_reason?: string }
+        Returns: {
+          balance_cents: number
+          code_hash: string
+          code_last4: string
+          created_at: string
+          expires_at: string | null
+          id: string
+          initial_cents: number
+          issued_by: string | null
+          issued_via: string
+          kind: string
+          message: string | null
+          owner_customer_id: string | null
+          purchaser_customer_id: string | null
+          recipient_email: string | null
+          recipient_name: string | null
+          shop_id: string
+          sold_price_cents: number | null
+          status: Database["public"]["Enums"]["gift_card_status"]
+          stripe_payment_intent_id: string | null
+          updated_at: string
+          void_reason: string | null
+          voided_at: string | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "gift_cards"
           isOneToOne: true
           isSetofReturn: false
         }
@@ -5473,6 +10141,7 @@ export type Database = {
           discount_kind: Database["public"]["Enums"]["discount_kind"]
           discount_value: number
           due_at: string | null
+          followups_paused: boolean
           id: string
           internal_notes: string | null
           issued_at: string | null
@@ -5505,11 +10174,32 @@ export type Database = {
         Args: { p_local: string; p_tz: string }
         Returns: string
       }
+      webhook_payload: {
+        Args: { p_integration_event_id: string }
+        Returns: Json
+      }
     }
     Enums: {
       business_type: "fixed" | "mobile" | "both"
+      calendar_event_kind:
+        | "closed"
+        | "time_off"
+        | "meeting"
+        | "consultation"
+        | "reminder"
+        | "other"
       campaign_status: "draft" | "launched" | "cancelled"
+      commission_kind: "none" | "percent" | "flat"
       coupon_kind: "percent" | "fixed"
+      custom_field_entity: "customer" | "job"
+      custom_field_type:
+        | "text"
+        | "textarea"
+        | "number"
+        | "select"
+        | "multiselect"
+        | "checkbox"
+        | "date"
       customer_lifecycle: "lead" | "customer"
       customer_source:
         | "staff"
@@ -5520,13 +10210,19 @@ export type Database = {
         | "instagram"
         | "walk_in"
         | "other"
+        | "import"
       damage_kind:
         "scratch" | "dent" | "chip" | "crack" | "stain" | "swirl" | "other"
       deposit_type: "percent" | "fixed"
       discount_kind: "none" | "percent" | "fixed"
       document_kind: "job" | "quote" | "invoice"
+      fee_apply_location: "none" | "shop" | "mobile" | "both"
       form_attach_to: "all_jobs" | "online_booking" | "manual"
+      gift_card_status: "active" | "depleted" | "void" | "expired"
+      gift_card_txn_kind:
+        "issue" | "redeem" | "refund" | "adjust" | "void" | "expire"
       inspection_kind: "pre" | "post"
+      inventory_movement_kind: "receive" | "consume" | "adjust" | "count"
       invoice_status: "draft" | "open" | "partially_paid" | "paid" | "void"
       job_photo_kind: "before" | "after" | "inspection" | "other"
       job_source: "staff" | "online_booking" | "quote" | "membership"
@@ -5540,7 +10236,7 @@ export type Database = {
         | "cancelled"
         | "no_show"
       location_type: "shop" | "mobile"
-      membership_interval: "month" | "year"
+      membership_interval: "month" | "year" | "week"
       membership_status: "incomplete" | "active" | "past_due" | "cancelled"
       message_channel: "sms" | "email"
       message_direction: "outbound" | "inbound"
@@ -5566,6 +10262,15 @@ export type Database = {
         | "follow_up"
         | "membership_welcome"
         | "invite"
+        | "gift_card_delivery"
+        | "referral_reward"
+        | "job_report"
+        | "quote_reminder"
+        | "deposit_reminder"
+        | "invoice_reminder"
+        | "invoice_overdue"
+        | "service_followup"
+        | "lead_received"
       notification_kind:
         | "new_booking"
         | "booking_cancelled"
@@ -5575,9 +10280,29 @@ export type Database = {
         | "inbound_message"
         | "form_signed"
         | "general"
+        | "gift_card_purchased"
+        | "membership_joined"
+        | "low_stock"
+        | "inspection_acknowledged"
+        | "job_assigned"
+        | "job_rescheduled"
+        | "new_lead"
+        | "task_assigned"
+        | "task_due"
+        | "sms_number_status"
+        | "webhook_failing"
+        | "billing_payment_failed"
       payment_kind: "deposit" | "payment" | "membership"
       payment_method:
-        "card" | "card_present" | "cash" | "check" | "bank_transfer" | "other"
+        | "card"
+        | "card_present"
+        | "cash"
+        | "check"
+        | "bank_transfer"
+        | "other"
+        | "gift_card"
+        | "ach_debit"
+        | "bnpl"
       payment_status:
         | "pending"
         | "succeeded"
@@ -5585,6 +10310,7 @@ export type Database = {
         | "cancelled"
         | "refunded"
         | "partially_refunded"
+        | "processing"
       quote_status:
         | "draft"
         | "sent"
@@ -5731,8 +10457,27 @@ export const Constants = {
   public: {
     Enums: {
       business_type: ["fixed", "mobile", "both"],
+      calendar_event_kind: [
+        "closed",
+        "time_off",
+        "meeting",
+        "consultation",
+        "reminder",
+        "other",
+      ],
       campaign_status: ["draft", "launched", "cancelled"],
+      commission_kind: ["none", "percent", "flat"],
       coupon_kind: ["percent", "fixed"],
+      custom_field_entity: ["customer", "job"],
+      custom_field_type: [
+        "text",
+        "textarea",
+        "number",
+        "select",
+        "multiselect",
+        "checkbox",
+        "date",
+      ],
       customer_lifecycle: ["lead", "customer"],
       customer_source: [
         "staff",
@@ -5743,6 +10488,7 @@ export const Constants = {
         "instagram",
         "walk_in",
         "other",
+        "import",
       ],
       damage_kind: [
         "scratch",
@@ -5756,8 +10502,19 @@ export const Constants = {
       deposit_type: ["percent", "fixed"],
       discount_kind: ["none", "percent", "fixed"],
       document_kind: ["job", "quote", "invoice"],
+      fee_apply_location: ["none", "shop", "mobile", "both"],
       form_attach_to: ["all_jobs", "online_booking", "manual"],
+      gift_card_status: ["active", "depleted", "void", "expired"],
+      gift_card_txn_kind: [
+        "issue",
+        "redeem",
+        "refund",
+        "adjust",
+        "void",
+        "expire",
+      ],
       inspection_kind: ["pre", "post"],
+      inventory_movement_kind: ["receive", "consume", "adjust", "count"],
       invoice_status: ["draft", "open", "partially_paid", "paid", "void"],
       job_photo_kind: ["before", "after", "inspection", "other"],
       job_source: ["staff", "online_booking", "quote", "membership"],
@@ -5772,7 +10529,7 @@ export const Constants = {
         "no_show",
       ],
       location_type: ["shop", "mobile"],
-      membership_interval: ["month", "year"],
+      membership_interval: ["month", "year", "week"],
       membership_status: ["incomplete", "active", "past_due", "cancelled"],
       message_channel: ["sms", "email"],
       message_direction: ["outbound", "inbound"],
@@ -5799,6 +10556,15 @@ export const Constants = {
         "follow_up",
         "membership_welcome",
         "invite",
+        "gift_card_delivery",
+        "referral_reward",
+        "job_report",
+        "quote_reminder",
+        "deposit_reminder",
+        "invoice_reminder",
+        "invoice_overdue",
+        "service_followup",
+        "lead_received",
       ],
       notification_kind: [
         "new_booking",
@@ -5809,6 +10575,18 @@ export const Constants = {
         "inbound_message",
         "form_signed",
         "general",
+        "gift_card_purchased",
+        "membership_joined",
+        "low_stock",
+        "inspection_acknowledged",
+        "job_assigned",
+        "job_rescheduled",
+        "new_lead",
+        "task_assigned",
+        "task_due",
+        "sms_number_status",
+        "webhook_failing",
+        "billing_payment_failed",
       ],
       payment_kind: ["deposit", "payment", "membership"],
       payment_method: [
@@ -5818,6 +10596,9 @@ export const Constants = {
         "check",
         "bank_transfer",
         "other",
+        "gift_card",
+        "ach_debit",
+        "bnpl",
       ],
       payment_status: [
         "pending",
@@ -5826,6 +10607,7 @@ export const Constants = {
         "cancelled",
         "refunded",
         "partially_refunded",
+        "processing",
       ],
       quote_status: [
         "draft",

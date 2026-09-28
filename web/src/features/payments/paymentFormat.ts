@@ -12,6 +12,9 @@ export const PAYMENT_METHODS = [
   'cash',
   'check',
   'bank_transfer',
+  'ach_debit',
+  'bnpl',
+  'gift_card',
   'other',
 ] as const satisfies readonly PaymentMethod[];
 
@@ -31,6 +34,7 @@ export const PAYMENT_KINDS = [
 
 export const PAYMENT_STATUSES = [
   'pending',
+  'processing',
   'succeeded',
   'failed',
   'cancelled',
@@ -44,6 +48,9 @@ export const METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'Cash',
   check: 'Check',
   bank_transfer: 'Bank transfer',
+  gift_card: 'Gift card / credit',
+  ach_debit: 'Bank debit (ACH)',
+  bnpl: 'Pay later',
   other: 'Other',
 };
 
@@ -69,18 +76,43 @@ export function brandLabel(brand: string | null | undefined): string {
   return BRAND_LABELS[brand.toLowerCase()] ?? brand.charAt(0).toUpperCase() + brand.slice(1);
 }
 
-/** "Visa •••• 4242", "Cash", "Card (in person)". */
+const PAY_LATER_PROVIDERS: Record<string, string> = {
+  affirm: 'Affirm',
+  klarna: 'Klarna',
+  afterpay_clearpay: 'Afterpay',
+  zip: 'Zip',
+};
+
+/** "Visa •••• 4242", "Cash", "Card (in person)", "Pay later · Klarna". */
 export function paymentMethodLabel(
-  payment: Pick<Row<'payments'>, 'method' | 'card_brand' | 'card_last4'>,
+  payment: Pick<Row<'payments'>, 'method' | 'card_brand' | 'card_last4'> & {
+    stripe_method_type?: string | null;
+  },
 ): string {
   if ((payment.method === 'card' || payment.method === 'card_present') && payment.card_last4) {
     return `${brandLabel(payment.card_brand)} •••• ${payment.card_last4}`;
   }
+  const provider = payment.stripe_method_type
+    ? PAY_LATER_PROVIDERS[payment.stripe_method_type]
+    : undefined;
+  if (payment.method === 'bnpl' && provider) return `${METHOD_LABELS.bnpl} · ${provider}`;
   return METHOD_LABELS[payment.method];
 }
 
 export function isCardMethod(method: PaymentMethod): boolean {
   return method === 'card' || method === 'card_present';
+}
+
+/** Money that moved through Stripe (refunded through Stripe, never by hand). */
+export const STRIPE_METHODS = [
+  'card',
+  'card_present',
+  'ach_debit',
+  'bnpl',
+] as const satisfies readonly PaymentMethod[];
+
+export function isStripeMethod(method: PaymentMethod): boolean {
+  return (STRIPE_METHODS as readonly PaymentMethod[]).includes(method);
 }
 
 /**

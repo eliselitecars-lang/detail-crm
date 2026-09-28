@@ -4,15 +4,17 @@
 \ir fixtures/two_shops.psql
 
 -- ------------------------------------------------------------ seeding
-select tests.eq((select count(*) from public.default_message_templates()), 23::bigint, 'defaults: 23 key/channel rows');
-select tests.eq((select count(distinct key) from public.default_message_templates()), 13::bigint,
+select tests.eq((select count(*) from public.default_message_templates()), 40::bigint, 'defaults: 40 key/channel rows');
+select tests.eq((select count(distinct key) from public.default_message_templates()), 22::bigint,
                 'defaults cover every template key');
+-- (0083 writes the wording of every key, including money's
+-- gift_card_delivery / referral_reward and ops' job_report)
 select tests.eq((select array_agg(distinct k::text order by k::text) from unnest(enum_range(null::public.message_template_key)) k),
                 (select array_agg(distinct key::text order by key::text) from public.default_message_templates()),
                 'every enum key has default wording');
-select tests.eq((select count(*) from public.message_templates where shop_id = tests.fx('shop_a')), 23::bigint,
+select tests.eq((select count(*) from public.message_templates where shop_id = tests.fx('shop_a')), 40::bigint,
                 'shop A seeded with every default');
-select tests.eq((select count(*) from public.message_templates where shop_id = tests.fx('shop_b')), 23::bigint,
+select tests.eq((select count(*) from public.message_templates where shop_id = tests.fx('shop_b')), 40::bigint,
                 'shop B seeded with every default');
 select tests.ok((select bool_and(offset_minutes = -1440) from public.message_templates
                   where shop_id = tests.fx('shop_a') and key = 'appointment_reminder'), 'reminder 24h before');
@@ -34,19 +36,24 @@ select tests.eq((
          regexp_matches(coalesce(d.subject, '') || ' ' || d.body, '\{\{[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\}\}', 'g') m
    where m[1] <> all (array['customer_first_name', 'customer_name', 'shop_name', 'shop_phone', 'job_date', 'job_time',
                             'job_number', 'vehicle', 'services', 'booking_link', 'booking_page_link', 'quote_link',
-                            'invoice_link', 'review_link', 'amount', 'balance', 'invite_link', 'unsubscribe_link'])),
+                            'invoice_link', 'review_link', 'amount', 'balance', 'invite_link', 'unsubscribe_link',
+                            -- v2 (0083)
+                            'quote_number', 'quote_total', 'valid_until', 'invoice_number', 'due_date', 'days_overdue',
+                            'deposit_due', 'deposit_link', 'rebook_link', 'report_link', 'gift_card_code',
+                            'gift_card_amount', 'sender_name', 'recipient_name', 'gift_message', 'credit_amount',
+                            'referee_first_name'])),
   '{}'::text[], 'defaults only use documented placeholders');
 select tests.ok((select bool_and(char_length(body) <= 320) from public.default_message_templates() where channel = 'sms'),
                 'default texts stay short (≤ 2 segments of text)');
 
 -- a shop created later is seeded too
 select tests.fx_set('shop_c', tests.make_shop('owner-c@test.local', 'shop-c', 'Shop C'));
-select tests.eq((select count(*) from public.message_templates where shop_id = tests.fx('shop_c')), 23::bigint,
+select tests.eq((select count(*) from public.message_templates where shop_id = tests.fx('shop_c')), 40::bigint,
                 'new shops are seeded');
 
 -- ------------------------------------------------------------ roles
 select tests.authenticate_as(tests.fx('u_manager_a'));
-select tests.eq(tests.row_count($$select 1 from public.message_templates$$), 23::bigint, 'managers read their templates');
+select tests.eq(tests.row_count($$select 1 from public.message_templates$$), 40::bigint, 'managers read their templates');
 select tests.eq(tests.row_count($$update public.message_templates set enabled = false where shop_id = tests.fx('shop_a')$$),
                 0::bigint, 'managers cannot edit templates');
 select tests.throws($$insert into public.message_templates (shop_id, key, channel, body)

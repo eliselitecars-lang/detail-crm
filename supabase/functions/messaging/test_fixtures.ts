@@ -559,6 +559,12 @@ export function setup(
         campaign_id: updated.campaign_id,
         template_key: updated.template_key,
         unsubscribe_token: updated.unsubscribe_token ?? null,
+        // 0089: the Messaging Service of the shop's sending number
+        messaging_service_sid: m.channel === "sms"
+          ? ctx.db.table("shop_sms_numbers").find((n) =>
+            n.shop_id === m.shop_id && n.phone_number === shop?.sms_from_number
+          )?.messaging_service_sid ?? null
+          : null,
       });
     }
     return out;

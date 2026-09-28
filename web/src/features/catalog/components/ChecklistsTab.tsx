@@ -13,6 +13,7 @@ import {
   LoadingState,
   SectionCard,
   Select,
+  Switch,
   useToast,
 } from '@/components/ui';
 import {
@@ -113,6 +114,7 @@ export function ChecklistsTab({ canManage }: { canManage: boolean }) {
                   <p className="text-ink truncate font-medium">{template.name}</p>
                   <p className="text-muted flex flex-wrap items-center gap-2 text-xs">
                     <span>{count === 1 ? '1 item' : `${count} items`}</span>
+                    {template.required && <Badge tone="warning">Required to complete</Badge>}
                     {linked === null ? (
                       <span>Added manually</span>
                     ) : linked === undefined ? (
@@ -212,6 +214,7 @@ export function ChecklistTemplateDialog({
   const newItemRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState(template?.name ?? '');
   const [serviceId, setServiceId] = useState(template?.service_id ?? '');
+  const [required, setRequired] = useState(template?.required ?? false);
   const [items, setItems] = useState<ChecklistDraftItem[]>(() =>
     parseChecklistItems(template?.items).map((i) => ({ key: i.id, id: i.id, label: i.label })),
   );
@@ -262,6 +265,7 @@ export function ChecklistTemplateDialog({
         name: trimmed,
         serviceId: serviceId === '' ? null : serviceId,
         items: checklistPayload(allItems),
+        required,
       });
       toast.success(template ? 'Checklist saved' : 'Checklist created');
       onClose();
@@ -284,6 +288,7 @@ export function ChecklistTemplateDialog({
             : linked === undefined
               ? 'Checking the linked service…'
               : `Added automatically to jobs with ${linked}.`}
+          {template.required && ' Every item must be ticked before the job can be completed.'}
         </p>
         {items.length === 0 ? (
           <p className="text-muted text-sm">This checklist has no items.</p>
@@ -352,6 +357,12 @@ export function ChecklistTemplateDialog({
             </Button>
           </div>
         )}
+        <Switch
+          label="Required to complete the job"
+          description="A job can’t be marked completed until every item from this checklist is ticked. Managers can complete it anyway, with a reason. Applies to jobs this checklist is added to from now on."
+          checked={required}
+          onCheckedChange={setRequired}
+        />
         <fieldset className="flex flex-col gap-2">
           <legend className="text-ink mb-1 text-sm font-medium">Items</legend>
           {items.length === 0 ? (

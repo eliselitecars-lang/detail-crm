@@ -22,8 +22,10 @@ import timeGridPlugin from '@fullcalendar/timegrid';
 import { useMemo, useRef } from 'react';
 import { Badge } from '@/components/ui';
 import type { LocalDate } from '@/lib/dates';
+import { EventContent } from './EventContent';
 import {
   columnEventInputs,
+  hasCustomContent,
   jobIdFromEventId,
   type CalendarFilters,
   type CalendarRow,
@@ -53,6 +55,8 @@ interface Props {
   slotMinTime: string;
   slotMaxTime: string;
   onOpenJob: (jobId: string) => void;
+  /** A calendar event was clicked: true when the page handled it. */
+  onOpenEvent: (extendedProps: Record<string, unknown>) => boolean;
   onMove: (move: ResourceMove) => void;
   onSelect: (resourceId: string | null, start: string, end: string) => void;
 }
@@ -70,6 +74,7 @@ export function ResourceDayView({
   slotMinTime,
   slotMaxTime,
   onOpenJob,
+  onOpenEvent,
   onMove,
   onSelect,
 }: Props) {
@@ -81,7 +86,7 @@ export function ResourceDayView({
       new Map(
         columns.map((c) => [
           columnKey(c.id),
-          columnEventInputs(rows, filters, c.id, canManage && !c.inactive),
+          columnEventInputs(rows, filters, c.id, canManage && !c.inactive, canManage),
         ]),
       ),
     [columns, rows, filters, canManage],
@@ -97,6 +102,7 @@ export function ResourceDayView({
 
   const onEventClick = (info: EventClickArg) => {
     info.jsEvent.preventDefault();
+    if (onOpenEvent(info.event.extendedProps)) return;
     const jobId = jobIdFromEventId(info.event.id);
     const row = jobId ? rows.find((r) => r.id === jobId) : undefined;
     if (!jobId || !row || row.is_busy_block) return;
@@ -197,6 +203,9 @@ export function ResourceDayView({
                 eventTimeFormat={{ hour: 'numeric', minute: '2-digit', meridiem: 'short' }}
                 slotLabelFormat={{ hour: 'numeric', meridiem: 'short' }}
                 eventClick={onEventClick}
+                eventContent={(arg) =>
+                  hasCustomContent(arg.event.extendedProps) ? <EventContent arg={arg} /> : true
+                }
                 eventDrop={onMovedWithin}
                 eventResize={onMovedWithin}
                 eventLeave={onLeave}

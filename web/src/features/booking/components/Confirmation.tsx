@@ -1,6 +1,5 @@
 import { CalendarCheck2, CreditCard, Hourglass } from 'lucide-react';
 import { useEffect, useRef } from 'react';
-import { Link } from 'react-router';
 import { Button, Card, CardBody, KeyValueList, StatusBadge, buttonClasses } from '@/components/ui';
 import { formatInTz, formatTimeRange } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
@@ -9,15 +8,19 @@ import { Banner } from '@/features/public-docs/shared/PublicPage';
 import { timeZoneName } from '@/features/public-docs/shared/format';
 import { useDepositCheckout, type CreatedBooking, type ShopProfile } from '../api';
 import type { SlotChoice } from '../model';
+import { PublicLink } from './PublicLink';
 
 export function Confirmation({
   profile,
   created,
   slot,
+  embed = false,
 }: {
   profile: ShopProfile;
   created: CreatedBooking;
   slot: SlotChoice | null;
+  /** Inside a shop's website: leave the frame for the booking page (and pay there). */
+  embed?: boolean;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const deposit = useDepositCheckout(created.job_token);
@@ -115,10 +118,35 @@ export function Confirmation({
           </Banner>
         )}
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <Link to={manageHref} className={buttonClasses({ variant: 'secondary', size: 'lg' })}>
-            View or manage booking
-          </Link>
-          {depositDue && (
+          {embed ? (
+            <a
+              href={manageHref}
+              target="_top"
+              className={buttonClasses({
+                variant: depositDue ? 'money' : 'secondary',
+                size: 'lg',
+              })}
+            >
+              {depositDue ? (
+                <>
+                  <CreditCard className="size-4" aria-hidden="true" />
+                  Pay {formatCents(created.deposit_required_cents, { currency })} deposit
+                </>
+              ) : (
+                'View or manage booking'
+              )}
+            </a>
+          ) : (
+            // A full page load while the shop's tag is loaded: the booking
+            // link is the customer's credential (tracking.ts).
+            <PublicLink
+              to={manageHref}
+              className={buttonClasses({ variant: 'secondary', size: 'lg' })}
+            >
+              View or manage booking
+            </PublicLink>
+          )}
+          {depositDue && !embed && (
             <Button
               variant="money"
               size="lg"
@@ -132,7 +160,8 @@ export function Confirmation({
         </div>
         {depositDue && (
           <p className="text-muted text-xs">
-            A deposit is required for this booking. Payments are processed securely by Stripe.
+            A deposit is required for this booking. Payments are processed securely by Stripe
+            {embed ? ' on your booking page' : ''}.
           </p>
         )}
       </CardBody>

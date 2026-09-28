@@ -11,8 +11,12 @@ import { routes as campaigns } from '@/features/campaigns/routes';
 import { routes as catalog } from '@/features/catalog/routes';
 import { routes as customers } from '@/features/customers/routes';
 import { routes as dashboard } from '@/features/dashboard/routes';
+import { routes as giftCards } from '@/features/gift-cards/routes';
+import { routes as inventory } from '@/features/inventory/routes';
 import { routes as invoices } from '@/features/invoices/routes';
+import { routes as jobReport } from '@/features/job-report/routes';
 import { routes as jobs } from '@/features/jobs/routes';
+import { routes as leads } from '@/features/leads/routes';
 import { routes as legal } from '@/features/legal/routes';
 import { routes as memberships } from '@/features/memberships/routes';
 import { routes as messages } from '@/features/messages/routes';
@@ -23,6 +27,7 @@ import { routes as publicDocs } from '@/features/public-docs/routes';
 import { routes as quotes } from '@/features/quotes/routes';
 import { routes as reports } from '@/features/reports/routes';
 import { routes as settings } from '@/features/settings/routes';
+import { routes as tasks } from '@/features/tasks/routes';
 import { routes as team } from '@/features/team/routes';
 import { routes as timesheets } from '@/features/timesheets/routes';
 import type { FeatureRoutes } from './routeTypes';
@@ -36,8 +41,12 @@ export const FEATURES: Readonly<Record<string, FeatureRoutes>> = {
   catalog,
   customers,
   dashboard,
+  giftCards,
+  inventory,
   invoices,
+  jobReport,
   jobs,
+  leads,
   legal,
   memberships,
   messages,
@@ -48,6 +57,7 @@ export const FEATURES: Readonly<Record<string, FeatureRoutes>> = {
   quotes,
   reports,
   settings,
+  tasks,
   team,
   timesheets,
 };

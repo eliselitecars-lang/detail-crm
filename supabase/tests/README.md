@@ -45,7 +45,12 @@ transaction never commits); force them with `set constraints <name> immediate`.
 | `30_` | communication (templates, messages, automations, campaigns, notifications) |
 | `40_` | integration flows (online booking, portal, public RPCs) |
 | `45_` | reports |
-| `90_` | cross-cutting hardening and integration (0090–0099) |
+| `50_` | scheduling v2: job series, calendar events, capacity, booking links, iCal feeds, geostamps, routes (0050–0059) |
+| `60_` | money v2: invoice jobs, tips / commissions, coupons, gift cards, fees, quote options, memberships v2, referrals (0060–0069) |
+| `70_` | field ops v2: job reports, completion gates, documents, customer merge, media, inventory (0070–0079) |
+| `80_` | comms & integrations v2: push, follow-ups, reminders, import / export, custom fields / leads, SMS numbers, webhooks (0080–0089) |
+| `90_`, `95_` | cross-cutting hardening and integration (0090–0099; `95_` = 0095 parity fixes) |
+| `100_` | shop subscription billing (0100–0109): standing rules, config, plans, entitlement, webhook RPCs, PT402 enforcement, seats, lapsed-shop booking and batches |
 
 ## Helpers (schema `tests`, defined in `supabase/shim/30_test_helpers.sql`)
 
@@ -63,13 +68,15 @@ transaction never commits); force them with `set constraints <name> immediate`.
 Useful SQLSTATEs: `42501` insufficient privilege / RLS `WITH CHECK` violation /
 RPC permission denial; `23514` check or business-rule violation; `23503`
 foreign key (e.g. composite-FK cross-shop injection); `23505` unique;
-`23P01` exclusion; `22023` invalid argument; `P0002` not found (staff and
+`23P01` exclusion; `22023` invalid argument (some carry a machine-readable HINT, e.g. `already_member`,
+`amount_out_of_range` — assert it with `get stacked diagnostics … pg_exception_hint`, see `95_parity_fixes.sql`); `P0002` not found (staff and
 internal RPCs); `PT404` not found in a public (anon) RPC — every `public_*`
 function, `get_available_slots` and `create_online_booking` raise it for an
 unknown slug / token / document so PostgREST answers HTTP 404 instead of 500
 (see the 0042 header); `55000` feature not enabled (e.g. online booking off);
 `428C9` writing a generated column; `40001` a compare-and-set lost a race
-(e.g. `set_stripe_refund_total`).
+(e.g. `set_stripe_refund_total`); `PT402` the shop's subscription is inactive or its
+seat limit is reached (PostgREST answers HTTP 402; 0102).
 
 **RLS semantics to remember:** `SELECT`/`UPDATE`/`DELETE` on rows you cannot
 see silently affect 0 rows (assert with `tests.row_count(...) = 0`), while
@@ -124,7 +131,10 @@ holds data. So a file must pass on a non-empty database, and twice in a row:
   `where id like 'evt_sec%'`), or reset the shared state explicitly inside
   the file's own transaction (it is rolled back): `two_shops.psql` deletes
   `platform_config.app_base_url`, the storage purge tests empty the global
-  purge queue first;
+  purge queue first; billing files retire every existing plan (`update public.platform_plans set
+  active = false`) before counting their own, and `two_shops.psql` also deletes the
+  `billing_enabled` / `billing_trial_days` keys, so billing starts off unless a file turns it on
+  (`select public.set_billing_config(true, 0)` as `service_role`);
 * seed global rows with upserts: `insert into public.platform_config … on
   conflict (key) do update set value = excluded.value`;
 * real Storage refuses direct `delete from storage.objects` unless

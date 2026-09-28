@@ -131,12 +131,17 @@ export const routes: FeatureRoutes = {
 - `useNavigate`, `Link`, `useParams`, `useSearchParams` from `react-router`.
 
 Route map: `/login`, `/signup`, `/forgot-password`, `/reset-password`,
-`/invite/:token`, `/book/:slug`, `/booking/:token`, `/q/:token`, `/i/:token`,
-`/f/:token`, `/u/:token` (email unsubscribe), `/portal`, `/account` (every
-signed-in role: delete account), `/privacy`, `/terms` (public; linked under the
-auth pages, in the public page footer and on `/account`), `/app` (dashboard), `/app/{calendar,jobs,customers,
-quotes,invoices,payments,memberships,messages,campaigns,reports,team,timesheets,
-catalog,settings,notifications}`, `/app/onboarding`.
+`/invite/:token`, `/book/:slug` (`?embed=1`, `?link=<token>`, prefill
+`?services=&category=&coupon=`), `/booking/:token`, `/q/:token`, `/i/:token`,
+`/f/:token`, `/r/:token` (customer job report), `/lead/:token` (lead form,
+`?embed=1`), `/join/:slug` (membership sign-up), `/gift/:slug` and
+`/gift/:slug/done` (gift card shop), `/u/:token` (email unsubscribe),
+`/portal`, `/account` (every signed-in role: delete account), `/privacy`,
+`/terms` (public; linked under the auth pages, in the public page footer and
+on `/account`), `/app` (dashboard), `/app/{calendar,jobs,customers,quotes,
+invoices,payments,memberships,gift-cards,messages,campaigns,reports,team,
+timesheets,tasks,inventory,catalog,settings,notifications}`,
+`/app/settings/<section>` (see Settings), `/app/onboarding`.
 
 ## Auth & tenancy
 
@@ -226,7 +231,7 @@ useRealtime({ table: 'messages', shopId, invalidate: [msgKeys.thread(shopId, id)
 ```
 
 Tables in the publication: `jobs`, `messages`, `notifications`, `payments`,
-`time_entries`. Changes are debounced (300 ms) into one invalidation; RLS still
+`time_entries`, `tasks`. Changes are debounced (300 ms) into one invalidation; RLS still
 applies to what each subscriber receives.
 
 ## UI kit (`@/components/ui`)
@@ -241,7 +246,14 @@ job|quote|invoice|payment|membership|message), Tabs, Table (sortable headers,
 stacked rows < md, `rowHref`), Pagination (+ `pageRange` for `.range()`),
 Dialog, Drawer, ConfirmDialog, DropdownMenu, Tooltip, Toast (`useToast`),
 Avatar, Skeleton, EmptyState, ErrorState, LoadingState, PageHeader,
-KeyValueList, SignaturePad (`ref` → `toBlob()` for the `signatures` bucket).
+KeyValueList, SignaturePad (`ref` → `toBlob()` for the `signatures` bucket),
+FileDropzone (drag-and-drop or pick; `accept` list, `fileMatchesAccept`,
+`formatBytes`), QrCode (renders a QR for a URL, PNG / SVG download), CopyField
+(read-only value + copy button, e.g. links and embed snippets).
+
+`@/components/customFields`: `CustomFieldInputs` (inputs for a list of custom
+field definitions: booking questions, lead forms, customer / job custom data)
+and `CustomFieldValues` (read-only display).
 
 Forms: react-hook-form + zod (`zodResolver`) with shared field schemas in
 `@/lib/validation` (`zEmail`, `zPhone`, `zOptionalPhone`, `zCents`,
@@ -257,6 +269,136 @@ Styling: Tailwind utilities over design tokens only (`bg-surface`, `text-ink`,
 dark. Never hard-code hex colours. Layouts must work at 360 px wide. Calendars
 use FullCalendar MIT plugins only (daygrid, timegrid, interaction, list), which
 pick up the tokens automatically.
+
+## Shared lib modules added with the parity work
+
+- `@/lib/customFields`: custom field types, limits, zod schemas for
+  `custom_data` (`customDataSchema`, `readCustomData`), draft ↔ value
+  conversion (`toDraft` / `fromDraft`), validation (`customValueError`) and
+  display (`formatCustomValue`). Definitions come from
+  `features/settings/data/customFields` (`useCustomFields`, `toFieldDef`).
+- `@/lib/qr`: `qrSvg`, `qrPngDataUrl`, `downloadQr` (generated in the
+  browser, no service).
+- `@/lib/csv`: `toCsv` / `rowsToCsv` / `downloadCsv` with spreadsheet-formula
+  neutralising (`csvCell`), `centsCell`, and `stripFormulaGuard` so an
+  exported file imports back unchanged.
+- `@/lib/download`: `downloadUrl`, `downloadBlob`, `fileStem`.
+- `@/lib/env`: `functionsUrl(path)` → absolute edge-function URL (calendar
+  feed links people paste into calendar apps).
+
+## Settings
+
+`/app/settings/<section>`; the sections, their sub-nav groups (Business,
+Booking, Money, Messages, Data & integrations, Account) and the capability
+that guards each one live in `src/features/settings/sections.ts`. Every route
+is wrapped in its own `RequireRole capability={section.view}` (routes.tsx);
+the sub-nav lists only what the member may open. Most sections are
+`settings.view` (managers read, owner/admin edit via `useSettingsAccess`);
+Payments and SMS are `shop.connectStripe` / `shop.manageSmsNumber`
+(owner/admin), Import & export `import.run` (managers+), Webhooks
+`webhooks.manage` (owner/admin), Delete shop `shop.delete` (owner), and
+Calendar feed `calendarFeed.own` (everyone — technicians get only that
+section, and `/app/settings` sends them there). Settings data hooks live in
+`src/features/settings/data/*` (booking links, calendar feed, custom fields,
+fees, follow-ups, import/export, lead forms, money settings, SMS
+provisioning, webhooks); other features import only `useCustomFields` /
+`toFieldDef`, `useShopFees` and the blocked-time helpers
+(`blockedTimes.ts`, `schemas.ts`) read-only. Saving follow-up settings or a
+template also refreshes the quote / invoice follow-up status cards
+(`['shop', id, 'followups']`).
+
+## Booking embed, QR code and tracking tags
+
+- **Embed** (Settings -> Online booking and Settings -> Lead forms show the
+  snippets, `src/features/settings/embed.ts`):
+
+  ```html
+  <div data-detailcrm-book="<slug>"></div>
+  <!-- optional: data-link="<private link token>" | data-lead="<lead form token>" | data-title="…" -->
+  <script src="https://<app origin>/embed.js" async></script>
+  ```
+
+  `public/embed.js` (vanilla, no dependencies, no cookies) replaces each div
+  with an iframe of `/book/<slug>?embed=1` (`&link=<token>`) or
+  `/lead/<token>?embed=1` (invalid slugs / tokens get no frame);
+  `window.DetailCRMEmbed.init()` picks up divs added later. In embed mode the
+  page has no chrome, a transparent background, links that leave it open in
+  the top window, and it posts only `{type:'detailcrm:height', height}` and
+  `{type:'detailcrm:scroll-top'}` to its parent (`src/features/booking/embed.ts`);
+  embed.js applies them only for its own frames and only from the app's
+  origin (min 320 px). A plain iframe of the same URL works without the
+  script. Only `/book/*` and `/lead/*` render inside a frame
+  (`src/app/RootLayout.tsx` + `src/app/framing.ts`); the deploy must set
+  `WEB_EMBED_PATHS=/book/*,/lead/*` for the headers to allow it
+  (docs/DEPLOY.md 4.3). E2E: `e2e/booking-embed.spec.ts` embeds both on a
+  page of another origin.
+
+- **QR code**: the booking link card and each lead form offer PNG / SVG
+  downloads (`@/lib/qr`).
+- **Tracking tags (shop opt-in)**: a shop's own Meta Pixel id / GA4
+  measurement id (Settings -> Online booking; `booking_settings`, returned by
+  `public_shop_profile.tracking`). `src/features/booking/tracking.ts` loads
+  them only on `/book/<slug>` (never private links, lead forms or any other
+  page) and only GA4 on `/booking/<token>?paid=1` to report the deposit.
+  Events: page view, begin checkout, booking created (value), deposit paid
+  (GA4). Never names, emails, phones, coupon codes or tokens: GA4 gets a page
+  location without query or token; Meta's history page views and automatic
+  configuration are off. While a tag is on, links to token pages are full
+  page loads (`PublicLink`), links into the booking page are full loads
+  without a referrer (`BookingPageLink`), the footer's legal links leave the
+  document (`PublicLayout fullPageLinks`), and leaving the wizard stops the
+  tags. The deploy CSP allows the tag origins only on `WEB_TRACKING_PATHS`.
+  Keep `src/features/legal/content.tsx` in step with any change here.
+
+## Parity features: where they live
+
+- **Gift cards / store credit** (`features/gift-cards`): staff list + detail
+  (`giftCards.view`; issue / redeem `giftCards.manage`, adjust / void
+  owner-admin), public shop `/gift/:slug` → Stripe Checkout, order status
+  `/gift/:slug/done`. Cards are tender, not discounts: redeeming pays an
+  invoice (`RecordPaymentDialog` gift card tab, `/i/:token` code panel).
+  Codes are shown once; only the last 4 are stored readable.
+- **Tasks** (`features/tasks`, `/app/tasks`): staff reminders; everyone sees
+  tasks assigned to or created by them (`tasks.own`), managers all
+  (`tasks.manage`). Realtime on `tasks`.
+- **Inventory** (`features/inventory`, `/app/inventory`, managers):
+  products, stock movements (`record_inventory_movement`), consumables per
+  service (catalog), low-stock state; job / service profit in reports.
+- **Job reports** (`features/jobs/reportApi.ts` staff side,
+  `features/job-report` public `/r/:token`): publish / revoke a customer
+  report with chosen photos, videos, inspection and documents (media signed
+  by the `public-media` function, refreshed before expiry); remote
+  inspection sign-off with a drawn signature.
+- **Leads** (`features/leads`, `/lead/:token`): the shop's lead forms
+  (Settings -> Lead forms) with custom questions, honeypot and server rate
+  limits (`leadSubmitErrorBanner`); submissions create or match customers
+  server-side.
+- **Calendar events & capacity v2** (`features/calendar`): `EventDialog`
+  creates / edits calendar events (kinds, whole shop or one member,
+  customer-linked, repeat rules from `features/settings/blockedTimes.ts`;
+  "every occurrence" or "this and later" — there is no single-occurrence
+  exception); managers open any event from the grid. Bays view
+  (`ResourceDayView`): jobs per bay / van, events without a bay once in the
+  "No bay / van" column. Capacity per location type, member availability and
+  multi-day jobs are booking settings.
+- **Routes / day map** (`features/calendar/DayMapView.tsx`, `route.ts`,
+  `LeafletMap.tsx`): the day's mobile jobs that start that day, in route
+  order (drag or arrows → `set_route_order`), filtered like the grid;
+  earlier-started jobs are listed separately; "Open route in Google Maps"
+  (from the shop, or the first stop, through up to 10 stops). Map tiles
+  from OpenStreetMap (the only map origin in the CSP); coordinates come
+  from the iPhone app's geocoder — the browser never geocodes.
+- **Recurring jobs** (`features/jobs/series.ts`, `seriesApi.ts`,
+  `components/RepeatFields.tsx`): repeat rules on new jobs
+  (`create_job_series`), "edit repeat" / "end repeat" for this and following
+  visits (`update_job_series` / `end_job_series`; an unchanged monthly rule
+  is sent back as it is).
+- **Import / export** (Settings -> Import & export, `settings/importing.ts`,
+  `settings/data/importExport.ts`): customers + vehicles and services from
+  CSV, parsed in the browser (papaparse), column mapping remembered per shop,
+  dry run then commit in chunks (`import_customers` / `import_services`,
+  resumable through `import_batches`); exports of customers (with their
+  custom fields), vehicles and jobs (`export_jobs`) as formula-safe CSV.
 
 ## Testing
 

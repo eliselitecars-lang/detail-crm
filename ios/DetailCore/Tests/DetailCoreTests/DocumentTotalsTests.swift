@@ -146,4 +146,100 @@ final class DocumentTotalsTests: XCTestCase {
         XCTAssertEqual(DocumentTotals.balanceCents(totalCents: 10_000, amountPaidCents: 2_500), 7_500)
         XCTAssertEqual(DocumentTotals.balanceCents(totalCents: 10_000, amountPaidCents: 10_000), 0)
     }
+    // MARK: - Discount-eligible lines (mirror of 0062 / 00_totals.sql)
+
+    private func summary(_ totals: DocumentTotals) -> String {
+        "\(totals.subtotalCents)/\(totals.discountCents)/\(totals.taxCents)/\(totals.totalCents)"
+    }
+
+    func testEveryLineEligibleMatchesClassicFormula() {
+        let lines = [
+            TotalsLine(unitPriceCents: 10_000, taxable: true, discountEligible: true),
+            TotalsLine(unitPriceCents: 5_000, taxable: false, discountEligible: true),
+        ]
+        XCTAssertEqual(summary(DocumentTotals(lines: lines, discount: .percent(basisPoints: 1_000), taxRateBps: 825)),
+                       "15000/1500/743/14243")
+    }
+
+    func testPercentDiscountAppliesToEligibleLinesOnly() {
+        // 10% of the eligible 10000; tax on 10000 - 1000 = 742.5 -> 743.
+        let lines = [
+            TotalsLine(unitPriceCents: 10_000, taxable: true),
+            TotalsLine(unitPriceCents: 5_000, taxable: false, discountEligible: false),
+        ]
+        XCTAssertEqual(summary(DocumentTotals(lines: lines, discount: .percent(basisPoints: 1_000), taxRateBps: 825)),
+                       "15000/1000/743/14743")
+    }
+
+    func testFixedDiscountCappedAtEligibleSubtotal() {
+        let lines = [
+            TotalsLine(unitPriceCents: 3_000),
+            TotalsLine(unitPriceCents: 7_000, discountEligible: false),
+        ]
+        XCTAssertEqual(summary(DocumentTotals(lines: lines, discount: .fixed(cents: 5_000), taxRateBps: 0)),
+                       "10000/3000/0/7000")
+    }
+
+    func testNoEligibleLineMeansNoDiscount() {
+        let lines = [TotalsLine(unitPriceCents: 7_000, discountEligible: false)]
+        XCTAssertEqual(summary(DocumentTotals(lines: lines, discount: .percent(basisPoints: 5_000), taxRateBps: 1_000)),
+                       "7000/0/700/7700")
+        XCTAssertEqual(summary(DocumentTotals(lines: lines, discount: .fixed(cents: 500), taxRateBps: 1_000)),
+                       "7000/0/700/7700")
+    }
+
+    func testTaxableShareComesFromEligibleLines() {
+        // round(1000 x 6000 / 10000) = 600; tax on 16000 - 600 = 15400 at 10%.
+        let lines = [
+            TotalsLine(unitPriceCents: 6_000, taxable: true),
+            TotalsLine(unitPriceCents: 4_000, taxable: false),
+            TotalsLine(unitPriceCents: 10_000, taxable: true, discountEligible: false),
+        ]
+        let totals = DocumentTotals(lines: lines, discount: .fixed(cents: 1_000), taxRateBps: 1_000)
+        XCTAssertEqual(summary(totals), "20000/1000/1540/20540")
+        XCTAssertEqual(totals.taxableBaseCents, 15_400)
+    }
+
+    func testEligiblePercentRoundsHalfUp() {
+        // 50% of 1005 = 502.5 -> 503.
+        let lines = [
+            TotalsLine(unitPriceCents: 1_005),
+            TotalsLine(quantity: 3, unitPriceCents: 999, discountEligible: false),
+        ]
+        XCTAssertEqual(summary(DocumentTotals(lines: lines, discount: .percent(basisPoints: 5_000), taxRateBps: 0)),
+                       "4002/503/0/3499")
+    }
+
+    func testMixedEligibilityWithTax() {
+        // SPEC example: 10000 eligible + 5000 not eligible, 10% off, 10% tax
+        // (all taxable): discount 1000, taxable base 14000, tax 1400.
+        let lines = [
+            TotalsLine(unitPriceCents: 10_000, taxable: true),
+            TotalsLine(unitPriceCents: 5_000, taxable: true, discountEligible: false),
+        ]
+        let totals = DocumentTotals(lines: lines, discount: .percent(basisPoints: 1_000), taxRateBps: 1_000)
+        XCTAssertEqual(summary(totals), "15000/1000/1400/15400")
+    }
+
+    func testEligibilityPropertyHolds() {
+        for g in 1...200 {
+            var lines: [TotalsLine] = []
+            for k in 1...4 {
+                lines.append(TotalsLine(
+                    quantity: Decimal(1 + (g * k) % 3),
+                    unitPriceCents: (g * 7_919 * k) % 25_000,
+                    taxable: (g + k) % 2 == 0,
+                    discountEligible: (g * k) % 3 != 0
+                ))
+            }
+            let eligible = lines.filter(\.discountEligible).map(\.lineTotalCents).reduce(0, +)
+            let discount: DocumentDiscount = g % 2 == 0
+                ? .percent(basisPoints: (g * 37) % 10_001)
+                : .fixed(cents: (g * 911) % 60_000)
+            let totals = DocumentTotals(lines: lines, discount: discount, taxRateBps: (g * 13) % 1_500)
+            XCTAssertEqual(totals.totalCents, totals.subtotalCents - totals.discountCents + totals.taxCents)
+            XCTAssertLessThanOrEqual(totals.discountCents, eligible)
+            XCTAssertGreaterThanOrEqual(totals.taxableBaseCents, 0)
+        }
+    }
 }

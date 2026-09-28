@@ -2,7 +2,8 @@
 //  CustomerVehicleEditorSheet.swift
 //  DetailCRM
 //
-//  Add / edit a customer's vehicle (managers and above). A VIN can fill
+//  Add / edit a customer's vehicle (managers and above). A VIN — typed or
+//  scanned from the door-jamb / windshield barcode (P-22) — can fill
 //  year / make / model / trim via NHTSA vPIC after DetailCore's VIN checks.
 //  The size class (vehicle category) drives catalog pricing.
 //
@@ -136,6 +137,8 @@ private struct CustomerVINSection: View {
     @Binding var draft: VehicleDraft
     @Binding var message: CustomerVINDecodeMessage?
 
+    @State private var showingScanner = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             SectionHeader(title: "VIN")
@@ -152,12 +155,31 @@ private struct CustomerVINSection: View {
                     .disabled(!canDecode)
                 }
             }
+            Button {
+                showingScanner = true
+            } label: {
+                Label("Scan the VIN barcode", systemImage: "barcode.viewfinder")
+            }
+            .buttonStyle(.themeSecondaryCompact)
+            .accessibilityHint("Opens the camera to read the VIN from the door jamb or windshield")
             if let message, message.vin == VIN.normalize(draft.vin) {
                 InlineMessage(text: message.text, kind: message.kind)
             } else if let warning = precheckWarning {
                 InlineMessage(text: warning, kind: .info)
             }
         }
+        .sheet(isPresented: $showingScanner) {
+            JobsVINScannerView { result in
+                scanned(result)
+            }
+        }
+    }
+
+    /// A scanned VIN (P-22) fills the field and is decoded straight away.
+    private func scanned(_ result: JobsVINScanResult) {
+        draft.vin = result.vin
+        message = nil
+        Task { await decode() }
     }
 
     private var canDecode: Bool {

@@ -210,4 +210,30 @@ describe('TimesheetsPage', () => {
       }),
     );
   });
+
+  it('links the recorded clock-in and clock-out locations to a map', async () => {
+    setTableResult('time_entries', {
+      data: [
+        {
+          ...entries[0],
+          clock_in_lat: 33.5186,
+          clock_in_lng: -86.8104,
+          clock_in_accuracy_m: 8,
+          clock_out_lat: null,
+          clock_out_lng: null,
+          clock_out_accuracy_m: null,
+        },
+      ],
+    });
+    renderAs('manager');
+    await setRange('2026-03-09', '2026-03-15');
+    const list = await screen.findByRole('table', { name: 'Time entries' });
+    const links = within(list).getAllByRole('link', { name: /Clocked in here/ });
+    expect(links[0]).toHaveAttribute(
+      'href',
+      'https://www.google.com/maps/search/?api=1&query=33.518600%2C-86.810400',
+    );
+    expect(links[0]).toHaveTextContent('±8 m');
+    expect(within(list).queryByRole('link', { name: /Clocked out here/ })).not.toBeInTheDocument();
+  });
 });

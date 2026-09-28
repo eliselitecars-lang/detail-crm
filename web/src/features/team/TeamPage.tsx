@@ -21,7 +21,7 @@ import { useAuth } from '@/features/auth/authContext';
 import { ROLE_LABELS } from '@/features/shop/permissions';
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
-import { useCompensation, useTeam, useUpdateMember } from './api';
+import { useCompensation, useMemberBookable, useTeam, useUpdateMember } from './api';
 import { InviteDialog } from './components/InviteDialog';
 import { InvitesCard } from './components/InvitesCard';
 import {
@@ -56,6 +56,7 @@ export default function TeamPage() {
   const isOwner = role === 'owner';
   const team = useTeam();
   const compensation = useCompensation();
+  const bookable = useMemberBookable();
   const update = useUpdateMember();
   const [inviting, setInviting] = useState(false);
   const [action, setAction] = useState<Action | null>(null);
@@ -130,16 +131,22 @@ export default function TeamPage() {
     {
       key: 'status',
       header: 'Status',
-      cell: (m) =>
-        m.active ? (
-          <Badge tone="success" dot>
-            Active
-          </Badge>
-        ) : (
-          <Badge tone="neutral" dot>
-            Inactive
-          </Badge>
-        ),
+      cell: (m) => (
+        <span className="flex flex-wrap items-center gap-1.5">
+          {m.active ? (
+            <Badge tone="success" dot>
+              Active
+            </Badge>
+          ) : (
+            <Badge tone="neutral" dot>
+              Inactive
+            </Badge>
+          )}
+          {m.active && bookable.data?.get(m.member_id) === false && (
+            <Badge tone="neutral">No online bookings</Badge>
+          )}
+        </span>
+      ),
     },
     ...(canSeePay
       ? [
@@ -251,7 +258,11 @@ export default function TeamPage() {
         />
       )}
       {action?.kind === 'details' && (
-        <MemberDetailsDialog member={action.member} onClose={() => setAction(null)} />
+        <MemberDetailsDialog
+          member={action.member}
+          bookable={canManage ? bookable.data?.get(action.member.member_id) : undefined}
+          onClose={() => setAction(null)}
+        />
       )}
       <ConfirmDialog
         open={toggling !== null}

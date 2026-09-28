@@ -34,6 +34,50 @@ export interface CalendarRow {
   assigned_member_ids: string[];
   member_id: string | null;
   title: string | null;
+  /** 'job' or the blocked time's calendar_event_kind (calendar_events v2). */
+  event_kind: string;
+  series_id: string | null;
+  color: string | null;
+  service_lat: number | null;
+  service_lng: number | null;
+}
+
+/** blocked_times.kind (0050). */
+export type EventKind = 'closed' | 'time_off' | 'meeting' | 'consultation' | 'reminder' | 'other';
+
+export const EVENT_KINDS: readonly EventKind[] = [
+  'closed',
+  'time_off',
+  'meeting',
+  'consultation',
+  'reminder',
+  'other',
+];
+
+export const EVENT_KIND_LABELS: Record<EventKind, string> = {
+  closed: 'Closed',
+  time_off: 'Time off',
+  meeting: 'Meeting',
+  consultation: 'Consultation',
+  reminder: 'Reminder',
+  other: 'Event',
+};
+
+export function isEventKind(value: string): value is EventKind {
+  return (EVENT_KINDS as readonly string[]).includes(value);
+}
+
+/** What FullCalendar keeps on each event for the page's handlers and content. */
+export interface EventMeta {
+  kind: 'job' | EventKind;
+  seriesId: string | null;
+  /** Blocked times: the block row and this occurrence's start. */
+  blockId?: string;
+  occurrenceStart?: string;
+  /** Consultations / reminders: the customer (managers only). */
+  customerName?: string | null;
+  /** A closure's shading (FullCalendar background event: never clicked). */
+  background?: true;
 }
 
 export interface CalendarFilters {
@@ -93,8 +137,14 @@ export function jobEventId(id: string): string {
   return `job:${id}`;
 }
 
-export function blockEventId(id: string): string {
-  return `block:${id}`;
+/** Blocked times repeat under one id, so the occurrence's start keeps event ids unique. */
+export function blockEventId(id: string, startsAt: string): string {
+  return `block:${id}@${startsAt}`;
+}
+
+/** The shading drawn under a closure (see toEventInputs). */
+export function closureShadeEventId(id: string, startsAt: string): string {
+  return `${blockEventId(id, startsAt)}#shade`;
 }
 
 /** "job:<uuid>" → uuid (null for blocks / foreign ids). */
@@ -102,32 +152,88 @@ export function jobIdFromEventId(eventId: string): string | null {
   return eventId.startsWith('job:') ? eventId.slice(4) : null;
 }
 
+/** A blocked time's kind ('closed' for rows from before kinds existed). */
+export function rowEventKind(row: Pick<CalendarRow, 'event_kind' | 'member_id'>): EventKind {
+  if (isEventKind(row.event_kind)) return row.event_kind;
+  return row.member_id ? 'time_off' : 'closed';
+}
+
 export function eventTitle(row: CalendarRow): string {
-  if (row.event_type === 'blocked_time') return row.title ?? 'Blocked';
+  if (row.event_type === 'blocked_time') {
+    const kind = rowEventKind(row);
+    const base = row.title ?? (kind === 'closed' ? 'Blocked' : EVENT_KIND_LABELS[kind]);
+    return row.customer_name ? `${base} · ${row.customer_name}` : base;
+  }
   if (row.is_busy_block) return 'Busy';
   const number = row.job_number !== null ? `#${row.job_number}` : 'Job';
   return row.title ? `${number} · ${row.title}` : number;
 }
 
+/** Kind colours (tokens) for calendar events without their own colour. */
+const EVENT_PALETTE: Record<EventKind, Palette> = {
+  closed: { bg: token('surface-3'), border: token('line-strong'), text: token('ink') },
+  time_off: { bg: token('surface-3'), border: token('line-strong'), text: token('muted') },
+  meeting: { bg: token('surface-2'), border: token('primary'), text: token('ink') },
+  consultation: { bg: token('surface-2'), border: token('success'), text: token('ink') },
+  reminder: { bg: token('surface-2'), border: token('warning'), text: token('ink') },
+  other: { bg: token('surface-2'), border: token('line-strong'), text: token('ink') },
+};
+
 export function toEventInputs(
   rows: readonly CalendarRow[],
   filters: CalendarFilters,
   canReschedule: boolean,
+  /** Managers open calendar events to edit them. */
+  canEditEvents = false,
 ): EventInput[] {
   return rows
     .filter((row) => matchesFilters(row, filters))
-    .map((row): EventInput => {
+    .flatMap((row): EventInput[] => {
       if (row.event_type === 'blocked_time') {
-        return {
-          id: blockEventId(row.id),
+        const kind = rowEventKind(row);
+        const meta: EventMeta = {
+          kind,
+          seriesId: null,
+          blockId: row.id,
+          occurrenceStart: row.starts_at,
+          customerName: row.customer_name,
+        };
+        // Every calendar event is an event block (time off, meetings,
+        // consultations, reminders, closures), so managers can open it — and
+        // it is listed in the month and list views. A shop closure also
+        // shades the time grid behind the jobs; FullCalendar never fires
+        // eventClick for that background part.
+        const palette = EVENT_PALETTE[kind];
+        const shade: EventInput[] =
+          kind === 'closed'
+            ? [
+                {
+                  id: closureShadeEventId(row.id, row.starts_at),
+                  start: row.starts_at,
+                  end: row.ends_at,
+                  title: '',
+                  display: 'background',
+                  backgroundColor: token('line-strong'),
+                  editable: false,
+                  classNames: ['dc-blocked-time'],
+                  extendedProps: { ...meta, background: true } satisfies EventMeta,
+                },
+              ]
+            : [];
+        const block: EventInput = {
+          id: blockEventId(row.id, row.starts_at),
           start: row.starts_at,
           end: row.ends_at,
           title: eventTitle(row),
-          display: 'background',
-          backgroundColor: token('line-strong'),
+          backgroundColor: palette.bg,
+          borderColor: row.color ?? palette.border,
+          textColor: palette.text,
           editable: false,
-          classNames: ['dc-blocked-time'],
+          interactive: canEditEvents,
+          classNames: ['dc-calendar-event', `dc-event-${kind}`],
+          extendedProps: meta,
         };
+        return [...shade, block];
       }
       const palette = row.is_busy_block || !row.status ? BUSY_PALETTE : STATUS_PALETTE[row.status];
       const movable =
@@ -137,31 +243,54 @@ export function toEventInputs(
         row.status !== 'completed' &&
         row.status !== 'cancelled' &&
         row.status !== 'no_show';
-      return {
-        id: jobEventId(row.id),
-        start: row.starts_at,
-        end: row.ends_at,
-        title: eventTitle(row),
-        backgroundColor: palette.bg,
-        borderColor: palette.border,
-        textColor: palette.text,
-        editable: movable,
-        startEditable: movable,
-        durationEditable: movable,
-        interactive: !row.is_busy_block,
-        classNames: row.is_busy_block ? ['dc-busy-block'] : ['dc-job'],
-      };
+      const meta: EventMeta = { kind: 'job', seriesId: row.series_id };
+      return [
+        {
+          id: jobEventId(row.id),
+          start: row.starts_at,
+          end: row.ends_at,
+          title: eventTitle(row),
+          backgroundColor: palette.bg,
+          borderColor: palette.border,
+          textColor: palette.text,
+          editable: movable,
+          startEditable: movable,
+          durationEditable: movable,
+          interactive: !row.is_busy_block,
+          classNames: row.is_busy_block ? ['dc-busy-block'] : ['dc-job'],
+          extendedProps: meta,
+        },
+      ];
     });
+}
+
+/** The page's view of FullCalendar's extendedProps (null for foreign events). */
+export function eventMeta(extendedProps: Record<string, unknown>): EventMeta | null {
+  const kind = extendedProps.kind;
+  if (kind !== 'job' && !(typeof kind === 'string' && isEventKind(kind))) return null;
+  return extendedProps as unknown as EventMeta;
+}
+
+/** Events that get a glyph (repeating jobs, calendar events); others render by default. */
+export function hasCustomContent(extendedProps: Record<string, unknown>): boolean {
+  const meta = eventMeta(extendedProps);
+  if (!meta || meta.background) return false;
+  if (meta.kind === 'job') return meta.seriesId !== null;
+  return true;
 }
 
 /** Accessible one-line description of a job event (list view / tooltips). */
 export function describeRow(row: CalendarRow): string {
+  if (row.event_type === 'blocked_time') {
+    return `${EVENT_KIND_LABELS[rowEventKind(row)]}: ${eventTitle(row)}`;
+  }
   if (row.is_busy_block) return 'Busy (another team member’s job)';
   const parts = [
     eventTitle(row),
     row.status ? statusLabel('job', row.status) : null,
     row.vehicle_label,
     row.location_type === 'mobile' ? (row.service_address ?? 'Mobile') : null,
+    row.series_id ? 'Repeats' : null,
   ];
   return parts.filter(Boolean).join(' · ');
 }
@@ -192,8 +321,8 @@ export function scrollTimeFor(rows: readonly BusinessHoursRow[]): string {
 
 /** Views rendered by the main FullCalendar instance. */
 export type GridView = 'timeGridDay' | 'timeGridWeek' | 'dayGridMonth' | 'listWeek';
-/** All calendar views, including the hand-rolled per-bay/van day view. */
-export type CalendarView = GridView | 'resourceDay';
+/** All calendar views, including the hand-rolled per-bay/van day view and the day map. */
+export type CalendarView = GridView | 'resourceDay' | 'dayMap';
 
 export const CALENDAR_VIEWS: readonly { value: CalendarView; label: string }[] = [
   { value: 'timeGridDay', label: 'Day' },
@@ -201,6 +330,7 @@ export const CALENDAR_VIEWS: readonly { value: CalendarView; label: string }[] =
   { value: 'dayGridMonth', label: 'Month' },
   { value: 'listWeek', label: 'List' },
   { value: 'resourceDay', label: 'Bays' },
+  { value: 'dayMap', label: 'Map' },
 ];
 
 export function isCalendarView(value: string | null): value is CalendarView {
@@ -208,7 +338,7 @@ export function isCalendarView(value: string | null): value is CalendarView {
 }
 
 export function isGridView(value: CalendarView): value is GridView {
-  return value !== 'resourceDay';
+  return value !== 'resourceDay' && value !== 'dayMap';
 }
 
 // ---------------------------------------------------------------------------
@@ -265,18 +395,30 @@ export function resourceColumns(
   return columns.filter((c) => c.id === filterResourceId);
 }
 
-/** Event inputs for one resource column (blocked times show in every column). */
+/**
+ * Event inputs for one resource column. Calendar events (time off, meetings,
+ * consultations, reminders, closures) belong to no bay / van: their blocks
+ * show once, in the "No bay / van" column. A shop closure also shades every
+ * column, since no bay or van is open then.
+ */
 export function columnEventInputs(
   rows: readonly CalendarRow[],
   filters: CalendarFilters,
   columnId: string | null,
   canReschedule: boolean,
+  canEditEvents = false,
 ): EventInput[] {
-  return toEventInputs(
+  const inputs = toEventInputs(
     rows.filter((r) => r.event_type === 'blocked_time' || (r.resource_id ?? null) === columnId),
     { memberId: filters.memberId, resourceId: null },
     canReschedule,
+    canEditEvents,
   );
+  if (columnId === null) return inputs;
+  return inputs.filter((input) => {
+    const meta = eventMeta(input.extendedProps ?? {});
+    return meta?.kind === 'job' || meta?.background === true;
+  });
 }
 
 function minutesOfDay(iso: string, timeZone: string): number {

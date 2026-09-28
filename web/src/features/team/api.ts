@@ -24,6 +24,7 @@ export const teamKeys = {
   members: (shopId: string) => [...teamKeys.all(shopId), 'members'] as const,
   compensation: (shopId: string) => [...teamKeys.all(shopId), 'compensation'] as const,
   invites: (shopId: string) => [...teamKeys.all(shopId), 'invites'] as const,
+  bookable: (shopId: string) => [...teamKeys.all(shopId), 'bookable'] as const,
 };
 
 export function useTeam() {
@@ -37,6 +38,25 @@ export function useTeam() {
   });
 }
 
+/**
+ * shop_members.bookable (capacity v2, 0050/0053): whether each member counts
+ * toward online booking capacity. shop_team does not return it.
+ */
+export function useMemberBookable() {
+  const { shopId } = useShop();
+  const allowed = useCan('team.view');
+  return useQuery({
+    queryKey: teamKeys.bookable(shopId),
+    enabled: allowed,
+    queryFn: async (): Promise<Map<string, boolean>> => {
+      const rows = unwrap(
+        await supabase.from('shop_members').select('id, bookable').eq('shop_id', shopId),
+      );
+      return new Map((rows ?? []).map((row) => [row.id, row.bookable]));
+    },
+  });
+}
+
 export function useCompensation() {
   const { shopId } = useShop();
   const allowed = useCan('compensation.view');
@@ -46,7 +66,7 @@ export function useCompensation() {
     queryFn: async (): Promise<Map<string, Compensation>> => {
       const result = await supabase
         .from('member_compensation')
-        .select('member_id, hourly_rate_cents, commission_bps')
+        .select('member_id, hourly_rate_cents, commission_bps, sales_commission_bps')
         .eq('shop_id', shopId);
       return new Map((unwrap(result) ?? []).map((row) => [row.member_id, row]));
     },
@@ -77,6 +97,8 @@ export interface MemberPatch {
   active?: boolean;
   display_name?: string;
   calendar_color?: string | null;
+  /** Owners / admins only (shop_members_50_bookable_guard). */
+  bookable?: boolean;
 }
 
 export function useUpdateMember() {

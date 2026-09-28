@@ -25,7 +25,8 @@ import {
   type LinePatch,
 } from '@/features/quotes/shared/lines';
 import type { Enums } from '@/features/quotes/shared/types';
-import type { ManualMethod } from '@/features/payments/paymentFormat';
+import { isStripeMethod, type ManualMethod } from '@/features/payments/paymentFormat';
+import { formatCents, sumCents } from '@/lib/money';
 
 export type InvoiceStatus = Enums['invoice_status'];
 /**
@@ -59,6 +60,11 @@ export const invoiceKeys = {
   payments: (shopId: string, id: string) => [...invoiceKeys.all(shopId), 'payments', id] as const,
   cards: (shopId: string, customerId: string) =>
     [...invoiceKeys.all(shopId), 'cards', customerId] as const,
+  jobs: (shopId: string, id: string) => [...invoiceKeys.all(shopId), 'jobs', id] as const,
+  credits: (shopId: string, customerId: string) =>
+    [...invoiceKeys.all(shopId), 'credits', customerId] as const,
+  unbilled: (shopId: string, customerId: string) =>
+    [...invoiceKeys.all(shopId), 'unbilled', customerId] as const,
 };
 
 /** Open or partially paid with a balance and a due date in the past. */
@@ -237,6 +243,10 @@ export function useInvoiceLines(invoiceId: string) {
         optional: false,
         selected: true,
         duration_minutes: 0,
+        discount_eligible: row.discount_eligible ?? true,
+        fee_id: row.fee_id ?? null,
+        option_id: null,
+        job_id: row.job_id ?? null,
       })),
   });
 }
@@ -358,6 +368,7 @@ export function useInvoiceLineMutations(invoiceId: string, lines: readonly DocLi
             unit_price_cents: d.unit_price_cents,
             discount_cents: d.discount_cents,
             taxable: d.taxable,
+            vehicle_id: d.vehicle_id ?? null,
             sort: sorts[i] ?? i + 1,
           })),
         ),
@@ -376,6 +387,7 @@ export function useInvoiceLineMutations(invoiceId: string, lines: readonly DocLi
           : {}),
         ...(patch.discount_cents !== undefined ? { discount_cents: patch.discount_cents } : {}),
         ...(patch.taxable !== undefined ? { taxable: patch.taxable } : {}),
+        ...(patch.vehicle_id !== undefined ? { vehicle_id: patch.vehicle_id } : {}),
       };
       unwrap(
         await supabase.from('invoice_line_items').update(next).eq('shop_id', shopId).eq('id', id),
@@ -549,17 +561,64 @@ export function cancelOpenPaymentsSummary(result: CancelOpenPaymentsResult): {
   return notes.length > 0 ? { title, description: notes.join(' ') } : { title };
 }
 
-/** Mirrors public.payment_in_flight: a pending payment started within the last hour. */
+/**
+ * Mirrors public.payment_in_flight (0064): a bank / pay-later payment still
+ * 'processing', or a pending card payment started within the last hour.
+ */
 export const PAYMENT_IN_FLIGHT_MS = 60 * 60 * 1000;
 
 export function isPaymentInFlight(
   payment: Pick<InvoicePayment, 'status' | 'created_at'>,
   now: Date = new Date(),
 ): boolean {
+  if (payment.status === 'processing') return true;
   return (
     payment.status === 'pending' &&
     now.getTime() - new Date(payment.created_at).getTime() < PAYMENT_IN_FLIGHT_MS
   );
+}
+
+/** A pending card payment in flight (the one staff can cancel), not a clearing bank payment. */
+export function isCardAttemptInFlight(
+  payment: Pick<InvoicePayment, 'status' | 'created_at'>,
+  now: Date = new Date(),
+): boolean {
+  return payment.status === 'pending' && isPaymentInFlight(payment, now);
+}
+
+/**
+ * Money on bank / pay-later payments still clearing ('processing'). It is not
+ * in amount_paid_cents yet; used only to tell staff the balance is already
+ * covered (the server applies the same rule when taking payments).
+ */
+export function processingCents(
+  payments: readonly Pick<InvoicePayment, 'status' | 'amount_cents'>[],
+) {
+  return sumCents(payments.filter((p) => p.status === 'processing').map((p) => p.amount_cents));
+}
+
+/**
+ * Money in flight toward the invoice (isPaymentInFlight: clearing bank /
+ * pay-later payments and pending card attempts under an hour old).
+ * record_manual_payment and redeem_gift_card (0064 / 0066) accept at most the
+ * balance less this amount.
+ */
+export function inFlightCents(
+  payments: readonly Pick<InvoicePayment, 'status' | 'created_at' | 'amount_cents'>[],
+  now: Date = new Date(),
+) {
+  return sumCents(payments.filter((p) => isPaymentInFlight(p, now)).map((p) => p.amount_cents));
+}
+
+/** What can still be collected now: the balance less the given money in flight, never below 0. */
+export function collectibleCents(balanceCents: number, heldCents: number) {
+  return Math.max(0, balanceCents - Math.max(0, heldCents));
+}
+
+/** "Balance due: $X", or the collectible amount and why it is less than the balance. */
+export function collectibleHelp(collectible: number, heldCents: number, currency: string) {
+  if (heldCents <= 0) return `Balance due: ${formatCents(collectible, { currency })}`;
+  return `Up to ${formatCents(collectible, { currency })} — ${formatCents(heldCents, { currency })} is still clearing or in progress`;
 }
 
 /**
@@ -594,15 +653,17 @@ export interface RefundInput {
 }
 
 /**
- * Owner/admin refunds: card payments through Stripe (payments.refund),
- * cash/check/bank/other through refund_manual_payment.
+ * Owner/admin refunds: Stripe-backed payments (card, card present, bank
+ * debit, pay later) through Stripe (payments.refund); cash / check / bank
+ * transfer / other through refund_manual_payment, which also puts a gift
+ * card payment back on its card.
  */
 export function useRefundPayment() {
   const { shopId } = useShop();
   const invalidate = useInvalidateMoney();
   return useMutation({
     mutationFn: async ({ payment, amountCents, nonce }: RefundInput) => {
-      if (payment.method === 'card' || payment.method === 'card_present') {
+      if (isStripeMethod(payment.method)) {
         await invokeEdge(
           'payments',
           'refund',
@@ -624,6 +685,195 @@ export function useRefundPayment() {
       );
     },
     onSettled: invalidate,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Grouped invoices (P-7): the jobs an invoice bills
+// ---------------------------------------------------------------------------
+
+const invoiceJobSchema = z.object({
+  job_id: z.string(),
+  voided: z.boolean(),
+  job: z
+    .object({
+      id: z.string(),
+      number: z.number(),
+      vehicle_id: z.string().nullable(),
+      scheduled_start: z.string().nullable(),
+      completed_at: z.string().nullable(),
+    })
+    .nullable(),
+});
+export type InvoiceJob = z.infer<typeof invoiceJobSchema>;
+
+/** Jobs billed by the invoice (one for a job invoice, several for a grouped one). */
+export function useInvoiceJobs(invoiceId: string) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: invoiceKeys.jobs(shopId, invoiceId),
+    queryFn: async (): Promise<InvoiceJob[]> => {
+      const { data, error } = await supabase
+        .from('invoice_jobs')
+        .select('job_id, voided, job:jobs(id, number, vehicle_id, scheduled_start, completed_at)')
+        .eq('shop_id', shopId)
+        .eq('invoice_id', invoiceId)
+        .order('created_at', { ascending: true });
+      const rows = z.array(invoiceJobSchema).parse(unwrap({ data, error }) ?? []);
+      return rows.sort((a, b) => (a.job?.number ?? 0) - (b.job?.number ?? 0));
+    },
+  });
+}
+
+export const unbilledJobSchema = z.object({
+  job_id: z.string(),
+  number: z.number(),
+  status: z.string(),
+  scheduled_start: z.string().nullable(),
+  completed_at: z.string().nullable(),
+  vehicle_label: z.string().nullable(),
+  total_cents: z.number().int(),
+  paid_cents: z.number().int(),
+});
+export type UnbilledJob = z.infer<typeof unbilledJobSchema>;
+
+/** A customer's jobs with no live invoice (unbilled_jobs, managers+). */
+export function useUnbilledJobs(customerId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: invoiceKeys.unbilled(shopId, customerId),
+    enabled,
+    queryFn: async (): Promise<UnbilledJob[]> =>
+      z
+        .array(unbilledJobSchema)
+        .parse(unwrap(await supabase.rpc('unbilled_jobs', { p_customer_id: customerId })) ?? []),
+  });
+}
+
+/** Most jobs one grouped invoice may bill (create_invoice_from_jobs). */
+export const MAX_GROUPED_JOBS = 100;
+
+/**
+ * create_invoice_from_jobs (managers+): one issued invoice for 2..100 jobs of
+ * the customer, lines grouped per job (every job must share a tax rate).
+ */
+export function useCreateInvoiceFromJobs(customerId: string) {
+  const invalidate = useInvalidateMoney();
+  return useMutation({
+    mutationFn: async (input: { jobIds: string[]; notes?: string | null }) =>
+      unwrapRequired<InvoiceRow>(
+        await supabase.rpc('create_invoice_from_jobs', {
+          p_customer_id: customerId,
+          p_job_ids: input.jobIds,
+          ...(input.notes ? { p_notes: input.notes } : {}),
+        }),
+        'invoice',
+      ),
+    onSettled: invalidate,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Gift cards & store credit as tender (P-13)
+// ---------------------------------------------------------------------------
+
+export const giftCardLookupSchema = z.object({
+  gift_card_id: z.string(),
+  kind: z.enum(['gift', 'credit']),
+  last4: z.string(),
+  balance_cents: z.number().int(),
+  status: z.enum(['active', 'depleted', 'void', 'expired']),
+  expires_at: z.string().nullable(),
+});
+export type GiftCardLookup = z.infer<typeof giftCardLookupSchema>;
+
+/**
+ * lookup_gift_card: the card behind a code (null = no card has it). The
+ * server limits misses (PT429 after 10 an hour per user).
+ */
+export function useLookupGiftCard() {
+  const { shopId } = useShop();
+  return useMutation({
+    mutationFn: async (code: string): Promise<GiftCardLookup | null> => {
+      const data = unwrap(
+        await supabase.rpc('lookup_gift_card', { p_shop_id: shopId, p_code: code }),
+      );
+      return data === null || data === undefined ? null : giftCardLookupSchema.parse(data);
+    },
+  });
+}
+
+/** redeem_gift_card: pays the invoice from the card; null = no card has that code. */
+export function useRedeemGiftCard(invoiceId: string) {
+  const invalidate = useInvalidateMoney();
+  const { shopId } = useShop();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { code: string; amountCents: number | null }) =>
+      unwrap(
+        await supabase.rpc('redeem_gift_card', {
+          p_invoice_id: invoiceId,
+          p_code: input.code,
+          ...(input.amountCents !== null ? { p_amount_cents: input.amountCents } : {}),
+        }),
+      ),
+    onSettled: () =>
+      Promise.all([
+        invalidate(),
+        queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'gift-cards') }),
+      ]),
+  });
+}
+
+export type StoreCredit = Pick<
+  Row<'gift_cards'>,
+  'id' | 'code_last4' | 'balance_cents' | 'expires_at' | 'created_at'
+>;
+
+/** The customer's usable store credit (gift_cards kind 'credit', managers+). */
+export function useCustomerCredits(customerId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: invoiceKeys.credits(shopId, customerId),
+    enabled,
+    queryFn: async (): Promise<StoreCredit[]> => {
+      const rows = unwrapList(
+        await supabase
+          .from('gift_cards')
+          .select('id, code_last4, balance_cents, expires_at, created_at')
+          .eq('shop_id', shopId)
+          .eq('kind', 'credit')
+          .eq('owner_customer_id', customerId)
+          .eq('status', 'active')
+          .gt('balance_cents', 0)
+          .order('created_at', { ascending: true }),
+      );
+      const now = Date.now();
+      return rows.filter((r) => r.expires_at === null || new Date(r.expires_at).getTime() > now);
+    },
+  });
+}
+
+/** redeem_customer_credit: applies the customer's store credit (no code needed). */
+export function useRedeemCustomerCredit(invoiceId: string) {
+  const invalidate = useInvalidateMoney();
+  const { shopId } = useShop();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { giftCardId: string; amountCents: number | null }) =>
+      unwrapRequired(
+        await supabase.rpc('redeem_customer_credit', {
+          p_invoice_id: invoiceId,
+          p_gift_card_id: input.giftCardId,
+          ...(input.amountCents !== null ? { p_amount_cents: input.amountCents } : {}),
+        }),
+        'payment',
+      ),
+    onSettled: () =>
+      Promise.all([
+        invalidate(),
+        queryClient.invalidateQueries({ queryKey: shopKey(shopId, 'gift-cards') }),
+      ]),
   });
 }
 

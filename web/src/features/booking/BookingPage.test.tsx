@@ -31,11 +31,15 @@ const preview = {
   total_cents: 19000,
 };
 
-function setup(overrides: Record<string, unknown> = {}): { calls: RpcCall[]; user: User } {
+function setup(
+  overrides: Record<string, unknown> = {},
+  path = '/book/glacier',
+): { calls: RpcCall[]; user: User } {
   const calls = mockRpc({
     public_shop_profile: { data: profileFixture() },
     public_booking_catalog: { data: catalogFixture() },
-    get_available_slots: { data: slotsFixture() },
+    public_booking_questions: { data: [] },
+    public_booking_slots: { data: slotsFixture() },
     public_validate_coupon: (args) =>
       args.p_code === 'SPRING10'
         ? {
@@ -63,7 +67,7 @@ function setup(overrides: Record<string, unknown> = {}): { calls: RpcCall[]; use
     ...overrides,
   });
   const { user } = renderRoute(<BookingPage />, {
-    path: '/book/glacier',
+    path,
     routePath: '/book/:slug',
     shop: null,
   });
@@ -119,12 +123,14 @@ describe('BookingPage', () => {
 
     // prices for the chosen category (server catalog), shop time zone note
     await pickFirstTime(user);
-    const slotCall = calls.find((c) => c.fn === 'get_available_slots');
+    const slotCall = calls.find((c) => c.fn === 'public_booking_slots');
     expect(slotCall?.args).toMatchObject({
-      p_shop_slug: 'glacier',
+      p_slug: 'glacier',
       p_service_ids: [WASH, WAX],
       p_vehicle_category_id: SEDAN,
+      p_location_type: 'shop',
     });
+    expect(slotCall?.args).not.toHaveProperty('p_link_token');
 
     await fillDetails(user);
     await user.type(screen.getByLabelText('Coupon code'), 'SPRING10');
@@ -188,7 +194,7 @@ describe('BookingPage', () => {
     await user.click(screen.getByRole('button', { name: 'Request appointment' }));
     expect(await screen.findByRole('heading', { name: 'Request received' })).toBeInTheDocument();
 
-    const slots = calls.find((c) => c.fn === 'get_available_slots');
+    const slots = calls.find((c) => c.fn === 'public_booking_slots');
     expect(slots?.args).not.toHaveProperty('p_vehicle_category_id');
     const coupon = calls.find((c) => c.fn === 'public_validate_coupon');
     expect(coupon?.args).not.toHaveProperty('p_vehicle_category_id');
@@ -224,9 +230,10 @@ describe('BookingPage', () => {
       create_online_booking: pgError('22023', 'this address is outside our service area'),
     });
     await completeVehicleAndServices(user);
+    await screen.findByRole('heading', { name: 'Pick a date and time' });
+    await user.click(screen.getByRole('radio', { name: /At my location/ }));
     await pickFirstTime(user);
     await fillDetails(user);
-    await user.click(screen.getByRole('radio', { name: /At my location/ }));
     await user.type(screen.getByLabelText(/^Street address/), '1 Elm St');
     await user.type(screen.getByLabelText(/^City/), 'Far Away');
     await user.type(screen.getByLabelText(/^ZIP/), '99999');

@@ -10,6 +10,7 @@
 		D1C0A0000000000000000050 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = D1C0A0000000000000000040 /* Supabase */; };
 		D1C0A0000000000000000051 /* StripePaymentSheet in Frameworks */ = {isa = PBXBuildFile; productRef = D1C0A0000000000000000041 /* StripePaymentSheet */; };
 		D1C0A0000000000000000052 /* DetailCore in Frameworks */ = {isa = PBXBuildFile; productRef = D1C0A0000000000000000042 /* DetailCore */; };
+		D1C0A0000000000000000053 /* StripeTerminal in Frameworks */ = {isa = PBXBuildFile; productRef = D1C0A0000000000000000043 /* StripeTerminal */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +37,7 @@
 				D1C0A0000000000000000050 /* Supabase in Frameworks */,
 				D1C0A0000000000000000051 /* StripePaymentSheet in Frameworks */,
 				D1C0A0000000000000000052 /* DetailCore in Frameworks */,
+				D1C0A0000000000000000053 /* StripeTerminal in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -81,6 +83,7 @@
 				D1C0A0000000000000000040 /* Supabase */,
 				D1C0A0000000000000000041 /* StripePaymentSheet */,
 				D1C0A0000000000000000042 /* DetailCore */,
+				D1C0A0000000000000000043 /* StripeTerminal */,
 			);
 			productName = DetailCRM;
 			productReference = D1C0A0000000000000000005 /* DetailCRM.app */;
@@ -114,6 +117,7 @@
 				D1C0A0000000000000000030 /* XCRemoteSwiftPackageReference "supabase-swift" */,
 				D1C0A0000000000000000031 /* XCRemoteSwiftPackageReference "stripe-ios-spm" */,
 				D1C0A0000000000000000032 /* XCLocalSwiftPackageReference "../DetailCore" */,
+				D1C0A0000000000000000033 /* XCRemoteSwiftPackageReference "stripe-terminal-ios" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D1C0A0000000000000000004 /* Products */;
@@ -270,6 +274,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = DetailCRM/DetailCRM.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -278,7 +283,10 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Detail CRM";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
-				INFOPLIST_KEY_NSCameraUsageDescription = "Detail CRM uses the camera to take before and after photos of vehicles and to document damage during inspections.";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Detail CRM connects to Stripe card readers over Bluetooth to take in-person payments.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Detail CRM uses the camera to take before and after photos and videos of vehicles, to document damage during inspections and to scan VIN barcodes.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Detail CRM uses your location to verify in-person card payments, stamp clock-ins and show your route.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Detail CRM records sound with the vehicle walkaround videos you take for a job.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Detail CRM can save job photos to your photo library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Detail CRM lets you attach vehicle photos from your library to jobs and inspections.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -307,6 +315,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = DetailCRM/DetailCRM.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -315,7 +324,10 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Detail CRM";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
-				INFOPLIST_KEY_NSCameraUsageDescription = "Detail CRM uses the camera to take before and after photos of vehicles and to document damage during inspections.";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Detail CRM connects to Stripe card readers over Bluetooth to take in-person payments.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Detail CRM uses the camera to take before and after photos and videos of vehicles, to document damage during inspections and to scan VIN barcodes.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Detail CRM uses your location to verify in-person card payments, stamp clock-ins and show your route.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Detail CRM records sound with the vehicle walkaround videos you take for a job.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Detail CRM can save job photos to your photo library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Detail CRM lets you attach vehicle photos from your library to jobs and inspections.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -386,6 +398,14 @@
 				minimumVersion = 24.0.0;
 			};
 		};
+		D1C0A0000000000000000033 /* XCRemoteSwiftPackageReference "stripe-terminal-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stripe/stripe-terminal-ios";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.7.3;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -402,6 +422,11 @@
 		D1C0A0000000000000000042 /* DetailCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = DetailCore;
+		};
+		D1C0A0000000000000000043 /* StripeTerminal */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1C0A0000000000000000033 /* XCRemoteSwiftPackageReference "stripe-terminal-ios" */;
+			productName = StripeTerminal;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

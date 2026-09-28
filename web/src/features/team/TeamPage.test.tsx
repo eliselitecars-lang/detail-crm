@@ -124,10 +124,33 @@ describe('TeamPage', () => {
     expect(within(dialog).queryByRole('radio', { name: /Owner/ })).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole('radio', { name: /Manager/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Save role' }));
-    await waitFor(() =>
-      expect(builders.shop_members?.[0]?.update).toHaveBeenCalledWith({ role: 'manager' }),
-    );
-    expect(builders.shop_members?.[0]?.eq).toHaveBeenCalledWith('id', 'm-tech');
+    const updater = () => builders.shop_members?.find((b) => b.update.mock.calls.length > 0);
+    await waitFor(() => expect(updater()?.update).toHaveBeenCalledWith({ role: 'manager' }));
+    expect(updater()?.eq).toHaveBeenCalledWith('id', 'm-tech');
+  });
+
+  it('owners and admins choose who counts toward online booking capacity', async () => {
+    setTableResult('shop_members', {
+      data: [
+        { id: 'm-owner', bookable: true },
+        { id: 'm-tech', bookable: false },
+      ],
+    });
+    const { user } = renderAs('admin');
+    expect((await screen.findAllByText('No online bookings')).length).toBeGreaterThan(0);
+    await user.click((await screen.findAllByRole('button', { name: 'Actions for Theo Tech' }))[0]!);
+    await user.click(screen.getByRole('menuitem', { name: 'Edit name & colour…' }));
+    const dialog = await screen.findByRole('dialog', { name: /Edit · Theo Tech/ });
+    const toggle = within(dialog).getByRole('switch', {
+      name: 'Counts toward online booking capacity',
+    });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    await user.click(toggle);
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      const updater = builders.shop_members?.find((b) => b.update.mock.calls.length > 0);
+      expect(updater?.update).toHaveBeenCalledWith(expect.objectContaining({ bookable: true }));
+    });
   });
 
   it('admins cannot act on the owner', async () => {

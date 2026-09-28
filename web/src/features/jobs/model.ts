@@ -7,6 +7,7 @@
 import type { Database } from '@/lib/database.types';
 import {
   addLocalDays,
+  formatDateTime,
   isLocalDate,
   isLocalTime,
   shopLocalToUtcIso,
@@ -104,6 +105,94 @@ export function statusSteps(
 /** Moving to one of these needs a scheduled time (jobs_schedule_required). */
 export function statusNeedsSchedule(status: JobStatus): boolean {
   return status !== 'requested' && status !== 'cancelled';
+}
+
+// ---------------------------------------------------------------------------
+// Completion gates (P-11, 0073 jobs_70_completion_gates)
+// ---------------------------------------------------------------------------
+
+/** job_status_rank (0006): the main path's order; side exits have none. */
+export function statusRank(status: JobStatus): number | null {
+  const index = MAIN_PATH.indexOf(status);
+  return index < 0 ? null : index;
+}
+
+/** A move the completion gates check: → completed, or forward into in_progress. */
+export function isGatedMove(from: JobStatus, to: JobStatus): boolean {
+  if (to === 'completed') return from !== 'completed';
+  const rank = statusRank(from);
+  return to === 'in_progress' && (rank === null || rank < 4);
+}
+
+export interface GateStateLike {
+  open_required_items: readonly { id: string; label: string }[];
+  before_photos: { required: number; have: number };
+  after_photos: { required: number; have: number };
+}
+
+export interface GateBlocker {
+  key: 'checklist' | 'after_photos' | 'before_photos';
+  text: string;
+}
+
+/**
+ * What blocks the move (mirrors job_gate_blockers_for): required checklist
+ * items and "after" photos for completing, "before" photos for starting.
+ * Empty when nothing blocks. The server re-checks every move.
+ */
+export function gateBlockers(state: GateStateLike, from: JobStatus, to: JobStatus): GateBlocker[] {
+  if (!isGatedMove(from, to)) return [];
+  const out: GateBlocker[] = [];
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  if (to === 'completed') {
+    const open = state.open_required_items;
+    if (open.length > 0) {
+      out.push({
+        key: 'checklist',
+        text: `Required checklist ${open.length === 1 ? 'item' : 'items'} not done: ${open.map((i) => i.label).join(', ')}`,
+      });
+    }
+    const { required, have } = state.after_photos;
+    if (have < required) {
+      out.push({
+        key: 'after_photos',
+        text: `${plural(required, '“after” photo')} needed (${have} so far)`,
+      });
+    }
+  } else {
+    const { required, have } = state.before_photos;
+    if (have < required) {
+      out.push({
+        key: 'before_photos',
+        text: `${plural(required, '“before” photo')} needed (${have} so far)`,
+      });
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Deposit follow-ups (P-3)
+// ---------------------------------------------------------------------------
+
+export interface FollowupStatusLike {
+  enabled: boolean;
+  paused: boolean;
+  attempts_sent: number;
+  max_attempts: number;
+  next_at: string | null;
+}
+
+/** "Next reminder Tue, Oct 6, 2026 · 9:00 AM · 1 of 3 sent." and friends. */
+export function describeFollowup(status: FollowupStatusLike, timeZone: string): string {
+  const sent = `${status.attempts_sent} of ${status.max_attempts} sent`;
+  if (!status.enabled) return 'Automatic deposit reminders are off.';
+  if (status.paused) return `Deposit reminders are paused · ${sent}.`;
+  if (status.next_at) return `Next reminder ${formatDateTime(status.next_at, timeZone)} · ${sent}.`;
+  if (status.max_attempts > 0 && status.attempts_sent >= status.max_attempts) {
+    return `All deposit reminders sent (${sent}).`;
+  }
+  return 'No deposit reminder is scheduled.';
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +460,14 @@ export function signaturePath(
 /** Public form link for a submission token (the /f/:token page). */
 export function formLink(origin: string, token: string): string {
   return `${origin.replace(/\/$/, '')}/f/${token}`;
+}
+
+/** A video's length: 65 → "1:05" (null when unknown). */
+export function formatVideoLength(seconds: number | null | undefined): string | null {
+  if (seconds === null || seconds === undefined || seconds <= 0) return null;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 export const PHOTO_KIND_LABELS: Record<JobPhotoKind, string> = {

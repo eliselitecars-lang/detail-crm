@@ -114,13 +114,14 @@ begin
 end
 $fixture$;
 
--- Known platform state: no app_base_url (customer links off) unless a file
--- sets one. On a shared database (the local stack) the row may exist; the
--- delete is part of the file's own transaction and rolled back with it.
+-- Known platform state: no app_base_url (customer links off) and shop
+-- subscription billing off (0100) unless a file sets them. On a shared
+-- database (the local stack) the rows may exist; the delete is part of the
+-- file's own transaction and rolled back with it.
 do $reset$
 begin
   if to_regclass('public.platform_config') is not null then
-    delete from public.platform_config where key = 'app_base_url';
+    delete from public.platform_config where key in ('app_base_url', 'billing_enabled', 'billing_trial_days');
   end if;
 end
 $reset$;

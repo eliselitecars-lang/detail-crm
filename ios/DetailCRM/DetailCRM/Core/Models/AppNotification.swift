@@ -21,6 +21,17 @@ enum AppNotificationKind: String, CaseIterable, Sendable {
     case inboundMessage = "inbound_message"
     case formSigned = "form_signed"
     case general
+    case giftCardPurchased = "gift_card_purchased"
+    case membershipJoined = "membership_joined"
+    case lowStock = "low_stock"
+    case inspectionAcknowledged = "inspection_acknowledged"
+    case jobAssigned = "job_assigned"
+    case jobRescheduled = "job_rescheduled"
+    case newLead = "new_lead"
+    case taskAssigned = "task_assigned"
+    case taskDue = "task_due"
+    case smsNumberStatus = "sms_number_status"
+    case webhookFailing = "webhook_failing"
 
     var systemImage: String {
         switch self {
@@ -32,6 +43,17 @@ enum AppNotificationKind: String, CaseIterable, Sendable {
         case .inboundMessage: return "bubble.left"
         case .formSigned: return "signature"
         case .general: return "bell"
+        case .giftCardPurchased: return "giftcard"
+        case .membershipJoined: return "person.crop.circle.badge.plus"
+        case .lowStock: return "shippingbox"
+        case .inspectionAcknowledged: return "checkmark.shield"
+        case .jobAssigned: return "person.badge.clock"
+        case .jobRescheduled: return "calendar.badge.clock"
+        case .newLead: return "person.crop.circle.badge.questionmark"
+        case .taskAssigned: return "checklist"
+        case .taskDue: return "alarm"
+        case .smsNumberStatus: return "phone.badge.checkmark"
+        case .webhookFailing: return "exclamationmark.arrow.triangle.2.circlepath"
         }
     }
 
@@ -45,7 +67,35 @@ enum AppNotificationKind: String, CaseIterable, Sendable {
         case .inboundMessage: return "New message"
         case .formSigned: return "Form signed"
         case .general: return "Notification"
+        case .giftCardPurchased: return "Gift card purchased"
+        case .membershipJoined: return "New membership"
+        case .lowStock: return "Low stock"
+        case .inspectionAcknowledged: return "Inspection signed by customer"
+        case .jobAssigned: return "Job assigned to you"
+        case .jobRescheduled: return "Job rescheduled"
+        case .newLead: return "New lead"
+        case .taskAssigned: return "Task assigned to you"
+        case .taskDue: return "Task due"
+        case .smsNumberStatus: return "Texting number update"
+        case .webhookFailing: return "Webhook failing"
         }
+    }
+
+    /// Kinds every member may read (`notification_kind_for_managers` is
+    /// false for them); every other kind reaches managers and up only. Used
+    /// to offer only the push toggles a member can actually receive.
+    var isForEveryMember: Bool {
+        switch self {
+        case .general, .jobAssigned, .jobRescheduled, .taskAssigned, .taskDue:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Staff tasks (opened in the Tasks screen rather than a record).
+    var isTaskKind: Bool {
+        self == .taskAssigned || self == .taskDue
     }
 }
 
@@ -112,7 +162,18 @@ struct AppNotification: Codable, Hashable, Sendable, Identifiable {
     /// answer the quote, else its job; a payment the invoice, else the job;
     /// everything else the job, else the customer. nil = nothing to open.
     var route: AppRoute? {
-        switch kindValue {
+        Self.route(kind: kindValue, jobID: jobID, customerID: customerID, quoteID: quoteID, invoiceID: invoiceID)
+    }
+
+    /// The destination rule shared by the list and push notifications.
+    static func route(
+        kind: AppNotificationKind,
+        jobID: UUID?,
+        customerID: UUID?,
+        quoteID: UUID?,
+        invoiceID: UUID?
+    ) -> AppRoute? {
+        switch kind {
         case .inboundMessage:
             return customerID.map { AppRoute.conversation($0) }
         case .quoteApproved, .quoteDeclined:
@@ -121,7 +182,21 @@ struct AppNotification: Codable, Hashable, Sendable, Identifiable {
         case .paymentReceived:
             if let invoiceID { return .invoice(invoiceID) }
             return jobID.map { AppRoute.job($0) }
-        case .newBooking, .bookingCancelled, .formSigned, .general:
+        case .newLead:
+            return customerID.map { AppRoute.customer($0) }
+        case .taskAssigned, .taskDue:
+            // Callers check `isTaskKind` first and open the Tasks screen
+            // (JobsPushRouter.target, NotificationsRowLink); the task's job
+            // is only for a caller without that screen.
+            return jobID.map { AppRoute.job($0) }
+        case .giftCardPurchased, .membershipJoined:
+            if let invoiceID { return .invoice(invoiceID) }
+            return customerID.map { AppRoute.customer($0) }
+        case .lowStock, .smsNumberStatus, .webhookFailing:
+            // Inventory, texting numbers and webhooks are managed on the web.
+            return nil
+        case .newBooking, .bookingCancelled, .formSigned, .general,
+             .inspectionAcknowledged, .jobAssigned, .jobRescheduled:
             if let jobID { return .job(jobID) }
             return customerID.map { AppRoute.customer($0) }
         }

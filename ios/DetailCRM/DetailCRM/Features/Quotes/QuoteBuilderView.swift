@@ -2,11 +2,13 @@
 //  QuoteBuilderView.swift
 //  DetailCRM
 //
-//  New / edit quote sheet: customer + vehicle, lines from the catalog
-//  (priced by the server's `price_services` for the vehicle's size and the
-//  customer's memberships) or custom lines, optional upsells, discount,
-//  validity, notes and terms. The totals shown here are a labelled
-//  estimate; the saved quote's totals are computed by the database.
+//  New / edit quote sheet: customer + vehicle, proposal options (good /
+//  better / best, P-15), lines from the catalog (priced by the server's
+//  `price_services` for the vehicle's size and the customer's memberships),
+//  preset fees (priced by the server on save, P-21) or custom lines,
+//  optional upsells, discount, validity, notes and terms. The totals shown
+//  here are a labelled estimate; the saved quote's totals are computed by
+//  the database.
 //
 
 import SwiftUI
@@ -16,6 +18,7 @@ import DetailCore
 enum QuoteBuilderSheet: Identifiable {
     case customer
     case services
+    case fees
     case newLine
     case editLine(QuoteDraftLine)
 
@@ -23,6 +26,7 @@ enum QuoteBuilderSheet: Identifiable {
         switch self {
         case .customer: return "customer"
         case .services: return "services"
+        case .fees: return "fees"
         case .newLine: return "newLine"
         case .editLine(let line): return "line-\(line.localID.uuidString)"
         }
@@ -53,9 +57,17 @@ struct QuoteBuilderView: View {
     @State private var repriceTask: Task<Void, Never>?
     /// Set when re-pricing for a new customer/vehicle failed.
     @State private var repriceProblem: String?
+    /// Which lines are shown and where new ones go: nil = shared by every
+    /// option (the only segment of a quote without options).
+    @State private var segment: UUID?
+    @State private var confirmation: ConfirmationRequest?
+    /// Opened for a new quote (a failed first save may already have
+    /// created it; the retry still says "created").
+    private let startedAsNew: Bool
 
     init(draft: QuoteDraft, onSaved: @escaping (UUID) -> Void) {
         self.onSaved = onSaved
+        self.startedAsNew = draft.quoteID == nil
         self._draft = State(initialValue: draft)
         self._hasExpiry = State(initialValue: draft.validUntil != nil)
     }
@@ -64,6 +76,7 @@ struct QuoteBuilderView: View {
         NavigationStack {
             Form {
                 customerSection
+                optionsSection
                 linesSection
                 discountSection
                 validitySection
@@ -82,6 +95,7 @@ struct QuoteBuilderView: View {
             .sheet(item: $activeSheet) { sheet in
                 sheetContent(sheet)
             }
+            .confirmation($confirmation)
         }
     }
 
@@ -117,9 +131,70 @@ struct QuoteBuilderView: View {
         }
     }
 
+    private var optionsSection: some View {
+        Section {
+            if draft.options.isEmpty {
+                Button {
+                    startOptions()
+                } label: {
+                    Label("Offer options (good / better / best)", systemImage: "square.stack.3d.up")
+                        .foregroundStyle(Theme.glacier)
+                }
+                .themedRow()
+            } else {
+                ForEach($draft.options, id: \.localID) { $option in
+                    HStack(spacing: Theme.Spacing.md) {
+                        TextField("Option name", text: $option.name)
+                            .font(Theme.Typography.body)
+                            .accessibilityLabel("Option name")
+                        Spacer(minLength: Theme.Spacing.sm)
+                        Text(itemCountText(draft.lines(inSegment: option.localID).count))
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .themedRow()
+                }
+                .onDelete { offsets in
+                    requestDeleteOptions(at: offsets)
+                }
+                .onMove { source, destination in
+                    draft.options.move(fromOffsets: source, toOffset: destination)
+                }
+                if draft.options.count < MoneyQuoteOption.maxPerQuote {
+                    Button {
+                        addOption()
+                    } label: {
+                        Label("Add option", systemImage: "plus.circle")
+                            .foregroundStyle(Theme.glacier)
+                    }
+                    .themedRow()
+                }
+                if let problem = optionNameProblem {
+                    InlineMessage(text: problem)
+                        .themedRow()
+                }
+            }
+        } header: {
+            Text("Options")
+        } footer: {
+            Text(draft.options.isEmpty
+                ? "Let the customer choose between up to \(MoneyQuoteOption.maxPerQuote) versions of this quote. Items can be shared by every option or belong to one."
+                : "The customer picks one option when approving. Until then the quote total shows the first option. Swipe to remove an option.")
+        }
+    }
+
     private var linesSection: some View {
         Section {
-            ForEach(draft.lines, id: \.localID) { line in
+            if !draft.options.isEmpty {
+                MoneyQuoteOptionPicker(
+                    choices: draft.options.map { MoneyQuoteOptionPicker.Choice(draft: $0) },
+                    selection: $segment,
+                    sharedTitle: "Every option",
+                    accessibilityTitle: "Showing items for"
+                )
+                .themedRow()
+            }
+            ForEach(segmentLines, id: \.localID) { line in
                 Button {
                     activeSheet = .editLine(line)
                 } label: {
@@ -131,7 +206,7 @@ struct QuoteBuilderView: View {
                         discountCents: line.discountCents,
                         totalCents: line.totalsLine.lineTotalCents,
                         currencyCode: appState.currencyCode,
-                        badge: line.isOptional ? "Optional" : nil,
+                        badge: line.isOptional ? "Optional" : (line.feeID != nil ? "Fee" : nil),
                         note: line.pricingNote,
                         noteIsWarning: line.serviceID != nil && line.unitPriceCents == 0 && line.pricingNote != nil
                     )
@@ -141,10 +216,18 @@ struct QuoteBuilderView: View {
                 .themedRow()
             }
             .onDelete { offsets in
-                draft.lines.remove(atOffsets: offsets)
+                removeSegmentLines(at: offsets)
             }
             .onMove { source, destination in
-                draft.lines.move(fromOffsets: source, toOffset: destination)
+                moveSegmentLines(from: source, to: destination)
+            }
+            if segmentLines.isEmpty && !draft.options.isEmpty {
+                Text(segment == nil
+                    ? "No shared items. Items added here appear in every option."
+                    : "No items in this option yet. Shared items are included too.")
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                    .themedRow()
             }
             Button {
                 addFromCatalog()
@@ -167,6 +250,13 @@ struct QuoteBuilderView: View {
                     .foregroundStyle(Theme.glacier)
             }
             .themedRow()
+            Button {
+                activeSheet = .fees
+            } label: {
+                Label("Add a preset fee", systemImage: "tag")
+                    .foregroundStyle(Theme.glacier)
+            }
+            .themedRow()
             if let repriceProblem {
                 InlineMessage(text: repriceProblem)
                     .themedRow()
@@ -183,13 +273,15 @@ struct QuoteBuilderView: View {
             HStack {
                 Text("Items")
                 Spacer()
-                if draft.lines.count > 1 {
+                if segmentLines.count > 1 || draft.options.count > 1 {
                     EditButton()
                         .font(Theme.Typography.footnote.weight(.semibold))
                 }
             }
         } footer: {
-            Text("Optional items are upsells the customer can pick when approving. Tap an item to edit it; swipe to remove.")
+            Text(draft.options.isEmpty
+                ? "Optional items are upsells the customer can pick when approving. Tap an item to edit it; swipe to remove."
+                : "Items under \"Every option\" are in each option. Optional items are upsells the customer can pick when approving. Tap an item to edit it or move it to another option.")
         }
     }
 
@@ -255,6 +347,21 @@ struct QuoteBuilderView: View {
 
     private var estimateSection: some View {
         Section {
+            if !draft.options.isEmpty {
+                ForEach(draft.options, id: \.localID) { option in
+                    MoneyAmountRow(
+                        label: option.name.trimmedNonEmpty ?? "Untitled option",
+                        cents: optionPreview(option.localID).totalCents,
+                        currencyCode: appState.currencyCode,
+                        isStrong: option.localID == estimateOptionLocalID
+                    )
+                    .themedRow()
+                }
+                Text("Breakdown for \(estimateOptionName):")
+                    .font(Theme.Typography.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                    .themedRow()
+            }
             let totals = previewTotals
             MoneyTotalsView(
                 subtotalCents: totals.subtotalCents,
@@ -272,7 +379,9 @@ struct QuoteBuilderView: View {
         } header: {
             Text("Estimate")
         } footer: {
-            Text("Estimate only — the saved quote's totals are calculated by the server. Optional items count only once the customer picks them.")
+            Text(draft.options.isEmpty
+                ? "Estimate only — the saved quote's totals are calculated by the server. Optional items count only once the customer picks them."
+                : "Estimate only — each option is its own items plus the shared ones, calculated by the server when saved. Optional items count only once the customer picks them.")
         }
     }
 
@@ -289,7 +398,7 @@ struct QuoteBuilderView: View {
                 Button("Save") {
                     Task { await save() }
                 }
-                .disabled(draft.customer == nil || isPricing)
+                .disabled(draft.customer == nil || isPricing || optionNameProblem != nil)
             }
         }
     }
@@ -310,11 +419,16 @@ struct QuoteBuilderView: View {
             QuoteServicePickerSheet { services in
                 Task { await addServices(services) }
             }
+        case .fees:
+            MoneyFeePickerSheet { fee in
+                draft.lines.append(QuoteDraftLine(fee: fee, optionLocalID: segment))
+            }
         case .newLine:
             QuoteLineEditorSheet(
-                line: QuoteDraftLine(name: "", unitPriceCents: 0),
+                line: QuoteDraftLine(name: "", unitPriceCents: 0, optionLocalID: segment),
                 isNew: true,
-                currencyCode: appState.currencyCode
+                currencyCode: appState.currencyCode,
+                options: draft.options
             ) { line in
                 draft.lines.append(line)
             }
@@ -322,7 +436,8 @@ struct QuoteBuilderView: View {
             QuoteLineEditorSheet(
                 line: line,
                 isNew: false,
-                currencyCode: appState.currencyCode
+                currencyCode: appState.currencyCode,
+                options: draft.options
             ) { updated in
                 if let index = draft.lines.firstIndex(where: { $0.localID == updated.localID }) {
                     draft.lines[index] = updated
@@ -360,10 +475,39 @@ struct QuoteBuilderView: View {
         }
     }
 
+    /// Lines of the segment being edited (every line without options).
+    private var segmentLines: [QuoteDraftLine] {
+        draft.lines(inSegment: segment)
+    }
+
+    /// The option the estimate breaks down: the one being edited, else the
+    /// one the quote total counts.
+    private var estimateOptionLocalID: UUID? {
+        segment ?? draft.effectiveOptionLocalID
+    }
+
+    private var estimateOptionName: String {
+        draft.options.first(where: { $0.localID == estimateOptionLocalID })?.name.trimmedNonEmpty ?? "the first option"
+    }
+
     private var previewTotals: DocumentTotals {
+        optionPreview(estimateOptionLocalID)
+    }
+
+    private func optionPreview(_ optionLocalID: UUID?) -> DocumentTotals {
         var preview = draft
         preview.discountValue = parsedDiscount ?? 0
-        return preview.previewTotals
+        return preview.previewTotals(forOption: optionLocalID)
+    }
+
+    /// Why the options can't be saved yet, or nil.
+    private var optionNameProblem: String? {
+        guard draft.options.contains(where: { $0.validName == nil }) else { return nil }
+        return "Give every option a name (up to \(MoneyQuoteOption.maxNameLength) characters)."
+    }
+
+    private func itemCountText(_ count: Int) -> String {
+        count == 1 ? "1 item" : "\(count) items"
     }
 
     // MARK: Actions
@@ -376,6 +520,11 @@ struct QuoteBuilderView: View {
         pricedContext = currentPricingContext
         if draft.quoteID == nil {
             draft.taxRateBps = appState.shop?.taxRateBps ?? 0
+        }
+        // A quote with options opens on its first option unless it has
+        // shared items to show.
+        if let first = draft.options.first, draft.lines(inSegment: nil).isEmpty {
+            segment = first.localID
         }
         switch draft.discountKind {
         case .none:
@@ -390,6 +539,71 @@ struct QuoteBuilderView: View {
             expiryDate = day
         } else {
             expiryDate = clock.addingDays(30, to: clock.startOfDay(Date()))
+        }
+    }
+
+    /// First options: two to start with (the existing items stay shared).
+    private func startOptions() {
+        let first = MoneyQuoteOption.Draft(name: MoneyQuoteOption.Draft.nextName(existing: []))
+        draft.options.append(first)
+        draft.options.append(MoneyQuoteOption.Draft(name: MoneyQuoteOption.Draft.nextName(existing: draft.options)))
+        segment = first.localID
+    }
+
+    private func addOption() {
+        guard draft.options.count < MoneyQuoteOption.maxPerQuote else { return }
+        let option = MoneyQuoteOption.Draft(name: MoneyQuoteOption.Draft.nextName(existing: draft.options))
+        draft.options.append(option)
+        segment = option.localID
+    }
+
+    /// Removes options; one with items asks first (its items go with it).
+    private func requestDeleteOptions(at offsets: IndexSet) {
+        let removed = offsets.map { draft.options[$0] }
+        let itemCount = removed.reduce(0) { $0 + draft.lines(inSegment: $1.localID).count }
+        guard itemCount > 0 else {
+            deleteOptions(removed.map { $0.localID })
+            return
+        }
+        let name = removed.count == 1 ? (removed[0].name.trimmedNonEmpty ?? "this option") : "these options"
+        confirmation = ConfirmationRequest(
+            title: "Remove \(name)?",
+            message: "Its \(itemCountText(itemCount)) are removed too. Shared items stay.",
+            confirmTitle: "Remove",
+            isDestructive: true
+        ) {
+            deleteOptions(removed.map { $0.localID })
+        }
+    }
+
+    private func deleteOptions(_ localIDs: [UUID]) {
+        let ids = Set(localIDs)
+        draft.options.removeAll { ids.contains($0.localID) }
+        draft.lines.removeAll { line in line.optionLocalID.map { ids.contains($0) } ?? false }
+        if let segment, ids.contains(segment) {
+            self.segment = nil
+        }
+        if draft.options.isEmpty {
+            segment = nil
+        }
+    }
+
+    /// Deletes lines of the segment shown (offsets are into `segmentLines`).
+    private func removeSegmentLines(at offsets: IndexSet) {
+        let ids = Set(offsets.map { segmentLines[$0].localID })
+        draft.lines.removeAll { ids.contains($0.localID) }
+    }
+
+    /// Reorders lines of the segment shown; other segments keep their places.
+    private func moveSegmentLines(from source: IndexSet, to destination: Int) {
+        let shown = segment
+        var subset = draft.lines(inSegment: shown)
+        subset.move(fromOffsets: source, toOffset: destination)
+        var iterator = subset.makeIterator()
+        for index in draft.lines.indices where draft.lines[index].optionLocalID == shown {
+            if let next = iterator.next() {
+                draft.lines[index] = next
+            }
         }
     }
 
@@ -454,7 +668,8 @@ struct QuoteBuilderView: View {
                     durationMinutes: priced.durationMinutes ?? 0,
                     pricingNote: missingPrice
                         ? QuoteBuilderRepricing.missingPriceNote
-                        : priced.note
+                        : priced.note,
+                    optionLocalID: segment
                 ))
             }
             if draft.discountKind == .none,
@@ -581,11 +796,14 @@ struct QuoteBuilderView: View {
         isSaving = true
         defer { isSaving = false }
         do {
-            let quoteID = try await QuoteService.save(shopID: shopID, draft: toSave)
-            toasts.show(draft.quoteID == nil ? "Quote created" : "Quote saved")
+            let quoteID = try await QuoteService.save(shopID: shopID, draft: &toSave)
+            toasts.show(startedAsNew ? "Quote created" : "Quote saved")
             onSaved(quoteID)
             dismiss()
         } catch {
+            // Keep what did get saved, so Save again finishes the job
+            // instead of adding the same options and items twice.
+            draft.adoptSaveProgress(from: toSave)
             errorText = ErrorText.message(for: error)
         }
     }

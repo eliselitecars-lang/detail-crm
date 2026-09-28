@@ -12,6 +12,7 @@ import DetailCore
 
 /// `membership_interval`.
 enum MembershipPlanInterval: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
+    case week
     case month
     case year
 
@@ -19,9 +20,45 @@ enum MembershipPlanInterval: String, Codable, CaseIterable, Identifiable, Hashab
 
     var title: String {
         switch self {
+        case .week: return "Weekly"
         case .month: return "Monthly"
         case .year: return "Yearly"
         }
+    }
+
+    /// Billing periods a plan may use (`membership_plans_interval_count`):
+    /// every 1–4 weeks, 1–12 months, or 1 year.
+    var planCountRange: ClosedRange<Int> {
+        switch self {
+        case .week: return 1...4
+        case .month: return 1...12
+        case .year: return 1...1
+        }
+    }
+
+    /// "per week", "every 2 weeks", "per month", "every 3 months", "per year".
+    func billingText(count: Int) -> String {
+        let count = max(1, count)
+        switch self {
+        case .week:
+            return count == 1 ? "per week" : "every \(count) weeks"
+        case .month:
+            return count == 1 ? "per month" : "every \(count) months"
+        case .year:
+            return count == 1 ? "per year" : "every \(count) years"
+        }
+    }
+
+    /// "week", "2 weeks", "month", … — the length of one billing period.
+    func periodText(count: Int) -> String {
+        let count = max(1, count)
+        let noun: String
+        switch self {
+        case .week: noun = "week"
+        case .month: noun = "month"
+        case .year: noun = "year"
+        }
+        return count == 1 ? noun : "\(count) \(noun)s"
     }
 }
 
@@ -41,6 +78,13 @@ struct MembershipPlan: Codable, Identifiable, Hashable, Sendable {
     var active: Bool
     var sort: Int
     var archivedAt: Date?
+    /// Offered on the shop's public join page.
+    var onlineJoinable: Bool
+    /// Included services may be used this many times per billing period;
+    /// nil = unlimited.
+    var includedUsesPerPeriod: Int?
+    /// Plan terms shown to customers when they join (≤ 5,000 characters).
+    var terms: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -57,6 +101,9 @@ struct MembershipPlan: Codable, Identifiable, Hashable, Sendable {
         case active
         case sort
         case archivedAt = "archived_at"
+        case onlineJoinable = "online_joinable"
+        case includedUsesPerPeriod = "included_uses_per_period"
+        case terms
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -64,17 +111,23 @@ struct MembershipPlan: Codable, Identifiable, Hashable, Sendable {
     static let selectColumns = [
         "id", "shop_id", "name", "description", "price_cents", "interval", "interval_count",
         "included_service_ids", "discount_bps", "active", "sort", "archived_at",
-        "created_at", "updated_at",
+        "online_joinable", "included_uses_per_period", "terms", "created_at", "updated_at",
     ].joined(separator: ",")
 
-    /// "per month", "every 3 months", "per year".
+    /// Most visits per period a plan may include (server CHECK).
+    static let maxUsesPerPeriod = 100
+
+    /// "per week", "every 2 weeks", "per month", "every 3 months", "per year".
     var billingText: String {
-        switch interval {
-        case .year:
-            return "per year"
-        case .month:
-            return intervalCount <= 1 ? "per month" : "every \(intervalCount) months"
-        }
+        interval.billingText(count: intervalCount)
+    }
+
+    /// "2 visits every month" — the usage limit on included services, or nil
+    /// when they are unlimited (or nothing is included).
+    var usesText: String? {
+        guard let uses = includedUsesPerPeriod, !includedServiceIDs.isEmpty else { return nil }
+        let visits = uses == 1 ? "1 included visit" : "\(uses) included visits"
+        return "\(visits) per \(interval.periodText(count: intervalCount))"
     }
 
     /// "10% off other services", when a discount applies.
@@ -101,6 +154,11 @@ struct Membership: Codable, Identifiable, Hashable, Sendable {
     var cancelledAt: Date?
     var createdAt: Date
     var updatedAt: Date
+    /// Billing terms copied from the plan when the membership was made (a
+    /// later plan change keeps these); nil only on rows read without them.
+    var priceCents: Int?
+    var interval: MembershipPlanInterval?
+    var intervalCount: Int?
     /// Whether Stripe has a subscription for it (the id itself is not kept
     /// in the app).
     var hasSubscription: Bool
@@ -118,13 +176,16 @@ struct Membership: Codable, Identifiable, Hashable, Sendable {
         case cancelledAt = "cancelled_at"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case priceCents = "price_cents"
+        case interval
+        case intervalCount = "interval_count"
         case stripeSubscriptionID = "stripe_subscription_id"
     }
 
     static let selectColumns = [
         "id", "shop_id", "plan_id", "customer_id", "vehicle_id", "status", "current_period_end",
         "cancel_at_period_end", "started_at", "cancelled_at", "created_at", "updated_at",
-        "stripe_subscription_id",
+        "price_cents", "interval", "interval_count", "stripe_subscription_id",
     ].joined(separator: ",")
 
     init(from decoder: Decoder) throws {
@@ -141,6 +202,9 @@ struct Membership: Codable, Identifiable, Hashable, Sendable {
         cancelledAt = try c.decodeIfPresent(Date.self, forKey: .cancelledAt)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        priceCents = try c.decodeIfPresent(Int.self, forKey: .priceCents)
+        interval = try c.decodeIfPresent(MembershipPlanInterval.self, forKey: .interval)
+        intervalCount = try c.decodeIfPresent(Int.self, forKey: .intervalCount)
         let subscription = try c.decodeIfPresent(String.self, forKey: .stripeSubscriptionID)
         hasSubscription = !(subscription ?? "").isEmpty
     }
@@ -159,6 +223,9 @@ struct Membership: Codable, Identifiable, Hashable, Sendable {
         try c.encodeIfPresent(cancelledAt, forKey: .cancelledAt)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encodeIfPresent(priceCents, forKey: .priceCents)
+        try c.encodeIfPresent(interval, forKey: .interval)
+        try c.encodeIfPresent(intervalCount, forKey: .intervalCount)
     }
 
     /// Waiting for the customer to finish Stripe Checkout.
@@ -166,6 +233,46 @@ struct Membership: Codable, Identifiable, Hashable, Sendable {
 
     /// Can still be cancelled (not already cancelled or set to end).
     var canCancel: Bool { status != .cancelled && !cancelAtPeriodEnd }
+
+    /// What the member pays: their own terms, else the plan's.
+    func price(plan: MembershipPlan?) -> Int? {
+        priceCents ?? plan?.priceCents
+    }
+
+    /// "per week", "every 3 months", … from the member's own terms, else
+    /// the plan's.
+    func billingText(plan: MembershipPlan?) -> String? {
+        if let interval {
+            return interval.billingText(count: intervalCount ?? 1)
+        }
+        return plan?.billingText
+    }
+}
+
+// MARK: - Usage (P-23)
+
+extension Membership {
+    /// Included visits used in the current billing period.
+    // rpc: membership_usage
+    struct Usage: Codable, Hashable, Sendable {
+        /// nil = unlimited.
+        var usesPerPeriod: Int?
+        var usesThisPeriod: Int
+        var periodStart: Date?
+        var periodEnd: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case usesPerPeriod = "uses_per_period"
+            case usesThisPeriod = "uses_this_period"
+            case periodStart = "period_start"
+            case periodEnd = "period_end"
+        }
+
+        /// Visits left this period (nil = unlimited).
+        var remaining: Int? {
+            usesPerPeriod.map { max(0, $0 - usesThisPeriod) }
+        }
+    }
 }
 
 /// Percent text from basis points: 1000 -> "10%", 1250 -> "12.5%".

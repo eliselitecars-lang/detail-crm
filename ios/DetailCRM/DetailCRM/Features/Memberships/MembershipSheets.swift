@@ -272,16 +272,18 @@ struct MembershipDetailSheet: View {
     private var details: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             InfoRow(label: "Plan", value: plan?.name ?? "Plan", systemImage: "arrow.triangle.2.circlepath")
-            if let plan {
+            if let price = membership.price(plan: plan) {
                 HStack {
                     Text("Price")
                         .font(Theme.Typography.subheadline)
                         .foregroundStyle(Theme.textSecondary)
                     Spacer(minLength: Theme.Spacing.md)
-                    MoneyText(cents: plan.priceCents, currencyCode: appState.currencyCode)
-                    Text(plan.billingText)
-                        .font(Theme.Typography.footnote)
-                        .foregroundStyle(Theme.textSecondary)
+                    MoneyText(cents: price, currencyCode: appState.currencyCode)
+                    if let billing = membership.billingText(plan: plan) {
+                        Text(billing)
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
                 }
                 .accessibilityElement(children: .combine)
             }
@@ -292,8 +294,19 @@ struct MembershipDetailSheet: View {
             if let cancelledAt = membership.cancelledAt {
                 InfoRow(label: "Cancelled", value: appState.clock.shortDayText(cancelledAt), systemImage: "xmark.circle")
             }
+            if showsUsage {
+                Divider().overlay(Theme.border)
+                MoneyMembershipUsageRow(membershipID: membership.id)
+            }
         }
         .cardStyle()
+    }
+
+    /// Visits are counted for a plan that includes services, while the
+    /// membership is billing.
+    private var showsUsage: Bool {
+        guard let plan, !plan.includedServiceIDs.isEmpty else { return false }
+        return membership.status == .active || membership.status == .pastDue
     }
 
     @ViewBuilder
@@ -389,9 +402,13 @@ struct MembershipPlanEditorSheet: View {
                     }
                     .pickerStyle(.segmented)
                 }
-                if draft.interval == .month {
-                    Stepper(value: $draft.intervalCount, in: 1...12) {
-                        Text(draft.intervalCount == 1 ? "Bills every month" : "Bills every \(draft.intervalCount) months")
+                .onChange(of: draft.interval) {
+                    let range = draft.interval.planCountRange
+                    draft.intervalCount = min(max(draft.intervalCount, range.lowerBound), range.upperBound)
+                }
+                if draft.interval != .year {
+                    Stepper(value: $draft.intervalCount, in: draft.interval.planCountRange) {
+                        Text("Bills \(draft.interval.billingText(count: draft.intervalCount))")
                             .font(Theme.Typography.body)
                             .foregroundStyle(Theme.textPrimary)
                     }
@@ -403,9 +420,36 @@ struct MembershipPlanEditorSheet: View {
                     kind: .money,
                     hint: "Percent off services that aren't included in the plan."
                 )
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    Toggle("Limit included visits", isOn: usesLimitBinding)
+                        .font(Theme.Typography.body)
+                        .tint(Theme.glacier)
+                    if let uses = draft.includedUsesPerPeriod {
+                        Stepper(value: usesBinding(default: uses), in: 1...MembershipPlan.maxUsesPerPeriod) {
+                            Text("\(uses) visit\(uses == 1 ? "" : "s") per \(draft.interval.periodText(count: draft.intervalCount))")
+                                .font(Theme.Typography.body)
+                                .foregroundStyle(Theme.textPrimary)
+                        }
+                    }
+                    Text(draft.includedUsesPerPeriod == nil
+                        ? "Included services can be used any number of times."
+                        : "After that, included services are charged at catalog prices until the next billing period.")
+                        .font(Theme.Typography.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                FormRow("Terms (optional)", hint: "Shown to customers when they join online.") {
+                    TextField("Cancellation, what's included…", text: $draft.terms, axis: .vertical)
+                        .lineLimit(2...8)
+                        .inputFieldStyle()
+                }
                 Toggle("Available for new members", isOn: $draft.active)
                     .font(Theme.Typography.body)
                     .tint(Theme.glacier)
+                Toggle("Offer on the online join page", isOn: $draft.onlineJoinable)
+                    .font(Theme.Typography.body)
+                    .tint(Theme.glacier)
+                    .disabled(!draft.active)
                 if plan != nil {
                     InlineMessage(
                         text: "Changing the price or billing period applies to new sign-ups; current members keep what they signed up for.",
@@ -428,6 +472,22 @@ struct MembershipPlanEditorSheet: View {
             }
             .onAppear(perform: setUp)
         }
+    }
+
+    private var usesLimitBinding: Binding<Bool> {
+        Binding(
+            get: { draft.includedUsesPerPeriod != nil },
+            set: { isOn in
+                draft.includedUsesPerPeriod = isOn ? (draft.includedUsesPerPeriod ?? 1) : nil
+            }
+        )
+    }
+
+    private func usesBinding(default value: Int) -> Binding<Int> {
+        Binding(
+            get: { draft.includedUsesPerPeriod ?? value },
+            set: { draft.includedUsesPerPeriod = $0 }
+        )
     }
 
     private func setUp() {
@@ -456,9 +516,17 @@ struct MembershipPlanEditorSheet: View {
             }
             discount = bps
         }
+        if draft.terms.count > MembershipService.maxTermsLength {
+            errorText = "Keep the terms under 5,000 characters."
+            return
+        }
         var toSave = draft
         toSave.priceCents = price
         toSave.discountBps = discount
+        // A plan that isn't available can't be joined online either.
+        if !toSave.active {
+            toSave.onlineJoinable = false
+        }
         do {
             let shopID = try appState.requireShopID()
             try await MembershipService.savePlan(shopID: shopID, draft: toSave)

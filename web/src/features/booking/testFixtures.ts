@@ -40,6 +40,7 @@ export function profileFixture(overrides: Partial<ShopProfile> = {}): ShopProfil
       cancellation_policy: 'Cancel 24 hours ahead.',
       allow_client_cancel_hours: 24,
     },
+    tracking: { meta_pixel_id: null, ga4_measurement_id: null },
     ...overrides,
   };
 }
@@ -56,7 +57,7 @@ export function catalogFixture(): BookingCatalog {
       { id: SEDAN, name: 'Sedan' },
       { id: TRUCK, name: 'Truck' },
     ],
-    service_categories: [{ id: 'sc-1', name: 'Detailing' }],
+    service_categories: [{ id: 'sc-1', name: 'Detailing', bookable_weekdays: null }],
     services: [
       {
         id: WASH,

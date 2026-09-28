@@ -77,7 +77,8 @@ select tests.eq(
      from public.report_team(tests.fx('rshop_a'), '2025-03-01', '2025-03-31', '2025-03-05 16:00+00')
           with ordinality as r (member_id, display_name, role, active, worked_seconds, hours, jobs_completed,
                                 revenue_cents, pre_tax_revenue_cents, hourly_rate_cents, commission_bps,
-                                commission_cents, labor_cost_cents, ord)),
+                                commission_cents, labor_cost_cents, tips_cents, service_commission_cents,
+                                sales_commission_cents, total_earnings_cents, ord)),
   '[["admin-ra",   "admin",      true,      0,  0.00, 0,     0,     0,    0,    0,    0,     0],
     ["manager-ra", "manager",    true,   5400,  1.50, 1, 36000, 33333, 3000,    0,    0,  4500],
     ["owner-ra",   "owner",      true,      0,  0.00, 0,     0,     0,    0,    0,    0,     0],
@@ -87,6 +88,12 @@ select tests.eq(
   'team report for the owner (hours clipped and unioned, even splits, pay)');
 select tests.eq((select member_id from public.report_team(tests.fx('rshop_a'), '2025-03-01', '2025-03-31', '2025-03-05 16:00+00')
                   where display_name = 'tech1-ra'), tests.fx('rm_tech1_a'), 'member ids returned');
+-- 0065: earnings = labor + commission + service commission + sales commission + tips
+select tests.eq((select count(*) from public.report_team(tests.fx('rshop_a'), '2025-03-01', '2025-03-31', '2025-03-05 16:00+00')
+                  where total_earnings_cents is distinct from
+                        labor_cost_cents + commission_cents + service_commission_cents + sales_commission_cents + tips_cents),
+                0::bigint, 'total earnings add up for every member');
+
 select tests.eq((select sum(pre_tax_revenue_cents) from public.report_team(tests.fx('rshop_a'), '2025-03-01', '2025-03-31', '2025-03-05 16:00+00')),
                 125100::numeric, 'attributed pre-tax revenue adds up to the completed jobs');
 select tests.eq((select sum(revenue_cents) from public.report_team(tests.fx('rshop_a'), '2025-03-01', '2025-03-31', '2025-03-05 16:00+00')),
@@ -122,8 +129,10 @@ select tests.eq((select count(*) from public.report_team(tests.fx('rshop_a'), '2
                 6::bigint, 'manager sees the whole team');
 select tests.eq((select count(*) from public.report_team(tests.fx('rshop_a'), '2025-03-01', '2025-03-31', '2025-03-05 16:00+00')
                   where hourly_rate_cents is not null or commission_bps is not null
-                     or commission_cents is not null or labor_cost_cents is not null),
-                0::bigint, 'manager gets no pay columns, not even their own');
+                     or commission_cents is not null or labor_cost_cents is not null
+                     or tips_cents is not null or service_commission_cents is not null
+                     or sales_commission_cents is not null or total_earnings_cents is not null),
+                0::bigint, 'manager gets no pay columns (tips / commissions / earnings included), not even their own');
 select tests.eq((select jsonb_build_array(worked_seconds, jobs_completed, revenue_cents, pre_tax_revenue_cents)
                    from public.report_team(tests.fx('rshop_a'), '2025-03-01', '2025-03-31', '2025-03-05 16:00+00')
                   where member_id = tests.fx('rm_tech1_a')),

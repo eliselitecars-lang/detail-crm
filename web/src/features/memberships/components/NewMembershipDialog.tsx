@@ -60,6 +60,7 @@ function NewMembershipForm({ onClose, onCreated }: NewMembershipDialogProps) {
               price_cents: plan.price_cents,
               interval: plan.interval,
               interval_count: plan.interval_count,
+              included_uses_per_period: plan.included_uses_per_period,
             }
           : null,
       });

@@ -47,6 +47,40 @@ describe('QuoteNewPage', () => {
     );
   });
 
+  it('removes the draft and says why when the starter options fail', async () => {
+    setTableResult('customers', { data: customerRow() });
+    setTableResult('vehicles', { data: [] });
+    setTableResult('shops', {
+      data: {
+        quote_terms: null,
+        invoice_terms: null,
+        invoice_due_days: 14,
+        tax_rate_bps: 0,
+        name: 'Glacier',
+        phone: null,
+      },
+    });
+    setTableResult('quotes', { data: quoteRow({ id: 'quote-new', number: 1002 }) });
+    setTableResult('quote_options', {
+      data: null,
+      error: { message: 'a quote can have at most 4 options', code: '23514' },
+    });
+    const { user } = renderRoute(<QuoteNewPage />, {
+      path: `/app/quotes/new?customerId=${CUSTOMER_ID}`,
+      routePath: '/app/quotes/new',
+      routes: [{ path: '/app/quotes/:quoteId', element: <p>Quote builder</p> }],
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: /Customer/ })).toHaveValue('Jane Doe'),
+    );
+    await user.click(screen.getByRole('checkbox', { name: /options/i }));
+    await user.click(screen.getByRole('button', { name: 'Create quote' }));
+    expect((await screen.findAllByText(/at most 4 options/i)).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Quote builder')).not.toBeInTheDocument();
+    const cleanup = builders.quotes?.find((b) => b.delete.mock.calls.length > 0);
+    expect(cleanup?.eq).toHaveBeenCalledWith('id', 'quote-new');
+  });
+
   it('requires a customer', async () => {
     setTableResult('shops', {
       data: {

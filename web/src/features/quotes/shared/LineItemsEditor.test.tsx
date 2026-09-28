@@ -24,6 +24,10 @@ const line: DocLine = {
   optional: true,
   selected: false,
   duration_minutes: 30,
+  discount_eligible: true,
+  fee_id: null,
+  option_id: null,
+  job_id: null,
 };
 
 function renderEditor(props: Partial<Parameters<typeof LineItemsEditor>[0]> = {}) {

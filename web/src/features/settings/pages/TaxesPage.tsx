@@ -27,6 +27,7 @@ function toInput(shop: ShopSettings): TaxesInput {
     invoiceTerms: shop.invoice_terms ?? '',
     invoiceDueDays: String(shop.invoice_due_days),
     techsCanCollectPayments: shop.techs_can_collect_payments,
+    techsCanShareReports: shop.techs_can_share_reports,
   };
 }
 
@@ -52,6 +53,7 @@ function TaxesForm({ shop, canEdit }: { shop: ShopSettings; canEdit: boolean }) 
         invoice_terms: v.invoiceTerms,
         invoice_due_days: v.invoiceDueDays,
         techs_can_collect_payments: v.techsCanCollectPayments,
+        techs_can_share_reports: v.techsCanShareReports,
       });
       reset(toInput(saved));
       toast.success('Tax and document settings saved');
@@ -105,20 +107,35 @@ function TaxesForm({ shop, canEdit }: { shop: ShopSettings; canEdit: boolean }) 
           </div>
         </SectionCard>
 
-        <SectionCard title="Payment collection">
-          <Controller
-            control={control}
-            name="techsCanCollectPayments"
-            render={({ field }) => (
-              <Switch
-                label="Technicians can collect payments"
-                description="Lets technicians see the invoice for their assigned jobs and take card, cash or check payments. Refunds stay with owners and admins."
-                checked={field.value}
-                onCheckedChange={field.onChange}
-                disabled={!canEdit}
-              />
-            )}
-          />
+        <SectionCard title="What technicians can do">
+          <div className="flex flex-col gap-4">
+            <Controller
+              control={control}
+              name="techsCanCollectPayments"
+              render={({ field }) => (
+                <Switch
+                  label="Technicians can collect payments"
+                  description="Lets technicians see the invoice for their assigned jobs and take card, cash or check payments. Refunds stay with owners and admins."
+                  checked={field.value}
+                  onCheckedChange={field.onChange}
+                  disabled={!canEdit}
+                />
+              )}
+            />
+            <Controller
+              control={control}
+              name="techsCanShareReports"
+              render={({ field }) => (
+                <Switch
+                  label="Technicians can share job reports"
+                  description="Lets technicians publish the photo and inspection report of their assigned jobs and send its link to the customer. Anyone with the link can view the report."
+                  checked={field.value}
+                  onCheckedChange={field.onChange}
+                  disabled={!canEdit}
+                />
+              )}
+            />
+          </div>
         </SectionCard>
       </fieldset>
       {canEdit && (

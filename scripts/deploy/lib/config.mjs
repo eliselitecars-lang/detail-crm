@@ -6,7 +6,8 @@
 // Sources of truth these helpers read (never duplicated by hand):
 //   supabase/config.toml                         [functions.<name>] verify_jwt
 //   supabase/functions/<name>/index.ts           deployable function directories
-//   supabase/functions/stripe-webhook/handlers.ts HANDLED_EVENT_TYPES
+//   supabase/functions/stripe-webhook/handlers.ts HANDLED_EVENT_TYPES (Connect endpoint)
+//   supabase/functions/billing-webhook/handlers.ts HANDLED_EVENT_TYPES (platform billing endpoint)
 //   supabase/functions/_shared/stripe.ts          STRIPE_API_VERSION
 //   supabase/functions/_shared/env.ts             secret names + formats (mirrored below)
 //   supabase/setup/cron.sql                       platform setup template
@@ -88,12 +89,12 @@ export function functionsPlan(supabaseDir) {
 }
 
 // ------------------------------------------------------------- Stripe facts
-/** HANDLED_EVENT_TYPES from stripe-webhook/handlers.ts (the webhook's own list). */
-export function parseHandledStripeEvents(handlersTs) {
+/** HANDLED_EVENT_TYPES from a webhook's handlers.ts (the webhook's own list). */
+export function parseHandledStripeEvents(handlersTs, file = 'stripe-webhook/handlers.ts') {
   const m = /export const HANDLED_EVENT_TYPES\s*=\s*\[([\s\S]*?)\]\s*as const/.exec(handlersTs);
-  if (!m) throw new DeployConfigError('HANDLED_EVENT_TYPES not found in stripe-webhook/handlers.ts');
+  if (!m) throw new DeployConfigError(`HANDLED_EVENT_TYPES not found in ${file}`);
   const events = [...m[1].matchAll(/"([a-z_.]+)"/g)].map((x) => x[1]);
-  if (events.length === 0) throw new DeployConfigError('HANDLED_EVENT_TYPES is empty');
+  if (events.length === 0) throw new DeployConfigError(`HANDLED_EVENT_TYPES is empty in ${file}`);
   return events;
 }
 
@@ -104,10 +105,15 @@ export function parseStripeApiVersion(stripeTs) {
   return m[1];
 }
 
+/**
+ * `events`: the Connect endpoint's (stripe-webhook); `billingEvents`: the
+ * platform billing endpoint's (billing-webhook, shop subscriptions).
+ */
 export function readStripeFacts(supabaseDir) {
   const fnDir = join(supabaseDir, 'functions');
   return {
     events: parseHandledStripeEvents(readFileSync(join(fnDir, 'stripe-webhook', 'handlers.ts'), 'utf8')),
+    billingEvents: parseHandledStripeEvents(readFileSync(join(fnDir, 'billing-webhook', 'handlers.ts'), 'utf8'), 'billing-webhook/handlers.ts'),
     apiVersion: parseStripeApiVersion(readFileSync(join(fnDir, '_shared', 'stripe.ts'), 'utf8')),
   };
 }
@@ -165,7 +171,8 @@ const EMAIL_FROM_RE = /^([^<>]+<[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+>|[^\s<>@]+@[^\s<>
  * validated exactly like _shared/env.ts so a bad value fails here, before it
  * reaches production). SUPABASE_URL / SUPABASE_ANON_KEY /
  * SUPABASE_SERVICE_ROLE_KEY are injected by Supabase and never set.
- * `required`: true | 'unless-stripe-webhooks' | false.
+ * `required`: true | 'unless-stripe-webhooks' | 'billing-unless-stripe-webhooks'
+ * (only while BILLING_ENABLED=true) | false.
  */
 export const SECRET_SPECS = [
   {
@@ -191,6 +198,19 @@ export const SECRET_SPECS = [
     required: 'unless-stripe-webhooks',
     where: 'Signing secret of the Stripe Connect webhook endpoint (or run with --stripe-webhooks)',
     validate: (v) => (/^whsec_[A-Za-z0-9+/=_-]+$/.test(v) ? null : 'expected whsec_ secret'),
+  },
+  {
+    name: 'STRIPE_BILLING_WEBHOOK_SECRET',
+    required: 'billing-unless-stripe-webhooks',
+    where:
+      'Signing secret of the Stripe PLATFORM webhook endpoint for billing-webhook (shop subscriptions), or run with --stripe-webhooks; needed only while BILLING_ENABLED=true',
+    validate: (v) => (/^whsec_[A-Za-z0-9+/=_-]+$/.test(v) ? null : 'expected whsec_ secret'),
+  },
+  {
+    name: 'BILLING_AUTOMATIC_TAX',
+    required: false,
+    where: '"true" = Stripe Tax on shop subscription Checkout (Stripe Tax must be set up on the platform account); unset = off (docs/BILLING.md)',
+    validate: (v) => (/^(true|false)$/i.test(v) ? null : 'must be true or false'),
   },
   {
     name: 'PLATFORM_FEE_BPS',
@@ -265,6 +285,75 @@ export const SECRET_SPECS = [
     required: false,
     where: 'Leave unset in production (only for tunnels / custom domains)',
     validate: (v) => (/^https:\/\/[^/\s]+\/functions\/v1\/?$/.test(v) ? null : 'must look like https://<host>/functions/v1'),
+  },  // Optional: APNs push for the staff iPhone app (push function). All four
+  // or none: while none is set pushes are simply not sent.
+  {
+    name: 'APNS_KEY_ID',
+    required: false,
+    where: 'developer.apple.com -> Keys -> the APNs auth key (.p8): its 10-character Key ID',
+    validate: (v) => (/^[A-Z0-9]{10}$/.test(v) ? null : 'expected the 10-character key id'),
+  },
+  {
+    name: 'APNS_TEAM_ID',
+    required: false,
+    where: 'developer.apple.com -> Account -> Membership details -> Team ID',
+    validate: (v) => (/^[A-Z0-9]{10}$/.test(v) ? null : 'expected the 10-character team id'),
+  },
+  {
+    name: 'APNS_PRIVATE_KEY',
+    required: false,
+    where: 'the contents of the APNs AuthKey_<id>.p8 file (line breaks may be written as \\n)',
+    validate: (v) =>
+      /^-----BEGIN PRIVATE KEY-----\s*[A-Za-z0-9+/=\s]+-----END PRIVATE KEY-----$/.test(v.replace(/\\n/g, '\n'))
+        ? null
+        : 'expected the PEM contents of the .p8 file (BEGIN PRIVATE KEY)',
+  },
+  {
+    name: 'APNS_TOPIC',
+    required: false,
+    where: "the iPhone app's bundle id (the APNs topic)",
+    validate: (v) => (/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(v) ? null : "expected the app's bundle id"),
+  },
+  // Optional feature flags (unset = off): self-serve SMS numbers ship dark.
+  {
+    name: 'SMS_PROVISIONING_ENABLED',
+    required: false,
+    where: '"true" once the platform Twilio account may buy numbers and submit toll-free verifications',
+    validate: (v) => (/^(true|false)$/i.test(v) ? null : 'must be true or false'),
+  },
+  {
+    name: 'TWILIO_ISV_ENABLED',
+    required: false,
+    where: '"true" once the platform Twilio account is an approved A2P 10DLC ISV',
+    validate: (v) => (/^(true|false)$/i.test(v) ? null : 'must be true or false'),
+  },
+  {
+    name: 'TWILIO_PRIMARY_CUSTOMER_PROFILE_SID',
+    required: false,
+    where: "Twilio Console -> Trust Hub -> the platform's primary customer profile (BU...), needed for 10DLC",
+    validate: (v) => (/^BU[0-9a-fA-F]{32}$/.test(v) ? null : 'expected BU followed by 32 hex characters'),
+  },
+];
+
+/**
+ * Secrets that only work together, checked after each value on its own.
+ * Each value alone passes its own format check, but the functions fail at
+ * run time with a partial set: push treats any APNS_* value as "configured"
+ * and then needs all four (the every-minute push cron would answer 500
+ * server_misconfigured forever), and 10DLC submission needs the primary
+ * Trust Hub profile as soon as TWILIO_ISV_ENABLED is true.
+ */
+export const SECRET_GROUPS = [
+  {
+    kind: 'all-or-none',
+    names: ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY', 'APNS_TOPIC'],
+    why: 'APNs push needs all four APNS_* values or none',
+  },
+  {
+    kind: 'requires',
+    when: { name: 'TWILIO_ISV_ENABLED', equals: 'true' },
+    names: ['TWILIO_PRIMARY_CUSTOMER_PROFILE_SID'],
+    why: 'required while TWILIO_ISV_ENABLED=true (10DLC registration assigns it to every shop profile)',
   },
 ];
 
@@ -277,6 +366,45 @@ export const DEPLOY_INPUTS = [
   { name: 'SUPABASE_PROJECT_REF', where: 'Project Settings -> General -> Reference ID (20 lowercase letters)' },
   { name: 'SUPABASE_DB_PASSWORD', where: 'The database password chosen when the project was created (Project Settings -> Database to reset)' },
 ];
+
+/**
+ * Shop subscription billing (docs/BILLING.md): database settings, not
+ * function secrets. The platform-setup step applies them with
+ * public.set_billing_config(p_enabled, p_trial_days).
+ */
+export const BILLING_INPUTS = [
+  {
+    name: 'BILLING_ENABLED',
+    where: '"true" turns on shop subscription billing (docs/BILLING.md); "false" or unset = off, every shop fully usable',
+    validate: (v) => (/^(true|false)$/i.test(v) ? null : 'must be true or false'),
+  },
+  {
+    name: 'BILLING_TRIAL_DAYS',
+    where: 'free trial for shops once billing is on, in whole days (0 = no trial; unset = 0; at most 730, Stripe\'s longest trial)',
+    validate: (v) => (/^\d{1,3}$/.test(v) && Number(v) <= 730 ? null : 'must be a whole number of days from 0 to 730'),
+  },
+];
+
+/**
+ * The billing inputs: { enabled, trialDays } with the defaults (off, 0) and
+ * whether each was set explicitly (an unset input never silently changes a
+ * project that has another value: see deploy_api.mjs platform-setup).
+ */
+export function billingConfig(env) {
+  const enabledRaw = env.BILLING_ENABLED?.trim() ?? '';
+  const trialRaw = env.BILLING_TRIAL_DAYS?.trim() ?? '';
+  for (const input of BILLING_INPUTS) {
+    const raw = env[input.name]?.trim();
+    const problem = raw ? input.validate(raw) : null;
+    if (problem) throw new DeployConfigError(`${input.name} ${problem}`);
+  }
+  return {
+    enabled: enabledRaw.toLowerCase() === 'true',
+    enabledSet: enabledRaw !== '',
+    trialDays: trialRaw === '' ? 0 : Number(trialRaw),
+    trialDaysSet: trialRaw !== '',
+  };
+}
 
 /**
  * Validates the environment for a deploy. Returns the exact lists the
@@ -293,9 +421,18 @@ export function validateDeployEnv(env, { stripeWebhooks = false, requireLiveStri
   if (env.SUPABASE_PROJECT_REF?.trim() && !projectRefOk(env.SUPABASE_PROJECT_REF.trim())) {
     invalid.push({ name: 'SUPABASE_PROJECT_REF', problem: 'must be the 20-character project ref (lowercase letters/digits)' });
   }
+  for (const input of BILLING_INPUTS) {
+    const raw = env[input.name]?.trim();
+    const problem = raw ? input.validate(raw) : null;
+    if (problem) invalid.push({ name: input.name, problem });
+  }
+  const billingOn = env.BILLING_ENABLED?.trim().toLowerCase() === 'true';
   for (const spec of SECRET_SPECS) {
     const value = env[spec.name]?.trim();
-    const required = spec.required === true || (spec.required === 'unless-stripe-webhooks' && !stripeWebhooks);
+    const required =
+      spec.required === true ||
+      (spec.required === 'unless-stripe-webhooks' && !stripeWebhooks) ||
+      (spec.required === 'billing-unless-stripe-webhooks' && billingOn && !stripeWebhooks);
     if (!value) {
       if (required) missing.push({ name: spec.name, where: spec.where });
       continue;
@@ -306,6 +443,26 @@ export function validateDeployEnv(env, { stripeWebhooks = false, requireLiveStri
       continue;
     }
     secrets[spec.name] = spec.name === 'APP_BASE_URL' ? normalizeAppBaseUrl(value) : value;
+  }
+  const isSet = (name) => Boolean(env[name]?.trim());
+  const whereOf = (name) => SECRET_SPECS.find((spec) => spec.name === name)?.where ?? '';
+  for (const group of SECRET_GROUPS) {
+    const unset = group.names.filter((name) => !isSet(name));
+    if (group.kind === 'all-or-none') {
+      const set = group.names.filter(isSet);
+      if (set.length === 0 || unset.length === 0) continue;
+      for (const name of unset) {
+        missing.push({ name, where: `${group.why} (${set.join(', ')} ${set.length === 1 ? 'is' : 'are'} set): ${whereOf(name)}` });
+      }
+    } else if (env[group.when.name]?.trim().toLowerCase() === group.when.equals) {
+      for (const name of unset) missing.push({ name, where: `${group.why}: ${whereOf(name)}` });
+    }
+  }
+  if (!billingOn && Number(env.BILLING_TRIAL_DAYS?.trim() || 0) > 0 && /^\d+$/.test(env.BILLING_TRIAL_DAYS.trim())) {
+    warnings.push('BILLING_TRIAL_DAYS is set but BILLING_ENABLED is not true: the trial length is stored and starts applying once billing is turned on');
+  }
+  if (env.TWILIO_ISV_ENABLED?.trim().toLowerCase() === 'true' && env.SMS_PROVISIONING_ENABLED?.trim().toLowerCase() !== 'true') {
+    warnings.push('TWILIO_ISV_ENABLED=true has no effect until SMS_PROVISIONING_ENABLED=true (self-serve numbers stay off)');
   }
   const mode = /^(sk|rk)_(test|live)_/.exec(env.STRIPE_SECRET_KEY ?? '')?.[2];
   if (mode === 'test') {

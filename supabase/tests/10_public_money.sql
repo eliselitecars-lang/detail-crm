@@ -60,10 +60,11 @@ select tests.throws($$select public.public_get_quote(null)$$, 'PT404', 'null tok
 create temp table got (doc jsonb);
 grant all on got to anon, authenticated, service_role;
 insert into got select public.public_get_quote(tests.fx('q_token'));
-select tests.eq((select pg_temp.keys(doc) from got), 'customer,line_items,quote,shop,vehicle', 'quote document sections');
+select tests.eq((select pg_temp.keys(doc) from got), 'customer,line_items,options,quote,self_schedule,shop,vehicle',
+                'quote document sections (0067: options, self_schedule)');
 select tests.eq((select pg_temp.keys(doc -> 'quote') from got),
-                'approved_at,approved_by_name,can_respond,declined_at,declined_reason,discount_cents,expired_at,expires_at,notes,number,'
-                || 'sent_at,status,subtotal_cents,tax_cents,tax_rate_bps,terms,total_cents,valid_until,viewed_at',
+                'approved_at,approved_by_name,can_respond,declined_at,declined_reason,discount_cents,expired_at,expires_at,has_options,'
+                || 'notes,number,selected_option_id,sent_at,status,subtotal_cents,tax_cents,tax_rate_bps,terms,total_cents,valid_until,viewed_at',
                 'quote keys (no internal notes, ids, tokens or creator)');
 select tests.eq((select pg_temp.keys(doc -> 'shop') from got),
                 'address_line1,address_line2,brand_color,city,country,currency,email,logo_path,name,phone,postal_code,region,review_url,slug,timezone,website',
@@ -71,8 +72,8 @@ select tests.eq((select pg_temp.keys(doc -> 'shop') from got),
 select tests.eq((select pg_temp.keys(doc -> 'customer') from got), 'company,first_name,last_name', 'customer: name only');
 select tests.eq((select pg_temp.keys(doc -> 'vehicle') from got), 'color,make,model,trim,year', 'vehicle description only');
 select tests.eq((select pg_temp.keys(doc -> 'line_items' -> 0) from got),
-                'description,discount_cents,id,name,optional,quantity,selected,taxable,total_cents,unit_price_cents,vehicle_label',
-                'line keys (id kept so optional lines can be chosen)');
+                'description,discount_cents,id,name,option_id,optional,quantity,selected,taxable,total_cents,unit_price_cents,vehicle_label',
+                'line keys (id kept so optional lines can be chosen; option_id 0067)');
 -- the shop id appears only as the public logo's storage folder (<shop_id>/..., SPEC §4.6)
 select tests.eq((select doc -> 'shop' ->> 'logo_path' from got), tests.fx('shop_a') || '/logo.png', 'logo object name');
 select tests.ok((select d::text not like '%SECRET-INTERNAL-NOTE%' and d::text not like '%' || tests.fx('shop_a') || '%'
@@ -167,16 +168,19 @@ select tests.throws($$select public.public_get_invoice(tests.fx('inv_draft_token
 select tests.throws($$select public.public_get_invoice(gen_random_uuid())$$, 'PT404', 'unknown token');
 truncate got;
 insert into got select public.public_get_invoice(tests.fx('inv_token'));
-select tests.eq((select pg_temp.keys(doc) from got), 'customer,invoice,job,line_items,payments,shop,vehicle', 'invoice document sections');
+select tests.eq((select pg_temp.keys(doc) from got), 'customer,invoice,job,jobs,line_items,payments,shop,vehicle',
+                'invoice document sections (0066: jobs)');
 select tests.eq((select pg_temp.keys(doc -> 'invoice') from got),
-                'amount_paid_cents,balance_cents,card_payments_enabled,discount_cents,due_at,issued_at,notes,number,paid_at,payable,'
-                || 'status,subtotal_cents,tax_cents,tax_rate_bps,terms,tip_cents,total_cents,voided_at',
+                'amount_paid_cents,balance_cents,card_payments_enabled,discount_cents,due_at,gift_card_redeemable,issued_at,notes,number,'
+                || 'paid_at,payable,processing_cents,status,subtotal_cents,tax_cents,tax_rate_bps,terms,tip_cents,total_cents,voided_at',
                 'invoice keys (no internal notes, void reason, ids, tokens)');
 select tests.eq((select pg_temp.keys(doc -> 'job') from got), 'number,scheduled_end,scheduled_start', 'job: number and time only');
 select tests.eq((select pg_temp.keys(doc -> 'line_items' -> 0) from got),
-                'description,discount_cents,name,quantity,taxable,total_cents,unit_price_cents,vehicle_label', 'invoice line keys');
+                'description,discount_cents,job_number,name,quantity,taxable,total_cents,unit_price_cents,vehicle_label',
+                'invoice line keys (job_number 0066)');
 select tests.eq((select pg_temp.keys(doc -> 'payments' -> 0) from got),
-                'amount_cents,card_brand,card_last4,kind,method,paid_at,refunded_cents,status,tip_cents', 'payment keys (no Stripe ids, notes, staff)');
+                'amount_cents,card_brand,card_last4,kind,method,paid_at,processing,refunded_cents,status,tip_cents',
+                'payment keys (no Stripe ids, notes, staff; processing flag 0066)');
 select tests.ok((select doc::text not like '%SECRET-%' and doc::text not like '%pi_pub%' and doc::text not like '%ch_pub%'
                         and doc::text not like '%' || tests.fx('u_manager_a') || '%' and doc::text not like '%' || tests.fx('inv_token') || '%'
                  from got), 'no internal notes, payment notes, Stripe ids, staff ids or token');

@@ -1,5 +1,5 @@
 import { createContext, use } from 'react';
-import type { PermissionContext, ShopRole } from './permissions';
+import { permissionContextOf, type PermissionContext, type ShopRole } from './permissions';
 import type { ShopMembership, ShopSummary } from './types';
 
 export type ShopStatus = 'loading' | 'error' | 'empty' | 'ready';
@@ -35,6 +35,8 @@ export interface CurrentShop {
   timezone: string;
   currency: string;
   techsCanCollectPayments: boolean;
+  /** shops.techs_can_share_reports: technicians may publish job reports on their jobs. */
+  techsCanShareReports: boolean;
   permissions: PermissionContext;
   memberships: ShopMembership[];
   switchShop: (shopId: string) => void;
@@ -56,10 +58,8 @@ export function useShop(): CurrentShop {
     timezone: membership.shop.timezone,
     currency: membership.shop.currency,
     techsCanCollectPayments: membership.shop.techs_can_collect_payments,
-    permissions: {
-      role: membership.role,
-      techsCanCollectPayments: membership.shop.techs_can_collect_payments,
-    },
+    techsCanShareReports: membership.shop.techs_can_share_reports === true,
+    permissions: permissionContextOf(membership),
     memberships,
     switchShop,
   };

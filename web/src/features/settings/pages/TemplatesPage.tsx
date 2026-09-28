@@ -1,5 +1,6 @@
 import { Clock, Pencil, Eye } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
+import { useSearchParams } from 'react-router';
 import { Badge, Button, SectionCard, Switch, useToast } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
 import { formatPhone } from '@/lib/phone';
@@ -13,9 +14,12 @@ import {
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
 import { TemplateEditorDialog } from '../components/TemplateEditorDialog';
 import { bookingUrl } from '../links';
+import { reminderOffsetsOf } from '../templates/drafts';
 import {
   CHANNEL_LABELS,
   describeOffset,
+  describeReminders,
+  TEMPLATE_KEYS,
   previewVars,
   TEMPLATE_GROUPS,
   templateMeta,
@@ -28,7 +32,21 @@ export default function TemplatesPage() {
   const { shop } = useShop();
   const query = useMessageTemplates();
   const shopSettings = useShopSettings();
-  const [editing, setEditing] = useState<TemplateKey | null>(null);
+  // ?edit=<key> opens a template's editor (links from Settings → Follow-ups).
+  const [params, setParams] = useSearchParams();
+  const editParam = params.get('edit');
+  const editing: TemplateKey | null =
+    TEMPLATE_KEYS.find((m) => m.key === editParam && !m.switchOnly)?.key ?? null;
+  const setEditing = (key: TemplateKey | null) =>
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (key) next.set('edit', key);
+        else next.delete('edit');
+        return next;
+      },
+      { replace: true },
+    );
 
   const vars = useMemo(
     () =>
@@ -99,7 +117,8 @@ function TemplateRow({
   const toast = useToast();
   const update = useUpdateTemplate();
   const offset = rows.find((r) => r.offset_minutes !== null)?.offset_minutes ?? null;
-  const timing = describeOffset(meta, offset);
+  const reminders = meta.multipleReminders ? reminderOffsetsOf(rows) : [];
+  const timing = reminders.length > 1 ? describeReminders(reminders) : describeOffset(meta, offset);
 
   return (
     <li className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
@@ -112,6 +131,7 @@ function TemplateRow({
             {timing}
           </p>
         )}
+        {meta.timingNote && <p className="text-muted mt-1 text-xs">{meta.timingNote}</p>}
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         {meta.channels.map((channel) => {
@@ -148,21 +168,23 @@ function TemplateRow({
             </div>
           );
         })}
-        <Button
-          variant="secondary"
-          size="sm"
-          leadingIcon={
-            canEdit ? (
-              <Pencil className="size-4" aria-hidden="true" />
-            ) : (
-              <Eye className="size-4" aria-hidden="true" />
-            )
-          }
-          onClick={onOpen}
-        >
-          {canEdit ? 'Edit' : 'View'}
-          <span className="sr-only"> {meta.label}</span>
-        </Button>
+        {!meta.switchOnly && (
+          <Button
+            variant="secondary"
+            size="sm"
+            leadingIcon={
+              canEdit ? (
+                <Pencil className="size-4" aria-hidden="true" />
+              ) : (
+                <Eye className="size-4" aria-hidden="true" />
+              )
+            }
+            onClick={onOpen}
+          >
+            {canEdit ? 'Edit' : 'View'}
+            <span className="sr-only"> {meta.label}</span>
+          </Button>
+        )}
       </div>
     </li>
   );

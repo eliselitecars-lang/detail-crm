@@ -62,6 +62,7 @@ enum TimeClockLoader {
 struct TimeClockView: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
+    @Environment(JobsRealtimeHub.self) private var realtime
     @State private var state: LoadState<TimeClockSnapshot> = .idle
     @State private var selectedJobID: UUID?
 
@@ -80,6 +81,9 @@ struct TimeClockView: View {
         .navigationTitle("Time Clock")
         .task { await load() }
         .refreshable { await load() }
+        .onChange(of: realtime.revision(.timeEntries)) { _, _ in
+            Task { await load() }
+        }
     }
 
     private func load() async {
@@ -102,11 +106,14 @@ struct TimeClockView: View {
         }
     }
 
+    /// Clock in with the device location when the member allows it (P-24);
+    /// without one the punch still goes through.
     private func clockIn(jobID: UUID?) async {
         do {
             let shopID = try appState.requireShopID()
-            _ = try await TimeClockService.clockIn(shopID: shopID, jobID: jobID)
-            toasts.show(jobID == nil ? "Clocked in." : "Job timer started.")
+            let spot = await OpsClockLocationProvider.shared.currentSpot()
+            _ = try await TimeClockService.clockIn(shopID: shopID, jobID: jobID, location: spot)
+            toasts.show(punchMessage(jobID == nil ? "Clocked in." : "Job timer started.", spot: spot))
         } catch {
             toasts.showError(error)
         }
@@ -116,12 +123,17 @@ struct TimeClockView: View {
     private func clockOut(kind: TimeEntryKind) async {
         do {
             let shopID = try appState.requireShopID()
-            _ = try await TimeClockService.clockOut(shopID: shopID, kind: kind)
-            toasts.show(kind == .shift ? "Clocked out." : "Job timer stopped.")
+            let spot = await OpsClockLocationProvider.shared.currentSpot()
+            _ = try await TimeClockService.clockOut(shopID: shopID, kind: kind, location: spot)
+            toasts.show(punchMessage(kind == .shift ? "Clocked out." : "Job timer stopped.", spot: spot))
         } catch {
             toasts.showError(error)
         }
         await load()
+    }
+
+    private func punchMessage(_ base: String, spot: TimeEntry.Spot?) -> String {
+        OpsClockLocationProvider.shared.punchMessage(base, spot: spot)
     }
 }
 
@@ -141,6 +153,8 @@ private struct TimeClockContent: View {
                     .themedRow()
             } header: {
                 Text("Shift")
+            } footer: {
+                Text("Clocking in or out on this screen records where you are (if you allow location access), so your manager can see where the punch happened. Location is read only at that moment.")
             }
             Section {
                 TimeClockJobCard(

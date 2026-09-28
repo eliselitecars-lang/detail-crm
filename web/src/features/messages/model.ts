@@ -226,15 +226,37 @@ export const TEMPLATE_LABELS: Record<MessageTemplateKey, string> = {
   follow_up: 'Follow-up',
   membership_welcome: 'Membership welcome',
   invite: 'Team invite',
+  gift_card_delivery: 'Gift card delivery',
+  referral_reward: 'Referral reward',
+  job_report: 'Job report',
+  quote_reminder: 'Quote reminder',
+  deposit_reminder: 'Deposit reminder',
+  invoice_reminder: 'Invoice reminder',
+  invoice_overdue: 'Invoice overdue',
+  service_followup: 'Maintenance follow-up',
+  lead_received: 'Lead received',
 };
 
 /**
- * Templates staff may send from the inbox: every key except `invite` (staff
- * invites are emailed by the invites function). Mirrors SENDABLE_TEMPLATE_KEYS
- * in supabase/functions/messaging/send.ts.
+ * Templates staff may send from the inbox. Mirrors SENDABLE_TEMPLATE_KEYS in
+ * supabase/functions/messaging/send.ts: `invite` is emailed by the invites
+ * function, and the automated keys (follow-ups, reminders, gift cards, job
+ * reports, referrals, leads) are queued only by the server.
  */
-export const SENDABLE_TEMPLATE_KEYS: readonly MessageTemplateKey[] =
-  Constants.public.Enums.message_template_key.filter((key) => key !== 'invite');
+export const SENDABLE_TEMPLATE_KEYS: readonly MessageTemplateKey[] = [
+  'booking_request_received',
+  'booking_confirmed',
+  'appointment_reminder',
+  'on_the_way',
+  'job_started',
+  'job_completed',
+  'quote_sent',
+  'invoice_sent',
+  'payment_receipt',
+  'review_request',
+  'follow_up',
+  'membership_welcome',
+];
 
 /**
  * Templates that may be sent without a job (send.ts CUSTOMER_TEMPLATE_KEYS),

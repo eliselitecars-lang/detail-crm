@@ -11,8 +11,17 @@ import {
   planHasChanges,
   planPriceChanges,
   resequence,
+  commissionColumns,
+  daysToOffsetParts,
+  describeCommission,
+  describeFollowupOffset,
+  describeWeekdays,
+  formatQuantity,
+  offsetPartsToDays,
+  parseQuantity,
   serviceColumns,
   serviceFormDefaults,
+  weekdaysValue,
   serviceFormSchema,
   serviceImagePath,
   soleAddonServices,
@@ -68,6 +77,8 @@ describe('service form', () => {
       online_bookable: false,
       active: true,
       sort: -5,
+      min_before_photos: 0,
+      min_after_photos: 0,
     });
   });
 
@@ -81,6 +92,86 @@ describe('service form', () => {
     const paths = result.error?.issues.map((i) => i.path[0]);
     expect(paths).toContain('name');
     expect(paths).toContain('durationMinutes');
+  });
+
+  it('adds commission columns only when asked, as bps or cents', () => {
+    const percent = serviceFormSchema.parse({
+      ...serviceFormDefaults(),
+      name: 'Coating',
+      commissionKind: 'percent',
+      commissionPercent: '7.5',
+    });
+    expect(serviceColumns(percent)).not.toHaveProperty('commission_kind');
+    expect(serviceColumns(percent, { commission: true })).toMatchObject({
+      commission_kind: 'percent',
+      commission_value: 750,
+    });
+    const flat = serviceFormSchema.parse({
+      ...serviceFormDefaults(),
+      name: 'Tint',
+      commissionKind: 'flat',
+      commissionCents: 2500,
+    });
+    expect(commissionColumns(flat)).toEqual({ commission_kind: 'flat', commission_value: 2500 });
+    const missing = serviceFormSchema.safeParse({
+      ...serviceFormDefaults(),
+      name: 'Tint',
+      commissionKind: 'flat',
+      commissionCents: null,
+    });
+    expect(missing.success).toBe(false);
+    expect(
+      serviceFormSchema.safeParse({ ...serviceFormDefaults(), name: 'X', minAfterPhotos: '21' })
+        .success,
+    ).toBe(false);
+  });
+
+  it('round-trips a saved commission into the form', () => {
+    const d = serviceFormDefaults({
+      commission_kind: 'percent',
+      commission_value: 1250,
+      min_before_photos: 2,
+      min_after_photos: 3,
+    } as Parameters<typeof serviceFormDefaults>[0]);
+    expect(d).toMatchObject({
+      commissionKind: 'percent',
+      commissionPercent: '12.5',
+      minBeforePhotos: '2',
+      minAfterPhotos: '3',
+    });
+    expect(describeCommission({ commission_kind: 'flat', commission_value: 500 }, 'usd')).toBe(
+      '$5.00 per unit sold',
+    );
+    expect(describeCommission({ commission_kind: 'none', commission_value: 0 }, 'usd')).toBeNull();
+  });
+});
+
+describe('follow-up offsets, quantities and weekdays', () => {
+  it('converts offsets between days and units', () => {
+    expect(daysToOffsetParts(90)).toEqual({ amount: '3', unit: 'months' });
+    expect(daysToOffsetParts(14)).toEqual({ amount: '2', unit: 'weeks' });
+    expect(daysToOffsetParts(10)).toEqual({ amount: '10', unit: 'days' });
+    expect(offsetPartsToDays('6', 'months')).toEqual({ days: 180, error: null });
+    expect(offsetPartsToDays('0', 'days').error).toMatch(/1 or more/);
+    expect(offsetPartsToDays('37', 'months').error).toMatch(/1095/);
+    expect(describeFollowupOffset(30)).toBe('1 month after the visit');
+    expect(describeFollowupOffset(21)).toBe('3 weeks after the visit');
+  });
+
+  it('parses consumable quantities', () => {
+    expect(parseQuantity('1.5')).toBe(1.5);
+    expect(parseQuantity('2,25')).toBe(2.25);
+    expect(parseQuantity('0')).toBeNull();
+    expect(parseQuantity('1.2345')).toBeNull();
+    expect(formatQuantity(0.1 + 0.2)).toBe('0.3');
+  });
+
+  it('describes and stores bookable weekdays', () => {
+    expect(describeWeekdays(null)).toBe('Every day');
+    expect(describeWeekdays([3, 1])).toBe('Mon, Wed');
+    expect(describeWeekdays([])).toMatch(/not bookable online/);
+    expect(weekdaysValue(new Set([0, 1, 2, 3, 4, 5, 6]))).toBeNull();
+    expect(weekdaysValue(new Set([5, 1]))).toEqual([1, 5]);
   });
 });
 

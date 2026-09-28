@@ -2,11 +2,13 @@
 //  QuoteDetailView.swift
 //  DetailCRM
 //
-//  One quote: customer & vehicle, lines (optional items marked), the
-//  server's totals, notes, a status timeline, and the actions that fit the
-//  status (send, share the client link, record the customer's answer,
-//  convert to a job, revise, delete). Sections are separated by AnyView
-//  seams to keep the composed view type shallow.
+//  One quote: customer & vehicle, lines (optional items marked, grouped by
+//  proposal option), the options with their server totals, the server's
+//  totals, notes, a status timeline, and the actions that fit the status
+//  (send, share the client link or a PDF, record the customer's answer,
+//  convert to a job, revise, delete), plus online self-scheduling and the
+//  automatic follow-ups. Sections are separated by AnyView seams to keep
+//  the composed view type shallow.
 //
 
 import SwiftUI
@@ -63,7 +65,8 @@ struct QuoteDetailView: View {
                         data: data,
                         currencyCode: appState.currencyCode,
                         clock: appState.clock,
-                        perform: { action in handle(action, data: data) }
+                        perform: { action in handle(action, data: data) },
+                        onChanged: { await load() }
                     )
                 }
             } else {
@@ -106,15 +109,27 @@ struct QuoteDetailView: View {
                     await load()
                 }
             case .approve:
-                QuoteResponseSheet(quote: data.quote, customer: data.customer, lines: data.lines, isApproval: true) {
+                QuoteResponseSheet(
+                    quote: data.quote,
+                    customer: data.customer,
+                    lines: data.lines,
+                    options: data.options,
+                    isApproval: true
+                ) {
                     await load()
                 }
             case .decline:
-                QuoteResponseSheet(quote: data.quote, customer: data.customer, lines: data.lines, isApproval: false) {
+                QuoteResponseSheet(
+                    quote: data.quote,
+                    customer: data.customer,
+                    lines: data.lines,
+                    options: data.options,
+                    isApproval: false
+                ) {
                     await load()
                 }
             case .convert:
-                QuoteConvertSheet(quote: data.quote, lines: data.lines) { jobID in
+                QuoteConvertSheet(quote: data.quote, lines: data.countedLines) { jobID in
                     pendingJobRoute = .job(jobID)
                     Task { await load() }
                 }
@@ -125,7 +140,13 @@ struct QuoteDetailView: View {
     private func handle(_ action: QuoteDetailAction, data: QuoteService.DetailData) {
         switch action {
         case .edit:
-            activeSheet = .edit(QuoteDraft(quote: data.quote, lines: data.lines, customer: data.customer, vehicle: data.vehicle))
+            activeSheet = .edit(QuoteDraft(
+                quote: data.quote,
+                lines: data.lines,
+                options: data.options,
+                customer: data.customer,
+                vehicle: data.vehicle
+            ))
         case .send:
             activeSheet = .send
         case .approve:
@@ -197,14 +218,24 @@ private struct QuoteDetailContent: View {
     let currencyCode: String
     let clock: ShopClock
     let perform: (QuoteDetailAction) -> Void
+    let onChanged: () async -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
                 AnyView(QuoteHeaderSection(data: data, clock: clock))
-                AnyView(QuoteLinesSection(lines: data.lines, currencyCode: currencyCode))
-                AnyView(QuoteTotalsSection(quote: data.quote, lines: data.lines, currencyCode: currencyCode))
+                AnyView(QuoteLinesSection(data: data, currencyCode: currencyCode))
+                if !data.options.isEmpty {
+                    AnyView(MoneyQuoteOptionsSection(quote: data.quote, options: data.options, currencyCode: currencyCode))
+                }
+                AnyView(QuoteTotalsSection(data: data, currencyCode: currencyCode))
                 AnyView(QuoteActionsSection(quote: data.quote, perform: perform))
+                if QuoteDetailView.SelfScheduleSection.applies(to: data.quote) {
+                    AnyView(QuoteDetailView.SelfScheduleSection(data: data, onChanged: onChanged))
+                }
+                if data.quote.status.isAwaitingCustomer {
+                    AnyView(MoneyFollowupStatusRow(kind: .quote, documentID: data.quote.id, refreshKey: data.quote.updatedAt))
+                }
                 AnyView(QuoteNotesSection(quote: data.quote))
                 AnyView(QuoteTimelineSection(quote: data.quote, clock: clock))
             }
@@ -241,9 +272,41 @@ private struct QuoteHeaderSection: View {
                 if let reason = data.quote.declinedReason, data.quote.status == .declined {
                     InfoRow(label: "Declined", value: reason, systemImage: "xmark.circle")
                 }
+                if let job = data.convertedJob {
+                    convertedJobRow(job)
+                }
             }
             .cardStyle()
         }
+    }
+
+    /// "Customer scheduled · Job #1042" (or "Converted to Job #1042").
+    private func convertedJobRow(_ job: QuoteService.ConvertedJobRef) -> some View {
+        NavigationLink(value: AppRoute.job(job.id)) {
+            HStack {
+                InfoRow(
+                    label: data.quote.selfScheduledAt != nil ? "Customer scheduled" : "Converted to",
+                    value: jobText(job),
+                    systemImage: data.quote.selfScheduledAt != nil ? "calendar.badge.checkmark" : "wrench.and.screwdriver"
+                )
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(Theme.textTertiary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Opens the job")
+    }
+
+    private func jobText(_ job: QuoteService.ConvertedJobRef) -> String {
+        var text = "Job #\(job.number)"
+        if let start = job.scheduledStart {
+            text += " · \(clock.shortDayText(start)), \(clock.timeText(start))"
+        } else {
+            text += " · \(job.status.displayName)"
+        }
+        return text
     }
 
     @ViewBuilder
@@ -285,49 +348,107 @@ private struct QuoteHeaderSection: View {
 }
 
 private struct QuoteLinesSection: View {
-    let lines: [QuoteLineItem]
+    let data: QuoteService.DetailData
     let currencyCode: String
 
     var body: some View {
         MoneySectionCard("Items") {
-            if lines.isEmpty {
+            if data.lines.isEmpty {
                 Text("No items yet. Edit the quote to add services.")
                     .font(Theme.Typography.subheadline)
                     .foregroundStyle(Theme.textSecondary)
+            } else if data.options.isEmpty {
+                lineRows(data.lines)
             } else {
-                ForEach(lines) { line in
-                    MoneyLineRow(
-                        name: line.name,
-                        detail: line.lineDescription,
-                        quantity: line.quantity,
-                        unitPriceCents: line.unitPriceCents,
-                        discountCents: line.discountCents,
-                        totalCents: line.totalCents,
-                        currencyCode: currencyCode,
-                        badge: line.isOptional ? "Optional" : nil,
-                        note: optionalNote(line)
-                    )
-                    if line.id != lines.last?.id {
-                        Divider().overlay(Theme.border)
+                ForEach(groups) { group in
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                        Text(group.title)
+                            .font(Theme.Typography.footnote.weight(.semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                        if group.lines.isEmpty {
+                            Text(group.optionID == nil ? "No shared items." : "No items of its own.")
+                                .font(Theme.Typography.footnote)
+                                .foregroundStyle(Theme.textTertiary)
+                        } else {
+                            lineRows(group.lines)
+                        }
                     }
                 }
             }
         }
     }
 
-    private func optionalNote(_ line: QuoteLineItem) -> String? {
-        guard line.isOptional else { return nil }
-        return line.isSelected ? "Chosen by the customer — included in the total." : "Not in the total unless the customer picks it."
+    /// Lines of one option (or the shared ones).
+    struct LineGroup: Identifiable {
+        let optionID: UUID?
+        let title: String
+        let lines: [QuoteLineItem]
+
+        var id: String { optionID?.uuidString ?? "shared" }
+    }
+
+    /// Shared lines, then each option's own lines.
+    private var groups: [LineGroup] {
+        var result = [LineGroup(optionID: nil, title: "In every option", lines: data.lines.filter { $0.optionID == nil })]
+        for option in data.options {
+            result.append(LineGroup(optionID: option.id, title: option.name, lines: data.lines.filter { $0.optionID == option.id }))
+        }
+        return result
+    }
+
+    @ViewBuilder
+    private func lineRows(_ lines: [QuoteLineItem]) -> some View {
+        ForEach(lines) { line in
+            MoneyLineRow(
+                name: line.name,
+                detail: line.lineDescription,
+                quantity: line.quantity,
+                unitPriceCents: line.unitPriceCents,
+                discountCents: line.discountCents,
+                totalCents: line.totalCents,
+                currencyCode: currencyCode,
+                badge: badge(line),
+                note: note(line)
+            )
+            if line.id != lines.last?.id {
+                Divider().overlay(Theme.border)
+            }
+        }
+    }
+
+    private func badge(_ line: QuoteLineItem) -> String? {
+        if line.isOptional { return "Optional" }
+        if line.feeID != nil { return "Fee" }
+        return nil
+    }
+
+    private func note(_ line: QuoteLineItem) -> String? {
+        var parts: [String] = []
+        if line.isOptional {
+            parts.append(line.isSelected
+                ? "Chosen by the customer — included in the total."
+                : "Not in the total unless the customer picks it.")
+        }
+        if !line.discountEligible && data.quote.discountKind != .none {
+            parts.append("The quote discount doesn't apply to this item.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 }
 
 private struct QuoteTotalsSection: View {
-    let quote: Quote
-    let lines: [QuoteLineItem]
+    let data: QuoteService.DetailData
     let currencyCode: String
+
+    private var quote: Quote { data.quote }
 
     var body: some View {
         MoneySectionCard("Totals") {
+            if let optionName {
+                Text("For \(optionName)")
+                    .font(Theme.Typography.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+            }
             MoneyTotalsView(
                 subtotalCents: quote.subtotalCents,
                 discountCents: quote.discountCents,
@@ -336,12 +457,19 @@ private struct QuoteTotalsSection: View {
                 totalCents: quote.totalCents,
                 currencyCode: currencyCode
             )
-            if lines.contains(where: { $0.isOptional && !$0.isSelected }) {
-                Text("Optional items the customer hasn't picked are not included.")
+            if data.countedLines.count < data.lines.count {
+                Text(data.options.isEmpty
+                    ? "Optional items the customer hasn't picked are not included."
+                    : "Other options' items, and optional items the customer hasn't picked, are not included.")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textSecondary)
             }
         }
+    }
+
+    private var optionName: String? {
+        guard let effective = data.effectiveOptionID else { return nil }
+        return data.options.first(where: { $0.id == effective })?.name
     }
 }
 
@@ -397,6 +525,9 @@ private struct QuoteTimelineSection: View {
         if let date = quote.expiredAt {
             list.append(MoneyTimelineEntry(id: "expired", title: "Expired", date: date))
         }
+        if let date = quote.selfScheduledAt {
+            list.append(MoneyTimelineEntry(id: "scheduled", title: "Scheduled online by the customer", date: date))
+        }
         if let date = quote.convertedAt {
             list.append(MoneyTimelineEntry(id: "converted", title: "Converted to a job", date: date))
         }
@@ -414,6 +545,7 @@ private struct QuoteActionsSection: View {
         VStack(spacing: Theme.Spacing.sm) {
             primaryActions
             shareLink
+            MoneyPDFShareButton(kind: .quote, documentID: quote.id, number: quote.number)
             secondaryActions
         }
     }

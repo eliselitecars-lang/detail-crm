@@ -3,7 +3,8 @@
 //  DetailCRM
 //
 //  One customer: contact card (call / text / email / Maps), tags, notes,
-//  vehicles (add / edit with VIN decode), job history, and — for roles
+//  custom fields (P-9), vehicles (add / edit with VIN scan and decode),
+//  job history, documents (P-25), the referral link (P-29), and — for roles
 //  that handle money — quotes, invoices, memberships (read-only summary;
 //  the Money screens own the details) and saved cards. Managers and above
 //  see the server's overview (lifetime paid, open balance, visits), can
@@ -66,7 +67,9 @@ struct CustomerDetailView: View {
             canSeeInvoices: appState.can(.manageInvoices),
             canSeeMemberships: appState.can(.manageMemberships),
             canSeeSavedCards: appState.can(.useSavedCards),
-            canSeeSummary: appState.role?.isManagerOrAbove ?? false
+            canSeeSummary: appState.role?.isManagerOrAbove ?? false,
+            canManageDocuments: appState.can(.editCustomers),
+            canUseReferrals: appState.role?.isManagerOrAbove ?? false
         )
     }
 
@@ -77,7 +80,9 @@ struct CustomerDetailView: View {
             newJob: { sheet = .newJob },
             retryHistory: { await loadHistory() },
             retrySummary: { await reloadSummary() },
-            removeCard: { card in confirmRemoveCard(card) }
+            retryCustomFields: { await reloadCustomFields() },
+            removeCard: { card in confirmRemoveCard(card) },
+            customerUpdated: { updated in state = .loaded(updated) }
         )
     }
 
@@ -271,6 +276,12 @@ struct CustomerDetailView: View {
         history.jobs.apply(result)
     }
 
+    private func reloadCustomFields() async {
+        guard let shopID = try? appState.requireShopID() else { return }
+        if history.customFields.value == nil { history.customFields = .loading }
+        history.customFields.apply(await CustomerDetailLoader.loadCustomFields(shopID: shopID))
+    }
+
     private func reloadSummary() async {
         guard permissions.canSeeSummary else { return }
         let id = customerID
@@ -324,6 +335,10 @@ struct CustomerDetailPermissions: Equatable {
     var canSeeSavedCards: Bool
     /// The server's overview (`customer_summary`) is owner/admin/manager.
     var canSeeSummary: Bool
+    /// Customer files (P-25): add, show to the customer, remove (managers+).
+    var canManageDocuments: Bool
+    /// Referral links (P-29): owner/admin/manager.
+    var canUseReferrals: Bool
     /// Removing a saved card follows the saved-card capability (manager+).
     var canRemoveCards: Bool { canSeeSavedCards }
 
@@ -337,7 +352,10 @@ struct CustomerDetailActions {
     let newJob: () -> Void
     let retryHistory: () async -> Void
     let retrySummary: () async -> Void
+    let retryCustomFields: () async -> Void
     let removeCard: (SavedCard) -> Void
+    /// A section saved the customer row (custom fields).
+    let customerUpdated: (Customer) -> Void
 }
 
 /// Each history section loads (and fails) on its own, so one missing
@@ -350,6 +368,11 @@ struct CustomerDetailHistory {
     var memberships: LoadState<[CustomerMembershipItem]> = .idle
     var savedCards: LoadState<[SavedCard]> = .idle
     var summary: LoadState<CustomerSummary> = .idle
+    /// The shop's customer fields, archived ones included (P-9).
+    var customFields: LoadState<[JobsCustomField]> = .idle
+    /// Whether the shop's referral program is on (P-29; managers+ read it,
+    /// false when unknown).
+    var referralProgramOn = false
 }
 
 /// Loads every history section in parallel.
@@ -368,6 +391,8 @@ enum CustomerDetailLoader {
         async let memberships = loadMemberships(allowed: permissions.canSeeMemberships, shopID: shopID, customerID: customerID)
         async let savedCards = loadSavedCards(allowed: permissions.canSeeSavedCards, shopID: shopID, customerID: customerID)
         async let summary = loadSummary(allowed: permissions.canSeeSummary, customerID: customerID)
+        async let customFields = loadCustomFields(shopID: shopID)
+        async let referralProgramOn = loadReferralProgram(allowed: permissions.canUseReferrals, shopID: shopID)
 
         var next = current
         next.vehicles.apply(await vehicles)
@@ -377,7 +402,21 @@ enum CustomerDetailLoader {
         next.memberships.apply(await memberships)
         next.savedCards.apply(await savedCards)
         next.summary.apply(await summary)
+        next.customFields.apply(await customFields)
+        next.referralProgramOn = await referralProgramOn
         return next
+    }
+
+    static func loadCustomFields(shopID: UUID) async -> LoadState<[JobsCustomField]> {
+        await LoadState<[JobsCustomField]>.result {
+            try await JobsCustomFieldService.allFields(shopID: shopID, entity: .customer)
+        }
+    }
+
+    /// The referral card is an extra: a failed read just hides it.
+    private static func loadReferralProgram(allowed: Bool, shopID: UUID) async -> Bool {
+        guard allowed else { return false }
+        return (try? await OpsReferralService.isProgramEnabled(shopID: shopID)) ?? false
     }
 
     private static func loadVehicles(shopID: UUID, customerID: UUID) async -> LoadState<[Vehicle]> {

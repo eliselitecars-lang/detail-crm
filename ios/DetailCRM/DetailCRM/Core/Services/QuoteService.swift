@@ -88,6 +88,62 @@ enum QuoteService {
         var lines: [QuoteLineItem]
         var customer: QuoteCustomerRef?
         var vehicle: QuoteVehicleRef?
+        /// Proposal options in display order (empty for a plain quote).
+        var options: [MoneyQuoteOption] = []
+        /// The job the quote became (number + how it was scheduled).
+        var convertedJob: ConvertedJobRef?
+        /// The shop's online self-scheduling switch; nil when it couldn't
+        /// be read.
+        var selfScheduleSetting: SelfScheduleSetting?
+
+        /// The option the totals count (the customer's choice, else first).
+        var effectiveOptionID: UUID? { quote.effectiveOptionID(options: options) }
+
+        /// Lines the quote total counts right now.
+        var countedLines: [QuoteLineItem] {
+            let effective = effectiveOptionID
+            return lines.filter { quote.counts($0, effectiveOptionID: effective) }
+        }
+    }
+
+    /// The job an approved quote was converted into.
+    // table: jobs
+    struct ConvertedJobRef: Codable, Hashable, Sendable {
+        var id: UUID
+        var number: Int
+        var status: JobStatus
+        var scheduledStart: Date?
+        /// staff | online_booking | quote | membership
+        var source: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case number
+            case status
+            case scheduledStart = "scheduled_start"
+            case source
+        }
+
+        static let selectColumns = "id,number,status,scheduled_start,source"
+    }
+
+    /// Whether the shop lets customers schedule approved quotes online.
+    // table: booking_settings
+    struct SelfScheduleSetting: Codable, Hashable, Sendable {
+        /// Online booking is on.
+        var enabled: Bool
+        /// Quote self-scheduling is on.
+        var quoteSelfSchedule: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case enabled
+            case quoteSelfSchedule = "quote_self_schedule"
+        }
+
+        static let selectColumns = "enabled,quote_self_schedule"
+
+        /// Customers can actually schedule (both switches on).
+        var isAvailable: Bool { enabled && quoteSelfSchedule }
     }
 
     static func detail(shopID: UUID, quoteID: UUID) async throws -> DetailData {
@@ -102,10 +158,60 @@ enum QuoteService {
         guard let quote = quotes.first else { throw AppError.notFound("That quote") }
 
         async let linesTask = lines(shopID: shopID, quoteID: quoteID)
+        async let optionsTask = options(shopID: shopID, quoteID: quoteID)
         async let customerTask = customer(shopID: shopID, customerID: quote.customerID)
         async let vehicleTask = vehicle(shopID: shopID, vehicleID: quote.vehicleID)
-        let (lines, customer, vehicle) = try await (linesTask, customerTask, vehicleTask)
-        return DetailData(quote: quote, lines: lines, customer: customer, vehicle: vehicle)
+        let (lines, options, customer, vehicle) = try await (linesTask, optionsTask, customerTask, vehicleTask)
+        // Extras must not hide the quote itself.
+        let jobRef = try? await convertedJob(shopID: shopID, jobID: quote.convertedJobID)
+        let setting = try? await selfScheduleSetting(shopID: shopID)
+        return DetailData(
+            quote: quote,
+            lines: lines,
+            customer: customer,
+            vehicle: vehicle,
+            options: options,
+            convertedJob: jobRef,
+            selfScheduleSetting: setting
+        )
+    }
+
+    /// The quote's proposal options in display order.
+    static func options(shopID: UUID, quoteID: UUID) async throws -> [MoneyQuoteOption] {
+        let rows: [MoneyQuoteOption] = try await Supa.client
+            .from("quote_options")
+            .select(MoneyQuoteOption.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("quote_id", value: quoteID.uuidString)
+            .order("sort", ascending: true)
+            .order("created_at", ascending: true)
+            .execute()
+            .value
+        return MoneyQuoteOption.ordered(rows)
+    }
+
+    static func convertedJob(shopID: UUID, jobID: UUID?) async throws -> ConvertedJobRef? {
+        guard let jobID else { return nil }
+        let rows: [ConvertedJobRef] = try await Supa.client
+            .from("jobs")
+            .select(ConvertedJobRef.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: jobID.uuidString)
+            .limit(1)
+            .execute()
+            .value
+        return rows.first
+    }
+
+    static func selfScheduleSetting(shopID: UUID) async throws -> SelfScheduleSetting? {
+        let rows: [SelfScheduleSetting] = try await Supa.client
+            .from("booking_settings")
+            .select(SelfScheduleSetting.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .limit(1)
+            .execute()
+            .value
+        return rows.first
     }
 
     static func lines(shopID: UUID, quoteID: UUID) async throws -> [QuoteLineItem] {
@@ -231,9 +337,17 @@ enum QuoteService {
 
     // MARK: - Save (create / edit)
 
-    /// Creates or updates the quote and reconciles its lines. Returns the
-    /// quote id. Totals are recomputed by the database.
-    static func save(shopID: UUID, draft: QuoteDraft) async throws -> UUID {
+    /// Creates or updates the quote and reconciles its options and lines.
+    /// Returns the quote id. Totals are recomputed by the database.
+    ///
+    /// The save is several requests (PostgREST has no multi-table
+    /// transaction), so `draft` records each row as it is created or
+    /// deleted: when a request fails, the caller keeps the updated draft and
+    /// saving it again finishes the job without adding the same options and
+    /// lines twice (`QuoteDraft.applyEdits(using:)`). New options and custom
+    /// lines get their ids here, so an insert whose reply was lost is found
+    /// on the retry instead of being inserted again.
+    static func save(shopID: UUID, draft: inout QuoteDraft) async throws -> UUID {
         guard let customer = draft.customer else {
             throw AppError.invalidInput("Choose a customer.")
         }
@@ -242,19 +356,26 @@ enum QuoteService {
                 throw AppError.invalidInput("Every line needs a name.")
             }
         }
+        guard draft.options.count <= MoneyQuoteOption.maxPerQuote else {
+            throw AppError.invalidInput("A quote can have at most \(MoneyQuoteOption.maxPerQuote) options.")
+        }
+        if draft.options.contains(where: { $0.validName == nil }) {
+            throw AppError.invalidInput("Every option needs a name (up to \(MoneyQuoteOption.maxNameLength) characters).")
+        }
+        let knownOptions = Set(draft.options.map { $0.localID })
+        if draft.lines.contains(where: { $0.optionLocalID.map { !knownOptions.contains($0) } ?? false }) {
+            throw AppError.invalidInput("An item belongs to an option that was removed. Move it to another option or remove it.")
+        }
         let fields = QuoteFieldsPayload(draft: draft, customerID: customer.id)
         if let existing = draft.quoteID {
-            // Lines first: they carry no vehicle of their own (the quote's
-            // vehicle applies), so a customer change can't trip the
-            // "line vehicle belongs to the customer" check.
-            try await updateExistingLines(shopID: shopID, quoteID: existing, draft: draft)
-            try await Supa.client
-                .from("quotes")
-                .update(fields, returning: .minimal)
-                .eq("shop_id", value: shopID.uuidString)
-                .eq("id", value: existing.uuidString)
-                .execute()
-            try await insertNewLines(shopID: shopID, quoteID: existing, draft: draft)
+            try await draft.applyEdits(using: saveRequests(shopID: shopID, quoteID: existing) {
+                try await Supa.client
+                    .from("quotes")
+                    .update(fields, returning: .minimal)
+                    .eq("shop_id", value: shopID.uuidString)
+                    .eq("id", value: existing.uuidString)
+                    .execute()
+            })
             return existing
         }
         let insert = QuoteInsertPayload(shopID: shopID, fields: fields)
@@ -265,54 +386,148 @@ enum QuoteService {
             .single()
             .execute()
             .value
+        var progress = draft
+        progress.quoteID = created.id
         do {
-            try await insertNewLines(shopID: shopID, quoteID: created.id, draft: draft)
+            // The quote was just written with these fields.
+            try await progress.applyEdits(using: saveRequests(shopID: shopID, quoteID: created.id) {})
         } catch {
             // Don't leave a half-built quote behind: a retry creates it anew.
-            try? await delete(shopID: shopID, quoteID: created.id)
+            // If it can't be removed, the retry finishes this one instead.
+            if (try? await delete(shopID: shopID, quoteID: created.id)) == nil {
+                draft = progress
+            }
             throw error
         }
+        draft = progress
         return created.id
     }
 
-    /// Deletes removed lines and updates the kept ones (with their new order).
-    private static func updateExistingLines(shopID: UUID, quoteID: UUID, draft: QuoteDraft) async throws {
-        let keptIDs = Set(draft.lines.compactMap { $0.id })
-        let removed = draft.originalLineIDs.filter { !keptIDs.contains($0) }
-        if !removed.isEmpty {
-            try await Supa.client
-                .from("quote_line_items")
-                .delete(returning: .minimal)
-                .eq("shop_id", value: shopID.uuidString)
-                .eq("quote_id", value: quoteID.uuidString)
-                .in("id", values: removed.map { $0.uuidString })
-                .execute()
-        }
-        for (index, line) in draft.lines.enumerated() {
-            guard let lineID = line.id else { continue }
-            let payload = QuoteLinePayload(line: line, sort: index + 1)
-            try await Supa.client
-                .from("quote_line_items")
-                .update(payload, returning: .minimal)
-                .eq("shop_id", value: shopID.uuidString)
-                .eq("quote_id", value: quoteID.uuidString)
-                .eq("id", value: lineID.uuidString)
-                .execute()
-        }
+    /// The Supabase requests of one save (see `QuoteDraft.SaveRequests`).
+    private static func saveRequests(
+        shopID: UUID,
+        quoteID: UUID,
+        updateQuote: @escaping () async throws -> Void
+    ) -> QuoteDraft.SaveRequests {
+        let shop = shopID.uuidString
+        let quote = quoteID.uuidString
+        return QuoteDraft.SaveRequests(
+            existingOptionIDs: { ids in
+                let rows: [IDRow] = try await Supa.client
+                    .from("quote_options")
+                    .select("id")
+                    .eq("shop_id", value: shop)
+                    .eq("quote_id", value: quote)
+                    .in("id", values: ids.map { $0.uuidString })
+                    .execute()
+                    .value
+                return Set(rows.map { $0.id })
+            },
+            existingLines: { ids in
+                let rows: [LineRefRow] = try await Supa.client
+                    .from("quote_line_items")
+                    .select("id,option_id")
+                    .eq("shop_id", value: shop)
+                    .eq("quote_id", value: quote)
+                    .in("id", values: ids.map { $0.uuidString })
+                    .execute()
+                    .value
+                return rows.map { QuoteDraft.SavedLineRef(id: $0.id, optionID: $0.optionID) }
+            },
+            deleteLines: { ids in
+                try await Supa.client
+                    .from("quote_line_items")
+                    .delete(returning: .minimal)
+                    .eq("shop_id", value: shop)
+                    .eq("quote_id", value: quote)
+                    .in("id", values: ids.map { $0.uuidString })
+                    .execute()
+            },
+            deleteOptions: { ids in
+                // Any lines still on them go with them (FK cascade).
+                try await Supa.client
+                    .from("quote_options")
+                    .delete(returning: .minimal)
+                    .eq("shop_id", value: shop)
+                    .eq("quote_id", value: quote)
+                    .in("id", values: ids.map { $0.uuidString })
+                    .execute()
+            },
+            updateOption: { id, option, sort in
+                try await Supa.client
+                    .from("quote_options")
+                    .update(QuoteOptionPayload(option: option, sort: sort), returning: .minimal)
+                    .eq("shop_id", value: shop)
+                    .eq("quote_id", value: quote)
+                    .eq("id", value: id.uuidString)
+                    .execute()
+            },
+            insertOption: { id, option, sort in
+                let payload = QuoteOptionInsertPayload(
+                    id: id,
+                    shopID: shopID,
+                    quoteID: quoteID,
+                    fields: QuoteOptionPayload(option: option, sort: sort)
+                )
+                try await Supa.client
+                    .from("quote_options")
+                    .insert(payload, returning: .minimal)
+                    .execute()
+            },
+            updateLine: { id, line, sort, optionID, placementOnly in
+                let request = Supa.client.from("quote_line_items")
+                if placementOnly {
+                    try await request
+                        .update(QuoteLinePlacementPayload(sort: sort, optionID: optionID), returning: .minimal)
+                        .eq("shop_id", value: shop)
+                        .eq("quote_id", value: quote)
+                        .eq("id", value: id.uuidString)
+                        .execute()
+                } else {
+                    try await request
+                        .update(QuoteLinePayload(line: line, sort: sort, optionID: optionID), returning: .minimal)
+                        .eq("shop_id", value: shop)
+                        .eq("quote_id", value: quote)
+                        .eq("id", value: id.uuidString)
+                        .execute()
+                }
+            },
+            insertLines: { lines in
+                let inserts = lines.map { new in
+                    QuoteLineInsertPayload(
+                        id: new.id,
+                        shopID: shopID,
+                        quoteID: quoteID,
+                        line: QuoteLinePayload(line: new.line, sort: new.sort, optionID: new.optionID)
+                    )
+                }
+                try await Supa.client
+                    .from("quote_line_items")
+                    .insert(inserts, returning: .minimal)
+                    .execute()
+            },
+            addFeeLine: { feeID in
+                try await JobService.addFeeLine(kind: .quote, documentID: quoteID, feeID: feeID)
+            },
+            updateQuote: updateQuote
+        )
     }
 
-    /// Inserts the lines added in the builder (one request).
-    private static func insertNewLines(shopID: UUID, quoteID: UUID, draft: QuoteDraft) async throws {
-        var inserts: [QuoteLineInsertPayload] = []
-        for (index, line) in draft.lines.enumerated() where line.id == nil {
-            let payload = QuoteLinePayload(line: line, sort: index + 1)
-            inserts.append(QuoteLineInsertPayload(shopID: shopID, quoteID: quoteID, line: payload))
+    /// A saved option's id (existence check on a retried save).
+    private struct IDRow: Decodable {
+        let id: UUID
+    }
+
+    /// A saved line's id and option (existence check on a retried save).
+    // table: quote_line_items
+    private struct LineRefRow: Decodable {
+        let id: UUID
+        let optionID: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case optionID = "option_id"
         }
-        guard !inserts.isEmpty else { return }
-        try await Supa.client
-            .from("quote_line_items")
-            .insert(inserts, returning: .minimal)
-            .execute()
     }
 
     // MARK: - Status actions
@@ -348,14 +563,17 @@ enum QuoteService {
     /// Records the customer's approval given in person / by phone
     /// (`staff_record_quote_response`, manager+): in one transaction the
     /// optional items the customer chose become exactly
-    /// `selectedOptionalIDs` (nil keeps the current choices) and the quote
-    /// is approved. Only a sent / viewed, unexpired quote can be answered.
+    /// `selectedOptionalIDs` (nil keeps the current choices), the chosen
+    /// proposal option is stored (required for a quote with options, and
+    /// only then) and the quote is approved. Only a sent / viewed,
+    /// unexpired quote can be answered.
     @discardableResult
     static func recordApproval(
         shopID: UUID,
         quoteID: UUID,
         approvedByName: String,
-        selectedOptionalIDs: [UUID]?
+        selectedOptionalIDs: [UUID]?,
+        optionID: UUID? = nil
     ) async throws -> Quote {
         let name = approvedByName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw AppError.invalidInput("Enter who approved the quote.") }
@@ -366,10 +584,23 @@ enum QuoteService {
                 p_action: "approve",
                 p_selected_optional_line_ids: selectedOptionalIDs,
                 p_approved_by_name: name,
-                p_declined_reason: nil
+                p_declined_reason: nil,
+                p_option_id: optionID
             ))
             .execute()
             .value
+    }
+
+    /// Lets (or stops) the customer schedule this quote online once it is
+    /// approved (P-16, `quotes.self_schedule`). The shop's booking settings
+    /// must allow quote self-scheduling too.
+    static func setSelfSchedule(shopID: UUID, quoteID: UUID, enabled: Bool) async throws {
+        try await Supa.client
+            .from("quotes")
+            .update(["self_schedule": enabled], returning: .minimal)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: quoteID.uuidString)
+            .execute()
     }
 
     /// Records the customer's decline given in person / by phone
@@ -386,7 +617,8 @@ enum QuoteService {
                 p_action: "decline",
                 p_selected_optional_line_ids: nil,
                 p_approved_by_name: nil,
-                p_declined_reason: trimmed
+                p_declined_reason: trimmed,
+                p_option_id: nil
             ))
             .execute()
             .value
@@ -519,8 +751,10 @@ private struct QuoteLinePayload: Encodable {
     let isOptional: Bool
     let isSelected: Bool
     let sort: Int
+    /// The saved option id; nil = shared by every option.
+    let optionID: UUID?
 
-    init(line: QuoteDraftLine, sort: Int) {
+    init(line: QuoteDraftLine, sort: Int, optionID: UUID?) {
         self.serviceID = line.serviceID
         self.name = line.name.trimmingCharacters(in: .whitespacesAndNewlines)
         self.lineDescription = line.lineDescription?.trimmedNonEmpty
@@ -532,6 +766,7 @@ private struct QuoteLinePayload: Encodable {
         self.isOptional = line.isOptional
         self.isSelected = line.isOptional ? line.isSelected : true
         self.sort = sort
+        self.optionID = optionID
     }
 
     enum LineKeys: String, CodingKey {
@@ -547,6 +782,7 @@ private struct QuoteLinePayload: Encodable {
         case isOptional = "optional"
         case isSelected = "selected"
         case sort
+        case optionID = "option_id"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -563,21 +799,28 @@ private struct QuoteLinePayload: Encodable {
         try c.encode(isOptional, forKey: .isOptional)
         try c.encode(isSelected, forKey: .isSelected)
         try c.encode(sort, forKey: .sort)
+        // Explicit null moves a line back to "shared".
+        try c.encode(optionID, forKey: .optionID)
     }
 }
 
+/// A new custom line; its id is chosen by the app so a retried save can
+/// tell whether the insert reached the server.
 private struct QuoteLineInsertPayload: Encodable {
+    let id: UUID
     let shopID: UUID
     let quoteID: UUID
     let line: QuoteLinePayload
 
     enum InsertKeys: String, CodingKey {
+        case id
         case shopID = "shop_id"
         case quoteID = "quote_id"
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: InsertKeys.self)
+        try c.encode(id, forKey: .id)
         try c.encode(shopID, forKey: .shopID)
         try c.encode(quoteID, forKey: .quoteID)
         try line.encode(to: encoder)
@@ -592,4 +835,75 @@ private struct QuoteResponseParams: Encodable {
     let p_selected_optional_line_ids: [UUID]?
     let p_approved_by_name: String?
     let p_declined_reason: String?
+    let p_option_id: UUID?
+}
+
+// MARK: - Option and fee-line payloads (P-15 / P-21)
+
+extension QuoteService {
+    /// Place and option of a fee line the server just added (its name, price
+    /// and tax come from the shop's fee).
+    fileprivate struct QuoteLinePlacementPayload: Encodable {
+        let sort: Int
+        let optionID: UUID?
+
+        enum PlacementKeys: String, CodingKey {
+            case sort
+            case optionID = "option_id"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: PlacementKeys.self)
+            try c.encode(sort, forKey: .sort)
+            try c.encode(optionID, forKey: .optionID)
+        }
+    }
+
+    /// Editable option columns (totals are server-maintained).
+    fileprivate struct QuoteOptionPayload: Encodable {
+        let name: String
+        let optionDescription: String?
+        let sort: Int
+
+        init(option: MoneyQuoteOption.Draft, sort: Int) {
+            self.name = option.validName ?? option.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.optionDescription = option.optionDescription.trimmedNonEmpty
+            self.sort = sort
+        }
+
+        enum OptionKeys: String, CodingKey {
+            case name
+            case optionDescription = "description"
+            case sort
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: OptionKeys.self)
+            try c.encode(name, forKey: .name)
+            try c.encode(optionDescription, forKey: .optionDescription)
+            try c.encode(sort, forKey: .sort)
+        }
+    }
+
+    /// A new option; its id is chosen by the app (see QuoteLineInsertPayload).
+    fileprivate struct QuoteOptionInsertPayload: Encodable {
+        let id: UUID
+        let shopID: UUID
+        let quoteID: UUID
+        let fields: QuoteOptionPayload
+
+        enum InsertKeys: String, CodingKey {
+            case id
+            case shopID = "shop_id"
+            case quoteID = "quote_id"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: InsertKeys.self)
+            try c.encode(id, forKey: .id)
+            try c.encode(shopID, forKey: .shopID)
+            try c.encode(quoteID, forKey: .quoteID)
+            try fields.encode(to: encoder)
+        }
+    }
 }

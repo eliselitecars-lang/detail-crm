@@ -3,7 +3,8 @@
 //  DetailCRM
 //
 //  Sheets for the quote screen: send (mark sent + the quote_sent message),
-//  record the customer's approval / decline, and convert to a job.
+//  record the customer's approval / decline (with the proposal option they
+//  chose), convert to a job, and the online self-scheduling switch.
 //
 
 import SwiftUI
@@ -128,6 +129,8 @@ struct QuoteResponseSheet: View {
     /// The quote's lines: an approval lets staff tick the optional items
     /// the customer chose.
     let lines: [QuoteLineItem]
+    /// Proposal options (P-15): an approval must say which one was chosen.
+    var options: [MoneyQuoteOption] = []
     let isApproval: Bool
     let onDone: () async -> Void
 
@@ -139,6 +142,8 @@ struct QuoteResponseSheet: View {
     @State private var errorText: String?
     @State private var didPrefill = false
     @State private var selectedOptionalIDs: Set<UUID> = []
+    /// The option the customer chose (quotes with options).
+    @State private var chosenOptionID: UUID?
 
     var body: some View {
         NavigationStack {
@@ -154,6 +159,37 @@ struct QuoteResponseSheet: View {
                         text: $text,
                         kind: .name
                     )
+                    if !options.isEmpty {
+                        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                            Text("Option the customer chose")
+                                .font(Theme.Typography.footnote.weight(.semibold))
+                                .foregroundStyle(Theme.textSecondary)
+                            MoneyQuoteOptionPicker(
+                                choices: orderedOptions.map { MoneyQuoteOptionPicker.Choice(option: $0) },
+                                selection: $chosenOptionID,
+                                accessibilityTitle: "Chosen option"
+                            )
+                            if let chosen = orderedOptions.first(where: { $0.id == chosenOptionID }) {
+                                HStack {
+                                    Text("\(chosen.name) total")
+                                        .font(Theme.Typography.subheadline)
+                                        .foregroundStyle(Theme.textSecondary)
+                                    Spacer(minLength: Theme.Spacing.sm)
+                                    MoneyText(cents: chosen.totalCents, currencyCode: appState.currencyCode)
+                                }
+                                .accessibilityElement(children: .combine)
+                                Text("With the optional items picked so far; the quote total follows the choices below once recorded.")
+                                    .font(Theme.Typography.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("Choose the option the customer approved.")
+                                    .font(Theme.Typography.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                        }
+                        .cardStyle()
+                    }
                     if !optionalLines.isEmpty {
                         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                             Text("Optional items the customer chose")
@@ -205,14 +241,25 @@ struct QuoteResponseSheet: View {
                     if isApproval, let customer {
                         text = customer.displayName
                     }
-                    selectedOptionalIDs = Set(optionalLines.filter { $0.isSelected }.map { $0.id })
+                    if let selected = quote.selectedOptionID, options.contains(where: { $0.id == selected }) {
+                        chosenOptionID = selected
+                    }
+                    selectedOptionalIDs = Set(lines.filter { $0.isOptional && $0.isSelected }.map { $0.id })
                 }
             }
         }
     }
 
+    private var orderedOptions: [MoneyQuoteOption] {
+        MoneyQuoteOption.ordered(options)
+    }
+
+    /// Optional items that can be picked: shared ones plus those of the
+    /// chosen option (none of another option's).
     private var optionalLines: [QuoteLineItem] {
-        lines.filter { $0.isOptional }.sorted { $0.sort < $1.sort }
+        lines
+            .filter { $0.isOptional && ($0.optionID == nil || (chosenOptionID != nil && $0.optionID == chosenOptionID)) }
+            .sorted { $0.sort < $1.sort }
     }
 
     private func selectionBinding(_ id: UUID) -> Binding<Bool> {
@@ -232,6 +279,9 @@ struct QuoteResponseSheet: View {
         if !isApproval {
             return "Use this when the customer turned the quote down in person or by phone."
         }
+        if !options.isEmpty {
+            return "Use this when the customer approved in person or by phone. Choose the option they picked and tick any optional items; the total follows."
+        }
         return optionalLines.isEmpty
             ? "Use this when the customer approved in person or by phone."
             : "Use this when the customer approved in person or by phone. Tick the optional items they chose; the total follows."
@@ -239,6 +289,10 @@ struct QuoteResponseSheet: View {
 
     private func submit() async {
         errorText = nil
+        if isApproval && !options.isEmpty && chosenOptionID == nil {
+            errorText = "Choose the option the customer approved."
+            return
+        }
         do {
             let shopID = try appState.requireShopID()
             if isApproval {
@@ -248,7 +302,8 @@ struct QuoteResponseSheet: View {
                     approvedByName: text,
                     selectedOptionalIDs: optionalLines.isEmpty
                         ? nil
-                        : optionalLines.map { $0.id }.filter { selectedOptionalIDs.contains($0) }
+                        : optionalLines.map { $0.id }.filter { selectedOptionalIDs.contains($0) },
+                    optionID: options.isEmpty ? nil : chosenOptionID
                 )
             } else {
                 try await QuoteService.recordDecline(shopID: shopID, quoteID: quote.id, reason: text)
@@ -282,7 +337,7 @@ struct QuoteConvertSheet: View {
     var body: some View {
         NavigationStack {
             FormScreen {
-                Text("Creates a job with the quote's items (optional items only when the customer chose them), discount and notes.")
+                Text("Creates a job with the quote's items (optional items only when the customer chose them; for a quote with options, the chosen option's items), discount and notes.")
                     .font(Theme.Typography.subheadline)
                     .foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -367,6 +422,91 @@ struct QuoteConvertSheet: View {
             dismiss()
         } catch {
             errorText = ErrorText.message(for: error)
+        }
+    }
+}
+
+// MARK: - Online self-scheduling (P-16)
+
+extension QuoteDetailView {
+
+    /// "Customer can schedule online": after approving, the customer picks a
+    /// time on the quote's page (the shop's online booking hours and
+    /// capacity apply) and pays any deposit there. Per quote
+    /// (`quotes.self_schedule`); the shop turns the feature on in its online
+    /// booking settings on the web.
+    struct SelfScheduleSection: View {
+        let data: QuoteService.DetailData
+        let onChanged: () async -> Void
+
+        @Environment(AppState.self) private var appState
+        @Environment(ToastCenter.self) private var toasts
+        @State private var isSaving = false
+
+        /// Shown until the quote is converted, declined or expired.
+        static func applies(to quote: Quote) -> Bool {
+            switch quote.status {
+            case .draft, .sent, .viewed, .approved: return true
+            case .declined, .expired, .converted: return false
+            }
+        }
+
+        var body: some View {
+            MoneySectionCard("Online scheduling") {
+                Toggle(isOn: binding) {
+                    Text("Customer can schedule online")
+                        .font(Theme.Typography.body)
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .tint(Theme.glacier)
+                .disabled(isSaving)
+                Text(explanation)
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+
+        private var shopAllows: Bool? { data.selfScheduleSetting?.isAvailable }
+
+        private var explanation: String {
+            switch shopAllows {
+            case .none:
+                return "After approving, the customer can pick a time on the quote page when your shop's online booking allows it."
+            case .some(false):
+                return "Online scheduling of approved quotes is off for your shop. Turn it on in the online booking settings on the web."
+            case .some(true):
+                guard data.quote.selfSchedule else {
+                    return "The customer won't be offered times online for this quote. Convert it to a job yourself once it's approved."
+                }
+                if data.quote.status == .approved {
+                    return "Waiting for the customer to pick a time on the quote page. Your online booking hours and capacity apply, and any deposit is paid there."
+                }
+                return "Once the customer approves, they can pick a time on the quote page. Your online booking hours and capacity apply, and any deposit is paid there."
+            }
+        }
+
+        private var binding: Binding<Bool> {
+            Binding(
+                get: { data.quote.selfSchedule },
+                set: { enabled in
+                    Task { await save(enabled) }
+                }
+            )
+        }
+
+        private func save(_ enabled: Bool) async {
+            guard !isSaving else { return }
+            isSaving = true
+            defer { isSaving = false }
+            do {
+                let shopID = try appState.requireShopID()
+                try await QuoteService.setSelfSchedule(shopID: shopID, quoteID: data.quote.id, enabled: enabled)
+                await onChanged()
+                toasts.show(enabled ? "The customer can schedule this quote online" : "Online scheduling turned off for this quote")
+            } catch {
+                toasts.showError(error)
+            }
         }
     }
 }

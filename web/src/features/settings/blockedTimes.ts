@@ -1,6 +1,49 @@
 import { addLocalDays, formatInTz, formatTimeRange, shopToday, utcToShopLocal } from '@/lib/dates';
-import type { BlockedTime } from './api';
-import type { BlockedTimeFormInput } from './schemas';
+import type { BlockedTime, CalendarEventKind } from './api';
+import type { BlockedTimeFormInput, RecurrenceRule } from './schemas';
+
+export const EVENT_KIND_LABELS: Record<CalendarEventKind, string> = {
+  closed: 'Closed',
+  time_off: 'Time off',
+  meeting: 'Meeting',
+  consultation: 'Consultation',
+  reminder: 'Reminder',
+  other: 'Other',
+};
+
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** Reads blocked_times.recurrence (null when absent or malformed). */
+export function readRecurrence(value: unknown): RecurrenceRule | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (v.freq !== 'day' && v.freq !== 'week' && v.freq !== 'month') return null;
+  const rule: RecurrenceRule = { freq: v.freq };
+  if (typeof v.interval === 'number') rule.interval = v.interval;
+  if (Array.isArray(v.by_weekday)) {
+    rule.by_weekday = v.by_weekday.filter((d): d is number => typeof d === 'number');
+  }
+  if (typeof v.until_date === 'string') rule.until_date = v.until_date;
+  if (typeof v.count === 'number') rule.count = v.count;
+  return rule;
+}
+
+/** "Every 2 weeks on Mon, Wed · until Mar 31, 2027" */
+export function describeRecurrence(rule: RecurrenceRule | null): string | null {
+  if (!rule) return null;
+  const n = rule.interval ?? 1;
+  const unit = rule.freq === 'day' ? 'day' : rule.freq === 'week' ? 'week' : 'month';
+  let text = n === 1 ? `Every ${unit}` : `Every ${n} ${unit}s`;
+  if (rule.freq === 'week' && rule.by_weekday && rule.by_weekday.length > 0) {
+    text += ` on ${[...rule.by_weekday]
+      .sort()
+      .map((d) => WEEKDAY_SHORT[d] ?? '')
+      .join(', ')}`;
+  }
+  if (rule.until_date) text += ` · until ${formatInTz(rule.until_date, 'UTC', 'MMM d, yyyy')}`;
+  else if (rule.count) text += ` · ${rule.count} time${rule.count === 1 ? '' : 's'}`;
+  return text;
+}
 
 /** True when a block starts and ends at shop-local midnight (whole days). */
 export function isAllDayBlock(
@@ -35,28 +78,55 @@ export function describeBlock(
 
 /** Form values for a new block (today, all day) or an existing one. */
 export function blockToFormInput(block: BlockedTime | null, tz: string): BlockedTimeFormInput {
+  const repeatDefaults = {
+    repeat: '' as const,
+    interval: '1',
+    weekdays: [] as number[],
+    repeatEnd: 'never' as const,
+    untilDate: '',
+    count: '10',
+  };
   if (!block) {
     const today = shopToday(tz);
     return {
+      kind: 'closed',
       memberId: '',
+      title: '',
       allDay: true,
       startDate: today,
       startTime: '09:00',
       endDate: today,
       endTime: '17:00',
       reason: '',
+      affectsCapacity: true,
+      ...repeatDefaults,
     };
   }
   const start = utcToShopLocal(block.starts_at, tz);
   const end = utcToShopLocal(block.ends_at, tz);
   const allDay = isAllDayBlock(block, tz);
+  const rule = readRecurrence(block.recurrence);
   return {
+    kind: block.kind,
     memberId: block.member_id ?? '',
+    title: block.title ?? '',
     allDay,
     startDate: start.date,
     startTime: allDay ? '09:00' : start.time,
     endDate: allDay ? addLocalDays(end.date, -1) : end.date,
     endTime: allDay ? '17:00' : end.time,
     reason: block.reason ?? '',
+    affectsCapacity:
+      block.affects_capacity ?? (block.kind === 'closed' || block.kind === 'time_off'),
+    ...(rule
+      ? {
+          repeat: rule.freq,
+          interval: String(rule.interval ?? 1),
+          weekdays: rule.by_weekday ?? [],
+          repeatEnd: rule.until_date ? 'until' : rule.count ? 'count' : 'never',
+          untilDate: rule.until_date ?? '',
+          count: String(rule.count ?? 10),
+        }
+      : repeatDefaults),
   };
 }

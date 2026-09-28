@@ -26,6 +26,13 @@ struct CustomerDetailContent: View {
                 AnyView(CustomerPrimaryActions(customer: customer, permissions: permissions, newJob: actions.newJob))
                 AnyView(CustomerContactDetails(customer: customer))
                 AnyView(CustomerTagsAndNotes(customer: customer))
+                AnyView(OpsCustomerCustomDataSection(
+                    customer: customer,
+                    fields: history.customFields,
+                    canEdit: permissions.canEdit,
+                    retry: actions.retryCustomFields,
+                    onSaved: actions.customerUpdated
+                ))
                 if permissions.canSeeSummary {
                     AnyView(CustomerSummarySection(
                         state: history.summary,
@@ -49,6 +56,12 @@ struct CustomerDetailContent: View {
                     currencyCode: currencyCode,
                     retry: actions.retryHistory
                 ))
+                if permissions.canManageDocuments {
+                    AnyView(OpsCustomerDocumentsSection(customerID: customer.id, canManage: permissions.canManageDocuments))
+                }
+                if permissions.canUseReferrals && history.referralProgramOn {
+                    AnyView(OpsReferralCodeRow(customer: customer))
+                }
                 AnyView(moneySections)
             }
             .padding(.horizontal, Theme.Spacing.gutter)
@@ -110,7 +123,9 @@ private struct CustomerHeaderCard: View {
                             text: customer.lifecycle.displayName,
                             tone: customer.lifecycle == .lead ? .warning : .info
                         )
-                        if customer.isArchived {
+                        if customer.mergedIntoID != nil {
+                            StatusBadge(text: "Merged", tone: .neutral)
+                        } else if customer.isArchived {
                             StatusBadge(text: "Archived", tone: .neutral)
                         }
                     }
@@ -119,6 +134,28 @@ private struct CustomerHeaderCard: View {
                         .foregroundStyle(Theme.textTertiary)
                 }
                 Spacer(minLength: 0)
+            }
+            if let survivorID = customer.mergedIntoID {
+                NavigationLink(value: AppRoute.customer(survivorID)) {
+                    HStack(spacing: Theme.Spacing.sm) {
+                        Image(systemName: "arrow.triangle.merge")
+                            .foregroundStyle(Theme.glacier)
+                            .accessibilityHidden(true)
+                        Text("This duplicate was merged into another customer. Their vehicles, jobs and history are there now.")
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .font(Theme.Typography.caption.weight(.semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                            .accessibilityHidden(true)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens the customer it was merged into")
             }
             HStack(spacing: Theme.Spacing.sm) {
                 CustomerContactButton(title: "Call", systemImage: "phone.fill", isEnabled: callURL != nil) {

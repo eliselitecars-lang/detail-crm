@@ -39,6 +39,7 @@ export const STATUS_MAP = {
   } satisfies Exhaustive<'invoice_status'>,
   payment: {
     pending: { label: 'Pending', tone: 'warning' },
+    processing: { label: 'Processing', tone: 'info' },
     succeeded: { label: 'Succeeded', tone: 'success' },
     failed: { label: 'Failed', tone: 'danger' },
     cancelled: { label: 'Cancelled', tone: 'neutral' },

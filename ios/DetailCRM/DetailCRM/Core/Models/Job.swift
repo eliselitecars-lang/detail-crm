@@ -13,6 +13,7 @@
 //
 
 import Foundation
+import Supabase
 import DetailCore
 
 // MARK: - Enums
@@ -158,6 +159,19 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
     var cancelReason: String?
     var createdAt: Date
     var updatedAt: Date
+    /// Recurring series this job belongs to (P-1; set only by the series
+    /// RPCs) and its occurrence number.
+    var seriesID: UUID?
+    var seriesSeq: Int?
+    /// True once this occurrence was moved on its own ("this job only"):
+    /// "this and following" series edits leave it alone.
+    var seriesDetached: Bool?
+    /// Answers to the shop's job fields / booking questions {key: value}.
+    var customData: [String: AnyJSON]?
+    /// Manual stop order within its shop-local day (0 = first).
+    var routePosition: Int?
+    /// Staff paused the automatic deposit reminders of this job.
+    var depositFollowupsPaused: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -199,6 +213,12 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
         case cancelReason = "cancel_reason"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case seriesID = "series_id"
+        case seriesSeq = "series_seq"
+        case seriesDetached = "series_detached"
+        case customData = "custom_data"
+        case routePosition = "route_position"
+        case depositFollowupsPaused = "deposit_followups_paused"
     }
 
     static let selectColumns = [
@@ -211,6 +231,8 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
         "tax_rate_bps", "tax_cents", "total_cents", "deposit_required_cents",
         "created_by", "confirmed_at", "en_route_at", "started_at", "completed_at",
         "cancelled_at", "cancel_reason", "created_at", "updated_at",
+        "series_id", "series_seq", "series_detached", "custom_data", "route_position",
+        "deposit_followups_paused",
     ].joined(separator: ",")
 
     /// "Job #1042".
@@ -226,6 +248,9 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
             postalCode: servicePostalCode
         )
     }
+
+    /// An occurrence of a recurring series.
+    var isSeriesOccurrence: Bool { seriesID != nil }
 
     /// Scheduled length in minutes, when scheduled.
     var scheduledMinutes: Int? {
@@ -407,6 +432,12 @@ struct JobLineItem: Codable, Identifiable, Hashable, Sendable {
     /// Server-generated `line_total_cents(quantity, unit_price, discount)`.
     var totalCents: Int?
     var createdAt: Date
+    /// A preset fee line (P-21).
+    var feeID: UUID?
+    /// Whether the job discount / coupon applies to this line (server-set).
+    var discountEligible: Bool?
+    /// Included in this membership (free visit).
+    var membershipID: UUID?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -424,12 +455,15 @@ struct JobLineItem: Codable, Identifiable, Hashable, Sendable {
         case sort
         case totalCents = "total_cents"
         case createdAt = "created_at"
+        case feeID = "fee_id"
+        case discountEligible = "discount_eligible"
+        case membershipID = "membership_id"
     }
 
     static let selectColumns = [
         "id", "shop_id", "job_id", "service_id", "vehicle_id", "name", "description",
         "quantity", "unit_price_cents", "discount_cents", "taxable", "duration_minutes",
-        "sort", "total_cents", "created_at",
+        "sort", "total_cents", "created_at", "fee_id", "discount_eligible", "membership_id",
     ].joined(separator: ",")
 }
 
@@ -599,6 +633,8 @@ struct JobPaymentSummary: Codable, Hashable, Sendable {
     var refundedCents: Int
     var pendingCents: Int
     var balanceCents: Int
+    /// Jobs on the live invoice: 1 single, 2+ grouped (fleet) invoice (P-7).
+    var invoiceJobCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case jobID = "job_id"
@@ -614,7 +650,11 @@ struct JobPaymentSummary: Codable, Hashable, Sendable {
         case refundedCents = "refunded_cents"
         case pendingCents = "pending_cents"
         case balanceCents = "balance_cents"
+        case invoiceJobCount = "invoice_job_count"
     }
+
+    /// Billed together with other jobs on one invoice.
+    var isOnGroupedInvoice: Bool { (invoiceJobCount ?? 0) > 1 }
 }
 
 /// The invoice issued by `create_invoice_from_job` (only what the job

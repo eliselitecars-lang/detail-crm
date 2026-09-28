@@ -176,10 +176,10 @@ test.describe('client portal', () => {
       `/q/${QUOTE_TOKEN}`,
     );
     await expect(page.getByRole('list', { name: 'Vehicles' })).toContainText('2021 Toyota Camry');
-    await expect(page.getByRole('link', { name: /Book\s+with Glacier Detailing/ })).toHaveAttribute(
-      'href',
-      '/book/glacier',
-    );
+    const book = page.getByRole('link', { name: /Book\s+with Glacier Detailing/ });
+    await expect(book).toHaveAttribute('href', '/book/glacier');
+    // A new document without a referrer (the booking page may load the shop's tags).
+    await expect(book).toHaveAttribute('rel', 'noreferrer');
     expect(order).toEqual(['claim', 'overview']);
   });
 

@@ -3,7 +3,9 @@
 //  DetailCRM
 //
 //  When and where (shop time zone), the bay/van, and who is assigned.
-//  Managers and above edit both from sheets.
+//  Managers and above edit both from sheets. A visit of a recurring series
+//  shows the repeat rule; managers can end the series from here (edits ask
+//  "this visit / following" in the editor).
 //
 
 import SwiftUI
@@ -18,6 +20,10 @@ struct JobScheduleSection: View {
     let canEdit: Bool
     let onEditDetails: () -> Void
     let onEditAssignees: () -> Void
+    /// The series behind a recurring visit (managers+), when loaded.
+    var series: JobsSeries? = nil
+    /// Ends the series after this visit (managers+).
+    var onEndSeries: (() -> Void)? = nil
 
     @Environment(\.openURL) private var openURL
     @Environment(AppState.self) private var appState
@@ -47,6 +53,9 @@ struct JobScheduleSection: View {
 
     private var scheduleRows: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            if job.isSeriesOccurrence {
+                seriesBanner
+            }
             InfoRow(label: "When", value: whenText, systemImage: "calendar")
             if let minutes = job.scheduledMinutes {
                 InfoRow(label: "Length", value: ShopClock.durationText(minutes: minutes), systemImage: "clock")
@@ -69,6 +78,66 @@ struct JobScheduleSection: View {
                 .accessibilityElement(children: .combine)
             }
         }
+    }
+
+    /// "Repeats every 2 weeks on Tue · visit 3 of 12" (+ End series).
+    private var seriesBanner: some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+            Image(systemName: "repeat")
+                .foregroundStyle(Theme.glacier)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                Text(seriesTitle)
+                    .font(Theme.Typography.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(seriesDetail)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            if let onEndSeries, series?.active ?? true {
+                Menu {
+                    Button("End the series after this visit", role: .destructive, action: onEndSeries)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .foregroundStyle(Theme.glacier)
+                        .frame(width: 32, height: 32)
+                }
+                .accessibilityLabel("Repeating job options")
+            }
+        }
+        .padding(Theme.Spacing.sm)
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.control).fill(Theme.glacier.opacity(0.08)))
+        .accessibilityElement(children: .contain)
+    }
+
+    private var seriesTitle: String {
+        guard let series else { return "Repeating job" }
+        let summary = series.summary
+        return "Repeats " + summary.prefix(1).lowercased() + String(summary.dropFirst())
+    }
+
+    private var seriesDetail: String {
+        var parts: [String] = []
+        if let seq = job.seriesSeq {
+            if let max = series?.maxOccurrences {
+                parts.append("Visit \(seq) of \(max)")
+            } else {
+                parts.append("Visit \(seq)")
+            }
+        }
+        if let end = series?.endSummary, series?.maxOccurrences == nil {
+            parts.append(end)
+        }
+        if series?.active == false {
+            parts.append("series ended")
+        }
+        if job.seriesDetached == true {
+            parts.append("moved by hand (series edits skip it)")
+        }
+        return parts.joined(separator: " · ")
     }
 
     private var whenText: String {

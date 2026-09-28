@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { ShieldOff } from 'lucide-react';
 import { EmptyState } from '@/components/ui';
-import { can, type Capability, type ShopRole } from './permissions';
+import { can, permissionContextOf, type Capability, type ShopRole } from './permissions';
 import { useShopContext } from './shopContext';
 
 export interface RequireRoleProps {
@@ -19,14 +19,7 @@ export function RequireRole({ capability, roles, children, fallback }: RequireRo
   const { membership } = useShopContext();
   const allowed =
     membership !== null &&
-    (capability === undefined ||
-      can(
-        {
-          role: membership.role,
-          techsCanCollectPayments: membership.shop.techs_can_collect_payments,
-        },
-        capability,
-      )) &&
+    (capability === undefined || can(permissionContextOf(membership), capability)) &&
     (roles === undefined || roles.includes(membership.role));
   if (allowed) return <>{children}</>;
   return (

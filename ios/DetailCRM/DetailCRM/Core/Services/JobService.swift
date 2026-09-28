@@ -170,18 +170,37 @@ enum JobService {
     /// Moves the job to `status` (the status machine validates the edge and
     /// the caller's role; timestamps are stamped by the server). A reason
     /// is stored only when cancelling.
-    static func updateStatus(shopID: UUID, jobID: UUID, to status: JobStatus, cancelReason: String? = nil) async throws -> Job {
-        let patch = JobStatusPatch(
-            status: status.rawValue,
-            cancel_reason: status == .cancelled ? cancelReason?.trimmedNonEmpty : nil
-        )
+    static func updateStatus(
+        shopID: UUID,
+        jobID: UUID,
+        to status: JobStatus,
+        cancelReason: String? = nil,
+        force: Bool = false,
+        overrideReason: String? = nil
+    ) async throws -> Job {
+        // `set_job_status` (P-11): the same transition rules as a direct
+        // update, plus the completion gates (required checklist items,
+        // before/after photo minimums; 23514 when they block) and the
+        // manager override (`p_force`, recorded with its reason). For a
+        // move to cancelled the reason is stored as the cancel reason.
+        let reason = status == .cancelled ? cancelReason?.trimmedNonEmpty : overrideReason?.trimmedNonEmpty
+        let params: [String: AnyJSON] = [
+            "p_job_id": .string(jobID.uuidString),
+            "p_status": .string(status.rawValue),
+            "p_force": .bool(force),
+            "p_reason": reason.map { AnyJSON.string(String($0.prefix(500))) } ?? .null,
+        ]
         return try await Supa.client
-            .from("jobs")
-            .update(patch)
-            .eq("shop_id", value: shopID.uuidString)
-            .eq("id", value: jobID.uuidString)
-            .select(Job.selectColumns)
+            .rpc("set_job_status", params: params)
             .single()
+            .execute()
+            .value
+    }
+
+    /// What still blocks starting / completing the job (staff on the job).
+    static func completionBlockers(jobID: UUID) async throws -> JobsCompletionBlockers {
+        try await Supa.client
+            .rpc("job_completion_blockers", params: ["p_job_id": jobID.uuidString])
             .execute()
             .value
     }
@@ -225,6 +244,159 @@ enum JobService {
             .single()
             .execute()
             .value
+    }
+
+    // MARK: - Deposit follow-ups (P-3)
+
+    /// `document_followup_status` / `set_document_followups_paused` for the
+    /// job's deposit reminders.
+    // rpc: document_followup_status
+    struct FollowupStatus: Decodable, Hashable, Sendable {
+        var enabled: Bool
+        var paused: Bool
+        var attemptsSent: Int
+        var maxAttempts: Int
+        var lastSentAt: Date?
+        var nextAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case enabled
+            case paused
+            case attemptsSent = "attempts_sent"
+            case maxAttempts = "max_attempts"
+            case lastSentAt = "last_sent_at"
+            case nextAt = "next_at"
+        }
+    }
+
+    /// The automatic deposit reminders of a job (managers+).
+    static func depositFollowupStatus(jobID: UUID) async throws -> FollowupStatus {
+        let params: [String: AnyJSON] = [
+            "p_kind": .string("deposit"),
+            "p_id": .string(jobID.uuidString),
+        ]
+        return try await Supa.client
+            .rpc("document_followup_status", params: params)
+            .execute()
+            .value
+    }
+
+    /// Pauses or resumes the job's deposit reminders (managers+).
+    static func setDepositFollowupsPaused(jobID: UUID, paused: Bool) async throws -> FollowupStatus {
+        let params: [String: AnyJSON] = [
+            "p_kind": .string("deposit"),
+            "p_id": .string(jobID.uuidString),
+            "p_paused": .bool(paused),
+        ]
+        return try await Supa.client
+            .rpc("set_document_followups_paused", params: params)
+            .execute()
+            .value
+    }
+
+    // MARK: - Custom data (P-9, managers+)
+
+    /// Saves the job's answers to the shop's job fields. The server checks
+    /// every value against its field (22023 names the field).
+    static func updateCustomData(shopID: UUID, jobID: UUID, data: [String: AnyJSON]) async throws -> Job {
+        try await Supa.client
+            .from("jobs")
+            .update(["custom_data": AnyJSON.object(data)])
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: jobID.uuidString)
+            .select(Job.selectColumns)
+            .single()
+            .execute()
+            .value
+    }
+
+    // MARK: - Fees (P-21) and line vehicles (P-7)
+
+    /// The shop's preset fees offered for adding (active, not archived).
+    static func fees(shopID: UUID) async throws -> [JobsShopFee] {
+        try await Supa.client
+            .from("shop_fees")
+            .select(JobsShopFee.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("active", value: true)
+            .is("archived_at", value: nil)
+            .order("sort", ascending: true)
+            .order("name", ascending: true)
+            .execute()
+            .value
+    }
+
+    /// Adds a preset fee as a line (priced by the server; managers+).
+    @discardableResult
+    static func addFeeLine(kind: JobsShopFee.DocumentKind, documentID: UUID, feeID: UUID) async throws -> UUID {
+        let params: [String: AnyJSON] = [
+            "p_doc_kind": .string(kind.rawValue),
+            "p_doc_id": .string(documentID.uuidString),
+            "p_fee_id": .string(feeID.uuidString),
+        ]
+        return try await Supa.client
+            .rpc("add_fee_line", params: params)
+            .execute()
+            .value
+    }
+
+    // MARK: - Route (P-18)
+
+    /// Route order and coordinates of the given jobs (the day map).
+    static func routeInfo(shopID: UUID, jobIDs: [UUID]) async throws -> [Job] {
+        guard !jobIDs.isEmpty else { return [] }
+        return try await Supa.client
+            .from("jobs")
+            .select(Job.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .in("id", values: jobIDs.map(\.uuidString))
+            .execute()
+            .value
+    }
+
+    /// Saves the stop order of one shop-local day (first = 0). Managers may
+    /// order any jobs; technicians only jobs they are all assigned to.
+    @discardableResult
+    static func setRouteOrder(shopID: UUID, jobIDs: [UUID]) async throws -> Int {
+        let params: [String: AnyJSON] = [
+            "p_shop_id": .string(shopID.uuidString),
+            "p_job_ids": .array(jobIDs.map { AnyJSON.string($0.uuidString) }),
+        ]
+        return try await Supa.client
+            .rpc("set_route_order", params: params)
+            .execute()
+            .value
+    }
+
+    /// Stores coordinates this iPhone found for a job's service address
+    /// (managers+, or a technician assigned to the job). `job` is the row the
+    /// geocoded address was read from: its address fields go along as
+    /// `p_address`, and the server refuses the point (40001) when the job's
+    /// address changed after it was read, so a point found for an old
+    /// address is never stored on a corrected one.
+    static func setJobCoordinates(job: Job, latitude: Double, longitude: Double) async throws {
+        let address: [String: AnyJSON] = [
+            "service_address_line1": addressValue(job.serviceAddressLine1),
+            "service_address_line2": addressValue(job.serviceAddressLine2),
+            "service_city": addressValue(job.serviceCity),
+            "service_region": addressValue(job.serviceRegion),
+            "service_postal_code": addressValue(job.servicePostalCode),
+        ]
+        let params: [String: AnyJSON] = [
+            "p_job_id": .string(job.id.uuidString),
+            "p_lat": .double(latitude),
+            "p_lng": .double(longitude),
+            "p_address": .object(address),
+        ]
+        try await Supa.client
+            .rpc("set_job_coordinates", params: params)
+            .execute()
+    }
+
+    /// An address field exactly as read (null stays null).
+    private static func addressValue(_ value: String?) -> AnyJSON {
+        guard let value else { return .null }
+        return .string(value)
     }
 
     // MARK: - Assignments
@@ -644,12 +816,6 @@ private struct JobTemplatePreviewParams: Encodable {
     let p_job_id: UUID
     let p_key: String
     let p_channel: String
-}
-
-private struct JobStatusPatch: Encodable {
-    let status: String
-    /// Omitted unless cancelling (technicians may not touch other columns).
-    let cancel_reason: String?
 }
 
 // table: jobs

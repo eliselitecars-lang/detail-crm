@@ -18,6 +18,10 @@ each provider's own pricing page (linked) before you commit.
 - **iPhone app** for shop staff (TestFlight first, then the App Store).
 - Each shop connects **its own Stripe account** (Stripe Connect Express);
   customer payments go to the shop, with your optional platform fee.
+- Optional: shops pay **you** a monthly or yearly subscription for Detail CRM,
+  on **your** Stripe account (plans you define in Stripe). It is off until
+  you turn it on and is unrelated to the shops' own Stripe accounts:
+  [BILLING.md](BILLING.md).
 
 ---
 
@@ -69,6 +73,14 @@ hand: the deploy does it (email confirmations stay ON in production).
       `pk_live_...`. Use test keys only for a separate staging project.
 - [ ] Webhook: nothing to click. The first backend deploy with
       `stripe_webhooks` creates the Connect webhook and stores its secret.
+- [ ] **Shop subscriptions** (optional, whenever you are ready to charge
+      shops; [BILLING.md](BILLING.md)): create your plan Products and Prices
+      in this platform account (metadata `detailcrm_plan` = `true`), save the
+      **Customer Portal** settings (Settings -> Billing -> Customer portal, in
+      test and in live mode), choose a trial length, and decide whether you
+      need Stripe Tax. Then set `BILLING_TRIAL_DAYS` and `BILLING_ENABLED` and
+      deploy with `stripe_webhooks` (it also creates the separate platform
+      billing webhook). Comp pilot shops **before** turning billing on.
 - [ ] Go through Stripe's [go-live checklist](https://docs.stripe.com/get-started/checklist/go-live).
 
 ### 1.3 Twilio (text messages)
@@ -89,8 +101,19 @@ accounts, so start early.
       Until a shop's campaign is approved, carriers block its texts.
 - [ ] Copy the **Account SID** (`AC...`) and **Auth Token**.
 
-Shops cannot buy or register numbers themselves yet: the operator does it per
-shop (self-serve numbers are on the roadmap, gated on the Twilio ISV setup).
+Self-serve numbers (a shop owner searches for, buys and verifies its own
+number in Settings -> SMS) are built but **ship dark**; while they are off,
+the operator sets up each shop's number as above.
+
+- [ ] Optional, to let shops get **toll-free** numbers themselves: once your
+      Twilio account can buy numbers and submit toll-free verifications, and
+      number costs are accounted for, set `SMS_PROVISIONING_ENABLED=true`.
+- [ ] Optional, to also offer **local** numbers (A2P 10DLC registration):
+      once your ISV profile is approved, set `TWILIO_ISV_ENABLED=true` and
+      `TWILIO_PRIMARY_CUSTOMER_PROFILE_SID` (the approved primary customer
+      profile, `BU...`); the deploy refuses the flag without the profile.
+
+Unset means off. Both are listed in [DEPLOY.md](DEPLOY.md).
 
 ### 1.4 Resend (email)
 
@@ -121,8 +144,11 @@ shop (self-serve numbers are on the roadmap, gated on the Twilio ISV setup).
       organization so the App Store shows your company name; that needs a
       D-U-N-S number ([D-U-N-S](https://developer.apple.com/support/D-U-N-S/)).
 - [ ] Register the bundle id `com.detailcrm.app` (or your own) under
-      Certificates, Identifiers & Profiles -> Identifiers (no capabilities are
-      needed yet).
+      Certificates, Identifiers & Profiles -> Identifiers and turn on the
+      **Push Notifications** capability (the app's entitlements carry
+      `aps-environment`; with automatic cloud signing and the Admin API key
+      below Xcode can also add it, but a profile without it fails the
+      archive).
 - [ ] In [App Store Connect](https://appstoreconnect.apple.com), create the
       **app record** (Apps -> + -> New App) with that bundle id.
 - [ ] Create an **App Store Connect API key** (Users and Access ->
@@ -134,14 +160,17 @@ shop (self-serve numbers are on the roadmap, gated on the Twilio ISV setup).
 - [ ] Note your **Team ID** (developer.apple.com -> Account -> Membership).
 - [ ] **APNs key** (push notifications): create one (Certificates, Identifiers
       & Profiles -> Keys -> Apple Push Notifications service) and keep the
-      `.p8`, Key ID and Team ID. Push is **not in this build**; it is the next
-      build phase, so the key is only stored for now
+      `.p8`, Key ID and Team ID. The `push` edge function sends with it (its
+      APNs secrets are listed in docs/DEPLOY.md; the topic is the bundle id).
+      Without them the app still registers devices and the in-app bell works;
+      nothing is pushed
       ([token-based APNs](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns)).
-- [ ] **Tap to Pay on iPhone** (optional, for later): request the entitlement
-      from Apple ([Tap to Pay on iPhone](https://developer.apple.com/tap-to-pay/))
-      and plan Stripe Terminal for it
+- [ ] **Tap to Pay on iPhone** (optional): request the entitlement from
+      Apple ([Tap to Pay on iPhone](https://developer.apple.com/tap-to-pay/))
+      and enable Stripe Terminal on the platform account
       ([Stripe Tap to Pay](https://docs.stripe.com/terminal/payments/setup-reader/tap-to-pay)).
-      The feature is not built yet and will ship switched off until Apple
+      The app ships with it switched off (`TAP_TO_PAY_ENABLED` = `NO` in
+      `Config.plist`); ios/README.md lists the two changes to make once Apple
       grants the entitlement, so asking early costs nothing.
 
 ### 1.7 GitHub
@@ -206,6 +235,9 @@ requests, the governing law of your terms and (optionally) a postal address
        shows up in App Store Connect -> TestFlight after Apple processes it;
        add yourself as an internal tester.
 6. [ ] **Twilio numbers** for the first shop (1.3, `twilio.md`).
+7. [ ] **Billing** (optional, later): [BILLING.md](BILLING.md) section 5.
+       Until `BILLING_ENABLED` is `true` every shop can use everything for
+       free.
 
 ---
 
@@ -237,6 +269,9 @@ project with Stripe test keys.
         `/u/<token>` page and unsubscribes.
 11. [ ] Run the backend smoke checks again (the last step of deploy-backend
         or `verify_live.mjs`): still `0 failed`.
+12. [ ] **Billing** (only once it is on; best on a staging project with test
+        keys): the test in [BILLING.md](BILLING.md) section 10 (subscribe
+        with a test card, manage in the portal, a failed renewal).
 
 ---
 
@@ -276,21 +311,47 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       |---|---|---|---|
       | Contact Info: name, email address, phone number | staff account (name, email, phone) and the shop's customers entered by staff (name, email, phone) | yes | no |
       | Contact Info: physical address | customer service addresses | yes | no |
-      | User Content: photos | before/after and inspection photos | yes | no |
-      | User Content: other (signatures, notes) | customer signatures, job/inspection notes | yes | no |
+      | Location: precise location | the device location at the moment a team member clocks in or out, when they allow location access (stored with the time entry; never tracked in between) | yes | no |
+      | User Content: photos or videos | before/after and inspection photos, job walkaround videos (with sound) | yes | no |
+      | User Content: other (signatures, notes, documents) | customer signatures, job/inspection notes, documents attached to jobs and customers, custom field answers, staff tasks | yes | no |
       | User Content: emails or text messages | messages staff send to and receive from customers (Inbox) | yes | no |
-      | Financial Info: payment info | card details typed into the Stripe payment sheet, processed by Stripe (the app stores only card brand and last 4) | yes | no |
-      | Purchases: purchase history | invoices and payments of the shop's customers | yes | no |
+      | Financial Info: payment info | card details typed into the Stripe payment sheet or tapped on Tap to Pay / a card reader when enabled, processed by Stripe (the app stores only card brand and last 4) | yes | no |
+      | Purchases: purchase history | invoices, payments, gift cards and store credit of the shop's customers | yes | no |
       | Identifiers: user ID | the sign-in account id | yes | no |
+      | Identifiers: device ID | the push notification device token (only when notifications are allowed) | yes | no |
       | Other data | vehicles (make/model, VIN, plate) and staff clock-in/out times | yes | no |
 
       Purpose for all: **App Functionality**. The app has no analytics, ads or
-      tracking SDKs and does not read the device location (map buttons only
-      open Apple Maps). The Stripe SDK may collect device data for fraud
-      prevention: follow Stripe's guidance for the payment-sheet rows
+      tracking SDKs. It asks for "while using the app" location
+      (`NSLocationWhenInUseUsageDescription`) and uses it in three places:
+      the location stamped on a clock-in / clock-out (the only device
+      location it stores; `OpsClockLocationProvider`); the day map
+      (`JobsDayMapView`), which shows your own position on the device and
+      does not send it anywhere; and, when Tap to Pay or a card reader is
+      turned on, the Stripe Terminal SDK, which requires location access
+      while taking in-person payments (see Stripe's privacy details below).
+      The day map also sends service addresses that have no map point yet to
+      Apple's geocoder (`CLGeocoder`) and saves the point found on the job
+      (`set_job_coordinates`), and its route buttons open Apple Maps or
+      Google Maps with the stops. The camera is used for photos, videos and
+      VIN scanning, the microphone only for the sound of job videos. The
+      Stripe SDK may collect device data for fraud prevention: follow
+      Stripe's guidance for the payment-sheet rows
       ([Stripe iOS SDK privacy details](https://support.stripe.com/questions/stripe-ios-sdk-and-apple-app-store-privacy-details)).
-      Re-check this table whenever a build adds a feature (push notifications
-      will add a device token; geostamped clock-in would add location).
+      Re-check this table whenever a build adds a feature.
+
+      On the web (not the iPhone app, so not part of these labels): a shop
+      may enter its own Meta Pixel or Google Analytics 4 id in Settings ->
+      Online booking. Only its public booking page `/book/<slug>` then loads
+      the tag (never private booking links, lead forms, quotes, invoices, the
+      portal or staff pages; the customer's own booking page `/booking/<token>`
+      loads only GA4, once, to report a deposit paid online, with the token
+      left out of the page address; `web/src/features/booking/tracking.ts`).
+      The deploy's CSP allows the tags' origins only on `WEB_TRACKING_PATHS`
+      (DEPLOY.md 4.3). The privacy policy says so; shops should mention the
+      tags in their own privacy policy and keep Meta's "Automatic advanced
+      matching" off (Settings -> Online booking says so too). The web day map
+      loads map tiles from OpenStreetMap (listed in the privacy policy).
 - [ ] **Account deletion inside the app** (Guideline 5.1.1(v), required for any
       app that lets people create an account:
       [Apple's page](https://developer.apple.com/support/offering-account-deletion-in-your-app/)).
@@ -309,6 +370,13 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       world, which Apple requires to go through a payment processor such as
       Stripe, not in-app purchase (Guideline 3.1.3(e)). Nothing to do; answer
       accordingly if asked.
+- [ ] **Shop subscriptions** (when billing is on): the iPhone app has no
+      purchase screen, no prices, no plan names and no links or buttons
+      towards buying; it only shows a neutral status line ("This shop's
+      subscription is inactive. ..."). Shops, as businesses, subscribe to
+      the service on the web (Settings -> Billing). If App Review asks,
+      explain exactly that (guidelines 3.1.1 and 3.1.3); do not add a link
+      to the web billing page in the app.
 - [ ] Sign in with Apple is not required: the app has no third-party sign-in
       (email and password only).
 - [ ] Support URL, screenshots, description, age rating in App Store Connect
@@ -320,25 +388,51 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
 
 From SPEC section 9 (parity roadmap, 2026-09-27) and this launch review:
 
-- **Ships dark until approved**: Tap to Pay on iPhone / Stripe Terminal
-  (needs Apple's entitlement; not built yet).
-- **Next build phase**: push notifications (APNs key in 1.6).
-- **Operator-run for now**: per-shop Twilio numbers and A2P registration
-  (self-serve SMS numbers are on the roadmap, gated on Twilio ISV onboarding).
-- **Roadmap, not built yet**: recurring jobs, document follow-ups, multiple
-  and per-service reminders, CSV import/export (P0); multi-job invoicing,
-  customer job reports, lead forms and custom fields, booking embed / QR /
-  pixels, required checklists, tips and commissions, coupon restrictions,
-  gift cards (P1); proposal options, quote self-scheduling, calendar events
-  and capacity v2, day map and route hand-off, iCal feeds, customer merge,
-  preset fees, VIN barcode scan, memberships v2, geostamped clock-in,
-  documents, iOS realtime (P2).
-- **Not planned** (partner agreements or compliance): QuickBooks sync, own
-  payment processing, Carfax / SiriusXM, 3D visualizer, marketplace/store,
-  voice calling, Android app, workflow builder, route optimization engine,
-  Reserve with Google, card surcharging.
-- **Known open defects** found by the real-stack checks
-  (`scripts/stack/README.md`): an unknown public link token answers HTTP 500
-  instead of 404 (pages still show "not found"); due-on-receipt invoices show
-  as overdue immediately; staff-sent invoice/quote messages can keep an empty
-  "call us at" line when the shop has no phone number.
+- **Built, ships dark until approved**: Tap to Pay on iPhone and Bluetooth
+  card readers (Stripe Terminal). Off until Apple grants the entitlement and
+  you set `TAP_TO_PAY_ENABLED` (and `TERMINAL_BLUETOOTH_ENABLED` for readers)
+  to `YES` in the app's `Config.plist` (1.6, ios/README.md).
+- **Built, ships dark until you turn it on**: self-serve SMS numbers
+  (`SMS_PROVISIONING_ENABLED` for toll-free numbers; `TWILIO_ISV_ENABLED` +
+  `TWILIO_PRIMARY_CUSTOMER_PROFILE_SID` for local A2P 10DLC numbers; 1.3).
+  While they are off, per-shop Twilio numbers and A2P registration are
+  operator-run.
+- **Off until you turn it on**: shop subscription billing
+  (`BILLING_ENABLED`, [BILLING.md](BILLING.md)); Stripe Tax on those
+  subscriptions (`BILLING_AUTOMATIC_TAX`).
+- **Needs its keys**: push notifications to the iPhone app are built; nothing
+  is pushed until the four `APNS_*` values are set (APNs key in 1.6). The
+  in-app notification list works without them.
+- **Built in this release** (the parity roadmap, SPEC section 9, and the
+  rest of the parity plan): recurring jobs, push notifications, document
+  follow-ups, multiple and per-service reminders, CSV import/export (P0);
+  multi-job invoicing, customer job reports, lead forms and custom fields,
+  booking embed / QR / pixels, required checklists, tips and commissions,
+  coupon restrictions, gift cards (P1); proposal options, quote
+  self-scheduling, calendar events and capacity v2, day map and route
+  hand-off, iCal feeds, customer merge, preset fees, VIN barcode scan,
+  memberships v2, geostamped clock-in (iPhone app), documents, iOS
+  realtime (P2); plus outbound webhooks (Zapier-ready), inventory and
+  consumables, customer referrals, job videos, bank debits (ACH) and
+  pay-later through Stripe Checkout, staff tasks, lead-source and quote
+  conversion reports, and PDF quotes / invoices / receipts.
+  Document follow-ups and service follow-ups are seeded off in every shop:
+  a shop turns them on in Settings -> Follow-ups and Settings -> Messages &
+  automations (service follow-ups are then written per service in the
+  catalog). Bank debits and pay-later appear at checkout only when those
+  payment methods are enabled for the shop's connected Stripe account
+  (Stripe's payment method settings). Embedding the booking page or
+  a lead form on a shop's website needs `WEB_EMBED_PATHS=/book/*,/lead/*`
+  on the web deploy, and shops' own Meta Pixel / GA4 tags load only with
+  `WEB_TRACKING_PATHS=/book/*,/booking/*` (DEPLOY.md 4.3); without them
+  those pages refuse to be framed and the tags are blocked.
+- **Not built** (partner agreements or compliance; SPEC section 9):
+  QuickBooks sync, own payment processing, Carfax / SiriusXM, 3D
+  visualizer, marketplace/store, voice calling, Android app, workflow
+  builder, route optimization engine, Reserve with Google, card
+  surcharging.
+- **Defects found by the real-stack checks** (`scripts/stack/README.md`)
+  are fixed and kept as regression checks: unknown public link tokens answer
+  404 (`PT404`), a due-on-receipt invoice is due at the end of its issue day
+  (not overdue at once), and quote / invoice messages are rendered by the
+  server, so a shop without a phone number gets no empty "call us at" line.

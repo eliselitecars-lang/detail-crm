@@ -36,3 +36,17 @@ export function missingEnvVars(source: Record<string, unknown> = import.meta.env
   if (!clean(source.VITE_SUPABASE_ANON_KEY)) missing.push('VITE_SUPABASE_ANON_KEY');
   return missing;
 }
+
+/**
+ * Absolute URL of an edge function path ("/functions/v1/calendar-feed?token=…")
+ * on this project, for links people paste elsewhere (calendar apps). Null
+ * when Supabase isn't configured.
+ */
+export function functionsUrl(
+  path: string,
+  source: Record<string, unknown> = import.meta.env,
+): string | null {
+  const env = readPublicEnv(source);
+  if (!env) return null;
+  return `${env.supabaseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}

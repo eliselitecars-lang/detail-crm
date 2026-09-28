@@ -18,8 +18,11 @@ const FAKE_CLI = join(REPO_ROOT, 'scripts', 'deploy', 'test', 'fakes', 'fake_sup
 const REF = 'abcdefghijklmnopqrst';
 const MIGRATIONS = readdirSync(join(REPO_ROOT, 'supabase', 'migrations')).filter((f) => f.endsWith('.sql'));
 const EVENTS = parseHandledStripeEvents(readFileSync(join(REPO_ROOT, 'supabase/functions/stripe-webhook/handlers.ts'), 'utf8'));
+const BILLING_EVENTS = parseHandledStripeEvents(readFileSync(join(REPO_ROOT, 'supabase/functions/billing-webhook/handlers.ts'), 'utf8'));
 const STRIPE_VERSION = parseStripeApiVersion(readFileSync(join(REPO_ROOT, 'supabase/functions/_shared/stripe.ts'), 'utf8'));
-const NO_JWT = ['messaging', 'payments', 'storage-purge', 'stripe-webhook'];
+const NO_JWT = ['billing', 'billing-webhook', 'calendar-feed', 'messaging', 'payments', 'pdf', 'public-media', 'push', 'sms-provisioning', 'storage-purge', 'stripe-webhook', 'webhooks'];
+const FUNCTIONS = ['account', 'billing', 'billing-webhook', 'calendar-feed', 'invites', 'messaging', 'payments', 'pdf', 'public-media', 'push', 'sms-provisioning', 'storage-purge', 'stripe-connect', 'stripe-webhook', 'webhooks'];
+const CRON_JOBS = [...readFileSync(join(REPO_ROOT, 'supabase/setup/cron.sql'), 'utf8').matchAll(/cron\.schedule\(\s*'([^']+)'/g)].map((m) => m[1]);
 
 const SECRETS = {
   SUPABASE_ACCESS_TOKEN: 'sbp_fake_token_SECRET_0123456789',
@@ -46,7 +49,7 @@ function freshState() {
 async function freshApi() {
   if (api) await api.close();
   freshState();
-  api = await startFakeApi({ ref: REF, deployedFile: join(work, 'deployed.jsonl'), token: SECRETS.SUPABASE_ACCESS_TOKEN, stripeKey: SECRETS.STRIPE_SECRET_KEY });
+  api = await startFakeApi({ ref: REF, deployedFile: join(work, 'deployed.jsonl'), token: SECRETS.SUPABASE_ACCESS_TOKEN, stripeKey: SECRETS.STRIPE_SECRET_KEY, cronSecret: SECRETS.CRON_SECRET });
 }
 
 function run(args = [], { omit = [], extra = {} } = {}) {
@@ -59,6 +62,7 @@ function run(args = [], { omit = [], extra = {} } = {}) {
     SUPABASE_CLI: FAKE_CLI,
     DEPLOY_SUPABASE_API_BASE: api.url,
     DEPLOY_STRIPE_API_BASE: api.url,
+    DEPLOY_FUNCTIONS_API_BASE: `${api.url}/functions/v1`,
     ...SECRETS,
     ...PUBLIC,
     ...extra,
@@ -138,12 +142,15 @@ describe('deploy_backend.sh', () => {
     assert.match(r.out, /DRY RUN/);
     assert.match(r.out, /Would push these migrations:/);
     for (const m of MIGRATIONS) assert.ok(r.out.includes(m), `pending migration ${m} not listed`);
-    for (const fn of ['account', 'invites', 'messaging', 'payments', 'storage-purge', 'stripe-connect', 'stripe-webhook']) {
+    for (const fn of FUNCTIONS) {
       assert.ok(r.out.includes(`would deploy ${fn} (verify_jwt=${!NO_JWT.includes(fn)})`), `plan for ${fn} missing:\n${r.out}`);
     }
     assert.match(r.out, /would create the Connect endpoint/);
+    assert.match(r.out, /Platform billing endpoint: not managed \(BILLING_ENABLED is not true\)/);
     assert.match(r.out, /dry run: Auth config not changed/);
     assert.match(r.out, /dry run: cron\.sql not executed/);
+    assert.match(r.out, /dry run: would call set_billing_config\(false, 0\)/);
+    assert.match(r.out, /billing: off \(BILLING_ENABLED unset\)/);
     assert.deepEqual(mutations(r.requests), [], `dry run sent mutations: ${JSON.stringify(mutations(r.requests).map((q) => `${q.method} ${q.path}`))}`);
     const cli = cliLog();
     assert.ok(cli.some((l) => l.startsWith(`link --project-ref ${REF} --workdir `)), cli.join('\n'));
@@ -168,7 +175,7 @@ describe('deploy_backend.sh', () => {
     const push = cli.findIndex((l) => /^db push/.test(l) && !l.includes('--dry-run'));
     assert.ok(push > idx(/^db push .*--dry-run/), cli.join('\n'));
     const deploys = cli.filter((l) => l.startsWith('functions deploy'));
-    assert.equal(deploys.length, 7, deploys.join('\n'));
+    assert.equal(deploys.length, FUNCTIONS.length, deploys.join('\n'));
     for (const l of deploys) {
       const fn = l.split(' ')[2];
       assert.equal(l.includes('--no-verify-jwt'), NO_JWT.includes(fn), `wrong JWT flag: ${l}`);
@@ -221,9 +228,16 @@ describe('deploy_backend.sh', () => {
     assert.equal(s.platformConfig, PUBLIC.APP_BASE_URL);
     assert.equal(s.vaultValues.cronSecret, SECRETS.CRON_SECRET);
     assert.equal(s.vaultValues.functionsUrl, `https://${REF}.supabase.co/functions/v1`);
-    assert.equal(s.cronJobs.length, 5);
+    assert.equal(s.cronJobs.length, CRON_JOBS.length);
+    assert.ok(s.cronJobs.some((j) => j.jobname === 'detail-crm-billing-sync-plans'));
     assert.match(r.out, /deployed functions match config\.toml/);
     assert.match(r.out, /platform setup applied/);
+
+    // Billing off (no BILLING_* inputs): the default is stored, no billing endpoint, no sync.
+    assert.deepEqual(s.billingConfigCalls, [{ enabled: false, trialDays: 0 }]);
+    assert.equal(s.syncCalls.length, 0);
+    assert.ok(![...s.endpoints.values()].some((e) => e.url.endsWith('/billing-webhook')));
+    assert.ok(!s.secrets.has('STRIPE_BILLING_WEBHOOK_SECRET'));
 
     // Nothing secret in the output or on any command line; no rendered SQL on disk.
     assertNoSecretLeak(r.out, 'output');
@@ -274,6 +288,110 @@ describe('deploy_backend.sh', () => {
     assert.match(r.out, /STRIPE_WEBHOOK_ADOPT/);
     assert.equal(api.state.endpointCreates, 0);
     assert.deepEqual(api.state.endpoints.get('we_handmade').enabled_events, ['*']);
+  });
+
+  test('billing inputs: the billing webhook secret is required only with billing on and without --stripe-webhooks; bad values are named', async () => {
+    await freshApi();
+    const on = await run([], { omit: ['STRIPE_BILLING_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'true' } });
+    assert.equal(on.code, 1, on.out);
+    assert.match(on.out, /- STRIPE_BILLING_WEBHOOK_SECRET: /);
+    assert.equal(on.requests.length, 0);
+
+    const off = await run(['--dry-run'], { extra: { BILLING_ENABLED: 'false' } });
+    assert.equal(off.code, 0, off.out);
+    assert.doesNotMatch(off.out, /STRIPE_BILLING_WEBHOOK_SECRET:/);
+
+    const hooks = await run(['--dry-run', '--stripe-webhooks'], { extra: { BILLING_ENABLED: 'true', BILLING_TRIAL_DAYS: '14' } });
+    assert.equal(hooks.code, 0, hooks.out);
+    assert.match(hooks.out, /billing: ON, trial 14 day\(s\) \(STRIPE_BILLING_WEBHOOK_SECRET will come from --stripe-webhooks\)/);
+    assert.match(hooks.out, /would create the platform billing endpoint and store its signing secret as STRIPE_BILLING_WEBHOOK_SECRET/);
+    assert.match(hooks.out, /dry run: would call set_billing_config\(true, 14\) and then billing sync_plans/);
+    assert.deepEqual(mutations(hooks.requests), []);
+
+    const bad = await run([], { extra: { BILLING_ENABLED: 'yes', BILLING_TRIAL_DAYS: '-1', STRIPE_BILLING_WEBHOOK_SECRET: 'nope' } });
+    assert.equal(bad.code, 1, bad.out);
+    assert.match(bad.out, /BILLING_ENABLED: must be true or false/);
+    assert.match(bad.out, /BILLING_TRIAL_DAYS: must be a whole number of days from 0 to 730/);
+    assert.match(bad.out, /STRIPE_BILLING_WEBHOOK_SECRET: expected whsec_ secret/);
+    assert.equal(bad.requests.length, 0);
+  });
+
+  test('billing on + --stripe-webhooks: platform endpoint with exactly the billing events, secret stored, config applied, plans synced', async () => {
+    await freshApi();
+    const r = await run(['--stripe-webhooks', '--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'true', BILLING_TRIAL_DAYS: '14' } });
+    assert.equal(r.code, 0, r.out);
+    const s = api.state;
+    assert.equal(s.endpoints.size, 2);
+    const all = [...s.endpoints.values()];
+    const connect = all.find((e) => e.metadata.detail_crm_role === 'connect');
+    const billing = all.find((e) => e.metadata.detail_crm_role === 'billing');
+    assert.ok(connect && billing, JSON.stringify(all.map((e) => e.metadata)));
+    assert.equal(connect.connect, true);
+    // a PLATFORM endpoint ("Events on your account"): never connect=true
+    assert.equal(billing.connect, false);
+    assert.equal(billing.url, `https://${REF}.supabase.co/functions/v1/billing-webhook`);
+    assert.equal(billing.api_version, STRIPE_VERSION);
+    assert.deepEqual([...billing.enabled_events].sort(), [...BILLING_EVENTS].sort());
+    assert.equal(s.secrets.get('STRIPE_BILLING_WEBHOOK_SECRET'), billing.secret);
+    assert.equal(s.secrets.get('STRIPE_WEBHOOK_SECRET'), connect.secret);
+    assert.notEqual(billing.secret, connect.secret);
+
+    assert.deepEqual(s.billingConfigCalls, [{ enabled: true, trialDays: 14 }]);
+    assert.equal(s.billingConfig.get('billing_enabled'), 'true');
+    assert.equal(s.syncCalls.length, 1);
+    assert.equal(s.syncCalls[0].secretOk, true);
+    assert.deepEqual(s.syncCalls[0].body, { action: 'sync_plans' });
+    assert.match(r.out, /billing: ON, trial 14 day\(s\) \(set_billing_config\)/);
+    assert.match(r.out, /billing plans synced from Stripe: 2 active price\(s\), 0 deactivated/);
+    // the sync runs after the functions are deployed (and read back)
+    const paths = r.requests.map((q) => `${q.method} ${q.path.replace(REF, '<ref>')}`);
+    assert.ok(paths.lastIndexOf('GET /v1/projects/<ref>/functions') < paths.indexOf('POST /functions/v1/billing'), paths.join('\n'));
+    assertNoSecretLeak(r.out, 'output');
+    assertNoSecretLeak(cliLog().join('\n'), 'CLI argv');
+
+    // re-run: nothing new in Stripe, no secret writes, the same config, a (harmless) resync
+    const creates = s.endpointCreates;
+    const again = await run(['--stripe-webhooks', '--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'true', BILLING_TRIAL_DAYS: '14' } });
+    assert.equal(again.code, 0, again.out);
+    assert.equal(s.endpointCreates, creates);
+    assert.equal(s.endpoints.size, 2);
+    assert.equal((again.out.match(/is up to date \(\d+ events/g) ?? []).length, 2, again.out);
+    assert.deepEqual(again.requests.filter((q) => q.method === 'POST' && q.path.endsWith('/secrets')), []);
+    assert.deepEqual(s.billingConfigCalls.at(-1), { enabled: true, trialDays: 14 });
+    assert.equal(s.syncCalls.length, 2);
+
+    // billing turned off later: the endpoint is left for existing subscriptions, no sync
+    const off = await run(['--stripe-webhooks', '--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'false', BILLING_TRIAL_DAYS: '14' } });
+    assert.equal(off.code, 0, off.out);
+    assert.match(off.out, /Platform billing endpoint: we_fake[0-9a-f]+ left as it is/);
+    assert.equal(s.endpoints.size, 2);
+    assert.deepEqual(s.billingConfigCalls.at(-1), { enabled: false, trialDays: 14 });
+    assert.equal(s.syncCalls.length, 2);
+  });
+
+  test('an unset BILLING_ENABLED / BILLING_TRIAL_DAYS never silently changes a project that has billing set up', async () => {
+    await freshApi();
+    api.state.billingConfig.set('billing_enabled', 'true');
+    api.state.billingConfig.set('billing_trial_days', '14');
+    const r = await run(['--allow-dirty'], { extra: { STRIPE_BILLING_WEBHOOK_SECRET: 'whsec_FAKEbilling0123' } });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /BILLING_ENABLED is not set, but billing is ON in this project/);
+    assert.deepEqual(api.state.billingConfigCalls, []);
+    assert.ok(!api.state.sql.some((q) => q.includes('cron.schedule')), 'nothing changed before the refusal');
+
+    const days = await run(['--allow-dirty'], { extra: { BILLING_ENABLED: 'true', STRIPE_BILLING_WEBHOOK_SECRET: 'whsec_FAKEbilling0123' } });
+    assert.equal(days.code, 1, days.out);
+    assert.match(days.out, /BILLING_TRIAL_DAYS is not set, but this project has a 14-day trial/);
+    assert.deepEqual(api.state.billingConfigCalls, []);
+  });
+
+  test('a failed plan sync fails the platform setup with the function\'s own error code', async () => {
+    await freshApi();
+    api.state.syncResponse = { status: 503, body: { error: 'The payment provider is unavailable.', code: 'service_unavailable', request_id: 'r' } };
+    const r = await run(['--allow-dirty'], { extra: { BILLING_ENABLED: 'true', STRIPE_BILLING_WEBHOOK_SECRET: 'whsec_FAKEbilling0123' } });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /billing sync_plans: HTTP 503 service_unavailable/);
+    assert.ok(!r.out.includes('whsec_FAKEbilling0123'));
   });
 
   test('the script source never runs config push and guards the CLI', () => {

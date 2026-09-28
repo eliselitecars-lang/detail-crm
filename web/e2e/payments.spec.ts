@@ -12,6 +12,7 @@ const PAYMENT = {
   refunded_cents: 0,
   card_brand: null,
   card_last4: null,
+  stripe_method_type: null,
   note: 'Paid at pickup',
   paid_at: '2026-09-21T15:00:00Z',
   created_at: '2026-09-21T15:00:00Z',
@@ -75,7 +76,7 @@ test('payments ledger shows server totals and exports CSV', async ({ page }) => 
     .toString('utf8')
     .replace(/^\uFEFF/, '');
   expect(text.split('\r\n')[1]).toBe(
-    '2026-09-21 10:00,Jane Doe,2001,,Payment,Cash,,succeeded,125.00,10.00,0.00,Paid at pickup',
+    '2026-09-21 10:00,Jane Doe,2001,,Payment,Cash,,,succeeded,125.00,10.00,0.00,Paid at pickup',
   );
 });
 

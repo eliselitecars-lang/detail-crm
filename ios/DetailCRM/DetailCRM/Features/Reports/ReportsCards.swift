@@ -308,6 +308,10 @@ struct ReportsTeamCard: View {
     let state: LoadState<[ReportTeamRow]>
     let currencyCode: String
     let ownOnly: Bool
+    /// The report range (for the per-job earnings drill-down).
+    let range: ReportDateRange
+    /// Owners / admins open any member's earnings by job (P-12).
+    let canOpenEarnings: Bool
     let retry: () async -> Void
 
     var body: some View {
@@ -324,7 +328,7 @@ struct ReportsTeamCard: View {
                     ReportsEmptyLine(text: "No team activity in this period.")
                 } else {
                     ForEach(rows) { row in
-                        ReportsTeamRowView(row: row, currencyCode: currencyCode)
+                        ReportsTeamRowView(row: row, currencyCode: currencyCode, range: range, canOpenEarnings: canOpenEarnings)
                     }
                 }
             }
@@ -335,6 +339,8 @@ struct ReportsTeamCard: View {
 private struct ReportsTeamRowView: View {
     let row: ReportTeamRow
     let currencyCode: String
+    let range: ReportDateRange
+    let canOpenEarnings: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
@@ -359,6 +365,38 @@ private struct ReportsTeamRowView: View {
             }
             if let labor = row.laborCostCents {
                 ReportsMoneyRow(label: "Labor cost", cents: labor, currencyCode: currencyCode)
+            }
+            if let service = row.serviceCommissionCents {
+                ReportsMoneyRow(label: "Service commission", cents: service, currencyCode: currencyCode)
+            }
+            if let sales = row.salesCommissionCents {
+                ReportsMoneyRow(label: "Sales commission", cents: sales, currencyCode: currencyCode)
+            }
+            if let tips = row.tipsCents {
+                ReportsMoneyRow(label: "Tips", cents: tips, currencyCode: currencyCode)
+            }
+            if let total = row.totalEarningsCents {
+                ReportsMoneyRow(label: "Total earnings", cents: total, currencyCode: currencyCode)
+            }
+            if canOpenEarnings {
+                NavigationLink {
+                    OpsEarningsCard.JobsList(memberID: row.memberID, memberName: row.displayName, range: range)
+                } label: {
+                    HStack {
+                        Text("Earnings by job")
+                            .font(Theme.Typography.footnote.weight(.semibold))
+                            .foregroundStyle(Theme.glacier)
+                        Spacer(minLength: Theme.Spacing.sm)
+                        Image(systemName: "chevron.right")
+                            .font(Theme.Typography.caption.weight(.semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                            .accessibilityHidden(true)
+                    }
+                    .frame(minHeight: Theme.Size.compactControlHeight)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Earnings by job for \(row.displayName)")
             }
         }
     }
@@ -553,5 +591,189 @@ private struct ReportsTopCustomerRow: View {
             parts.append("last \(clock.shortDayText(last))")
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - Lead sources (P-33)
+
+/// Where customers came from in the range, busiest sources first: new
+/// customers, open leads, conversions and revenue per source.
+struct OpsLeadSourcesCard: View {
+    let state: LoadState<[OpsLeadSourceRow]>
+    let currencyCode: String
+    let retry: () async -> Void
+
+    /// Sources shown before "Show all".
+    private static let collapsedCount = 5
+
+    /// Matches the server's definitions (`report_lead_sources`, ops 0078).
+    static let subtitle = "Customers added in this period by where they came from. Converted = marked as a customer or has a completed job. Revenue = what they paid by the end of the period, including deposits, less refunds and without tips."
+
+    @State private var showAll = false
+
+    var body: some View {
+        ReportsCard(
+            "Lead sources",
+            subtitle: OpsLeadSourcesCard.subtitle,
+            state: state,
+            retry: retry
+        ) { rows in
+            let active = OpsLeadSourceRow.active(rows)
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                if active.isEmpty {
+                    ReportsEmptyLine(text: "No new customers or leads in this period.")
+                } else {
+                    let visible = showAll ? active : Array(active.prefix(Self.collapsedCount))
+                    ForEach(visible) { row in
+                        OpsLeadSourcesCard.Row(row: row, currencyCode: currencyCode)
+                        if row.id != visible.last?.id {
+                            Divider()
+                        }
+                    }
+                    if active.count > Self.collapsedCount {
+                        let toggleTitle: String = showAll ? "Show fewer" : "Show all \(active.count) sources"
+                        Button(toggleTitle) {
+                            showAll.toggle()
+                        }
+                        .font(Theme.Typography.footnote.weight(.semibold))
+                        .foregroundStyle(Theme.glacier)
+                    }
+                }
+            }
+        }
+    }
+}
+
+extension OpsLeadSourcesCard {
+    struct Row: View {
+        let row: OpsLeadSourceRow
+        let currencyCode: String
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(row.sourceName)
+                        .font(Theme.Typography.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer(minLength: Theme.Spacing.sm)
+                    MoneyText(cents: row.revenueCents, currencyCode: currencyCode, size: .small)
+                }
+                Text(countsText)
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if row.firstJobRevenueCents > 0 {
+                    ReportsMoneyRow(label: "First completed job (before tax)", cents: row.firstJobRevenueCents, currencyCode: currencyCode, emphasis: .secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+
+        private var countsText: String {
+            var parts = ["\(row.customersCount) new"]
+            parts.append("\(row.convertedCount) converted")
+            if let bps = row.conversionBps {
+                parts[parts.count - 1] += " (\(ReportsFormatting.percent(bps: bps)))"
+            }
+            if row.leadsCount > 0 {
+                parts.append("\(row.leadsCount) open lead\(row.leadsCount == 1 ? "" : "s")")
+            }
+            return parts.joined(separator: " · ")
+        }
+    }
+}
+
+// MARK: - Quote conversion (P-33)
+
+/// Quotes sent in the range: approval rate, outcomes, averages, time to
+/// approval and a line per month.
+struct OpsQuoteConversionCard: View {
+    let state: LoadState<OpsQuoteConversion>
+    let currencyCode: String
+    let retry: () async -> Void
+
+    var body: some View {
+        ReportsCard(
+            "Quote conversion",
+            subtitle: "Quotes sent in this period and what became of them. Approved includes quotes already turned into jobs.",
+            state: state,
+            retry: retry
+        ) { report in
+            OpsQuoteConversionCard.Details(report: report, currencyCode: currencyCode)
+        }
+    }
+}
+
+extension OpsQuoteConversionCard {
+    struct Details: View {
+        let report: OpsQuoteConversion
+        let currencyCode: String
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                if report.sent == 0 {
+                    ReportsEmptyLine(text: "No quotes were sent in this period.")
+                } else {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Approval rate")
+                            .font(Theme.Typography.subheadline)
+                            .foregroundStyle(Theme.textSecondary)
+                        Spacer(minLength: Theme.Spacing.sm)
+                        Text(report.conversionRateBps.map { ReportsFormatting.percent(bps: $0) } ?? "—")
+                            .font(Theme.Typography.sectionTitle.monospacedDigit())
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    ReportsMetricRow(label: "Sent", value: "\(report.sent)")
+                    ReportsMetricRow(label: "Viewed", value: "\(report.viewed)")
+                    ReportsMetricRow(label: "Approved", value: "\(report.approved)")
+                    ReportsMetricRow(label: "Turned into jobs", value: "\(report.converted)")
+                    ReportsMetricRow(label: "Declined", value: "\(report.declined)")
+                    ReportsMetricRow(label: "Expired", value: "\(report.expired)")
+                    ReportsMetricRow(label: "Awaiting an answer", value: "\(report.awaiting)")
+                    Divider()
+                    averageRow("Average quote", cents: report.averageQuoteCents)
+                    averageRow("Average approved quote", cents: report.averageApprovedCents)
+                    ReportsMetricRow(
+                        label: "Median time to approval",
+                        value: report.medianHoursToApprove.map { OpsQuoteConversion.durationText(hours: $0) } ?? "—"
+                    )
+                    if report.byMonth.count > 1 {
+                        Divider()
+                        Text("BY MONTH")
+                            .font(Theme.Typography.eyebrow)
+                            .foregroundStyle(Theme.textSecondary)
+                        ForEach(report.byMonth) { month in
+                            monthRow(month)
+                        }
+                    }
+                }
+            }
+        }
+
+        @ViewBuilder
+        private func averageRow(_ label: String, cents: Int?) -> some View {
+            if let cents {
+                ReportsMoneyRow(label: label, cents: cents, currencyCode: currencyCode)
+            } else {
+                ReportsMetricRow(label: label, value: "—")
+            }
+        }
+
+        private func monthRow(_ month: OpsQuoteConversion.Month) -> some View {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                    Text(month.label())
+                        .font(Theme.Typography.subheadline)
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("\(month.approved) of \(month.sent) approved")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Spacer(minLength: Theme.Spacing.sm)
+                MoneyText(cents: month.approvedCents, currencyCode: currencyCode, size: .small)
+            }
+            .accessibilityElement(children: .combine)
+        }
     }
 }

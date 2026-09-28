@@ -63,11 +63,18 @@ function installMoneyRpcs(db: FakeSupabase): void {
     const status = a.p_status as string;
     const amount = a.p_amount_cents as number;
     const tip = (a.p_tip_cents as number | null) ?? 0;
-    if (!["pending", "succeeded", "failed", "cancelled"].includes(status)) {
+    if (!["pending", "processing", "succeeded", "failed", "cancelled"].includes(status)) {
       throw new FakeRpcError("22023", "refund states are applied with apply_stripe_refund");
     }
-    if (!["card", "card_present"].includes(a.p_method as string)) {
-      throw new FakeRpcError("22023", "Stripe payments are card or card_present");
+    // 0064: the Stripe-backed methods
+    if (!["card", "card_present", "ach_debit", "bnpl"].includes(a.p_method as string)) {
+      throw new FakeRpcError("22023", "Stripe payments are card, card_present, ach_debit or bnpl");
+    }
+    const methodType = a.p_stripe_method_type === null || a.p_stripe_method_type === undefined
+      ? null
+      : String(a.p_stripe_method_type).trim().toLowerCase() || null;
+    if (methodType !== null && !/^[a-z][a-z0-9_]{0,39}$/.test(methodType)) {
+      throw new FakeRpcError("22023", "invalid Stripe payment method type");
     }
     if (amount < 0 || tip < 0 || amount + tip <= 0) {
       throw new FakeRpcError("22023", "amount and tip must be non-negative and not both zero");
@@ -180,6 +187,7 @@ function installMoneyRpcs(db: FakeSupabase): void {
           stripe_checkout_session_id: a.p_checkout_session_id ?? null,
           card_brand: a.p_card_brand ?? null,
           card_last4: a.p_card_last4 ?? null,
+          stripe_method_type: methodType,
           note: null,
           paid_at: status === "succeeded" ? (a.p_paid_at ?? NOW.toISOString()) : null,
         };
@@ -189,16 +197,29 @@ function installMoneyRpcs(db: FakeSupabase): void {
       if (row.shop_id !== a.p_shop_id) {
         throw new FakeRpcError("22023", "payment intent belongs to another shop");
       }
+      // 0064 state machine: received money is never downgraded; a cancelled
+      // row only turns succeeded; a late pending / processing never reopens
+      // a failure; processing never regresses to pending. (The SQL also keeps
+      // a declined card-less sheet pending; the webhook itself records such a
+      // decline as pending, which the tests below assert on the RPC call.)
       const received = RECEIVED.includes(row.status as string);
       const next = received
         ? row.status
         : row.status === "cancelled" && status !== "succeeded"
         ? "cancelled"
+        : row.status === "failed" && (status === "pending" || status === "processing")
+        ? "failed"
+        : row.status === "processing" && status === "pending"
+        ? "processing"
         : status;
       Object.assign(row, {
         status: next,
         amount_cents: received ? row.amount_cents : amount,
         tip_cents: received ? row.tip_cents : tip,
+        method: received ? row.method : a.p_method,
+        stripe_method_type: received
+          ? (row.stripe_method_type ?? methodType)
+          : (methodType ?? row.stripe_method_type ?? null),
         stripe_charge_id: row.stripe_charge_id ?? a.p_charge_id ?? null,
         stripe_checkout_session_id: row.stripe_checkout_session_id ?? a.p_checkout_session_id ??
           null,
@@ -460,7 +481,7 @@ class FakeStripe {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function setup(options: { membership?: Partial<Row> } = {}) {
+function setup(options: { membership?: Partial<Row>; tables?: Record<string, Row[]> } = {}) {
   const db = new FakeSupabase({
     tables: {
       shop_stripe_accounts: [
@@ -500,6 +521,8 @@ function setup(options: { membership?: Partial<Row> } = {}) {
         cancelled_at: null,
         ...options.membership,
       }],
+      gift_card_orders: [],
+      ...options.tables,
     },
     tableOptions: {
       stripe_events: {
@@ -1522,7 +1545,7 @@ Deno.test("checkout.session.completed (payment): paid -> succeeded with the sess
   assertEquals(db.table("customer_payment_methods")[0]?.stripe_payment_method_id, "pm_1Card");
 });
 
-Deno.test("checkout.session.completed (payment): unpaid (async method) -> pending", async () => {
+Deno.test("checkout.session.completed (payment): unpaid, debit clearing -> processing (in flight)", async () => {
   const { db, stripe, handler } = setup();
   const pi = intent({ status: "processing", amount_received: 0, latest_charge: null });
   stripe.put(pi);
@@ -1540,11 +1563,53 @@ Deno.test("checkout.session.completed (payment): unpaid (async method) -> pendin
     ),
   );
   const row = payment(db);
-  assertEquals([row.status, row.paid_at, row.amount_cents], ["pending", null, 10_000]);
+  assertEquals([row.status, row.paid_at, row.amount_cents], ["processing", null, 10_000]);
   // later success upgrades it
   stripe.put(intent()).put(charge());
   await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
   assertEquals(payment(db).status, "succeeded");
+});
+
+Deno.test("checkout.session.completed (payment): unpaid, bank account still unverified -> pending", async () => {
+  const { db, stripe, handler } = setup();
+  const pi = intent({
+    status: "requires_action",
+    amount_received: 0,
+    latest_charge: null,
+    payment_method_types: ["card", "us_bank_account"],
+  });
+  stripe.put(pi);
+  await ok(
+    await deliver(
+      handler,
+      event("checkout.session.completed", {
+        id: "cs_1Verify",
+        object: "checkout.session",
+        mode: "payment",
+        payment_status: "unpaid",
+        payment_intent: "pi_1Invoice",
+        metadata: pi.metadata,
+      }),
+    ),
+  );
+  assertEquals(payment(db).status, "pending");
+  // micro-deposits verified: the debit starts clearing, then settles
+  const clearing = charge({
+    status: "pending",
+    payment_method_details: { type: "us_bank_account", us_bank_account: { last4: "6789" } },
+  });
+  stripe.put(clearing);
+  const processing = intent({
+    status: "processing",
+    amount_received: 0,
+    payment_method_types: ["card", "us_bank_account"],
+  });
+  stripe.put(processing);
+  await ok(await deliver(handler, event("payment_intent.processing", processing)));
+  assertEquals(
+    [payment(db).status, payment(db).method, payment(db).stripe_method_type],
+    ["processing", "ach_debit", "us_bank_account"],
+  );
 });
 
 const DELETED_JOB = "99999999-9999-4999-8999-999999999999";
@@ -1692,30 +1757,51 @@ Deno.test("deleted job: an FK error while every linked record exists is still re
   assertEquals((await res.json() as ErrorBody).code, "internal_error");
 });
 
-Deno.test("non-card Stripe methods are flagged on the row (stored as card, the only Stripe method)", async () => {
+Deno.test("ACH: a bank debit is recorded as ach_debit with its account's last4 (no note)", async () => {
   const { db, stripe, logs, handler } = setup();
   stripe.put(intent()).put(charge({
     payment_method_details: { type: "us_bank_account", us_bank_account: { last4: "6789" } },
   }));
   await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
   const row = payment(db);
-  assertEquals([row.status, row.method, row.card_brand, row.card_last4], [
-    "succeeded",
-    "card",
-    null,
-    null,
-  ]);
-  assert(String(row.note).includes("us bank account"), String(row.note));
-  assertEquals(logs.events("stripe_non_card_payment")[0]?.payment_method_type, "us_bank_account");
-  // A card charge carries no such note.
+  assertEquals(
+    [row.status, row.method, row.stripe_method_type, row.card_brand, row.card_last4, row.note],
+    ["succeeded", "ach_debit", "us_bank_account", null, "6789", null],
+  );
+  assertEquals(logs.events("stripe_unmapped_payment_method").length, 0);
+});
+
+Deno.test("BNPL: pay-later providers are recorded as bnpl with their Stripe type", async () => {
+  for (const type of ["affirm", "klarna", "afterpay_clearpay", "zip"]) {
+    const { db, stripe, handler } = setup();
+    stripe.put(intent()).put(charge({ payment_method_details: { type, [type]: {} } }));
+    await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
+    const row = payment(db);
+    assertEquals(
+      [row.method, row.stripe_method_type, row.card_last4, row.note],
+      ["bnpl", type, null, null],
+      type,
+    );
+  }
+});
+
+Deno.test("unmapped Stripe methods are stored as card with a note; cards get none", async () => {
+  const { db, stripe, logs, handler } = setup();
+  stripe.put(intent()).put(charge({ payment_method_details: { type: "cashapp", cashapp: {} } }));
+  await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
+  const row = payment(db);
+  assertEquals([row.method, row.stripe_method_type], ["card", "cashapp"]);
+  assert(String(row.note).includes("cashapp (recorded as card)"), String(row.note));
+  assertEquals(logs.events("stripe_unmapped_payment_method")[0]?.payment_method_type, "cashapp");
+  // A card charge carries no such note, and its type is recorded.
   const cardDb = setup();
   cardDb.stripe.put(intent()).put(charge());
   await ok(await deliver(cardDb.handler, event("payment_intent.succeeded", intent())));
-  assertEquals(payment(cardDb.db).note, null);
+  assertEquals([payment(cardDb.db).note, payment(cardDb.db).stripe_method_type], [null, "card"]);
 });
 
-Deno.test("non-card Stripe methods: a clearing (unpaid) Checkout bank debit is flagged while pending", async () => {
-  const { db, stripe, logs, handler } = setup();
+Deno.test("ACH through Checkout: processing -> async_payment_succeeded records the money", async () => {
+  const { db, stripe, handler } = setup();
   const pi = intent({
     status: "processing",
     amount_received: 0,
@@ -1726,27 +1812,184 @@ Deno.test("non-card Stripe methods: a clearing (unpaid) Checkout bank debit is f
     payment_method_details: { type: "us_bank_account", us_bank_account: { last4: "6789" } },
   });
   stripe.put(pi).put(clearing);
-  await ok(
+  const session = {
+    id: "cs_1Ach",
+    object: "checkout.session",
+    mode: "payment",
+    payment_status: "unpaid",
+    payment_intent: "pi_1Invoice",
+    metadata: pi.metadata,
+  };
+  await ok(await deliver(handler, event("checkout.session.completed", session)));
+  const row = payment(db);
+  assertEquals(
+    [row.status, row.method, row.card_last4, row.stripe_method_type, row.note],
+    ["processing", "ach_debit", "6789", "us_bank_account", null],
+  );
+  // a late pending report never moves it back
+  await ok(await deliver(handler, event("payment_intent.processing", pi)));
+  assertEquals(payment(db).status, "processing");
+  // the debit settles
+  stripe.put(intent({ payment_method_types: ["card", "us_bank_account"] })).put(
+    charge({ payment_method_details: clearing.payment_method_details }),
+  );
+  const result = await ok(
     await deliver(
       handler,
-      event("checkout.session.completed", {
-        id: "cs_1Ach",
-        object: "checkout.session",
-        mode: "payment",
-        payment_status: "unpaid",
-        payment_intent: "pi_1Invoice",
-        metadata: pi.metadata,
-      }),
+      event("checkout.session.async_payment_succeeded", { ...session, payment_status: "paid" }),
     ),
   );
+  assertEquals(result.result, "applied");
+  assertEquals(
+    [payment(db).status, payment(db).method, payment(db).paid_at !== null],
+    ["succeeded", "ach_debit", true],
+  );
+});
+
+Deno.test("ACH: a debit returned after processing becomes failed and stays ach_debit", async () => {
+  const { db, stripe, handler } = setup();
+  const types = ["card", "us_bank_account"];
+  const returned = charge({
+    status: "failed",
+    payment_method_details: { type: "us_bank_account", us_bank_account: { last4: "6789" } },
+  });
+  stripe.put(returned);
+  const processing = intent({
+    status: "processing",
+    amount_received: 0,
+    payment_method_types: types,
+  });
+  await ok(await deliver(handler, event("payment_intent.processing", processing)));
+  assertEquals([payment(db).status, payment(db).method], ["processing", "ach_debit"]);
+
+  const failed = intent({
+    status: "requires_payment_method",
+    amount_received: 0,
+    payment_method_types: types,
+    last_payment_error: { code: "bank_account_restricted" },
+  });
+  stripe.put(failed);
+  const result = await ok(await deliver(handler, event("payment_intent.payment_failed", failed)));
+  assertEquals(result.result, "applied");
   const row = payment(db);
-  assertEquals([row.status, row.method, row.card_last4], ["pending", "card", null]);
-  assert(String(row.note).includes("us bank account (not a card)"), String(row.note));
-  assertEquals(logs.events("stripe_non_card_payment").length, 1);
-  // The later success keeps the note (never overwritten) and records the money.
-  stripe.put(intent()).put(charge({ payment_method_details: clearing.payment_method_details }));
-  await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
-  assertEquals([payment(db).status, payment(db).note], ["succeeded", row.note]);
+  assertEquals([row.status, row.method, row.paid_at], ["failed", "ach_debit", null]);
+  // a late processing / pending report never reopens it
+  await ok(await deliver(handler, event("payment_intent.processing", processing)));
+  assertEquals(payment(db).status, "failed");
+});
+
+Deno.test("ACH through Checkout: async_payment_failed fails the tracked payment only", async () => {
+  const { db, stripe, handler } = setup();
+  const types = ["card", "us_bank_account"];
+  const failedIntent = intent({
+    status: "requires_payment_method",
+    amount_received: 0,
+    payment_method_types: types,
+    latest_charge: "ch_1Charge",
+  });
+  stripe.put(failedIntent).put(charge({
+    status: "failed",
+    payment_method_details: { type: "us_bank_account", us_bank_account: { last4: "6789" } },
+  }));
+  const session = {
+    id: "cs_1Ach",
+    object: "checkout.session",
+    mode: "payment",
+    payment_status: "unpaid",
+    payment_intent: "pi_1Invoice",
+    metadata: failedIntent.metadata,
+  };
+  // nothing tracked: no row is created for money that never arrived
+  const ignored = await ok(
+    await deliver(handler, event("checkout.session.async_payment_failed", session)),
+  );
+  assertEquals(ignored.result, "ignored");
+  assertEquals(db.table("payments").length, 0);
+  // tracked (processing): it fails
+  trackAttempt(db, "pi_1Invoice", {
+    status: "processing",
+    method: "ach_debit",
+    tip_cents: 1_000,
+    stripe_checkout_session_id: "cs_1Ach",
+  });
+  const result = await ok(
+    await deliver(handler, event("checkout.session.async_payment_failed", session)),
+  );
+  assertEquals(result.result, "applied");
+  assertEquals([payment(db).status, payment(db).method], ["failed", "ach_debit"]);
+});
+
+Deno.test("payment_intent.processing records the money in flight (created when untracked)", async () => {
+  const { db, stripe, handler } = setup();
+  const pi = intent({
+    status: "processing",
+    amount_received: 0,
+    payment_method_types: ["us_bank_account"],
+    latest_charge: null,
+  });
+  stripe.put(pi);
+  const result = await ok(await deliver(handler, event("payment_intent.processing", pi)));
+  assertEquals(result.result, "applied");
+  const row = payment(db);
+  assertEquals(
+    [row.status, row.method, row.stripe_method_type, row.amount_cents, row.tip_cents],
+    ["processing", "ach_debit", "us_bank_account", 10_000, 1_000],
+  );
+  // never on another shop's intent
+  const other = setup();
+  const foreign = intent({
+    status: "processing",
+    metadata: { shop_id: OTHER_SHOP, invoice_id: INVOICE },
+  });
+  other.stripe.put(foreign);
+  const mismatch = await ok(
+    await deliver(other.handler, event("payment_intent.processing", foreign)),
+  );
+  assertEquals(mismatch.result, "ignored");
+  assertEquals(other.db.table("payments").length, 0);
+});
+
+Deno.test("Checkout cards are saved from the card options' setup_future_usage (P-31)", async () => {
+  const { db, stripe, handler } = setup();
+  stripe.put(paymentMethod()).put(charge());
+  const pi = intent({
+    setup_future_usage: null,
+    payment_method_types: ["card", "us_bank_account", "affirm"],
+    payment_method_options: { card: { setup_future_usage: "off_session" } },
+  });
+  stripe.put(pi);
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  assertEquals(db.table("customer_payment_methods")[0]?.stripe_payment_method_id, "pm_1Card");
+  // a bank debit is never saved as a card
+  const achDb = setup();
+  achDb.stripe.put(paymentMethod({ type: "us_bank_account", card: null })).put(charge({
+    payment_method_details: { type: "us_bank_account", us_bank_account: { last4: "6789" } },
+  })).put(pi);
+  await ok(await deliver(achDb.handler, event("payment_intent.succeeded", pi)));
+  assertEquals(achDb.db.table("customer_payment_methods").length, 0);
+  assertEquals(payment(achDb.db).method, "ach_debit");
+});
+
+Deno.test("a Link payment on a card-saving link is recorded but flagged: no card on file", async () => {
+  const { db, stripe, logs, handler } = setup();
+  stripe.put(paymentMethod({ type: "link", card: null, link: { email: "ada@example.com" } }))
+    .put(charge({ payment_method_details: { type: "link", link: { country: "US" } } }));
+  const pi = intent({
+    payment_method_types: ["card", "link"],
+    payment_method_options: { card: { setup_future_usage: "off_session" } },
+  });
+  stripe.put(pi);
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  // the money is recorded as a card payment (Link pays with a card) ...
+  assertEquals(payment(db).status, "succeeded");
+  assertEquals(payment(db).method, "card");
+  // ... but nothing is saved as the card on file, and that is logged
+  assertEquals(db.table("customer_payment_methods").length, 0);
+  assertEquals(rpcCalls(db, "upsert_customer_payment_method").length, 0);
+  const flagged = logs.events("stripe_card_not_saved");
+  assertEquals(flagged.length, 1);
+  assertEquals(flagged[0]?.reason, "link_payment");
+  assertEquals(flagged[0]?.level, "warn");
 });
 
 Deno.test("checkout.session.completed (setup): the card is saved; the first card is default", async () => {
@@ -2951,4 +3194,351 @@ Deno.test("P0002 while the named records exist is a real failure: retried (500)"
   const res = await deliver(handler, event("payment_intent.succeeded", intent()));
   assertEquals(res.status, 500);
   await res.body?.cancel();
+});
+
+// ---------------------------------------------------------------------------
+// Online gift card sales (P-13): gift_card_order_paid / _refunded, never payments
+// ---------------------------------------------------------------------------
+
+const ORDER = "60000000-0000-4000-8000-000000000001";
+
+function giftSetup(orderShop = SHOP) {
+  const ctx = setup({
+    tables: {
+      gift_card_orders: [{
+        id: ORDER,
+        shop_id: orderShop,
+        status: "pending",
+        gift_card_id: null,
+        price_cents: 9_000,
+      }],
+    },
+  });
+  // 0066 rules: issue once per order (replays hand back the card), amount must match
+  ctx.db.onRpc("gift_card_order_paid", (a, { role }) => {
+    assertEquals(role, "service_role");
+    return mutate(ctx.db, "gift_card_orders", (rows) => {
+      const order = rows.find((o) => o.id === a.p_order_id);
+      if (!order) throw new FakeRpcError("P0002", "gift card order not found");
+      if (order.gift_card_id) {
+        return { gift_card_id: order.gift_card_id, last4: "WXYZ", first_time: false };
+      }
+      if (a.p_amount_received_cents !== order.price_cents) {
+        throw new FakeRpcError("22023", "the amount received does not match the order price");
+      }
+      order.gift_card_id = "61000000-0000-4000-8000-000000000001";
+      order.status = "paid";
+      return { gift_card_id: order.gift_card_id, last4: "WXYZ", first_time: true };
+    });
+  });
+  ctx.db.onRpc("gift_card_order_refunded", (a, { role }) => {
+    assertEquals(role, "service_role");
+    return mutate(ctx.db, "gift_card_orders", (rows) => {
+      const order = rows.find((o) => o.gift_card_id);
+      if (!order) {
+        throw new FakeRpcError("P0002", `gift card for intent ${a.p_payment_intent_id} not found`);
+      }
+      order.refunded_cents = a.p_refunded_total_cents;
+      return { gift_card_id: order.gift_card_id, removed_cents: 1_000, unrecovered_cents: 0 };
+    });
+  });
+  return ctx;
+}
+
+function giftIntent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return intent({
+    id: "pi_1Gift",
+    amount: 9_000,
+    amount_received: 9_000,
+    customer: null,
+    latest_charge: "ch_1Gift",
+    metadata: { shop_id: SHOP, gift_card_order_id: ORDER, kind: "gift_card" },
+    ...overrides,
+  });
+}
+
+Deno.test("gift card sale: checkout.session.completed issues the card once, never a payment", async () => {
+  const { db, stripe, handler } = giftSetup();
+  const pi = giftIntent();
+  stripe.put(pi).put(charge({ id: "ch_1Gift", amount: 9_000, payment_intent: "pi_1Gift" }));
+  const session = {
+    id: "cs_1Gift",
+    object: "checkout.session",
+    mode: "payment",
+    payment_status: "paid",
+    payment_intent: "pi_1Gift",
+    metadata: pi.metadata,
+  };
+  const first = await ok(await deliver(handler, event("checkout.session.completed", session)));
+  assertEquals(first.result, "applied");
+  assertEquals(rpcCalls(db, "gift_card_order_paid")[0], {
+    p_order_id: ORDER,
+    p_payment_intent_id: "pi_1Gift",
+    p_amount_received_cents: 9_000,
+  });
+  // payment_intent.succeeded for the same sale: the card is not issued twice
+  const again = await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  assertEquals(again.result, "applied");
+  assertEquals(db.table("gift_card_orders")[0]?.status, "paid");
+  assertEquals(rpcCalls(db, "upsert_stripe_payment").length, 0);
+  assertEquals(db.table("payments").length, 0);
+});
+
+Deno.test("gift card sale: failures, other shops and mismatched amounts never issue a card", async () => {
+  // declined / cancelled: nothing
+  const declined = giftSetup();
+  declined.stripe.put(giftIntent({ status: "requires_payment_method", amount_received: 0 }));
+  const failed = await ok(
+    await deliver(
+      declined.handler,
+      event("payment_intent.payment_failed", giftIntent({ status: "requires_payment_method" })),
+    ),
+  );
+  assertEquals(failed.result, "ignored");
+  assertEquals(rpcCalls(declined.db, "gift_card_order_paid").length, 0);
+
+  // an order of another shop named in this shop's intent
+  const foreign = giftSetup(OTHER_SHOP);
+  foreign.stripe.put(charge({ id: "ch_1Gift", amount: 9_000, payment_intent: "pi_1Gift" }));
+  const res = await ok(
+    await deliver(foreign.handler, event("payment_intent.succeeded", giftIntent())),
+  );
+  assertEquals(res.result, "ignored");
+  assertEquals(rpcCalls(foreign.db, "gift_card_order_paid").length, 0);
+
+  // the amount received does not match the order: logged for staff, acknowledged
+  const odd = giftSetup();
+  odd.stripe.put(charge({ id: "ch_1Gift", amount: 5_000, payment_intent: "pi_1Gift" }));
+  const mismatch = await ok(
+    await deliver(
+      odd.handler,
+      event("payment_intent.succeeded", giftIntent({ amount_received: 5_000 })),
+    ),
+  );
+  assertEquals(mismatch.result, "ignored");
+  assertEquals(odd.logs.events("gift_card_order_unpaid")[0]?.code, "22023");
+  assertEquals(odd.db.table("payments").length, 0);
+});
+
+Deno.test("gift card sale: a refund in Stripe takes the value off the card", async () => {
+  const { db, stripe, handler } = giftSetup();
+  const pi = giftIntent();
+  stripe.put(pi).put(charge({ id: "ch_1Gift", amount: 9_000, payment_intent: "pi_1Gift" }));
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  stripe.put(charge({
+    id: "ch_1Gift",
+    amount: 9_000,
+    amount_refunded: 3_000,
+    payment_intent: "pi_1Gift",
+  }));
+  const res = await ok(
+    await deliver(
+      handler,
+      event("charge.refunded", charge({ id: "ch_1Gift", payment_intent: "pi_1Gift" })),
+    ),
+  );
+  assertEquals(res.result, "applied");
+  assertEquals(rpcCalls(db, "gift_card_order_refunded")[0], {
+    p_payment_intent_id: "pi_1Gift",
+    p_refunded_total_cents: 3_000,
+  });
+  assertEquals(rpcCalls(db, "apply_stripe_refund").length, 0);
+  assertEquals(db.table("payments").length, 0);
+});
+
+Deno.test("gift card sale: a refund that arrives before the sale issues the card first", async () => {
+  const { db, stripe, handler } = giftSetup();
+  stripe.put(giftIntent()).put(charge({
+    id: "ch_1Gift",
+    amount: 9_000,
+    amount_refunded: 9_000,
+    payment_intent: "pi_1Gift",
+  }));
+  const res = await ok(
+    await deliver(
+      handler,
+      event("charge.refunded", charge({ id: "ch_1Gift", payment_intent: "pi_1Gift" })),
+    ),
+  );
+  assertEquals(res.result, "applied");
+  assertEquals(rpcCalls(db, "gift_card_order_paid").length, 1);
+  assertEquals(rpcCalls(db, "gift_card_order_refunded")[0]?.p_refunded_total_cents, 9_000);
+});
+
+// ---------------------------------------------------------------------------
+// Terminal / Tap to Pay (P-6)
+// ---------------------------------------------------------------------------
+
+function terminalIntent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return intent({
+    id: "pi_1Tap",
+    customer: null,
+    payment_method_types: ["card_present"],
+    latest_charge: "ch_1Tap",
+    metadata: {
+      ...(intent().metadata as Record<string, string>),
+      source: "terminal",
+      channel: "terminal",
+    },
+    ...overrides,
+  });
+}
+
+Deno.test("terminal: a tapped card is recorded card_present with its brand and last4", async () => {
+  const { db, stripe, handler } = setup();
+  trackAttempt(db, "pi_1Tap", { method: "card_present" });
+  stripe.put(terminalIntent()).put(charge({
+    id: "ch_1Tap",
+    payment_intent: "pi_1Tap",
+    payment_method_details: {
+      type: "card_present",
+      card_present: { brand: "mastercard", last4: "0005", exp_month: 1, exp_year: 2030 },
+    },
+  }));
+  await ok(await deliver(handler, event("payment_intent.succeeded", terminalIntent())));
+  const row = payment(db, "pi_1Tap");
+  assertEquals(
+    [row.status, row.method, row.card_brand, row.card_last4, row.stripe_method_type, row.tip_cents],
+    ["succeeded", "card_present", "mastercard", "0005", "card_present", 1_000],
+  );
+  // Interac (Canada) is in person too
+  const interac = setup();
+  interac.stripe.put(terminalIntent()).put(charge({
+    id: "ch_1Tap",
+    payment_intent: "pi_1Tap",
+    payment_method_details: {
+      type: "interac_present",
+      interac_present: { brand: "interac", last4: "1234" },
+    },
+  }));
+  await ok(await deliver(interac.handler, event("payment_intent.succeeded", terminalIntent())));
+  assertEquals(payment(interac.db, "pi_1Tap").method, "card_present");
+});
+
+Deno.test("terminal: a declined tap stays open (pending), like a declined PaymentSheet", async () => {
+  const { db, handler } = setup();
+  trackAttempt(db, "pi_1Tap", { method: "card_present" });
+  const declined = terminalIntent({
+    status: "requires_payment_method",
+    amount_received: 0,
+    latest_charge: null,
+    last_payment_error: { type: "card_error", code: "card_declined" },
+  });
+  const res = await ok(await deliver(handler, event("payment_intent.payment_failed", declined)));
+  assertEquals(res.result, "applied");
+  assertEquals(rpcCalls(db, "upsert_stripe_payment")[0]?.p_status, "pending");
+  assertEquals(rpcCalls(db, "upsert_stripe_payment")[0]?.p_method, "card_present");
+  assertEquals(payment(db, "pi_1Tap").status, "pending");
+});
+
+Deno.test("terminal: a reader intent still waiting is cancelled once the invoice is paid elsewhere", async () => {
+  const { db, stripe, handler } = setup();
+  db.seed("invoices", [{
+    id: INVOICE,
+    shop_id: SHOP,
+    job_id: JOB,
+    customer_id: CUSTOMER,
+    status: "paid",
+    balance_cents: 0,
+  }]);
+  trackAttempt(db, "pi_1Tap", { method: "card_present" });
+  stripe.put(
+    terminalIntent({ status: "requires_payment_method", amount_received: 0, latest_charge: null }),
+  );
+  db.http.on(
+    "POST",
+    `${STRIPE}/payment_intents/:id/cancel`,
+    (_req, { params }) =>
+      jsonResponse({ id: params.id, object: "payment_intent", status: "canceled" }),
+  );
+  stripe.put(intent()).put(charge());
+  await ok(await deliver(handler, event("payment_intent.succeeded", intent())));
+  assertEquals(db.http.callsTo("POST", `${STRIPE}/payment_intents/pi_1Tap/cancel`).length, 1);
+  assertEquals(payment(db, "pi_1Tap").status, "cancelled");
+});
+
+// ---------------------------------------------------------------------------
+// Weekly memberships (P-23) and merged customers (P-20)
+// ---------------------------------------------------------------------------
+
+Deno.test("subscriptions: weekly billing terms are recorded on the membership", async () => {
+  const { db, stripe, handler } = setup();
+  const weekly = subscription({
+    items: {
+      object: "list",
+      data: [{
+        id: "si_1",
+        current_period_end: 1_791_600_000,
+        quantity: 1,
+        price: {
+          id: "price_1Weekly",
+          unit_amount: 1_500,
+          recurring: { interval: "week", interval_count: 2 },
+        },
+      }],
+    },
+  });
+  stripe.put(weekly);
+  await ok(await deliver(handler, event("customer.subscription.updated", weekly)));
+  const sync = rpcCalls(db, "sync_stripe_subscription")[0];
+  assertEquals(
+    [sync?.p_price_id, sync?.p_price_cents, sync?.p_interval, sync?.p_interval_count],
+    ["price_1Weekly", 1_500, "week", 2],
+  );
+});
+
+Deno.test("merged customer: money from a link opened before the merge goes to the survivor", async () => {
+  const MERGED = "33333333-3333-4333-8333-333333333333";
+  const { db, stripe, logs, handler } = setup({
+    tables: {
+      customers: [
+        { id: CUSTOMER, shop_id: SHOP, stripe_customer_id: "cus_1Customer", merged_into_id: null },
+        { id: MERGED, shop_id: SHOP, stripe_customer_id: null, merged_into_id: CUSTOMER },
+        { id: OTHER_CUSTOMER, shop_id: OTHER_SHOP, stripe_customer_id: "cus_1Other" },
+      ],
+    },
+  });
+  // a deposit link opened for the duplicate; the job moved to the survivor
+  const pi = intent({
+    metadata: { shop_id: SHOP, job_id: JOB, customer_id: MERGED, kind: "deposit", tip_cents: "0" },
+  });
+  stripe.put(pi).put(charge());
+  const res = await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  assertEquals(res.result, "applied");
+  const row = payment(db);
+  assertEquals([row.customer_id, row.job_id, row.note], [CUSTOMER, JOB, null]);
+  assertEquals(rpcCalls(db, "upsert_stripe_payment")[0]?.p_customer_id, CUSTOMER);
+  assertEquals(logs.events("stripe_payment_merged_customer")[0]?.to_customer, CUSTOMER);
+});
+
+Deno.test("customer.deleted: cards a merge moved to another customer go with their Stripe customer", async () => {
+  const { db, stripe, handler } = setup();
+  // pm_1Merged was saved on the duplicate's Stripe customer, then merged into CUSTOMER
+  db.seed("customer_payment_methods", [{
+    id: crypto.randomUUID(),
+    shop_id: SHOP,
+    customer_id: CUSTOMER,
+    stripe_payment_method_id: "pm_1Merged",
+    stripe_customer_id: "cus_1Duplicate",
+    is_default: true,
+  }, {
+    id: crypto.randomUUID(),
+    shop_id: SHOP,
+    customer_id: CUSTOMER,
+    stripe_payment_method_id: "pm_1Own",
+    stripe_customer_id: "cus_1Customer",
+    is_default: false,
+  }]);
+  stripe.put(paymentMethod({ id: "pm_1Merged", customer: null }));
+  const res = await ok(
+    await deliver(
+      handler,
+      event("customer.deleted", { id: "cus_1Duplicate", object: "customer", deleted: true }),
+    ),
+  );
+  assertEquals(res.result, "applied");
+  assertEquals(
+    db.table("customer_payment_methods").map((r) => r.stripe_payment_method_id),
+    ["pm_1Own"],
+  );
 });

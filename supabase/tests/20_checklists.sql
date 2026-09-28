@@ -126,10 +126,13 @@ select tests.eq(tests.row_count($$select 1 from public.job_checklist_items where
 update public.job_line_items set unit_price_cents = 2000 where id = tests.fx('line_custom');
 select tests.eq(tests.row_count($$select 1 from public.job_checklist_items where job_id = tests.fx('job_custom')$$), 4::bigint,
                 'other line edits attach nothing new');
--- deleting the line keeps the checklist (work may already be ticked)
+-- deleting the line keeps the work already ticked; its service's open
+-- items leave with it (0073 job_line_items_detach_checklists)
+update public.job_checklist_items set done_at = now()
+ where job_id = tests.fx('job_custom') and template_id = tests.fx('tpl_qc');
 delete from public.job_line_items where id = tests.fx('line_custom');
-select tests.eq(tests.row_count($$select 1 from public.job_checklist_items where job_id = tests.fx('job_custom')$$), 4::bigint,
-                'removing the line keeps the checklist');
+select tests.eq((select array_agg(template_id) from public.job_checklist_items where job_id = tests.fx('job_custom')),
+                array[tests.fx('tpl_qc')], 'removing the line keeps the ticked item only');
 
 -- shop B services never attach shop A templates
 select tests.as_superuser();

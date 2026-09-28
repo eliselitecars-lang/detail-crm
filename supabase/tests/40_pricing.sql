@@ -76,8 +76,9 @@ create temp table r as
 select tests.eq((select pg_temp.line(p, tests.fx('svc_wash')) from r),
                 jsonb_build_object('service_id', tests.fx('svc_wash'), 'name', 'Exterior Wash', 'kind', 'service', 'taxable', true,
                                    'duration_minutes', 60, 'catalog_price_cents', 5000, 'unit_price_cents', 0,
-                                   'membership_included', true, 'note', 'Included with your Gold membership'),
-                'an included service is priced 0 with a note');
+                                   'membership_included', true, 'note', 'Included with your Gold membership',
+                                   'membership_id', tests.fx('mem_gold'), 'uses_remaining', null),
+                'an included service is priced 0 with a note (0069: the membership used, unlimited uses)');
 select tests.eq((select (pg_temp.line(p, tests.fx('svc_a')) ->> 'unit_price_cents')::bigint from r), 20000::bigint,
                 'the vehicle-scoped plan does not apply to another vehicle');
 select tests.eq((select p ->> 'suggested_discount_kind' from r), 'percent', 'plan discount suggested as a percent');

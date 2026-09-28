@@ -8,7 +8,8 @@
  *
  *   succeeded                         -> recorded as succeeded
  *   canceled                          -> recorded as cancelled
- *   requires_payment_method/_confirmation/_action on a payment_sheet intent
+ *   requires_payment_method/_confirmation/_action on a payment_sheet or
+ *   terminal (Tap to Pay / reader) intent
  *                                     -> cancelled in Stripe, recorded cancelled
  *   processing / requires_capture / anything not ours -> left pending ("in progress")
  *
@@ -71,6 +72,14 @@ export interface PendingCardRow {
 
 const PENDING_COLUMNS =
   "id, shop_id, invoice_id, job_id, customer_id, kind, method, status, amount_cents, tip_cents, stripe_payment_intent_id, created_at";
+
+/**
+ * metadata.source of the intents a device confirms (payment_sheet: the iOS
+ * PaymentSheet; terminal: Tap to Pay / a reader). Only these are abandoned
+ * here; the webhook keeps the same list (stripe-webhook/mapping.ts
+ * DEVICE_INTENT_SOURCES).
+ */
+export const DEVICE_SOURCES: ReadonlySet<string> = new Set(["payment_sheet", "terminal"]);
 
 const UNCONFIRMED = new Set([
   "requires_payment_method",
@@ -282,9 +291,10 @@ export async function settlePending(
   }
 
   if (UNCONFIRMED.has(intent.status)) {
-    // Only abandon what payment_sheet created; other flows own their intents
-    // (a declined off-session charge_saved_card intent is never re-confirmed).
-    if (intent.metadata?.source !== "payment_sheet") return idle;
+    // Only abandon what a device confirms (payment_sheet, terminal); other
+    // flows own their intents (a declined off-session charge_saved_card
+    // intent is never re-confirmed, Checkout closes its own).
+    if (!DEVICE_SOURCES.has(intent.metadata?.source ?? "")) return idle;
     try {
       // No fixed idempotency key: Stripe would replay a cached refusal (the
       // intent was processing) after the intent returned to an unconfirmed

@@ -282,7 +282,7 @@ export function MembershipsTab({ customerId }: { customerId: string }) {
 
   const interval = (m: MembershipRow) => {
     if (!m.plan) return '';
-    const unit = m.plan.interval === 'year' ? 'yr' : 'mo';
+    const unit = m.plan.interval === 'year' ? 'yr' : m.plan.interval === 'week' ? 'wk' : 'mo';
     return m.plan.interval_count > 1 ? ` / ${m.plan.interval_count} ${unit}` : ` / ${unit}`;
   };
 

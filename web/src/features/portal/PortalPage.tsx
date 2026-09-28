@@ -7,14 +7,12 @@ import {
   History,
   LogOut,
   Receipt,
-  Repeat,
   Store,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { PublicLayout, type PublicShopBranding } from '@/components/layout/PublicLayout';
 import {
-  Badge,
   Button,
   Card,
   EmptyState,
@@ -26,9 +24,10 @@ import {
 } from '@/components/ui';
 import { formatDate, formatInTz, formatLocalDate, formatTimeRange } from '@/lib/dates';
 import { errorMessage, toAppError } from '@/lib/errors';
-import { formatBps, formatCents } from '@/lib/money';
+import { formatCents } from '@/lib/money';
 import { formatPhone } from '@/lib/phone';
 import { useAuth } from '@/features/auth/authContext';
+import { BookingPageLink } from '@/features/booking/components/BookingPageLink';
 import { Banner } from '@/features/public-docs/shared/PublicPage';
 import { toBranding } from '@/features/public-docs/shared/schemas';
 import {
@@ -38,6 +37,12 @@ import {
   type PortalOverview,
   type PortalShop,
 } from './api';
+import {
+  DocumentsSection,
+  JobReportsSection,
+  MembershipsSection,
+  ReferralsSection,
+} from './components/SelfServiceSections';
 import { ReturnBanners } from './ReturnBanners';
 
 const PORTAL_BRANDING: PublicShopBranding = { name: 'My appointments' };
@@ -127,7 +132,7 @@ export default function PortalPage() {
             />
           </Card>
         ) : (
-          <PortalSections data={overview.data} />
+          <PortalSections data={overview.data} userId={userId} />
         )}
 
         <footer className="text-muted border-line flex flex-wrap items-center justify-between gap-2 border-t pt-4 text-sm">
@@ -145,7 +150,7 @@ export default function PortalPage() {
   );
 }
 
-function PortalSections({ data }: { data: PortalOverview }) {
+function PortalSections({ data, userId }: { data: PortalOverview; userId: string }) {
   const shopsBySlug = new Map(data.shops.map((s) => [s.slug, s]));
   const multiShop = data.shops.length > 1;
   const shopOf = (slug: string) => shopsBySlug.get(slug);
@@ -236,54 +241,7 @@ function PortalSections({ data }: { data: PortalOverview }) {
         </SectionCard>
       )}
 
-      {data.memberships.length > 0 && (
-        <SectionCard title="Memberships" flush>
-          <RowList label="Memberships">
-            {data.memberships.map((m, i) => {
-              const shop = shopOf(m.shop_slug);
-              const currency = shop?.currency ?? 'usd';
-              const every =
-                m.interval_count === 1 ? m.interval : `${m.interval_count} ${m.interval}s`;
-              return (
-                <li
-                  key={`${m.shop_slug}-${m.plan_name}-${i}`}
-                  className="flex items-start gap-3 py-3"
-                >
-                  <RowIcon>
-                    <Repeat aria-hidden="true" />
-                  </RowIcon>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-ink text-sm font-semibold">{m.plan_name}</p>
-                      <StatusBadge kind="membership" status={m.status} />
-                      {m.cancel_at_period_end && <Badge tone="warning">Ends this period</Badge>}
-                    </div>
-                    <p className="text-muted text-xs">
-                      {[
-                        multiShop ? shop?.name : null,
-                        m.vehicle,
-                        m.included_services.length > 0
-                          ? `Includes ${m.included_services.join(', ')}`
-                          : null,
-                        m.discount_bps ? `${formatBps(m.discount_bps)} off other services` : null,
-                        m.current_period_end && shop
-                          ? `${m.cancel_at_period_end ? 'Ends' : 'Renews'} ${formatDate(m.current_period_end, shop.timezone)}`
-                          : null,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')}
-                    </p>
-                  </div>
-                  <p className="text-ink shrink-0 text-sm font-medium tabular-nums">
-                    {formatCents(m.price_cents, { currency })}
-                    <span className="text-muted text-xs font-normal"> / {every}</span>
-                  </p>
-                </li>
-              );
-            })}
-          </RowList>
-        </SectionCard>
-      )}
+      <MembershipsSection userId={userId} data={data} />
 
       {data.past_jobs.length > 0 && (
         <SectionCard title="Past appointments" flush>
@@ -300,6 +258,9 @@ function PortalSections({ data }: { data: PortalOverview }) {
           </RowList>
         </SectionCard>
       )}
+
+      <JobReportsSection userId={userId} data={data} />
+      <DocumentsSection userId={userId} data={data} />
 
       {data.vehicles.length > 0 && (
         <SectionCard title="Vehicles" flush>
@@ -329,6 +290,8 @@ function PortalSections({ data }: { data: PortalOverview }) {
           </RowList>
         </SectionCard>
       )}
+
+      <ReferralsSection userId={userId} data={data} />
 
       <SectionCard title={multiShop ? 'Your shops' : 'Your shop'} flush>
         <RowList label="Your shops">
@@ -449,13 +412,13 @@ function ShopRow({ shop }: { shop: PortalShop }) {
           </a>
         )}
         {shop.booking_enabled && (
-          <Link
-            to={`/book/${shop.slug}`}
+          <BookingPageLink
+            slug={shop.slug}
             className={buttonClasses({ variant: 'secondary', size: 'sm' })}
           >
             <CalendarPlus className="size-4" aria-hidden="true" />
             Book<span className="sr-only"> with {shop.name}</span>
-          </Link>
+          </BookingPageLink>
         )}
       </div>
     </li>

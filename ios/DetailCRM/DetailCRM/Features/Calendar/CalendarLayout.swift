@@ -43,8 +43,8 @@ struct CalendarPlacedEvent: Identifiable, Hashable, Sendable {
     var durationMinutes: Int { max(0, endMinute - startMinute) }
 }
 
-/// One day's timeline: job blocks (including anonymous busy blocks) laid
-/// out in columns, and blocked times shaded behind them.
+/// One day's timeline: job and event blocks (including anonymous busy
+/// blocks) laid out in columns, and closed / time-off shaded behind them.
 struct CalendarDayLayout: Identifiable, Hashable, Sendable {
     /// Shop-local midnight.
     let day: Date
@@ -153,7 +153,9 @@ enum CalendarLayoutEngine {
             guard let span = minuteSpan(of: event, dayStart: interval.start, dayEnd: interval.end, clock: clock) else {
                 continue
             }
-            if event.isBlockedTime {
+            // Closed hours and time off shade the column; meetings,
+            // consultations, reminders and other events sit with the jobs.
+            if event.isBackgroundBlock {
                 shaded.append(CalendarPlacedEvent(
                     event: event, startMinute: span.start, endMinute: span.end, column: 0, columnCount: 1
                 ))

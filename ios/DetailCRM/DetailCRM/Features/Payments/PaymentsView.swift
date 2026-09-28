@@ -5,6 +5,8 @@
 //  Payments ledger (owner/admin/manager): received payments in a date
 //  range (shop time zone) with a method filter, and the server's totals
 //  for the same range (`report_payments`: collected, net, tips, refunds).
+//  Bank debits and pay-later payments still clearing (`processing`) are
+//  listed on their own: they count once Stripe confirms them.
 //
 
 import SwiftUI
@@ -259,6 +261,23 @@ private struct PaymentsLedgerContent: View {
                 PaymentsSummaryCard(summary: data.summary, rangeText: rangeText, currencyCode: currencyCode)
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
+            }
+            if !data.processing.isEmpty {
+                Section {
+                    ForEach(data.processing) { payment in
+                        PaymentsLedgerRow(
+                            payment: payment,
+                            customerName: data.customers[payment.customerID]?.displayName ?? "Customer",
+                            currencyCode: currencyCode,
+                            clock: clock
+                        )
+                        .themedRow()
+                    }
+                } header: {
+                    Text("Still clearing")
+                } footer: {
+                    Text("Bank debits and pay-later payments take a few business days. They count toward invoices and these totals once Stripe confirms them; a bank can still return one.")
+                }
             }
             Section {
                 if data.payments.isEmpty {

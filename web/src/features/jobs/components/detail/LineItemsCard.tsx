@@ -1,8 +1,12 @@
-import { ArrowDown, ArrowUp, Pencil, Plus, Tag, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, Pencil, Plus, Receipt, Tag, Trash2 } from 'lucide-react';
 import { useState } from 'react';
+import { useNavigate } from 'react-router';
 import {
+  Badge,
   Button,
+  buttonClasses,
   ConfirmDialog,
+  DropdownMenu,
   EmptyState,
   ErrorState,
   IconButton,
@@ -11,15 +15,19 @@ import {
   useToast,
 } from '@/components/ui';
 import { formatBps, formatCents } from '@/lib/money';
+import { useShopFees } from '@/features/settings/data/fees';
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import {
+  useAddFeeLine,
   useDeleteLineItem,
   useLineItems,
   useMoveLineItem,
   type JobDetail,
   type LineItem,
 } from '../../api';
+import { vehicleLabel } from '../../model';
+import { useCustomerVehicles } from '../../newJobApi';
 import { DiscountDialog } from './DiscountDialog';
 import { CatalogDialog, LineDialog } from './LineItemDialogs';
 
@@ -38,6 +46,11 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
   const lines = useLineItems(job.id);
   const move = useMoveLineItem(job.id);
   const remove = useDeleteLineItem();
+  const addFee = useAddFeeLine(job.id);
+  const navigate = useNavigate();
+  const canSettings = useCan('settings.view');
+  const fees = useShopFees();
+  const vehicles = useCustomerVehicles(canManage ? job.customer_id : null);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleting, setDeleting] = useState<LineItem | null>(null);
   const money = (cents: number | null) => formatCents(cents, { currency });
@@ -48,6 +61,22 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
   const onMove = (index: number, delta: -1 | 1) => {
     if (!rows[index] || !rows[index + delta]) return;
     move.mutateAsync({ rows, index, delta }).catch((error: unknown) => toast.error(error));
+  };
+
+  const activeFees = (fees.data ?? []).filter((f) => f.active);
+  const onAddFee = async (feeId: string, name: string) => {
+    try {
+      await addFee.mutateAsync(feeId);
+      toast.success(`${name} added`);
+    } catch (error) {
+      toast.error(error);
+    }
+  };
+  /** A line's vehicle when it isn't the job's own (P-7: several vehicles on one job). */
+  const otherVehicle = (line: LineItem) => {
+    if (!line.vehicle_id || line.vehicle_id === job.vehicle_id) return null;
+    const v = (vehicles.data ?? []).find((x) => x.id === line.vehicle_id);
+    return v ? vehicleLabel(v) : 'Another vehicle';
   };
 
   const discountLabel =
@@ -74,6 +103,38 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
             <Button size="sm" variant="ghost" onClick={() => setDialog({ kind: 'custom' })}>
               Custom item
             </Button>
+            {(activeFees.length > 0 || (fees.isSuccess && canSettings)) && (
+              <DropdownMenu
+                align="end"
+                trigger={(props) => (
+                  <button
+                    type="button"
+                    {...props}
+                    disabled={addFee.isPending}
+                    className={buttonClasses({ variant: 'ghost', size: 'sm' })}
+                  >
+                    <Receipt className="size-4" aria-hidden="true" />
+                    Add fee
+                    <ChevronDown className="size-3.5" aria-hidden="true" />
+                  </button>
+                )}
+                items={
+                  activeFees.length > 0
+                    ? activeFees.map((fee) => ({
+                        key: fee.id,
+                        label: canSeeMoney ? `${fee.name} · ${money(fee.amount_cents)}` : fee.name,
+                        onSelect: () => void onAddFee(fee.id, fee.name),
+                      }))
+                    : [
+                        {
+                          key: 'setup',
+                          label: 'Set up preset fees…',
+                          onSelect: () => void navigate('/app/settings/fees'),
+                        },
+                      ]
+                }
+              />
+            )}
           </div>
         ) : undefined
       }
@@ -93,7 +154,13 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
           {rows.map((line, index) => (
             <li key={line.id} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-3">
               <div className="min-w-0 flex-1">
-                <p className="text-ink font-medium">{line.name}</p>
+                <p className="text-ink flex flex-wrap items-center gap-2 font-medium">
+                  {line.name}
+                  {line.fee_id && <Badge tone="neutral">Fee</Badge>}
+                </p>
+                {otherVehicle(line) && (
+                  <p className="text-muted text-xs">For {otherVehicle(line)}</p>
+                )}
                 {line.description && (
                   <p className="text-muted text-xs whitespace-pre-line">{line.description}</p>
                 )}

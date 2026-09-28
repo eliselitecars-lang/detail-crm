@@ -24,6 +24,7 @@ export const SOURCES = [
   'facebook',
   'instagram',
   'walk_in',
+  'import',
   'other',
 ] as const satisfies readonly CustomerSource[];
 
@@ -35,6 +36,7 @@ export const SOURCE_LABELS: Record<CustomerSource, string> = {
   facebook: 'Facebook',
   instagram: 'Instagram',
   walk_in: 'Walk-in',
+  import: 'Imported',
   other: 'Other',
 };
 
