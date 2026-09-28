@@ -183,6 +183,25 @@ async function vehicleStep(page: Page) {
   await page.getByRole('button', { name: 'Continue' }).click();
 }
 
+/**
+ * The app's dev server on a loopback address other than "localhost": a
+ * different origin, so an embed on it is really cross-origin. Which address
+ * the server listens on follows how the machine resolves localhost (IPv4 in
+ * most sandboxes, IPv6 on GitHub's runners), so use whichever one answers.
+ */
+async function otherLoopbackOrigin(app: string): Promise<string> {
+  const { port } = new URL(app);
+  for (const host of ['127.0.0.1', '[::1]']) {
+    const origin = `http://${host}:${port}`;
+    try {
+      if ((await fetch(`${origin}/embed.js`)).ok) return origin;
+    } catch {
+      // Not listening on this address.
+    }
+  }
+  throw new Error(`the dev server answers on no loopback address besides localhost (${app})`);
+}
+
 test.describe('booking v2', () => {
   test('a private link books its services at the customer’s location with the questions answered', async ({
     page,
@@ -320,11 +339,11 @@ test.describe('booking v2', () => {
   }) => {
     await setup(page);
     await page.setViewportSize({ width: 800, height: 600 });
-    // A shop's website on its own origin (127.0.0.1; the app is on
-    // localhost): a real cross-origin embed, whose focus changes never scroll
-    // the shop's page. The document comes from the dev server so it is on the
-    // local network like the app; its content is then replaced.
-    await page.goto(`${(baseURL ?? '').replace('//localhost:', '//127.0.0.1:')}/__shop-site-long`);
+    // A shop's website on its own origin (another loopback address; the app
+    // is on localhost): a real cross-origin embed, whose focus changes never
+    // scroll the shop's page. The document comes from the dev server so it is
+    // on the local network like the app; its content is then replaced.
+    await page.goto(`${await otherLoopbackOrigin(baseURL ?? '')}/__shop-site-long`);
     await page.setContent(`<!doctype html><title>Shop site</title>
 <h1>Our shop</h1>
 <div style="height:900px">About us</div>
@@ -371,10 +390,10 @@ test.describe('booking v2', () => {
   }) => {
     await setup(page);
     const app = baseURL ?? '';
-    // The shop's website on its own origin (127.0.0.1; the app is on
-    // localhost), pasting the snippets Settings shows: the booking page (here
-    // a private link) and a lead form. A div with a bad slug gets no frame.
-    await page.goto(`${app.replace('//localhost:', '//127.0.0.1:')}/__shop-site-embeds`);
+    // The shop's website on its own origin (another loopback address; the app
+    // is on localhost), pasting the snippets Settings shows: the booking page
+    // (here a private link) and a lead form. A div with a bad slug gets no frame.
+    await page.goto(`${await otherLoopbackOrigin(app)}/__shop-site-embeds`);
     await page.setContent(`<!doctype html><title>Shop site</title>
 <h1>Our shop</h1>
 <div id="book" data-detailcrm-book="${SLUG}" data-link="${LINK}"></div>
