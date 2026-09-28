@@ -100,10 +100,19 @@ enum InvoiceService {
         var lines: [InvoiceLineItem]
         var payments: [Payment]
         var customer: QuoteCustomerRef?
-        /// Saved cards (manager+ only; empty otherwise).
+        /// Saved cards (manager+ only; empty otherwise, and when they
+        /// couldn't be read — see `savedCardsProblem`).
         var savedCards: [SavedCard]
-        /// The customer's pay-link token (manager+ only; nil otherwise).
+        /// The customer's pay-link token (manager+ only; nil otherwise, and
+        /// when it couldn't be read — see `linkTokenProblem`).
         var linkToken: UUID?
+        /// Why the saved cards couldn't be read (nil when they were, or
+        /// weren't asked for). The screen shows it with a retry, so a
+        /// failed read never looks like "no card on file".
+        var savedCardsProblem: String? = nil
+        /// Why the pay-link token couldn't be read (nil when it was, or
+        /// wasn't asked for); shown in place of "Share pay link".
+        var linkTokenProblem: String? = nil
         /// The jobs this invoice bills, in billing order (P-7). One for a
         /// job's own invoice, 2+ for a grouped (fleet) invoice; empty for an
         /// invoice without a job or when they can't be read.
@@ -175,15 +184,25 @@ enum InvoiceService {
         async let paymentsTask = PaymentService.payments(shopID: shopID, invoiceID: invoiceID)
         async let customerTask = QuoteService.customer(shopID: shopID, customerID: invoice.customerID)
         let (lines, payments, customer) = try await (linesTask, paymentsTask, customerTask)
+        // Saved cards and the pay-link token are extras: a failure must not
+        // hide the invoice itself, but it is recorded so the screen says so
+        // (with a retry) instead of leaving the action out as if there were
+        // no card / no link.
         var cards: [SavedCard] = []
+        var cardsProblem: String?
         if includeSavedCards {
-            // A failure here must not hide the invoice itself.
-            cards = (try? await savedCards(shopID: shopID, customerID: invoice.customerID)) ?? []
+            switch try await SideLoad.attempt({ try await savedCards(shopID: shopID, customerID: invoice.customerID) }) {
+            case .success(let rows): cards = rows
+            case .failure(let error): cardsProblem = ErrorText.message(for: error)
+            }
         }
         var token: UUID?
+        var tokenProblem: String?
         if includeLinkToken {
-            // A failure here must not hide the invoice itself.
-            token = try? await linkToken(invoiceID: invoiceID)
+            switch try await SideLoad.attempt({ try await linkToken(invoiceID: invoiceID) }) {
+            case .success(let value): token = value
+            case .failure(let error): tokenProblem = ErrorText.message(for: error)
+            }
         }
         // Job headings and vehicle names are extras: a failure (or RLS
         // hiding them from a technician) leaves the plain line list.
@@ -195,7 +214,9 @@ enum InvoiceService {
         let vehicles = (try? await vehicleRefs(shopID: shopID, ids: Array(vehicleIDs))) ?? [:]
         return DetailData(
             invoice: invoice, lines: lines, payments: payments, customer: customer,
-            savedCards: cards, linkToken: token, billedJobs: jobs, vehicles: vehicles
+            savedCards: cards, linkToken: token,
+            savedCardsProblem: cardsProblem, linkTokenProblem: tokenProblem,
+            billedJobs: jobs, vehicles: vehicles
         )
     }
 
@@ -230,18 +251,20 @@ enum InvoiceService {
         }
     }
 
-    /// Vehicle names for a set of ids (one query).
+    /// Vehicle names for a set of ids. Keep URLs short: one request per
+    /// chunk of 100 ids (every id of the list is looked up).
     static func vehicleRefs(shopID: UUID, ids: [UUID]) async throws -> [UUID: QuoteVehicleRef] {
-        guard !ids.isEmpty else { return [:] }
-        let rows: [QuoteVehicleRef] = try await Supa.client
-            .from("vehicles")
-            .select(QuoteVehicleRef.selectColumns)
-            .eq("shop_id", value: shopID.uuidString)
-            .in("id", values: Array(ids.prefix(200)).map { $0.uuidString })
-            .execute()
-            .value
         var map: [UUID: QuoteVehicleRef] = [:]
-        for row in rows { map[row.id] = row }
+        for chunk in IDChunks.chunks(ids) {
+            let rows: [QuoteVehicleRef] = try await Supa.client
+                .from("vehicles")
+                .select(QuoteVehicleRef.selectColumns)
+                .eq("shop_id", value: shopID.uuidString)
+                .in("id", values: chunk.map { $0.uuidString })
+                .execute()
+                .value
+            for row in rows { map[row.id] = row }
+        }
         return map
     }
 

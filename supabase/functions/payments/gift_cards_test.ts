@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { FakeRpcError } from "../_shared/testing/mod.ts";
+import { FakeRpcError, jsonRequest } from "../_shared/testing/mod.ts";
 import {
   ACCT,
   errorOf,
@@ -56,6 +56,19 @@ function shop(
   });
   return f;
 }
+
+Deno.test("gift_card_checkout: passes the visitor's address for the per-connection limit (0110)", async () => {
+  const f = shop();
+  const res = await f.handler(jsonRequest("payments", buy, {
+    headers: { "x-forwarded-for": "1.1.1.1, 203.0.113.7" },
+  }));
+  assertEquals(res.status, 200);
+  assertEquals(
+    f.rpcCalls.find((c) => c.name === "gift_card_order_prepare")?.args.p_client_ip,
+    "203.0.113.7",
+    "the proxy-appended hop, never the client-chosen first one",
+  );
+});
 
 Deno.test("gift_card_checkout: anonymous buyer pays the offer's price for its value", async () => {
   const f = shop();

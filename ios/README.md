@@ -115,7 +115,11 @@ ios/
   `ShopEntitlement` (the shop's subscription standing, which status line
   to show, and the PT402 / HTTP 402 refusal text), `UnsentVideoWarning`
   (the sign-out / discard / account-deletion wording while job videos
-  haven't finished uploading).
+  haven't finished uploading), `ListPage` / `IDChunks` (paged "Load more"
+  lists fetched with one extra row; id look-ups split into de-duplicated
+  chunks of 100 to keep request URLs short) and `SideLoad` (an optional
+  extra such as saved cards or a pay-link token whose failure is reported
+  to the screen, never silently turned into "none").
 
 ## Shared building blocks (jobs agent; other features use them read-only)
 

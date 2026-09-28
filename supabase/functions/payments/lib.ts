@@ -642,6 +642,9 @@ export async function customerSessions(
  * in the meantime (completed or expired) is skipped, unless
  * `refuseCompleted`: then one that was just paid means the money is on its
  * way and the caller must not charge again (409 payment_in_progress).
+ * The holds of the sessions it expired are released (releaseCheckoutHolds):
+ * an expired page can no longer be paid, so it must not keep blocking the
+ * customer's online cancel or the invoice's manual payments.
  * Returns the expired ids.
  */
 export async function expireOpenSessions(
@@ -678,7 +681,40 @@ export async function expireOpenSessions(
       s.log.warn("checkout_expire_skipped", { shop_id: account.shop_id, session: session.id });
     }
   }
+  await releaseCheckoutHolds(s, account.shop_id, expired);
   return expired;
+}
+
+/**
+ * Forgets the holds of Checkout Sessions that can no longer be paid (the
+ * edge expired them, or Stripe says they are closed): their 0106
+ * job_checkout_holds rows (the customer's online cancel waits for those) and
+ * their 0109 invoice_checkout_holds rows (record_manual_payment and gift card
+ * / store credit redemptions wait for those and for the job holds of the
+ * invoice's jobs, 55000 HINT checkout_open). Without this an expired page
+ * kept blocking cash until its original expires_at, and staff "cancel open
+ * payments" could not clear it. A session that was PAID keeps its hold until
+ * its payment row (processing / received) releases it: never pass one here.
+ */
+export async function releaseCheckoutHolds(
+  s: Services,
+  shopId: string,
+  sessionIds: ReadonlyArray<string>,
+): Promise<void> {
+  if (sessionIds.length === 0) return;
+  const ids = [...new Set(sessionIds)];
+  const jobHolds = await s.admin
+    .from("job_checkout_holds")
+    .delete()
+    .eq("shop_id", shopId)
+    .in("stripe_checkout_session_id", ids);
+  if (jobHolds.error) throw dbFailure("job_checkout_holds release", jobHolds.error);
+  const invoiceHolds = await s.admin
+    .from("invoice_checkout_holds")
+    .delete()
+    .eq("shop_id", shopId)
+    .in("stripe_checkout_session_id", ids);
+  if (invoiceHolds.error) throw dbFailure("invoice_checkout_holds release", invoiceHolds.error);
 }
 
 export function isInvalidRequest(err: unknown): boolean {

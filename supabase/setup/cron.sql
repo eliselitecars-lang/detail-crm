@@ -57,6 +57,11 @@
 --                               UTC            (Twilio numbers no shop uses any more:
 --                                              releases those bought for deleted shops,
 --                                              reports the rest; supabase/setup/twilio.md)
+--   detail-crm-prune-cron-history  daily 04:41  delete from cron.job_run_details
+--                               UTC            (pg_cron never clears its run log: about
+--                                              4,900 rows a day from the jobs above; keeps
+--                                              7 days of history for these jobs and drops
+--                                              the rows of jobs no longer scheduled)
 --
 -- Document follow-ups, per-service follow-ups and task reminders ride on
 -- detail-crm-run-automations (enqueue_due_automations); they need no job.
@@ -155,7 +160,7 @@ select cron.unschedule(j.jobid)
                      'detail-crm-sweep-payment-sheets', 'detail-crm-storage-purge', 'detail-crm-push',
                      'detail-crm-webhooks', 'detail-crm-sms-status', 'detail-crm-generate-series',
                      'detail-crm-billing-sync-plans', 'detail-crm-billing-sync-customers',
-                     'detail-crm-sms-releases');
+                     'detail-crm-sms-releases', 'detail-crm-prune-cron-history');
 
 -- Send queued messages. The function drains up to 200 messages within ~45 s
 -- per call; overlapping runs are safe (claim_queued_messages skips locked rows).
@@ -360,6 +365,21 @@ select cron.schedule(
     body := '{"action":"release_worklist"}'::jsonb,
     timeout_milliseconds := 60000
   );
+  $job$
+);
+
+-- pg_cron writes one cron.job_run_details row per run (with the command and
+-- its return message) and never deletes them; Supabase recommends pruning
+-- the table regularly (it slows the diagnostics below and Postgres
+-- upgrades). pg_net's net._http_response is cleared by pg_net itself.
+select cron.schedule(
+  'detail-crm-prune-cron-history',
+  '41 4 * * *',
+  $job$
+  delete from cron.job_run_details d
+   where d.end_time < now() - interval '7 days'
+     and (d.jobid in (select j.jobid from cron.job j where j.jobname like 'detail-crm-%')
+          or not exists (select 1 from cron.job j where j.jobid = d.jobid));
   $job$
 );
 

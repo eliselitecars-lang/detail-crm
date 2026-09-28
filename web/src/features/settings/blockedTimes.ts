@@ -25,7 +25,16 @@ export function readRecurrence(value: unknown): RecurrenceRule | null {
   }
   if (typeof v.until_date === 'string') rule.until_date = v.until_date;
   if (typeof v.count === 'number') rule.count = v.count;
+  if (Array.isArray(v.except_dates)) {
+    const dates = v.except_dates.filter((d): d is string => typeof d === 'string');
+    if (dates.length > 0) rule.except_dates = dates;
+  }
   return rule;
+}
+
+/** The rule with the occurrence starting on local `date` skipped (0115). */
+export function skipOccurrence(rule: RecurrenceRule, date: string): RecurrenceRule {
+  return { ...rule, except_dates: [...new Set([...(rule.except_dates ?? []), date])].sort() };
 }
 
 /** "Every 2 weeks on Mon, Wed · until Mar 31, 2027" */
@@ -42,6 +51,8 @@ export function describeRecurrence(rule: RecurrenceRule | null): string | null {
   }
   if (rule.until_date) text += ` · until ${formatInTz(rule.until_date, 'UTC', 'MMM d, yyyy')}`;
   else if (rule.count) text += ` · ${rule.count} time${rule.count === 1 ? '' : 's'}`;
+  const skipped = rule.except_dates?.length ?? 0;
+  if (skipped > 0) text += ` · ${skipped} date${skipped === 1 ? '' : 's'} skipped`;
   return text;
 }
 

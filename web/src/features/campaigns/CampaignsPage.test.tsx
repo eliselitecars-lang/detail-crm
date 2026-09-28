@@ -236,4 +236,55 @@ describe('CampaignDetailPage', () => {
       expect(supabase.rpc).toHaveBeenCalledWith('cancel_campaign', { p_campaign_id: 'camp-1' }),
     );
   });
+
+  it('still lets the owner cancel a launched campaign when the delivery stats fail', async () => {
+    setTableResult('campaigns', {
+      data: {
+        ...draft,
+        status: 'launched',
+        launched_at: '2026-03-05T15:00:00Z',
+        scheduled_at: '2026-03-20T15:00:00Z',
+        recipient_count: 40,
+      },
+    });
+    setTableResult('messages', { data: null, error: { message: 'boom', code: '500' } });
+    rpcResults({ cancel_campaign: { ...draft, status: 'cancelled' } });
+    const { user } = renderRoute(<CampaignDetailPage />, {
+      path: '/app/campaigns/camp-1',
+      routePath: '/app/campaigns/:campaignId',
+    });
+    expect(await screen.findByText(/Couldn.t load/)).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Cancel unsent messages' });
+    expect(button).toBeEnabled();
+    expect(button).not.toHaveAttribute('title', 'Every message has already been sent.');
+    await user.click(button);
+    const dialog = await screen.findByRole('alertdialog', { name: 'Cancel unsent messages?' });
+    expect(
+      within(dialog).getByText(/Every message that hasn’t been sent yet is withdrawn/),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel campaign' }));
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('cancel_campaign', { p_campaign_id: 'camp-1' }),
+    );
+  });
+
+  it('disables cancelling once no message is left queued', async () => {
+    setTableResult('campaigns', {
+      data: {
+        ...draft,
+        status: 'launched',
+        launched_at: '2026-03-05T15:00:00Z',
+        recipient_count: 3,
+      },
+    });
+    setTableResult('messages', { data: null, count: 0 });
+    renderRoute(<CampaignDetailPage />, {
+      path: '/app/campaigns/camp-1',
+      routePath: '/app/campaigns/:campaignId',
+    });
+    await screen.findByText('Recipients');
+    const button = screen.getByRole('button', { name: 'Cancel unsent messages' });
+    await waitFor(() => expect(button).toBeDisabled());
+    expect(button).toHaveAttribute('title', 'Every message has already been sent.');
+  });
 });

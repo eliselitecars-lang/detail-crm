@@ -64,7 +64,14 @@ export default function JobsPage() {
   const members = new Map((team.data ?? []).map((m) => [m.memberId, m.name]));
 
   const columns: Column<JobListRow, ColumnKey>[] = [
-    { key: 'number', header: 'Job', primary: true, sortable: true, cell: (j) => `#${j.number}` },
+    {
+      key: 'number',
+      header: 'Job',
+      sortLabel: 'Job number',
+      primary: true,
+      sortable: true,
+      cell: (j) => `#${j.number}`,
+    },
     {
       key: 'when',
       header: 'When',

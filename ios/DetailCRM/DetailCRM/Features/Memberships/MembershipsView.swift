@@ -2,9 +2,10 @@
 //  MembershipsView.swift
 //  DetailCRM
 //
-//  Memberships (owner/admin/manager): subscribers with their status, and
-//  the shop's plans. New memberships start incomplete; the customer
-//  activates billing through a Stripe Checkout link shared from here.
+//  Memberships (owner/admin/manager): subscribers with their status (paged
+//  newest first with "Load more", filtered by status, searched by
+//  customer), and the shop's plans. New memberships start incomplete; the
+//  customer activates billing through a Stripe Checkout link shared here.
 //
 
 import SwiftUI
@@ -40,6 +41,12 @@ enum MembershipsSheet: Identifiable {
     }
 }
 
+/// What the member list shows (reloads when either changes).
+struct MembershipsQueryKey: Hashable {
+    var status: MembershipStatus?
+    var search: String
+}
+
 struct MembershipsView: View {
     @Environment(AppState.self) private var appState
     @Environment(ToastCenter.self) private var toasts
@@ -48,6 +55,7 @@ struct MembershipsView: View {
     @State private var membersState: LoadState<MembershipService.ListData> = .idle
     @State private var plansState: LoadState<[MembershipPlan]> = .idle
     @State private var statusFilter: MembershipStatus?
+    @State private var search = ""
     @State private var activeSheet: MembershipsSheet?
 
     var body: some View {
@@ -111,33 +119,35 @@ struct MembershipsView: View {
 
     private var membersScreen: some View {
         VStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: Theme.Spacing.sm) {
-                    MoneyFilterChip(title: "All", isSelected: statusFilter == nil) {
-                        statusFilter = nil
-                    }
-                    ForEach(MembershipStatus.allCases, id: \.self) { status in
-                        MoneyFilterChip(title: status.displayName, isSelected: statusFilter == status) {
-                            statusFilter = status
-                        }
+            MoneyListHeader(search: $search, prompt: "Customer name, phone or email") {
+                MoneyFilterChip(title: "All", isSelected: statusFilter == nil) {
+                    statusFilter = nil
+                }
+                ForEach(MembershipStatus.allCases, id: \.self) { status in
+                    MoneyFilterChip(title: status.displayName, isSelected: statusFilter == status) {
+                        statusFilter = status
                     }
                 }
-                .padding(.horizontal, Theme.Spacing.gutter)
-                .padding(.bottom, Theme.Spacing.sm)
             }
             LoadStateView(membersState, loadingLabel: "Loading members…", retry: { await loadMembers() }) { data in
                 MembershipsMemberList(
                     data: data,
                     isFiltered: statusFilter != nil,
+                    isSearching: !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                     currencyCode: appState.currencyCode,
                     clock: appState.clock,
                     onSelect: { membership in activeSheet = .member(membership) },
-                    onCreate: { activeSheet = .newMembership }
+                    onCreate: { activeSheet = .newMembership },
+                    onLoadMore: { await loadMoreMembers() }
                 )
             }
         }
         .refreshable { await loadMembers() }
-        .task(id: statusFilter) {
+        .task(id: MembershipsQueryKey(status: statusFilter, search: search)) {
+            if !search.isEmpty {
+                try? await Task.sleep(for: .milliseconds(350))
+                if Task.isCancelled { return }
+            }
             await loadMembers()
         }
     }
@@ -197,13 +207,35 @@ struct MembershipsView: View {
         guard let shopID = try? appState.requireShopID() else { return }
         membersState.beginLoading()
         let status = statusFilter
+        let term = search
         let result = await LoadState<MembershipService.ListData>.result {
-            try await MembershipService.memberships(shopID: shopID, status: status)
+            try await MembershipService.memberships(shopID: shopID, status: status, search: term)
         }
         if let message = result.errorMessage, membersState.value != nil {
             toasts.show(message, style: .error)
         }
         membersState.apply(result)
+    }
+
+    /// Appends the next page of older memberships.
+    private func loadMoreMembers() async {
+        guard let shopID = try? appState.requireShopID(),
+              let current = membersState.value, current.hasMore else { return }
+        let status = statusFilter
+        let term = search
+        do {
+            let page = try await MembershipService.memberships(
+                shopID: shopID,
+                status: status,
+                search: term,
+                offset: current.memberships.count
+            )
+            // Ignore a page for a filter or search that changed meanwhile.
+            guard status == statusFilter, term == search, let latest = membersState.value else { return }
+            membersState = .loaded(latest.appending(page))
+        } catch {
+            toasts.show(ErrorText.message(for: error), style: .error)
+        }
     }
 
     private func loadPlans() async {
@@ -224,14 +256,22 @@ struct MembershipsView: View {
 private struct MembershipsMemberList: View {
     let data: MembershipService.ListData
     let isFiltered: Bool
+    let isSearching: Bool
     let currencyCode: String
     let clock: ShopClock
     let onSelect: (Membership) -> Void
     let onCreate: () -> Void
+    let onLoadMore: () async -> Void
 
     var body: some View {
         if data.memberships.isEmpty {
-            if isFiltered {
+            if isSearching {
+                EmptyStateView(
+                    systemImage: "magnifyingglass",
+                    title: "No matching members",
+                    message: isFiltered ? "Try another search or status." : "Try another name, phone or email."
+                )
+            } else if isFiltered {
                 EmptyStateView(
                     systemImage: "magnifyingglass",
                     title: "No members with this status",
@@ -263,6 +303,10 @@ private struct MembershipsMemberList: View {
                     }
                     .buttonStyle(.plain)
                     .themedRow()
+                }
+                if data.hasMore {
+                    MoneyLoadMoreRow(shownCount: data.memberships.count, noun: "memberships", action: onLoadMore)
+                        .themedRow()
                 }
             }
             .listStyle(.plain)

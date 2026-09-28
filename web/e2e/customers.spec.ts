@@ -270,5 +270,36 @@ test.describe('customers', () => {
       await expect(page.getByRole('heading', { name: 'Jane Doe', level: 1 })).toBeVisible();
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
     });
+
+    test('the stacked list can still be sorted', async ({ page }) => {
+      const orders: string[] = [];
+      await mockSupabase(page, {
+        user: OWNER,
+        tables: {
+          shop_members: [membershipRow(OWNER, 'owner')],
+          notifications: [],
+          customers: ({ url }) => {
+            if (url.searchParams.get('select')?.includes('lifecycle')) {
+              orders.push(url.searchParams.getAll('order').join(','));
+            }
+            return [CUSTOMER, OTHER];
+          },
+        },
+      });
+      await page.goto('/app/customers');
+      await expect(page.getByRole('list', { name: 'Customers' })).toBeVisible();
+      // The header sort buttons live in the hidden desktop table.
+      await expect(page.getByRole('table', { name: 'Customers' })).toBeHidden();
+      const sortBy = page.getByRole('combobox', { name: 'Sort customers by' });
+      await expect(sortBy).toBeVisible();
+      await sortBy.selectOption({ label: 'Last updated' });
+      await expect(page).toHaveURL(/sort=updated_at/);
+      await expect.poll(() => orders.some((o) => o.startsWith('updated_at.'))).toBe(true);
+      const direction = page.getByRole('button', { name: /Ascending|Descending/ });
+      const before = await direction.textContent();
+      await direction.click();
+      await expect(direction).not.toHaveText(before ?? '');
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+    });
   });
 });

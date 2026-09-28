@@ -168,8 +168,16 @@ describe('DashboardPage (manager+)', () => {
     );
     const dialog = await screen.findByRole('alertdialog', { name: 'Decline this booking?' });
     const confirm = within(dialog).getByRole('button', { name: 'Decline booking' });
-    expect(confirm).toBeDisabled();
-    await user.type(within(dialog).getByLabelText(/Reason/), 'Fully booked that day');
+    // The reason is optional and customer-facing (the /booking page shows
+    // it), and the dialog says nobody is messaged automatically.
+    expect(confirm).toBeEnabled();
+    const reason = within(dialog).getByLabelText(/Reason for the customer/);
+    expect(reason).not.toBeRequired();
+    expect(
+      within(dialog).getByText(/customer sees this on their booking page/),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(/isn’t messaged automatically/)).toBeInTheDocument();
+    await user.type(reason, 'Fully booked that day');
     await user.click(confirm);
     await waitFor(() =>
       expect(

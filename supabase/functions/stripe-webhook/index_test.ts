@@ -528,6 +528,9 @@ function setup(options: { membership?: Partial<Row>; tables?: Record<string, Row
         ...options.membership,
       }],
       gift_card_orders: [],
+      // 0106 / 0109: the payments edge's holds of open Checkout Sessions
+      job_checkout_holds: [],
+      invoice_checkout_holds: [],
       ...options.tables,
     },
     tableOptions: {
@@ -3499,6 +3502,91 @@ Deno.test("gift card sale: an expiry never touches a paid order", async () => {
   );
   assertEquals([res.result, lastIgnored(logs)], ["ignored", "gift_card_order_not_pending"]);
   assertEquals(db.table("gift_card_orders")[0]?.status, "paid");
+});
+
+Deno.test("checkout.session.expired: an invoice or deposit link's page holds are released", async () => {
+  const until = new Date(NOW.getTime() + 30 * 60_000).toISOString();
+  const { db, logs, handler } = setup({
+    tables: {
+      job_checkout_holds: [
+        {
+          stripe_checkout_session_id: "cs_1Invoice",
+          shop_id: SHOP,
+          job_id: JOB,
+          expires_at: until,
+        },
+        { stripe_checkout_session_id: "cs_1Other", shop_id: SHOP, job_id: JOB, expires_at: until },
+      ],
+      invoice_checkout_holds: [
+        {
+          stripe_checkout_session_id: "cs_1Invoice",
+          shop_id: SHOP,
+          invoice_id: INVOICE,
+          expires_at: until,
+        },
+      ],
+    },
+  });
+  const res = await ok(
+    await deliver(
+      handler,
+      event(
+        "checkout.session.expired",
+        expiredGiftSession({
+          id: "cs_1Invoice",
+          metadata: { shop_id: SHOP, invoice_id: INVOICE, job_id: JOB, kind: "payment" },
+        }),
+      ),
+    ),
+  );
+  assertEquals(res.result, "applied");
+  assertEquals(logs.events("stripe_event_applied").at(-1)?.detail, "checkout_holds_released");
+  assertEquals(db.table("job_checkout_holds").map((h) => h.stripe_checkout_session_id), [
+    "cs_1Other",
+  ]);
+  assertEquals(db.table("invoice_checkout_holds"), []);
+  // a deposit link's hold too; a replay finds nothing left
+  db.seed("job_checkout_holds", [
+    { stripe_checkout_session_id: "cs_1Deposit", shop_id: SHOP, job_id: JOB, expires_at: until },
+  ]);
+  const deposit = expiredGiftSession({
+    id: "cs_1Deposit",
+    metadata: { shop_id: SHOP, job_id: JOB, kind: "deposit" },
+  });
+  const first = await ok(await deliver(handler, event("checkout.session.expired", deposit)));
+  assertEquals(first.result, "applied");
+  assertEquals(db.table("job_checkout_holds"), []);
+  const again = await ok(await deliver(handler, event("checkout.session.expired", deposit)));
+  assertEquals([again.result, lastIgnored(logs)], ["ignored", "nothing_to_expire"]);
+});
+
+Deno.test("checkout.session.expired: another shop's holds of the same session id are left alone", async () => {
+  const until = new Date(NOW.getTime() + 30 * 60_000).toISOString();
+  const { db, handler } = setup({
+    tables: {
+      job_checkout_holds: [
+        {
+          stripe_checkout_session_id: "cs_1Invoice",
+          shop_id: OTHER_SHOP,
+          job_id: JOB,
+          expires_at: until,
+        },
+      ],
+    },
+  });
+  await ok(
+    await deliver(
+      handler,
+      event(
+        "checkout.session.expired",
+        expiredGiftSession({
+          id: "cs_1Invoice",
+          metadata: { shop_id: SHOP, invoice_id: INVOICE, kind: "payment" },
+        }),
+      ),
+    ),
+  );
+  assertEquals(db.table("job_checkout_holds").length, 1);
 });
 
 Deno.test("checkout.session.expired: other sessions, other shops and unknown orders are acknowledged", async () => {

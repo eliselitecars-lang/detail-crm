@@ -142,7 +142,7 @@ function DeclineDialog({
   const tooLong = reason.length > 1000;
 
   const submit = async () => {
-    if (!reason.trim() || tooLong) return;
+    if (tooLong) return;
     try {
       const { recorded } = await decline.mutateAsync({
         jobId: request.id,
@@ -189,7 +189,7 @@ function DeclineDialog({
           <Button
             variant="danger"
             loading={decline.isPending}
-            disabled={!reason.trim() || tooLong}
+            disabled={tooLong}
             onClick={() => void submit()}
           >
             Decline booking
@@ -198,14 +198,26 @@ function DeclineDialog({
       }
     >
       <div className="flex flex-col gap-3">
+        {/* jobs.cancel_reason is customer-facing: /booking/:token prints it in
+            the "This booking was cancelled" banner (booking_public_json). */}
         <FormField
-          label="Reason"
-          required
-          help="Kept on the job for your records."
+          label="Reason for the customer"
+          help="Optional. The customer sees this on their booking page — don’t include internal notes."
           error={tooLong ? 'Keep the reason under 1,000 characters.' : undefined}
         >
-          <Textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} />
+          <Textarea
+            rows={3}
+            value={reason}
+            placeholder="e.g. We’re fully booked that day"
+            onChange={(e) => setReason(e.target.value)}
+          />
         </FormField>
+        {/* Nothing is sent on decline: no cancellation template exists, the
+            status trigger ignores 'cancelled', and appointment templates are
+            refused for cancelled jobs (messaging appointment_closed). */}
+        <p className="bg-primary-soft text-primary-ink rounded-control px-3 py-2 text-sm">
+          The customer isn’t messaged automatically. Let them know from the inbox.
+        </p>
         {decline.isError && (
           <p role="alert" className="text-danger-ink text-sm">
             {errorMessage(decline.error)}

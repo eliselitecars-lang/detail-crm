@@ -7,7 +7,8 @@
 //  fields), services with server totals, the money picture, checklist,
 //  photos and videos, the customer job report, inspections, documents,
 //  forms, customer texts, notes and activity. Realtime changes to the job
-//  refresh it.
+//  refresh it; payment changes refresh the money picture (a payment never
+//  touches the jobs row, so the jobs counter alone would leave it stale).
 //
 //  Every section is its own view behind an AnyView seam (deep generic view
 //  types on big screens overflow the stack at runtime). Sheets are driven
@@ -96,6 +97,15 @@ struct JobDetailView: View {
         .onChange(of: realtime.revision(.jobs)) { _, _ in
             guard model.detail.value != nil, sheet == nil else { return }
             Task { await model.loadDetail() }
+        }
+        // A payment landed or changed (a texted deposit / pay link paid, the
+        // webhook settled a card, someone collected elsewhere). Payments
+        // never touch the jobs row, so the jobs counter doesn't move: re-read
+        // the money picture (deposit due, balance, the collect actions).
+        // Harmless while a sheet is open: it only refreshes the summary.
+        .onChange(of: realtime.revision(.payments)) { _, _ in
+            guard model.detail.value != nil else { return }
+            Task { await model.loadPayment() }
         }
     }
 

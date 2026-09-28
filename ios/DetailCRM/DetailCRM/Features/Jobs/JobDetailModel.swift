@@ -70,6 +70,10 @@ final class JobDetailModel {
 
     var detail: LoadState<JobDetailSnapshot> = .idle
     var payment: LoadState<JobPaymentSummary?> = .idle
+    /// Bumped per money-picture read so an older read that answers late
+    /// (screen reappeared and a Realtime payment change at once) can't
+    /// put a stale "deposit due" back over a newer one.
+    @ObservationIgnored private var paymentReadGeneration = 0
     var checklist: LoadState<[JobChecklistItem]> = .idle
     var photos: LoadState<[JobPhotoItem]> = .idle
     var inspections: LoadState<[JobInspectionBundle]> = .idle
@@ -479,10 +483,14 @@ final class JobDetailModel {
         }
         let hadContent = payment.value != nil
         payment.beginLoading()
+        paymentReadGeneration += 1
+        let generation = paymentReadGeneration
         let jobID = self.jobID
         let result = await LoadState<JobPaymentSummary?>.result {
             try await JobService.paymentSummary(jobID: jobID)
         }
+        // A newer read started meanwhile: its answer wins.
+        guard generation == paymentReadGeneration else { return nil }
         payment.apply(result)
         return hadContent ? result.errorMessage : nil
     }

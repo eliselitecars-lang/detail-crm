@@ -112,11 +112,11 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     ),
     gift_card_checkout: jsonAction(
       giftCardCheckoutInput,
-      (input, ctx) => giftCardCheckout(services(deps, ctx), input),
+      (input, ctx) => giftCardCheckout(services(deps, ctx), ctx.req, input),
     ),
     membership_join_checkout: jsonAction(
       membershipJoinCheckoutInput,
-      (input, ctx) => membershipJoinCheckout(services(deps, ctx), input),
+      (input, ctx) => membershipJoinCheckout(services(deps, ctx), ctx.req, input),
     ),
     portal_membership_cancel: jsonAction(
       portalMembershipInput,

@@ -19,6 +19,7 @@ import {
 import type { Json } from '@/lib/database.types';
 import {
   addLocalDays,
+  formatLocalDate,
   isLocalDate,
   localDaysBetween,
   shopToday,
@@ -31,6 +32,7 @@ import {
   blockToFormInput,
   describeRecurrence,
   readRecurrence,
+  skipOccurrence,
 } from '@/features/settings/blockedTimes';
 import { blockedTimeSchema, type BlockedTimeFormInput } from '@/features/settings/schemas';
 import { useShop } from '@/features/shop/shopContext';
@@ -53,7 +55,8 @@ export type EventDialogTarget =
   | { mode: 'new'; start?: { date: string; time: string }; end?: { date: string; time: string } }
   | { mode: 'edit'; blockId: string; occurrenceStart: string };
 
-type Scope = 'all' | 'following';
+/** Which occurrences of a repeating event a change or delete applies to. */
+type Scope = 'this' | 'all' | 'following';
 
 const KIND_HELP: Record<EventKind, string> = {
   closed: 'The whole shop is closed: nothing can be booked online.',
@@ -116,9 +119,21 @@ function initialForm(
 /** The original rule ended the day before `occurrenceDate` (count rules become until rules). */
 function endedBefore(recurrence: Json | null, occurrenceDate: string): Json {
   const rule = readRecurrence(recurrence) ?? { freq: 'day' as const };
-  const { count: _count, ...rest } = rule;
+  const { count: _count, except_dates: skipped, ...rest } = rule;
   void _count;
-  return { ...rest, until_date: addLocalDays(occurrenceDate, -1) };
+  return {
+    ...rest,
+    until_date: addLocalDays(occurrenceDate, -1),
+    // the skipped dates it still covers (written out: an omitted key would
+    // carry every one of them over, 0115)
+    ...(skipped ? { except_dates: skipped.filter((d) => d < occurrenceDate) } : {}),
+  };
+}
+
+/** The original rule with the occurrence on `occurrenceDate` skipped (0115). */
+function withoutOccurrence(recurrence: Json | null, occurrenceDate: string): Json {
+  const rule = readRecurrence(recurrence) ?? { freq: 'day' as const };
+  return { ...skipOccurrence(rule, occurrenceDate) };
 }
 
 export interface EventDialogProps {
@@ -130,7 +145,9 @@ export interface EventDialogProps {
  * New / edit calendar event (blocked_times, P-17): kind, member (time off),
  * customer (consultations, reminders), time, repeat, whether it takes online
  * booking capacity, and a colour. A repeating event is changed or deleted
- * for every occurrence, or from the opened occurrence on.
+ * for the opened occurrence only (its date is skipped in the series and a
+ * change becomes a one-off event, 0115), for every occurrence, or from the
+ * opened occurrence on.
  */
 export function EventDialog({ target, onClose }: EventDialogProps) {
   const row = useCalendarEvent(target.mode === 'edit' ? target.blockId : null);
@@ -168,7 +185,8 @@ function EventForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [scope, setScope] = useState<Scope>('all');
   const [deleting, setDeleting] = useState(false);
-  const [deleteScope, setDeleteScope] = useState<Scope>('all');
+  const [deleteScope, setDeleteScope] = useState<Scope>('this');
+  const [restoreSkipped, setRestoreSkipped] = useState(false);
   const [query, setQuery] = useState('');
   const search = useCustomerSearch(useDebouncedValue(query, 250));
   const linked = useCustomer(form.customerId || null);
@@ -181,6 +199,9 @@ function EventForm({
     target.mode === 'edit' ? utcToShopLocal(target.occurrenceStart, timezone).date : '';
   const firstOccurrence = !rule || occurrenceDate <= originalDate;
   const canSplit = rule !== null && !firstOccurrence && !rule.count;
+  const skipped = rule?.except_dates ?? [];
+  // "Only this one": the edit is a one-off event, so it has no repeat of its own
+  const onlyThis = rule !== null && scope === 'this';
   const kind = form.kind;
   const busy = create.isPending || update.isPending || split.isPending;
   const members = (team.data ?? []).filter((m) => m.active || m.memberId === form.memberId);
@@ -220,13 +241,32 @@ function EventForm({
         if (!v) return;
         await create.mutateAsync(v);
         toast.success('Event added');
-      } else if (rule && scope === 'following' && canSplit) {
-        const v = values(form);
+      } else if (rule && scope === 'this') {
+        // A one-off event with the changes; the series skips this date.
+        const v = values({ ...form, repeat: '' });
         if (!v) return;
         await split.mutateAsync({
           id: row.id,
+          endRecurrence: withoutOccurrence(row.recurrence, occurrenceDate),
+          values: { ...v, recurrence: null },
+        });
+        toast.success('This occurrence was changed');
+      } else if (rule && scope === 'following' && canSplit) {
+        const v = values(form);
+        if (!v) return;
+        // the new series keeps the skipped dates from here on, moved with it
+        const moved = localDaysBetween(occurrenceDate, form.startDate);
+        const later = skipped.filter((d) => d >= occurrenceDate).map((d) => addLocalDays(d, moved));
+        await split.mutateAsync({
+          id: row.id,
           endRecurrence: endedBefore(row.recurrence, occurrenceDate),
-          values: v,
+          values:
+            v.recurrence && later.length > 0 && typeof v.recurrence === 'object'
+              ? {
+                  ...v,
+                  recurrence: { ...(v.recurrence as Record<string, Json>), except_dates: later },
+                }
+              : v,
         });
         toast.success('Event changed from this date on');
       } else {
@@ -239,7 +279,18 @@ function EventForm({
           endDate: addLocalDays(form.endDate, localDaysBetween(form.startDate, startDate)),
         });
         if (!v) return;
-        await update.mutateAsync({ id: row.id, values: v });
+        // Without the key the server keeps the skipped dates, moved with the
+        // series (0115); an empty list brings them all back.
+        await update.mutateAsync({
+          id: row.id,
+          values:
+            restoreSkipped && v.recurrence && typeof v.recurrence === 'object'
+              ? {
+                  ...v,
+                  recurrence: { ...(v.recurrence as Record<string, Json>), except_dates: [] },
+                }
+              : v,
+        });
         toast.success('Event saved');
       }
       onClose();
@@ -251,12 +302,15 @@ function EventForm({
   const confirmDelete = async () => {
     if (!editing) return;
     try {
+      const only = rule !== null && deleteScope === 'this' && rule.count !== 1;
       await remove.mutateAsync(
-        rule && deleteScope === 'following' && !firstOccurrence
-          ? { id: row.id, endRecurrence: endedBefore(row.recurrence, occurrenceDate) }
-          : { id: row.id },
+        only
+          ? { id: row.id, endRecurrence: withoutOccurrence(row.recurrence, occurrenceDate) }
+          : rule && deleteScope === 'following' && !firstOccurrence
+            ? { id: row.id, endRecurrence: endedBefore(row.recurrence, occurrenceDate) }
+            : { id: row.id },
       );
-      toast.success('Event deleted');
+      toast.success(only ? 'This occurrence was deleted' : 'Event deleted');
       setDeleting(false);
       onClose();
     } catch (error) {
@@ -283,7 +337,7 @@ function EventForm({
                 className="sm:mr-auto"
                 disabled={busy}
                 onClick={() => {
-                  setDeleteScope('all');
+                  setDeleteScope('this');
                   setDeleting(true);
                 }}
               >
@@ -306,9 +360,10 @@ function EventForm({
               <RadioGroup<Scope>
                 label="Change"
                 orientation="horizontal"
-                value={canSplit ? scope : 'all'}
+                value={scope === 'following' && !canSplit ? 'all' : scope}
                 onChange={setScope}
                 options={[
+                  { value: 'this', label: 'Only this one' },
                   { value: 'all', label: 'Every occurrence' },
                   {
                     value: 'following',
@@ -320,6 +375,19 @@ function EventForm({
                   },
                 ]}
               />
+              {scope === 'this' && (
+                <p className="text-muted text-xs">
+                  The series skips {formatLocalDate(occurrenceDate)}; your changes become a one-off
+                  event that day.
+                </p>
+              )}
+              {scope === 'all' && skipped.length > 0 && (
+                <Checkbox
+                  label={`Bring back the ${skipped.length === 1 ? 'skipped date' : `${skipped.length} skipped dates`}`}
+                  checked={restoreSkipped}
+                  onChange={(e) => setRestoreSkipped(e.target.checked)}
+                />
+              )}
             </div>
           )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -452,39 +520,43 @@ function EventForm({
               </FormField>
             )}
           </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <FormField label="Repeat">
-              <Select
-                value={form.repeat}
-                onChange={(e) => {
-                  const repeat = REPEATS.find((r) => r.value === e.target.value)?.value ?? '';
-                  // weekly: start with the event's own weekday
-                  const weekdays =
-                    repeat === 'week' &&
-                    (form.weekdays ?? []).length === 0 &&
-                    isLocalDate(form.startDate)
-                      ? [localWeekday(form.startDate)]
-                      : form.weekdays;
-                  set({ repeat, weekdays });
-                }}
-                options={REPEATS.map((r) => ({ value: r.value, label: r.label }))}
-              />
-            </FormField>
-            {form.repeat !== '' && (
-              <FormField
-                label="Every"
-                error={errors.interval}
-                help={form.repeat === 'day' ? 'days' : form.repeat === 'week' ? 'weeks' : 'months'}
-              >
-                <Input
-                  inputMode="numeric"
-                  value={form.interval}
-                  onChange={(e) => set({ interval: e.target.value })}
+          {!onlyThis && (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <FormField label="Repeat">
+                <Select
+                  value={form.repeat}
+                  onChange={(e) => {
+                    const repeat = REPEATS.find((r) => r.value === e.target.value)?.value ?? '';
+                    // weekly: start with the event's own weekday
+                    const weekdays =
+                      repeat === 'week' &&
+                      (form.weekdays ?? []).length === 0 &&
+                      isLocalDate(form.startDate)
+                        ? [localWeekday(form.startDate)]
+                        : form.weekdays;
+                    set({ repeat, weekdays });
+                  }}
+                  options={REPEATS.map((r) => ({ value: r.value, label: r.label }))}
                 />
               </FormField>
-            )}
-          </div>
-          {form.repeat === 'week' && (
+              {form.repeat !== '' && (
+                <FormField
+                  label="Every"
+                  error={errors.interval}
+                  help={
+                    form.repeat === 'day' ? 'days' : form.repeat === 'week' ? 'weeks' : 'months'
+                  }
+                >
+                  <Input
+                    inputMode="numeric"
+                    value={form.interval}
+                    onChange={(e) => set({ interval: e.target.value })}
+                  />
+                </FormField>
+              )}
+            </div>
+          )}
+          {!onlyThis && form.repeat === 'week' && (
             <fieldset>
               <legend className="text-ink mb-1.5 text-sm font-medium">On</legend>
               <div className="flex flex-wrap gap-x-4 gap-y-2">
@@ -511,7 +583,7 @@ function EventForm({
               )}
             </fieldset>
           )}
-          {form.repeat !== '' && (
+          {!onlyThis && form.repeat !== '' && (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <FormField label="Ends">
                 <Select
@@ -599,14 +671,17 @@ function EventForm({
         }
         confirmLabel="Delete"
       >
-        {rule && !firstOccurrence && (
+        {rule && (
           <RadioGroup<Scope>
             label="Delete"
             hideLabel
             value={deleteScope}
             onChange={setDeleteScope}
             options={[
-              { value: 'following', label: 'This and later occurrences' },
+              { value: 'this', label: `Only this one (${formatLocalDate(occurrenceDate)})` },
+              ...(firstOccurrence
+                ? []
+                : [{ value: 'following' as const, label: 'This and later occurrences' }]),
               { value: 'all', label: 'Every occurrence' },
             ]}
           />

@@ -364,6 +364,9 @@ describe('blocked times', () => {
     expect(describeRecurrence({ freq: 'day', until_date: '2026-12-31' })).toBe(
       'Every day · until Dec 31, 2026',
     );
+    expect(describeRecurrence({ freq: 'week', except_dates: ['2026-10-05', '2026-10-12'] })).toBe(
+      'Every week · 2 dates skipped',
+    );
   });
 
   it('describes and round-trips blocks in the shop zone', () => {

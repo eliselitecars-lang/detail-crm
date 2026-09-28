@@ -281,15 +281,11 @@ enum PaymentService {
         return LedgerPage(payments: payments, customers: customers, hasMore: hasMore)
     }
 
-    /// Customer names for a set of ids (one query).
+    /// Customer names for a set of ids.
     static func customerRefs(shopID: UUID, ids: [UUID]) async throws -> [UUID: QuoteCustomerRef] {
-        let unique = Array(Set(ids))
-        guard !unique.isEmpty else { return [:] }
         var result: [UUID: QuoteCustomerRef] = [:]
         // Keep URLs short: chunks of 100 ids.
-        var index = 0
-        while index < unique.count {
-            let chunk = Array(unique[index..<min(index + 100, unique.count)])
+        for chunk in IDChunks.chunks(ids) {
             let rows: [QuoteCustomerRef] = try await Supa.client
                 .from("customers")
                 .select(QuoteCustomerRef.selectColumns)
@@ -298,7 +294,6 @@ enum PaymentService {
                 .execute()
                 .value
             for row in rows { result[row.id] = row }
-            index += 100
         }
         return result
     }

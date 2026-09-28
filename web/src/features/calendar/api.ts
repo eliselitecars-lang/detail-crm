@@ -215,9 +215,12 @@ export function useUpdateCalendarEvent() {
 }
 
 /**
- * "This and following" on a repeating event: the original stops the day
- * before `occurrenceDate` and a new event with `values` takes over from
- * there. The new row is written first, so a failure never loses visits.
+ * Splits a repeating event: a new event with `values` is written, then the
+ * original's rule becomes `endRecurrence` — "this and following" (the
+ * original stops the day before the occurrence, the new series takes over)
+ * or "only this one" (the original skips the occurrence's date, 0115, and
+ * the new row is that day's one-off). The new row is written first, so a
+ * failure never loses visits.
  */
 export function useSplitCalendarEvent() {
   const { shopId } = useShop();
@@ -254,7 +257,11 @@ export function useDeleteCalendarEvent() {
       endRecurrence,
     }: {
       id: string;
-      /** Set: keep the earlier occurrences (end the repeat); unset: delete the event. */
+      /**
+       * Set: the series' new rule — ended before the occurrence (keep the
+       * earlier ones) or with the occurrence skipped (0115); unset: delete
+       * the event.
+       */
       endRecurrence?: Json;
     }) => {
       if (endRecurrence !== undefined) await updateEvent(shopId, id, { recurrence: endRecurrence });

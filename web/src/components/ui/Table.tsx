@@ -2,6 +2,8 @@ import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { cn } from '@/lib/cn';
+import { Button } from './Button';
+import { Select } from './Select';
 
 export type SortDirection = 'asc' | 'desc';
 
@@ -15,6 +17,8 @@ export interface Column<T, K extends string = string> {
   header: ReactNode;
   cell: (row: T) => ReactNode;
   sortable?: boolean;
+  /** Plain-text name for the stacked-layout "Sort by" picker (defaults to a string `header`). */
+  sortLabel?: string;
   align?: 'left' | 'right' | 'center';
   /** Title cell in the stacked (mobile) layout; also hosts the row link. */
   primary?: boolean;
@@ -32,6 +36,11 @@ export interface TableProps<T, K extends string = string> {
   getRowId: (row: T) => string;
   sort?: SortState<K> | null;
   onSortChange?: (sort: SortState<K>) => void;
+  /**
+   * Sort keys with no column of their own (e.g. "Last updated"), offered in
+   * the stacked layout's "Sort by" picker next to the sortable columns.
+   */
+  extraSortOptions?: readonly { key: K; label: string }[];
   /** Makes rows navigable: the primary cell becomes a link, the row is clickable. */
   rowHref?: (row: T) => string;
   className?: string;
@@ -46,7 +55,9 @@ function ariaSort(sort: SortState | null | undefined, key: string) {
 
 /**
  * Data table with sortable headers (server- or client-side — the caller
- * sorts `rows`) and a stacked card layout below the `md` breakpoint.
+ * sorts `rows`) and a stacked card layout below the `md` breakpoint. The
+ * stacked layout has no headers to click, so it gets a "Sort by" picker and
+ * a direction toggle instead (same `onSortChange`).
  * Loading/empty/error states are rendered by the caller around it.
  */
 export function Table<T, K extends string = string>({
@@ -56,11 +67,23 @@ export function Table<T, K extends string = string>({
   getRowId,
   sort,
   onSortChange,
+  extraSortOptions,
   rowHref,
   className,
 }: TableProps<T, K>) {
   const navigate = useNavigate();
   const primary = columns.find((c) => c.primary) ?? columns[0];
+  const sortOptions = onSortChange
+    ? [
+        ...columns
+          .filter((c) => c.sortable)
+          .map((c) => ({
+            value: c.key,
+            label: c.sortLabel ?? (typeof c.header === 'string' ? c.header : c.key),
+          })),
+        ...(extraSortOptions ?? []).map((o) => ({ value: o.key, label: o.label })),
+      ]
+    : [];
 
   const renderCell = (column: Column<T, K>, row: T) => {
     const content = column.cell(row);
@@ -164,6 +187,44 @@ export function Table<T, K extends string = string>({
           </tbody>
         </table>
       </div>
+
+      {/* < md : sort picker (the header buttons above are hidden) */}
+      {onSortChange && sortOptions.length > 0 && (
+        <div className="border-line flex items-center gap-2 border-b px-4 py-2 md:hidden">
+          <Select
+            aria-label={`Sort ${caption.toLowerCase()} by`}
+            selectSize="sm"
+            className="min-w-0 flex-1"
+            value={sort?.key ?? ''}
+            placeholder={sort ? undefined : 'Default order'}
+            options={sortOptions}
+            onChange={(event) => {
+              const option = sortOptions.find((o) => o.value === event.target.value);
+              if (option) onSortChange({ key: option.value, direction: sort?.direction ?? 'asc' });
+            }}
+          />
+          <Button
+            size="sm"
+            variant="secondary"
+            className="shrink-0"
+            disabled={!sort}
+            title="Reverse the order"
+            leadingIcon={
+              sort?.direction === 'desc' ? (
+                <ArrowDown className="size-4" aria-hidden="true" />
+              ) : (
+                <ArrowUp className="size-4" aria-hidden="true" />
+              )
+            }
+            onClick={() =>
+              sort &&
+              onSortChange({ key: sort.key, direction: sort.direction === 'asc' ? 'desc' : 'asc' })
+            }
+          >
+            {sort?.direction === 'desc' ? 'Descending' : 'Ascending'}
+          </Button>
+        </div>
+      )}
 
       {/* < md : stacked rows */}
       <ul className="divide-line divide-y md:hidden" aria-label={caption}>

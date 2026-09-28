@@ -292,6 +292,116 @@ describe('CalendarPage', () => {
     expect((builders.blocked_times ?? []).some((b) => b.delete.mock.calls.length > 0)).toBe(false);
   });
 
+  const WEEKLY_OFF = {
+    id: 'blk-1',
+    member_id: null,
+    starts_at: '2026-09-15T14:00:00Z',
+    ends_at: '2026-09-15T15:00:00Z',
+    reason: null,
+    kind: 'meeting',
+    title: 'Weekly huddle',
+    customer_id: null,
+    affects_capacity: false,
+    color: null,
+    recurrence: { freq: 'week', interval: 1, count: 10, except_dates: ['2026-09-22'] },
+  };
+  const HUDDLE_OCCURRENCE = {
+    ...BUSY,
+    event_type: 'blocked_time',
+    id: 'blk-1',
+    event_kind: 'meeting',
+    title: 'Weekly huddle',
+    starts_at: '2026-09-29T14:00:00Z',
+    ends_at: '2026-09-29T15:00:00Z',
+  };
+
+  it('deletes only the opened occurrence of a repeating event (even a count rule)', async () => {
+    const { user } = setup('owner', [JOB, HUDDLE_OCCURRENCE]);
+    setTableResult('blocked_times', { data: WEEKLY_OFF });
+    await user.click(await screen.findByText('Weekly huddle'));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit event' });
+    expect(within(dialog).getByText(/1 date skipped/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete this event?' });
+    // the least destructive choice is the default
+    expect(
+      within(confirm).getByRole('radio', { name: /Only this one \(Sep 29, 2026\)/ }),
+    ).toBeChecked();
+    await user.click(within(confirm).getByRole('button', { name: 'Delete' }));
+    await waitFor(() =>
+      expect((builders.blocked_times ?? []).flatMap((b) => b.update.mock.calls)).toContainEqual([
+        {
+          recurrence: {
+            freq: 'week',
+            interval: 1,
+            count: 10,
+            except_dates: ['2026-09-22', '2026-09-29'],
+          },
+        },
+      ]),
+    );
+    expect((builders.blocked_times ?? []).some((b) => b.delete.mock.calls.length > 0)).toBe(false);
+  });
+
+  it('deletes only the first occurrence without deleting the series', async () => {
+    const { user } = setup('owner', [JOB, HUDDLE_OCCURRENCE]);
+    setTableResult('blocked_times', {
+      data: {
+        ...WEEKLY_OFF,
+        starts_at: HUDDLE_OCCURRENCE.starts_at,
+        ends_at: HUDDLE_OCCURRENCE.ends_at,
+        recurrence: { freq: 'week', interval: 1 },
+      },
+    });
+    await user.click(await screen.findByText('Weekly huddle'));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit event' });
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete this event?' });
+    expect(within(confirm).queryByRole('radio', { name: 'This and later occurrences' })).toBeNull();
+    await user.click(within(confirm).getByRole('button', { name: 'Delete' }));
+    await waitFor(() =>
+      expect((builders.blocked_times ?? []).flatMap((b) => b.update.mock.calls)).toContainEqual([
+        { recurrence: { freq: 'week', interval: 1, except_dates: ['2026-09-29'] } },
+      ]),
+    );
+    expect((builders.blocked_times ?? []).some((b) => b.delete.mock.calls.length > 0)).toBe(false);
+  });
+
+  it('changes only the opened occurrence: a one-off event, and the series skips that date', async () => {
+    const { user } = setup('owner', [JOB, HUDDLE_OCCURRENCE]);
+    setTableResult('blocked_times', { data: WEEKLY_OFF });
+    await user.click(await screen.findByText('Weekly huddle'));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit event' });
+    await user.click(within(dialog).getByRole('radio', { name: 'Only this one' }));
+    // a one-off has no repeat of its own
+    expect(within(dialog).queryByLabelText('Repeat')).toBeNull();
+    const title = within(dialog).getByLabelText('Title');
+    await user.clear(title);
+    await user.type(title, 'Huddle moved online');
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect((builders.blocked_times ?? []).flatMap((b) => b.update.mock.calls)).toContainEqual([
+        {
+          recurrence: {
+            freq: 'week',
+            interval: 1,
+            count: 10,
+            except_dates: ['2026-09-22', '2026-09-29'],
+          },
+        },
+      ]),
+    );
+    const inserts = (builders.blocked_times ?? []).flatMap((b) => b.insert.mock.calls);
+    expect(inserts).toContainEqual([
+      expect.objectContaining({
+        title: 'Huddle moved online',
+        starts_at: '2026-09-29T14:00:00.000Z',
+        ends_at: '2026-09-29T15:00:00.000Z',
+        recurrence: null,
+      }),
+    ]);
+  });
+
   it('opens a closure from the calendar and shows calendar events once in the bay view', async () => {
     const closure = {
       ...BUSY,

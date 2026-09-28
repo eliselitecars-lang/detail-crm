@@ -256,6 +256,7 @@ export default function CustomersPage() {
               getRowId={(c) => c.id}
               rowHref={(c) => `/app/customers/${c.id}`}
               sort={filters.sort}
+              extraSortOptions={[{ key: 'updated_at', label: 'Last updated' }]}
               onSortChange={(sort) => {
                 if (sort.key === 'name' || sort.key === 'created_at' || sort.key === 'updated_at') {
                   update({ sort: { key: sort.key, direction: sort.direction } });

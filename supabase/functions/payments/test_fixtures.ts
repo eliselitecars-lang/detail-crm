@@ -100,6 +100,8 @@ export interface FixtureOptions {
   smsReleases?: Row[];
   /** job_checkout_holds rows (0106: open Checkout Sessions of a job). */
   holds?: Row[];
+  /** invoice_checkout_holds rows (0109: open Checkout Sessions of an invoice). */
+  invoiceHolds?: Row[];
   /** public_get_booking cancellation.allowed (default true). */
   cancelAllowed?: boolean;
   /** public_cancel_booking raises this instead of cancelling. */
@@ -268,6 +270,7 @@ export function fixture(options: FixtureOptions = {}): Fixture {
       sms_number_releases: options.smsReleases ?? [],
       quotes: options.quotes ?? [],
       job_checkout_holds: options.holds ?? [],
+      invoice_checkout_holds: options.invoiceHolds ?? [],
       payments: [
         {
           id: PAYMENT,
@@ -406,6 +409,71 @@ export function fixture(options: FixtureOptions = {}): Fixture {
             (ids === null || ids.includes(String(h.stripe_checkout_session_id))))
         );
         ctx.db.seed("job_checkout_holds", kept);
+        // 0109 body: the sessions' invoice holds go too
+        if (ids !== null) {
+          ctx.db.seed(
+            "invoice_checkout_holds",
+            ctx.db.table("invoice_checkout_holds").filter((h) =>
+              !(h.shop_id === args.p_shop_id && ids.includes(String(h.stripe_checkout_session_id)))
+            ),
+          );
+        }
+        return rows.length - kept.length;
+      },
+      // 0109: hold an invoice pay link (service role) under the invoice lock.
+      payments_hold_invoice_checkout: (args, ctx) => {
+        record("payments_hold_invoice_checkout", args);
+        const invoice = ctx.db.table("invoices").find((i) =>
+          i.id === args.p_invoice_id && i.shop_id === args.p_shop_id
+        );
+        if (!invoice) throw new FakeRpcError("P0002", "invoice not found", { status: 404 });
+        const due = Number(invoice.balance_cents ?? 0);
+        if (!["open", "partially_paid"].includes(String(invoice.status)) || due <= 0) {
+          throw new FakeRpcError("55000", "this invoice is no longer taking this payment", {
+            hint: "invoice_closed",
+          });
+        }
+        if (
+          args.p_amount_cents !== undefined && args.p_amount_cents !== null &&
+          Number(args.p_amount_cents) > due
+        ) {
+          throw new FakeRpcError(
+            "55000",
+            "this invoice's balance changed; reload it and try again",
+            {
+              hint: "balance_changed",
+            },
+          );
+        }
+        // invoice_bills_only_cancelled_jobs: every billed job cancelled
+        const billed = ctx.db.table("invoice_jobs")
+          .filter((ij) => ij.invoice_id === invoice.id && !ij.voided)
+          .map((ij) => ctx.db.table("jobs").find((j) => j.id === ij.job_id));
+        if (billed.length > 0 && billed.every((j) => j?.status === "cancelled")) {
+          throw new FakeRpcError("55000", "the appointment on this invoice was cancelled", {
+            hint: "booking_cancelled",
+          });
+        }
+        const holds = ctx.db.table("invoice_checkout_holds")
+          .filter((h) => h.stripe_checkout_session_id !== args.p_session_id);
+        holds.push({
+          stripe_checkout_session_id: args.p_session_id,
+          shop_id: args.p_shop_id,
+          invoice_id: args.p_invoice_id,
+          expires_at: args.p_expires_at,
+        });
+        ctx.db.seed("invoice_checkout_holds", holds);
+        return undefined;
+      },
+      payments_release_invoice_checkouts: (args, ctx) => {
+        record("payments_release_invoice_checkouts", args);
+        const ids = args.p_session_ids as string[] | null;
+        const rows = ctx.db.table("invoice_checkout_holds");
+        const kept = rows.filter((h) =>
+          !(h.shop_id === args.p_shop_id && h.invoice_id === args.p_invoice_id &&
+            (ids === null || ids.includes(String(h.stripe_checkout_session_id))))
+        );
+        ctx.db.seed("invoice_checkout_holds", kept);
         return rows.length - kept.length;
       },
       // 0106 body: refuses while a hold of the job is live, else cancels.

@@ -475,7 +475,7 @@ select tests.eq((
   select coalesce(string_agg(f, ', ' order by f), '')
   from unnest(array[
     'public.gift_card_code_hash(uuid, text)', 'public.gen_gift_card_code()', 'public.gift_card_issue_core(uuid, text, bigint, bigint, text, uuid, uuid, text, text, text, text, timestamp with time zone, text)',
-    'public.gift_card_redeem_core(public.invoices, public.gift_cards, bigint, text)', 'public.gift_card_order_prepare(text, jsonb, timestamp with time zone)',
+    'public.gift_card_redeem_core(public.invoices, public.gift_cards, bigint, text)', 'public.gift_card_order_prepare(text, jsonb, timestamp with time zone, inet)',
     'public.gift_card_order_paid(uuid, text, bigint)', 'public.gift_card_order_refunded(text, bigint)',
     'public.gift_card_log_attempt(uuid, text, boolean)', 'public.gift_card_match_customer(uuid, text, text, public.customer_source)']) as f
   where has_function_privilege('authenticated', f, 'execute') or has_function_privilege('anon', f, 'execute')

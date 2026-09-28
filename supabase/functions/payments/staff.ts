@@ -33,7 +33,7 @@ import {
 } from "../_shared/auth.ts";
 import { errors, HttpError } from "../_shared/errors.ts";
 import { links, withQuery } from "../_shared/links.ts";
-import { releaseJobCheckouts } from "./checkout_holds.ts";
+import { releaseInvoiceCheckouts, releaseJobCheckouts } from "./checkout_holds.ts";
 import { nonNegativeCents, positiveCents, requestNonce, uuid } from "../_shared/schemas.ts";
 import { idempotencyKey, onAccount, type Stripe, STRIPE_API_VERSION } from "../_shared/stripe.ts";
 import { isStripeError } from "../_shared/stripe_errors.ts";
@@ -512,14 +512,17 @@ async function freshIntent(
  * pending rows block void / pricing / line-item edits) and expires its open
  * Checkout sessions and its job's open deposit sessions (so an old pay or
  * deposit link cannot be paid after a void or edit; the public pages open a
- * fresh one for what is still due). Call it when a sheet is dismissed and
- * before voiding or editing.
+ * fresh one for what is still due), and releases every live page hold of
+ * the invoice and its jobs (0106 / 0109: the holds that make cash, checks and
+ * gift cards refuse with checkout_open). Call it when a sheet is dismissed,
+ * before voiding or editing, and on checkout_open before retrying.
  *
  * With `job_id` instead, releases a job before it is cancelled / marked
  * no-show or moved to another customer: every unsettled card attempt of the
  * job (its deposits and its invoice's payments), the deposit links opened for
  * the job's CURRENT customer and, when the job has a non-void invoice, that
- * invoice's pay links.
+ * invoice's pay links; every live hold of the job and of that invoice is
+ * released.
  *
  * Payments already processing are reported (`in_progress`), never cancelled.
  */
@@ -536,27 +539,21 @@ export async function cancelOpenPayments(
   const account = await findAccount(s.admin, invoice.shop_id);
   if (!account) return { ...released, ...NOTHING_RELEASED };
   const settled = await settleInvoice(s, account, invoice.shop_id, invoice.id);
-  const customer = await loadCustomer(s.admin, invoice.shop_id, invoice.customer_id);
   const jobIds = await invoiceJobIds(s.admin, invoice);
-  const expired = customer.stripe_customer_id
-    ? await expireOpenSessions(
-      s,
-      account,
-      customer.stripe_customer_id,
-      sessionFor.invoiceOrDeposit(invoice.shop_id, invoice, jobIds),
-    )
-    : [];
-  // 0106: an expired page no longer holds its job's online cancel.
-  if (expired.length > 0) {
-    for (const jobId of jobIds) {
-      const { error } = await s.admin.rpc("payments_release_job_checkouts", {
-        p_shop_id: invoice.shop_id,
-        p_job_id: jobId,
-        p_session_ids: expired,
-      });
-      if (error) throw dbFailure("payments_release_job_checkouts", error);
-    }
-  }
+  // The customer's open pay / deposit pages and every live hold of the
+  // invoice and its jobs (0106 / 0109) — what makes record_manual_payment
+  // and gift card redemptions refuse with checkout_open — are expired and
+  // released, so the staff apps' "cancel open payments and try again" works
+  // even for a page an earlier attempt already expired, or one opened for a
+  // previous customer. A page that was just paid keeps its hold (reported
+  // through `settled` once its payment row lands).
+  const expired = await releaseInvoiceCheckouts(
+    s,
+    account,
+    invoice,
+    jobIds,
+    sessionFor.invoiceOrDeposit(invoice.shop_id, invoice, jobIds),
+  );
   return {
     ...released,
     cancelled: settled.cancelled,
@@ -591,7 +588,10 @@ async function cancelOpenJobPayments(
   // still holds for the job (0106), released so a job staff reopen is not
   // left blocked for the customer's online cancel until Stripe expires them.
   // A page that was just paid is reported through `settled`, not refused.
-  const expired = await releaseJobCheckouts(s, account, job, match, { refuseCompleted: false });
+  const expired = await releaseJobCheckouts(s, account, job, match, {
+    refuseCompleted: false,
+    invoiceId: invoice?.id ?? null,
+  });
   return {
     ...released,
     cancelled: settled.cancelled,

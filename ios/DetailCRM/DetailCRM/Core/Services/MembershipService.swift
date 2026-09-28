@@ -119,10 +119,33 @@ enum MembershipService {
         var plans: [UUID: MembershipPlan]
         var customers: [UUID: QuoteCustomerRef]
         var vehicles: [UUID: QuoteVehicleRef]
+        /// More (older) memberships match beyond the rows loaded so far.
+        var hasMore: Bool = false
+
+        /// Appends the next page (skipping rows already shown).
+        func appending(_ page: ListData) -> ListData {
+            var merged = self
+            merged.memberships = ListPage.appending(memberships, page.memberships, id: \.id)
+            merged.plans.merge(page.plans) { _, newer in newer }
+            merged.customers.merge(page.customers) { current, _ in current }
+            merged.vehicles.merge(page.vehicles) { current, _ in current }
+            merged.hasMore = page.hasMore
+            return merged
+        }
     }
 
-    /// Memberships (newest first) with their plan, customer and vehicle.
-    static func memberships(shopID: UUID, status: MembershipStatus?) async throws -> ListData {
+    /// Memberships per list page ("Load more" fetches the next page).
+    static let listPageSize = ListPage.defaultPageSize
+
+    /// Memberships (newest first) with their plan, customer and vehicle:
+    /// one page starting at `offset`, optionally one status and a search
+    /// by customer name, phone or email (like the invoice list).
+    static func memberships(
+        shopID: UUID,
+        status: MembershipStatus?,
+        search: String = "",
+        offset: Int = 0
+    ) async throws -> ListData {
         var query = Supa.client
             .from("memberships")
             .select(Membership.selectColumns)
@@ -130,11 +153,26 @@ enum MembershipService {
         if let status {
             query = query.eq("status", value: status.rawValue)
         }
-        let rows: [Membership] = try await query
+        let term = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !term.isEmpty {
+            let matches = try await QuoteService.searchCustomers(
+                shopID: shopID, term: term, includeArchived: true, limit: 100
+            )
+            guard !matches.isEmpty else {
+                return ListData(memberships: [], plans: [:], customers: [:], vehicles: [:])
+            }
+            query = query.in("customer_id", values: matches.map { $0.id.uuidString })
+        }
+        // One extra row tells whether another page exists.
+        let start = max(0, offset)
+        let reply: [Membership] = try await query
             .order("created_at", ascending: false)
-            .limit(300)
+            .order("id", ascending: false)
+            .range(from: start, to: start + listPageSize)
             .execute()
             .value
+        let page = ListPage.trim(reply, pageSize: listPageSize)
+        let rows = page.rows
 
         // Plans include archived ones so old memberships still show a name.
         let planRows: [MembershipPlan] = try await Supa.client
@@ -147,19 +185,14 @@ enum MembershipService {
         for plan in planRows { plans[plan.id] = plan }
 
         let customers = try await PaymentService.customerRefs(shopID: shopID, ids: rows.map { $0.customerID })
-        let vehicleIDs = Array(Set(rows.compactMap { $0.vehicleID }))
-        var vehicles: [UUID: QuoteVehicleRef] = [:]
-        if !vehicleIDs.isEmpty {
-            let vehicleRows: [QuoteVehicleRef] = try await Supa.client
-                .from("vehicles")
-                .select(QuoteVehicleRef.selectColumns)
-                .eq("shop_id", value: shopID.uuidString)
-                .in("id", values: vehicleIDs.map { $0.uuidString })
-                .execute()
-                .value
-            for vehicle in vehicleRows { vehicles[vehicle.id] = vehicle }
-        }
-        return ListData(memberships: rows, plans: plans, customers: customers, vehicles: vehicles)
+        let vehicles = try await InvoiceService.vehicleRefs(shopID: shopID, ids: rows.compactMap { $0.vehicleID })
+        return ListData(
+            memberships: rows,
+            plans: plans,
+            customers: customers,
+            vehicles: vehicles,
+            hasMore: page.hasMore
+        )
     }
 
     /// New incomplete membership (`create_membership`); billing starts when

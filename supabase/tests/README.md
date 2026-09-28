@@ -51,6 +51,7 @@ transaction never commits); force them with `set constraints <name> immediate`.
 | `80_` | comms & integrations v2: push, follow-ups, reminders, import / export, custom fields / leads, SMS numbers, webhooks (0080–0089) |
 | `90_`, `95_` | cross-cutting hardening and integration (0090–0099; `95_` = 0095 parity fixes) |
 | `100_` | shop subscription billing (0100–0103): standing rules, config, plans, entitlement, webhook RPCs, PT402 enforcement, seats, lapsed-shop booking and batches; later hardening numbered in the range (0104–0109): booking abuse limits, open-checkout holds, portal link vs email, membership coverage, cancelled-booking money, manual money vs open pay pages |
+| `110_` | later hardening (0110–0119): join / gift card abuse limits and consent until paid, membership paid_through (past_due reprices), coupon redemption backfill, cancelled-job notifications for assigned members, custom fields in the customer CSV import, skipped occurrences of repeating calendar events |
 
 ## Helpers (schema `tests`, defined in `supabase/shim/30_test_helpers.sql`)
 

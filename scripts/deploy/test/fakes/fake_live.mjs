@@ -71,6 +71,7 @@ export async function startFakeLive({ ref, anon, service, token, app, faults = [
             'detail-crm-billing-sync-plans',
             'detail-crm-expire-quotes',
             'detail-crm-generate-series',
+            'detail-crm-prune-cron-history',
             'detail-crm-process-queue',
             'detail-crm-push',
             'detail-crm-run-automations',

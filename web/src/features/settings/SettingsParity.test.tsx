@@ -429,6 +429,96 @@ describe('ImportExportPage', () => {
     expect(screen.getByRole('button', { name: 'Check the file' })).toBeEnabled();
   });
 
+  it('imports the custom-field columns of a customer export', async () => {
+    setTableResult('import_batches', { data: [] });
+    setTableResult('vehicle_categories', { data: [] });
+    setTableResult('custom_fields', {
+      data: [
+        {
+          id: 'f-1',
+          entity: 'customer',
+          key: 'referred_by',
+          label: 'Referred by',
+          type: 'text',
+          options: [],
+          help_text: null,
+          required: false,
+          show_in_booking: false,
+          show_in_lead_form: false,
+          location_scope: null,
+          sort: 1,
+          archived_at: null,
+        },
+        {
+          id: 'f-2',
+          entity: 'customer',
+          key: 'fleet_size',
+          label: 'Fleet size',
+          type: 'number',
+          options: [],
+          help_text: null,
+          required: false,
+          show_in_booking: false,
+          show_in_lead_form: false,
+          location_scope: null,
+          sort: 2,
+          archived_at: null,
+        },
+        {
+          id: 'f-3',
+          entity: 'customer',
+          key: 'old',
+          label: 'Old field',
+          type: 'text',
+          options: [],
+          help_text: null,
+          required: false,
+          show_in_booking: false,
+          show_in_lead_form: false,
+          location_scope: null,
+          sort: 3,
+          archived_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+    const calls = mockRpc({
+      import_customers: () => ({
+        data: {
+          batch_id: null,
+          dry_run: true,
+          counts: { created: 1, updated: 0, skipped: 0, errors: 0 },
+          rows: [
+            { row: 1, action: 'create', customer_id: null, vehicle_action: 'none', message: null },
+          ],
+        },
+      }),
+    });
+    const { user } = renderSettings('/app/settings/import-export', { role: 'manager' });
+    await screen.findByText('Import from a spreadsheet');
+    const csv = 'First name,Email,Referred by,Fleet size,Old field\nAnn,ann@x.test,Bob,3,x\n';
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+    await user.upload(input!, new File([csv], 'customers.csv', { type: 'text/csv' }));
+    expect(await screen.findByLabelText('Field for the column Referred by')).toHaveValue(
+      'custom.referred_by',
+    );
+    expect(screen.getByLabelText('Field for the column Fleet size')).toHaveValue(
+      'custom.fleet_size',
+    );
+    // archived fields are not offered
+    expect(screen.getByLabelText('Field for the column Old field')).toHaveValue('');
+    await user.click(screen.getByRole('button', { name: 'Check the file' }));
+    expect(await screen.findByText('Check results (nothing saved yet)')).toBeVisible();
+    expect(calls.find((c) => c.fn === 'import_customers')?.args).toMatchObject({
+      p_rows: [
+        {
+          first_name: 'Ann',
+          email: 'ann@x.test',
+          custom_data: { referred_by: 'Bob', fleet_size: 3 },
+        },
+      ],
+    });
+  });
+
   it('maps columns, checks the file (dry run) and then imports', async () => {
     setTableResult('import_batches', { data: [] });
     setTableResult('vehicle_categories', { data: [] });

@@ -10,7 +10,9 @@
  * The order is created by gift_card_order_prepare (0066, service role),
  * which owns every rule: the shop has online sales on, the offer exists or
  * the custom amount is within the shop's range, the contact details, and
- * the abuse limit (5 orders per purchaser email per 24 h). Prices never come
+ * the abuse limits (5 orders per purchaser email per 24 h; 0110: 10 unpaid
+ * orders per connection — the visitor's address, passed as p_client_ip —
+ * and 100 per shop). Prices never come
  * from the client: amount_cents is only a request that the RPC validates.
  * The webhook issues the card when the payment succeeds
  * (gift_card_order_paid) and follows refunds (gift_card_order_refunded); a
@@ -26,6 +28,7 @@
  * purchaser's recent pending orders.
  */
 import { z } from "zod";
+import { clientIp } from "../_shared/client_ip.ts";
 import { HttpError } from "../_shared/errors.ts";
 import { idempotencyKey, onAccount, type Stripe } from "../_shared/stripe.ts";
 import { withQuery } from "../_shared/links.ts";
@@ -160,6 +163,7 @@ async function retriedOrderSession(
 
 export async function giftCardCheckout(
   s: Services,
+  req: Request,
   input: z.output<typeof giftCardCheckoutInput>,
 ): Promise<GiftCardCheckoutResult> {
   // Card payments first: no order is created (nor the abuse limit spent)
@@ -206,9 +210,12 @@ export async function giftCardCheckout(
     }
   }
 
+  // The visitor's address for the RPC's per-connection limit (0110).
+  const ip = clientIp(req);
   const prepared = await s.admin.rpc("gift_card_order_prepare", {
     p_slug: shop.slug,
     p_payload: payload,
+    ...(ip ? { p_client_ip: ip } : {}),
   });
   if (prepared.error) {
     switch (prepared.error.code) {

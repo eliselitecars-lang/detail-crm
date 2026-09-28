@@ -170,13 +170,14 @@ create function pg_temp.join_payload(p_email text, p_extra jsonb default '{}') r
 $$;
 select public.membership_join_prepare('shop-a', tests.fx('plan_wash'), pg_temp.join_payload('jo@example.com')) as j1 \gset
 select tests.as_superuser();
-select tests.ok((select c.source = 'online_booking' and c.lifecycle = 'customer' and c.phone = '+12055550177' and c.phone_unverified
-                        and c.sms_opt_in and m.status = 'incomplete' and m.created_by is null and v.make = 'Mazda'
+select tests.ok((select c.source = 'online_booking' and c.lifecycle = 'lead' and c.phone = '+12055550177' and c.phone_unverified
+                        and not c.sms_opt_in and not c.email_opt_in
+                        and m.status = 'incomplete' and m.created_by is null and v.make = 'Mazda'
                  from public.memberships m
                  join public.customers c on c.id = m.customer_id
                  join public.vehicles v on v.id = m.vehicle_id
                  where m.id = (:'j1'::jsonb ->> 'membership_id')::uuid),
-                'a new customer (unverified phone) with the vehicle and an incomplete membership');
+                'a new customer (unverified phone; a lead without consent until paid, 0110) with the vehicle and an incomplete membership');
 select tests.eq(:'j1'::jsonb ->> 'email', 'jo@example.com', 'returns the email for Checkout');
 select tests.as_service();
 select tests.eq((public.membership_join_prepare('shop-a', tests.fx('plan_wash'), pg_temp.join_payload('JO@example.com')) ->> 'membership_id'),
@@ -215,6 +216,9 @@ select tests.ok((select title like 'New member: Jo Joiner joined Wash club' and 
                  from public.notifications where shop_id = tests.fx('shop_a') and kind = 'membership_joined' limit 1), 'with who and what');
 select tests.eq((select count(*) from public.notifications where shop_id = tests.fx('shop_a') and kind = 'membership_joined'
                     and customer_id = (:'j1'::jsonb ->> 'customer_id')::uuid), 3::bigint, 'linked to the customer');
+select tests.ok((select c.lifecycle = 'customer' and c.sms_opt_in and not c.email_opt_in
+                 from public.customers c where c.id = (:'j1'::jsonb ->> 'customer_id')::uuid),
+                '0110: paid -> a customer, with the text consent the join asked for (and no email consent it did not ask for)');
 select tests.as_service();
 select public.sync_stripe_subscription(tests.fx('shop_a'), 'sub_week', 'active', null, false);
 select tests.as_superuser();
@@ -247,7 +251,7 @@ select tests.eq(public.portal_membership_access(tests.fx('mem_alice_week'), null
 select tests.as_superuser();
 select tests.ok(not has_function_privilege('authenticated', 'public.create_membership_core(uuid, uuid, uuid)', 'execute')
                 and not has_function_privilege('authenticated', 'public.membership_uses_in_period(uuid, timestamptz, uuid)', 'execute')
-                and not has_function_privilege('anon', 'public.membership_join_prepare(text, uuid, jsonb, timestamptz)', 'execute')
+                and not has_function_privilege('anon', 'public.membership_join_prepare(text, uuid, jsonb, timestamptz, inet)', 'execute')
                 and has_function_privilege('anon', 'public.public_membership_plans(text)', 'execute')
                 and has_function_privilege('authenticated', 'public.portal_memberships()', 'execute')
                 and not has_function_privilege('anon', 'public.portal_memberships()', 'execute'),

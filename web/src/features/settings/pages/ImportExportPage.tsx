@@ -35,7 +35,7 @@ import { errorMessage } from '@/lib/errors';
 import { readLocal, storageKeys, writeLocal } from '@/lib/storage';
 import { useVehicleCategories } from '../api';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
-import { customFieldsQuery } from '../data/customFields';
+import { customFieldsQuery, useCustomFields } from '../data/customFields';
 import {
   fetchExportCustomers,
   fetchExportJobs,
@@ -58,6 +58,7 @@ import {
   IMPORT_MAX_ROWS,
   parseCsv,
   readFileText,
+  type ImportCustomField,
   type ImportKind,
   type ImportMapping,
   type LocalRowError,
@@ -123,8 +124,21 @@ function ImportCard() {
   const [interrupted, setInterrupted] = useState<ImportInterruptedError | null>(null);
   const locked = run.isPending || interrupted !== null;
 
+  const fieldsQuery = useCustomFields('customer');
   const sizes = useMemo(() => (categories.data ?? []).map((c) => c.name), [categories.data]);
-  const targets = useMemo(() => importTargets(kind, sizes), [kind, sizes]);
+  // Active customer custom fields: one column target each (0114), matched by
+  // label — the header the customer export writes for them.
+  const customFields = useMemo<ImportCustomField[]>(
+    () =>
+      (fieldsQuery.data ?? [])
+        .filter((f) => !f.archived_at)
+        .map((f) => ({ key: f.key, label: f.label, type: f.type, options: f.options })),
+    [fieldsQuery.data],
+  );
+  const targets = useMemo(
+    () => importTargets(kind, sizes, customFields),
+    [kind, sizes, customFields],
+  );
   // A services file has one price column per vehicle size: until the sizes
   // are loaded those columns can't be matched (they'd silently map to "don't
   // import"), so the file waits for them — or for their error and a retry.
@@ -134,7 +148,15 @@ function ImportCard() {
       : categories.isError
         ? 'error'
         : 'loading';
-  const sizesReady = sizesStatus === 'ready';
+  // Likewise a customers file waits for the custom fields: their columns
+  // would otherwise map to "don't import" and the values be dropped.
+  const fieldsStatus: 'ready' | 'loading' | 'error' =
+    kind !== 'customers' || fieldsQuery.isSuccess
+      ? 'ready'
+      : fieldsQuery.isError
+        ? 'error'
+        : 'loading';
+  const sizesReady = sizesStatus === 'ready' && fieldsStatus === 'ready';
   // The mapping follows the targets it was made for: sizes that arrive (or
   // change) after the file was read re-run the suggestions; choices made by
   // hand are kept (they are remembered per header).
@@ -146,8 +168,8 @@ function ImportCard() {
     setPreview(null);
   }
   const built = useMemo(
-    () => (file ? buildImportRows(file.csv.records, mapping) : null),
-    [file, mapping],
+    () => (file ? buildImportRows(file.csv.records, mapping, customFields) : null),
+    [file, mapping, customFields],
   );
   const duplicates = duplicateTargets(mapping);
   const mappedCount = Object.values(mapping).filter(Boolean).length;
@@ -165,7 +187,7 @@ function ImportCard() {
   const changeKind = (next: ImportKind) => {
     setKind(next);
     if (file) {
-      const nextTargets = importTargets(next, sizes);
+      const nextTargets = importTargets(next, sizes, customFields);
       setMapping(autoMap(file.csv.headers, nextTargets, readSavedMapping(shopId, next)));
       setMappedFor(nextTargets.map((t) => t.id).join('\u0000'));
     }
@@ -307,13 +329,25 @@ function ImportCard() {
             retrying={categories.isFetching}
           />
         )}
+        {!done && fieldsStatus === 'loading' && (
+          <LoadingState label="Loading your customer fields…" />
+        )}
+        {!done && fieldsStatus === 'error' && (
+          <ErrorState
+            compact
+            title="Couldn’t load your customer fields"
+            error={fieldsQuery.error}
+            onRetry={() => void fieldsQuery.refetch()}
+            retrying={fieldsQuery.isFetching}
+          />
+        )}
         {done ? (
           <ImportDone kind={kind} result={done} onAgain={reset} />
         ) : !file ? (
           <FileDropzone
             accept={['.csv', 'text/csv']}
             maxBytes={IMPORT_MAX_BYTES}
-            disabled={!sizesReady}
+            disabled={sizesStatus !== 'ready'}
             busy={parsing}
             label="Drop a CSV file here"
             description="Up to 10 MB and 20,000 rows. The first row must be the column names."

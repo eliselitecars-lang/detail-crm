@@ -353,15 +353,21 @@ invoice). Stripe returns the customer to `/i/<token>?paid=1` or
 `/i/<token>?canceled=1`. A card is saved for off-session use. After
 `?paid=1` an ACH payment shows as processing on the invoice for a few days.
 
-A single-job invoice's link is **held** for its job before the URL is
-returned (below, "Open payment pages"); a closed job's invoice (completed,
-cancelled, no-show) stays payable without a hold, and a grouped invoice's
-link is not held.
+Every link is **held** for its invoice before the URL is returned
+(`payments_hold_invoice_checkout`, below "Open payment pages"), completed
+jobs' and grouped invoices' links too, so cash, checks and gift cards wait
+for it; a single-job invoice whose job is still open is also held for the
+job (the customer's online cancel waits for it). The hold re-checks the
+invoice under its lock; when it refuses, the session is expired and no link
+is returned.
 
 Errors: `404 not_found` (unknown token or a draft invoice), `409 conflict`
 reasons `void`, `paid`, `payment_in_progress` (also when processing
 payments already cover the balance), `checkout_superseded` (links keep
-changing: refresh), `422 unprocessable` reasons `tip_too_large`
+changing: refresh), `invoice_closed` (no longer open, or nothing left to pay:
+e.g. cash recorded meanwhile), `balance_changed` (less is left than this
+link would charge: refresh), `booking_cancelled` (every appointment on the
+invoice was cancelled; the page says it is not payable), `422 unprocessable` reasons `tip_too_large`
 (`details.max_tip_cents`), `amount_out_of_range`, `stripe_not_connected`,
 `charges_disabled`.
 
@@ -408,18 +414,38 @@ customer (as `money_public_quote_json` hands it out): once staff move it to
 another customer, the old quote link gets `409 booking_closed`, never a
 Checkout on the new customer's Stripe customer.
 
-#### Open payment pages (migration 0106)
+#### Open payment pages (migrations 0106, 0109)
 
-Every Checkout Session opened for a job (a booking or quote deposit link, a
-single-job invoice's pay link) is recorded with
-`payments_hold_job_checkout(shop, job, session, expires_at)` **before** its
-URL is handed out. While a hold is live, `public_cancel_booking` refuses
-with `55000` HINT `checkout_open`, so a deposit cannot be paid on a booking
-the customer cancelled in another tab. A hold ends when Stripe expires the
-session, when its payment row turns processing / received (a trigger), or
-when this function expires the session and calls
-`payments_release_job_checkouts`: the customer's `booking_cancel` and staff
-`cancel_open_payments` (both paths) do.
+Every Checkout Session this function opens is **held** before its URL is
+handed out:
+
+* a booking or quote deposit link, and the pay link of a single-job invoice
+  whose job is still open, for the **job**
+  (`payments_hold_job_checkout(shop, job, session, expires_at)`): while it is
+  live, `public_cancel_booking` refuses with `55000` HINT `checkout_open`, so
+  a deposit cannot be paid on a booking the customer cancelled in another tab;
+* every `/i` invoice pay link, for the **invoice**
+  (`payments_hold_invoice_checkout(shop, invoice, session, expires_at,
+  amount)`, 0109): while it, or a job hold of one of the invoice's jobs, is
+  live, `record_manual_payment` and gift card / store credit redemptions
+  (staff and public) refuse with `55000` HINT `checkout_open`, so cash cannot
+  be taken for a balance the customer can still pay by card (the webhook
+  would record the card payment on top: overpaid).
+
+A hold ends when Stripe expires the session, when its payment row turns
+processing / received (a trigger), or when this function expires the
+session: **every** session it expires (a newer link, a job's deposit links,
+a staff PaymentSheet / Terminal intent or saved-card charge superseding the
+customer's pages, `booking_cancel`, `cancel_open_payments`) loses its job and
+invoice holds at once (`expireOpenSessions`). `cancel_open_payments` also
+sweeps every live hold that blocks the document — by `invoice_id` the
+invoice's holds and its jobs' holds, by `job_id` the job's and its live
+invoice's — expiring any of those sessions still open (also one opened for a
+previous customer) and releasing the rest; a page that was just paid keeps
+its hold until its payment row lands. So the staff apps' "cancel open
+payments and try again" on `checkout_open` always clears what it can. The
+Stripe webhook's `checkout.session.expired` releases whatever is left for a
+session that ended some other way.
 
 #### `booking_cancel` (PUBLIC, booking token)
 
@@ -478,8 +504,12 @@ Errors: `404 not_found` (unknown shop), `409 conflict` reason `disabled`
 (online sales are off), `422 unprocessable` reasons `amount_out_of_range`,
 `invalid_order` (the `error` text says what to fix: an offer no longer
 available, custom amounts off, an invalid email...), `stripe_not_connected`,
-`charges_disabled`, `429 rate_limited` (5 orders per buyer email per 24 h;
-`Retry-After`).
+`charges_disabled`, `429 rate_limited` (5 orders per buyer email, 10 unpaid
+orders per connection and 100 unpaid per shop in 24 h; `Retry-After`). The
+visitor's address (`_shared/client_ip.ts`: cf-connecting-ip, x-real-ip, the
+last x-forwarded-for hop — the same sources as the database's
+`form_signer_ip`) is passed as `p_client_ip` (migration 0110), since the
+service-role call hides it from the database.
 
 #### `membership_join_checkout` (PUBLIC, shop slug)
 
@@ -489,7 +519,12 @@ from the `/join/<slug>` page (plans from `public_membership_plans`).
 `membership_join_prepare` matches or creates the customer (never overwriting
 a matched one), adds the vehicle, and creates (or reuses a never-billed)
 incomplete membership; then the same subscription Checkout as
-`membership_checkout` (weekly, monthly or yearly).
+`membership_checkout` (weekly, monthly or yearly). A customer the join
+creates is a lead without marketing consent until the membership is paid
+(the webhook's activation applies the consent asked for; migration 0110).
+Limits: 3 joins per email, 10 unpaid joins per connection (the visitor's
+address is passed as `p_client_ip`, as for gift cards) and 100 unpaid per
+shop in 24 h (`429 rate_limited`).
 
 200: `{url, expires_at, amount_cents, interval, interval_count, currency}`.
 Stripe returns to `/join/<slug>?joined=1` or `?canceled=1`; the webhook
@@ -638,16 +673,20 @@ intents are released alike.
 
 - `invoice_id` releases the invoice: cancels its unconfirmed PaymentSheet
   and reader intents, records any that already succeeded, and expires its
-  open Checkout pay links and the deposit links of the jobs it bills (their
-  holds are released). Call it when a sheet is dismissed
-  and **before voiding or editing** an invoice.
+  open Checkout pay links and the deposit links of the jobs it bills, and
+  releases every live page hold of the invoice and of the jobs it bills
+  (0106 / 0109: also a page an earlier staff attempt or newer link already
+  expired, or one opened for a previous customer; a page just paid keeps its
+  hold). Call it when a sheet is dismissed, **before voiding or editing** an
+  invoice, and on `checkout_open` from a manual payment or gift card before
+  retrying.
 - `job_id` releases the job: every unsettled card attempt of the job (its
   deposits and its invoice's payments), the deposit links opened for the
   job's **current** customer and, when the job has a live invoice (single or
   grouped), that invoice's pay links, plus every page still held for the
-  job (0106, also one opened for an earlier customer); what it expired is
-  released, so a job staff reopen is not left blocked for the customer's
-  online cancel. Call it **before cancelling a job / marking it
+  job (0106, also one opened for an earlier customer) and for its live
+  invoice (0109); what it expired is released, so a job staff reopen is not
+  left blocked for the customer's online cancel, nor its invoice for cash. Call it **before cancelling a job / marking it
   no-show and before changing a job's customer**. Technicians may call it
   only for a job assigned to them, when the shop lets them collect.
 
@@ -911,7 +950,11 @@ again, `set_stripe_refund_total`), subscriptions and saved cards, it:
   Checkout expires unpaid (`checkout.session.expired`),
   `gift_card_order_expired` turns its pending order `expired` (idempotent;
   a paid or refunded order is never touched; an order that never recorded
-  the session, P0002, is acknowledged). Other expired sessions need nothing;
+  the session, P0002, is acknowledged). An expired invoice or deposit link
+  (`kind: payment` / `deposit`) has its page holds released
+  (`job_checkout_holds` / `invoice_checkout_holds` rows of that session in
+  this shop; the payments function already released the ones it expired
+  itself). Other expired sessions need nothing;
 - records Terminal / Tap to Pay payments (metadata `channel: terminal`) as
   `card_present` with the card's brand and last4; a declined tap stays
   pending (retryable), and a reader intent still waiting when the invoice is
@@ -1738,7 +1781,8 @@ account, so payment events are emitted **on the connected account**.
 4. Events: `checkout.session.completed`,
    `checkout.session.async_payment_succeeded`,
    `checkout.session.async_payment_failed`, `checkout.session.expired` (an
-   online gift card order whose Checkout expired unpaid becomes `expired`),
+   online gift card order whose Checkout expired unpaid becomes `expired`;
+   an expired pay / deposit link's page holds are released),
    `payment_intent.processing`
    (ACH debits clearing), `payment_intent.succeeded`,
    `payment_intent.payment_failed`, `payment_intent.canceled`,

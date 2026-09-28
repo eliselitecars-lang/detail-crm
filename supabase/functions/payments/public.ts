@@ -31,9 +31,18 @@
  * saved for later through the card options (SAVE_CARD_OPTIONS); Link is not
  * offered (NO_LINK_WALLET), since a Link payment would leave no card on file.
  *
- * Holds (0106, checkout_holds.ts): a deposit link and a single-job invoice's
- * pay link are recorded against the job before the URL is returned, so the
- * customer's online cancel waits for (booking_cancel: expires) them.
+ * Holds (checkout_holds.ts), taken before the URL is returned:
+ *  - every invoice pay link is held for the INVOICE (0109; completed jobs and
+ *    grouped invoices too), so staff cannot record cash / redeem a gift card
+ *    for a balance this page can still take (55000 checkout_open until staff
+ *    cancel the open payments). The hold also re-checks, under the invoice
+ *    lock, that the invoice can still take this amount: 409 invoice_closed /
+ *    balance_changed / booking_cancelled (the session is expired);
+ *  - a deposit link, and the pay link of a single-job invoice whose job is
+ *    still open, are held for the JOB (0106), so the customer's online cancel
+ *    waits for (booking_cancel: expires) them.
+ * Sessions this code expires (older links, a job's deposit links) release
+ * their holds (expireOpenSessions).
  */
 import { z } from "zod";
 import { getMembership, hasRole, ROLES } from "../_shared/auth.ts";
@@ -73,7 +82,13 @@ import {
   sessionFor,
 } from "./lib.ts";
 import { settleInvoice, settleJob } from "./settle.ts";
-import { holdJobCheckout, refuseClosedJobSession, releaseJobCheckouts } from "./checkout_holds.ts";
+import {
+  holdInvoiceCheckout,
+  holdJobCheckout,
+  refuseClosedJobSession,
+  refuseUnheldInvoiceSession,
+  releaseJobCheckouts,
+} from "./checkout_holds.ts";
 
 export const invoiceCheckoutInput = z.object({
   token: publicToken,
@@ -196,10 +211,17 @@ export async function invoiceCheckout(
     "invoice_checkout",
     [invoice.id, balance, tip, stripeCustomer, request.part],
   );
+  // 0109: no cash, check or gift card for this balance while the page can
+  // still be paid (every invoice: completed jobs and grouped invoices too).
+  // The database re-checks the invoice under its lock; a refusal expires the
+  // session, so its URL is never handed out.
+  const held = await holdInvoiceCheckout(s, shop.id, invoice.id, session, balance);
+  if (held !== "held") await refuseUnheldInvoiceSession(s, account, session.id, held);
   // 0106: the job's customer cannot cancel the booking online while this
   // link can still be paid. A closed job (completed, cancelled, no-show)
-  // cannot be cancelled anyway, so its invoice stays payable without a hold.
-  // A grouped invoice (no job_id) pays several jobs and is not held.
+  // cannot be cancelled online anyway ("closed": no job hold needed; the
+  // invoice hold above still guards its money). A grouped invoice (no
+  // job_id) is guarded by its invoice hold alone.
   if (invoice.job_id) await holdJobCheckout(s, shop.id, invoice.job_id, session);
   // One live link per invoice: older sessions (other device, old balance or
   // tip) can no longer be paid.

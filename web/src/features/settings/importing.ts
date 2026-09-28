@@ -6,12 +6,16 @@
  */
 import Papa from 'papaparse';
 import { stripFormulaGuard } from '@/lib/csv';
+import type { CustomFieldType, CustomValue } from '@/lib/customFields';
 import { parseMoneyInput } from '@/lib/money';
 
 export type ImportKind = 'customers' | 'services';
 
 export interface ImportTarget {
-  /** Mapping value: a server key, "vehicle.<key>", "price.<size>" or "full_name". */
+  /**
+   * Mapping value: a server key, "vehicle.<key>", "price.<size>",
+   * "custom.<field key>" or "full_name".
+   */
   id: string;
   label: string;
   /** Header spellings that auto-match (normalised: lowercase letters and digits). */
@@ -201,12 +205,34 @@ const SERVICE_BASE_TARGETS: readonly ImportTarget[] = [
   },
 ];
 
-/** Import targets; services get one price column per vehicle size. */
+/** A customer custom field (custom_fields, entity customer) a column can fill. */
+export interface ImportCustomField {
+  key: string;
+  label: string;
+  type: CustomFieldType;
+  options: readonly string[];
+}
+
+/**
+ * Import targets; services get one price column per vehicle size, customers
+ * one target per active customer custom field (matched by its label, which
+ * is the column header our customer export writes).
+ */
 export function importTargets(
   kind: ImportKind,
   vehicleSizes: readonly string[] = [],
+  customFields: readonly ImportCustomField[] = [],
 ): ImportTarget[] {
-  if (kind === 'customers') return [...CUSTOMER_TARGETS];
+  if (kind === 'customers')
+    return [
+      ...CUSTOMER_TARGETS,
+      ...customFields.map((f) => ({
+        id: `custom.${f.key}`,
+        label: f.label,
+        aliases: [f.label, f.key],
+        group: 'Custom field',
+      })),
+    ];
   return [
     ...SERVICE_BASE_TARGETS,
     ...vehicleSizes.map((size) => ({
@@ -292,6 +318,57 @@ export function splitFullName(full: string): { first_name?: string; last_name?: 
   return { first_name: parts.slice(0, -1).join(' '), last_name: parts[parts.length - 1] };
 }
 
+const YES = new Set(['yes', 'y', 'true', '1', 'on', 'x', 'checked']);
+const NO = new Set(['no', 'n', 'false', '0', 'off', 'unchecked']);
+
+/** The option spelled as the field defines it ("detail" → "Detail"), else the text. */
+function canonicalOption(options: readonly string[], value: string): string {
+  const lower = value.toLocaleLowerCase('en-US');
+  return options.find((o) => o.toLocaleLowerCase('en-US') === lower) ?? value;
+}
+
+/**
+ * A CSV cell → the JSON value a custom field stores (as our export writes
+ * it: numbers as digits, checkboxes as true / false, multi-selects joined
+ * with "; "). Text, dates and options are sent as typed (options with the
+ * field's own spelling), so the server's row error names a bad value;
+ * unreadable numbers and checkboxes are local errors.
+ */
+export function customCellValue(
+  field: ImportCustomField,
+  value: string,
+): { value: CustomValue } | { error: string } {
+  switch (field.type) {
+    case 'number': {
+      const digits = value.replace(/[,\s]/g, '');
+      const n = digits === '' ? Number.NaN : Number(digits);
+      return Number.isFinite(n) ? { value: n } : { error: `"${value}" isn’t a number` };
+    }
+    case 'checkbox': {
+      const norm = value.toLowerCase();
+      if (YES.has(norm)) return { value: true };
+      if (NO.has(norm)) return { value: false };
+      return { error: `"${value}" isn’t yes or no` };
+    }
+    case 'select':
+      return { value: canonicalOption(field.options, value) };
+    case 'multiselect':
+      return {
+        value: [
+          ...new Set(
+            value
+              .split(/[;\n]/)
+              .map((v) => v.trim())
+              .filter(Boolean)
+              .map((v) => canonicalOption(field.options, v)),
+          ),
+        ],
+      };
+    default:
+      return { value };
+  }
+}
+
 const SERVICE_KINDS = ['service', 'package', 'addon', 'product'] as const;
 
 /**
@@ -306,7 +383,8 @@ export function normalizeServiceKind(value: string): string {
 /**
  * CSV records → import rows. Blank cells are left out (never overwrite),
  * vehicle columns become `vehicle {…}`, price columns become
- * `prices {size: cents}` (money text such as "$1,299.00" → 129900).
+ * `prices {size: cents}` (money text such as "$1,299.00" → 129900), custom
+ * field columns become `custom_data {key: value}` (customCellValue; 0114).
  * Rows with no mapped value are skipped; unreadable prices are local errors.
  * The apostrophe our exports put before formula-like cells is removed, and a
  * service type is written the way the server spells it ("Add-on" → "addon").
@@ -314,7 +392,9 @@ export function normalizeServiceKind(value: string): string {
 export function buildImportRows(
   records: readonly Record<string, string | undefined>[],
   mapping: ImportMapping,
+  customFields: readonly ImportCustomField[] = [],
 ): { rows: BuiltRow[]; errors: LocalRowError[]; blank: number } {
+  const fields = new Map(customFields.map((f) => [f.key, f]));
   const rows: BuiltRow[] = [];
   const errors: LocalRowError[] = [];
   let blank = 0;
@@ -323,6 +403,7 @@ export function buildImportRows(
     const payload: Record<string, unknown> = {};
     const vehicle: Record<string, string> = {};
     const prices: Record<string, number> = {};
+    const custom: Record<string, CustomValue> = {};
     const problems: string[] = [];
     for (const [header, target] of Object.entries(mapping)) {
       if (!target) continue;
@@ -341,6 +422,12 @@ export function buildImportRows(
         const cents = parseMoneyInput(value);
         if (cents === null || cents < 0) problems.push(`"${value}" isn’t a price (${header})`);
         else prices[size] = cents;
+      } else if (target.startsWith('custom.')) {
+        const field = fields.get(target.slice('custom.'.length));
+        if (!field) continue; // a remembered mapping to a field that is gone
+        const cell = customCellValue(field, value);
+        if ('error' in cell) problems.push(`${cell.error} (${header})`);
+        else custom[field.key] = cell.value;
       } else if (target === 'kind') {
         payload.kind = normalizeServiceKind(value);
       } else {
@@ -349,6 +436,7 @@ export function buildImportRows(
     }
     if (Object.keys(vehicle).length > 0) payload.vehicle = vehicle;
     if (Object.keys(prices).length > 0) payload.prices = prices;
+    if (Object.keys(custom).length > 0) payload.custom_data = custom;
     if (problems.length > 0) {
       errors.push({ line, message: problems.join('; ') });
       return;

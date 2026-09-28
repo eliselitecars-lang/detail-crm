@@ -83,7 +83,11 @@ function CampaignSummary({ campaign: c }: { campaign: Campaign }) {
   useRealtime({ table: 'messages', shopId, invalidate: [campaignKeys.stats(shopId, c.id)] });
 
   const audience = audienceSchema.safeParse(c.audience);
-  const pending = stats.data?.pending ?? 0;
+  // The queued count is a secondary read: when it is still loading or failed
+  // to load, the owner can still stop the blast (cancel_campaign withdraws
+  // whatever is queued server-side) — only a known zero disables it.
+  const pending = stats.data?.pending ?? null;
+  const nothingQueued = pending === 0;
 
   return (
     <>
@@ -96,8 +100,8 @@ function CampaignSummary({ campaign: c }: { campaign: Campaign }) {
             <Button
               variant="danger"
               leadingIcon={<Ban />}
-              disabled={stats.isPending || pending === 0}
-              title={pending === 0 ? 'Every message has already been sent.' : undefined}
+              disabled={nothingQueued}
+              title={nothingQueued ? 'Every message has already been sent.' : undefined}
               onClick={() => setConfirmCancel(true)}
             >
               Cancel unsent messages
@@ -177,7 +181,11 @@ function CampaignSummary({ campaign: c }: { campaign: Campaign }) {
         tone="danger"
         loading={cancel.isPending}
         title="Cancel unsent messages?"
-        description={`${pending.toLocaleString()} queued ${pending === 1 ? 'message is' : 'messages are'} withdrawn. Messages already sent stay sent. This can’t be undone.`}
+        description={`${
+          pending === null
+            ? 'Every message that hasn’t been sent yet is withdrawn.'
+            : `${pending.toLocaleString()} queued ${pending === 1 ? 'message is' : 'messages are'} withdrawn.`
+        } Messages already sent stay sent. This can’t be undone.`}
         confirmLabel="Cancel campaign"
         cancelLabel="Keep sending"
         onConfirm={async () => {

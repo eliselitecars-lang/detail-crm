@@ -324,7 +324,7 @@ export function StatusControl({ job }: StatusControlProps) {
           setHeld(false);
         }}
         title="Cancel this job?"
-        description="The job leaves the calendar. Unsigned forms become void, and open deposit and pay links for it stop working."
+        description="The job leaves the calendar. Unsigned forms become void, and open deposit and pay links for it stop working. The customer isn’t messaged automatically."
         size="sm"
         dismissible={!busy}
         footer={
@@ -343,7 +343,12 @@ export function StatusControl({ job }: StatusControlProps) {
         }
       >
         {held && <PaymentHeld />}
-        <FormField label="Reason" help="Optional. Shown on the job's activity.">
+        {/* set_job_status stores this as jobs.cancel_reason, which the
+            customer's /booking/:token page prints in its cancelled banner. */}
+        <FormField
+          label="Reason for the customer"
+          help="Optional. The customer sees this on their booking page — don’t include internal notes."
+        >
           <Textarea
             rows={3}
             maxLength={REASON_MAX}

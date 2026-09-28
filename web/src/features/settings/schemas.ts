@@ -251,13 +251,18 @@ export const EVENT_KINDS = [
 export const REPEAT_FREQS = ['', 'day', 'week', 'month'] as const;
 export const REPEAT_ENDS = ['never', 'until', 'count'] as const;
 
-/** blocked_times.recurrence (calendar_recurrence_valid, 0050). */
+/** blocked_times.recurrence (calendar_recurrence_valid, 0050 / 0115). */
 export interface RecurrenceRule {
   freq: 'day' | 'week' | 'month';
   interval?: number;
   by_weekday?: number[];
   until_date?: string;
   count?: number;
+  /**
+   * Skipped occurrences, by their shop-local start date (0115). An update
+   * that leaves the key out keeps them (moved with the start date).
+   */
+  except_dates?: string[];
 }
 
 export function blockedTimeSchema(timeZone: string) {

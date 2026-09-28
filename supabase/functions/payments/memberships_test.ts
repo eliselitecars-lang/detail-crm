@@ -387,6 +387,27 @@ Deno.test("membership_join_checkout: prepares the membership, then the subscript
   assert(f.db.requests.every((r) => r.role === "service_role"));
 });
 
+Deno.test("membership_join_checkout: passes the visitor's address for the per-connection limit (0110)", async () => {
+  const f = joinShop();
+  const res = await f.handler(
+    jsonRequest("payments", join, { headers: { "cf-connecting-ip": "2001:db8::7" } }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(f.rpcCalls.find((c) => c.name === "membership_join_prepare")?.args, {
+    p_slug: "shine-co",
+    p_plan_id: PLAN,
+    p_payload: { customer: join.customer, vehicle: join.vehicle },
+    p_client_ip: "2001:db8::7",
+  });
+  const limited = joinShop(() => {
+    throw new FakeRpcError(
+      "PT429",
+      "too many membership sign-ups from this connection today; please contact the shop",
+    );
+  });
+  assertEquals((await errorOf(await limited.call(join))).slice(0, 2), [429, "rate_limited"]);
+});
+
 Deno.test("membership_join_checkout: errors", async () => {
   const unavailable = joinShop(() => {
     throw new FakeRpcError("55000", "this membership plan is not available online");

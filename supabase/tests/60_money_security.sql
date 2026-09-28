@@ -58,10 +58,10 @@ select tests.eq((
   select coalesce(string_agg(f, ', ' order by f), '')
   from unnest(array[
     'public.upsert_stripe_payment(uuid, text, public.payment_status, bigint, bigint, public.payment_kind, public.payment_method, uuid, uuid, uuid, uuid, text, text, text, text, timestamp with time zone, text)',
-    'public.gift_card_order_prepare(text, jsonb, timestamp with time zone)',
+    'public.gift_card_order_prepare(text, jsonb, timestamp with time zone, inet)',
     'public.gift_card_order_paid(uuid, text, bigint)',
     'public.gift_card_order_refunded(text, bigint)',
-    'public.membership_join_prepare(text, uuid, jsonb, timestamp with time zone)',
+    'public.membership_join_prepare(text, uuid, jsonb, timestamp with time zone, inet)',
     'public.portal_membership_access(uuid, uuid)',
     'public.sync_stripe_subscription(uuid, text, public.membership_status, timestamp with time zone, boolean, uuid, timestamp with time zone, text, bigint, public.membership_interval, integer)',
     'public.coupon_customer_reason(public.coupons, uuid, uuid)',

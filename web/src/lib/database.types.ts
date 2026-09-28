@@ -3532,6 +3532,50 @@ export type Database = {
           },
         ]
       }
+      membership_join_log: {
+        Row: {
+          client_ip: unknown
+          created_at: string
+          customer_id: string
+          email_opt_in: boolean
+          id: string
+          membership_id: string
+          new_customer: boolean
+          shop_id: string
+          sms_opt_in: boolean
+        }
+        Insert: {
+          client_ip?: unknown
+          created_at?: string
+          customer_id: string
+          email_opt_in?: boolean
+          id?: string
+          membership_id: string
+          new_customer: boolean
+          shop_id: string
+          sms_opt_in?: boolean
+        }
+        Update: {
+          client_ip?: unknown
+          created_at?: string
+          customer_id?: string
+          email_opt_in?: boolean
+          id?: string
+          membership_id?: string
+          new_customer?: boolean
+          shop_id?: string
+          sms_opt_in?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "membership_join_log_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       membership_plans: {
         Row: {
           active: boolean
@@ -3617,6 +3661,7 @@ export type Database = {
           id: string
           interval: Database["public"]["Enums"]["membership_interval"]
           interval_count: number
+          paid_through: string | null
           plan_id: string
           price_cents: number
           shop_id: string
@@ -3637,6 +3682,7 @@ export type Database = {
           id?: string
           interval?: Database["public"]["Enums"]["membership_interval"]
           interval_count?: number
+          paid_through?: string | null
           plan_id: string
           price_cents?: number
           shop_id: string
@@ -3657,6 +3703,7 @@ export type Database = {
           id?: string
           interval?: Database["public"]["Enums"]["membership_interval"]
           interval_count?: number
+          paid_through?: string | null
           plan_id?: string
           price_cents?: number
           shop_id?: string
@@ -7578,6 +7625,7 @@ export type Database = {
           id: string
           interval: Database["public"]["Enums"]["membership_interval"]
           interval_count: number
+          paid_through: string | null
           plan_id: string
           price_cents: number
           shop_id: string
@@ -7611,6 +7659,7 @@ export type Database = {
           id: string
           interval: Database["public"]["Enums"]["membership_interval"]
           interval_count: number
+          paid_through: string | null
           plan_id: string
           price_cents: number
           shop_id: string
@@ -7946,7 +7995,12 @@ export type Database = {
         Returns: Json
       }
       gift_card_order_prepare: {
-        Args: { p_now?: string; p_payload: Json; p_slug: string }
+        Args: {
+          p_client_ip?: unknown
+          p_now?: string
+          p_payload: Json
+          p_slug: string
+        }
         Returns: Json
       }
       gift_card_order_prepare_core: {
@@ -8712,6 +8766,7 @@ export type Database = {
       }
       membership_join_prepare: {
         Args: {
+          p_client_ip?: unknown
           p_now?: string
           p_payload: Json
           p_plan_id: string
@@ -8730,6 +8785,17 @@ export type Database = {
       }
       membership_period_bounds: {
         Args: { p_at: string; p_membership_id: string }
+        Returns: unknown
+      }
+      membership_period_bounds_of: {
+        Args: {
+          p_at: string
+          p_created_at: string
+          p_current_period_end: string
+          p_interval: Database["public"]["Enums"]["membership_interval"]
+          p_interval_count: number
+          p_started_at: string
+        }
         Returns: unknown
       }
       membership_usage: {
@@ -10116,6 +10182,7 @@ export type Database = {
           id: string
           interval: Database["public"]["Enums"]["membership_interval"]
           interval_count: number
+          paid_through: string | null
           plan_id: string
           price_cents: number
           shop_id: string

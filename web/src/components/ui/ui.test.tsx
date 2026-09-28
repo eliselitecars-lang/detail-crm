@@ -304,6 +304,70 @@ describe('Table', () => {
   });
 });
 
+describe('Table stacked layout', () => {
+  it('offers a sort picker and a direction toggle (the header buttons are desktop-only)', async () => {
+    const user = userEvent.setup();
+    const onSortChange = vi.fn();
+    const router = createMemoryRouter([
+      {
+        path: '*',
+        element: (
+          <Table
+            caption="Jobs"
+            rows={[{ id: '1', number: 7 }]}
+            getRowId={(r) => r.id}
+            sort={{ key: 'when', direction: 'desc' }}
+            onSortChange={onSortChange}
+            extraSortOptions={[{ key: 'updated', label: 'Last updated' }]}
+            columns={[
+              {
+                key: 'number',
+                header: <span>Job</span>,
+                sortLabel: 'Job number',
+                cell: (r) => `#${r.number}`,
+                sortable: true,
+                primary: true,
+              },
+              { key: 'when', header: 'When', cell: () => 'Soon', sortable: true },
+              { key: 'status', header: 'Status', cell: () => 'Open' },
+            ]}
+          />
+        ),
+      },
+    ]);
+    render(<RouterProvider router={router} />);
+    const picker = screen.getByRole('combobox', { name: 'Sort jobs by' });
+    expect(picker).toHaveValue('when');
+    expect(
+      within(picker)
+        .getAllByRole('option')
+        .map((o) => o.textContent),
+    ).toEqual(['Job number', 'When', 'Last updated']);
+    await user.selectOptions(picker, 'number');
+    expect(onSortChange).toHaveBeenLastCalledWith({ key: 'number', direction: 'desc' });
+    await user.click(screen.getByRole('button', { name: 'Descending' }));
+    expect(onSortChange).toHaveBeenLastCalledWith({ key: 'when', direction: 'asc' });
+  });
+
+  it('has no sort picker when the table is not sortable', () => {
+    const router = createMemoryRouter([
+      {
+        path: '*',
+        element: (
+          <Table
+            caption="Rows"
+            rows={[{ id: '1' }]}
+            getRowId={(r) => r.id}
+            columns={[{ key: 'id', header: 'Id', cell: (r) => r.id, sortable: true }]}
+          />
+        ),
+      },
+    ]);
+    render(<RouterProvider router={router} />);
+    expect(screen.queryByRole('combobox', { name: /Sort/ })).not.toBeInTheDocument();
+  });
+});
+
 describe('Toast', () => {
   it('announces success and maps thrown errors to friendly text', async () => {
     const user = userEvent.setup();

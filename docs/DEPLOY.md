@@ -355,10 +355,12 @@ way breaks confirmation and reset links.
 
 `supabase/setup/cron.sql` is the one-time SQL that stores `APP_BASE_URL` in
 `platform_config` (every customer link in messages is built from it) and
-schedules the twelve pg_cron jobs (message queue, automations, quote expiry,
+schedules the thirteen pg_cron jobs (message queue, automations, quote expiry,
 payment sheet sweep, storage purge, push notifications, outbound webhooks,
 SMS verification status, recurring job series, billing plan sync, billing
-customer sync, SMS number releases) with the functions URL and
+customer sync, SMS number releases, and the daily prune of pg_cron's own
+run log `cron.job_run_details`, which pg_cron never clears: 7 days of
+history are kept) with the functions URL and
 `CRON_SECRET` kept in Vault. The file's header lists each job's name,
 schedule and purpose; `detail-crm-billing-sync-customers` keeps each shop's
 platform Stripe customer on its current owner's email, and

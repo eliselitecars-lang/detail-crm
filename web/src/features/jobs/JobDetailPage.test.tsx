@@ -145,7 +145,14 @@ describe('JobDetailPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Cancel job' }));
     const dialog = await screen.findByRole('dialog', { name: 'Cancel this job?' });
-    await user.type(within(dialog).getByLabelText(/Reason/), 'Customer rescheduled');
+    // cancel_reason is shown to the customer on /booking/:token.
+    expect(
+      within(dialog).getByText(/customer sees this on their booking page/),
+    ).toBeInTheDocument();
+    await user.type(
+      within(dialog).getByLabelText(/Reason for the customer/),
+      'Customer rescheduled',
+    );
     await user.click(within(dialog).getByRole('button', { name: 'Cancel job' }));
     await waitFor(() =>
       expect(supabase.rpc).toHaveBeenCalledWith('set_job_status', {

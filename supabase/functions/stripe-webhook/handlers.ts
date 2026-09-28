@@ -1307,12 +1307,17 @@ async function giftCardSold(
 }
 
 /**
- * checkout.session.expired: a Checkout that ended unpaid. Only an online gift
- * card sale has a record waiting on it: gift_card_order_expired (0095) turns
- * its pending order `expired` (idempotent: a replay, or an order already
- * paid or refunded, changes nothing). Every other session the CRM creates
- * (invoice and deposit links, card saving, memberships) recorded nothing
- * before payment, so its expiry needs nothing.
+ * checkout.session.expired: a Checkout that ended unpaid.
+ *  - An online gift card sale: gift_card_order_expired (0095) turns its
+ *    pending order `expired` (idempotent: a replay, or an order already paid
+ *    or refunded, changes nothing).
+ *  - An invoice or deposit link: the payments edge held it before handing
+ *    out its URL (0106 job_checkout_holds, 0109 invoice_checkout_holds). The
+ *    edge releases the holds of the sessions it expires itself; this releases
+ *    them for a session that ended any other way (its expiry time, or expired
+ *    in the Stripe dashboard), so no hold outlives a page that can no longer
+ *    be paid (the database also ignores holds past their expires_at).
+ *  - Card saving and membership sessions recorded nothing before payment.
  */
 async function onCheckoutSessionExpired(
   ctx: WebhookContext,
@@ -1324,7 +1329,17 @@ async function onCheckoutSessionExpired(
   if (owner !== "ours") return ignore(ctx, owner, { shop_id: shopId });
   const md = readMetadata(session.metadata);
   noteProblems(ctx, md);
-  if (md.giftCardOrderId === null) return ignore(ctx, "nothing_to_expire");
+  if (md.giftCardOrderId === null) {
+    if (session.mode !== "payment" || (md.kind !== "payment" && md.kind !== "deposit")) {
+      return ignore(ctx, "nothing_to_expire");
+    }
+    const heldId = checkoutSessionId(session.id);
+    if (!heldId) return ignore(ctx, "invalid_object");
+    const released = await releaseCheckoutHolds(ctx, shopId, heldId);
+    return released > 0
+      ? applied(ctx, "checkout_holds_released", { session: heldId, released })
+      : ignore(ctx, "nothing_to_expire");
+  }
   const sessionId = checkoutSessionId(session.id);
   if (!sessionId) return ignore(ctx, "invalid_object");
   // The order must be this shop's (the RPC finds it by the session alone).
@@ -1361,6 +1376,35 @@ async function onCheckoutSessionExpired(
     session: sessionId,
     order_id: result.order_id ?? order.id,
   });
+}
+
+/**
+ * Deletes this shop's job and invoice holds of an expired Checkout Session
+ * (service role; the tables have no client access). Returns how many.
+ */
+async function releaseCheckoutHolds(
+  ctx: WebhookContext,
+  shopId: string,
+  sessionId: string,
+): Promise<number> {
+  let released = 0;
+  const jobHolds = await ctx.admin
+    .from("job_checkout_holds")
+    .delete()
+    .eq("shop_id", shopId)
+    .eq("stripe_checkout_session_id", sessionId)
+    .select("stripe_checkout_session_id");
+  if (jobHolds.error) throw new DbError("job_checkout_holds release", jobHolds.error);
+  released += (jobHolds.data ?? []).length;
+  const invoiceHolds = await ctx.admin
+    .from("invoice_checkout_holds")
+    .delete()
+    .eq("shop_id", shopId)
+    .eq("stripe_checkout_session_id", sessionId)
+    .select("stripe_checkout_session_id");
+  if (invoiceHolds.error) throw new DbError("invoice_checkout_holds release", invoiceHolds.error);
+  released += (invoiceHolds.data ?? []).length;
+  return released;
 }
 
 /**

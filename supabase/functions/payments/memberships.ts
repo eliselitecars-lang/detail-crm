@@ -25,6 +25,7 @@
  */
 import { z } from "zod";
 import { requireShopRole, requireUser, ROLES } from "../_shared/auth.ts";
+import { clientIp } from "../_shared/client_ip.ts";
 import { errors, HttpError } from "../_shared/errors.ts";
 import { links, withQuery } from "../_shared/links.ts";
 import { email, requestNonce, uuid } from "../_shared/schemas.ts";
@@ -542,7 +543,10 @@ interface JoinPrepared {
  * (0069, service role) owns the rules: the plan is active and sold online,
  * the customer is matched like an online booking (never overwritten) or
  * created, the vehicle is reused or added, a never-billed membership of a
- * retried join is reused, and at most 3 online joins per email per 24 h.
+ * retried join is reused, and at most 3 online joins per email per 24 h
+ * (0110: also 10 unpaid joins per connection — the visitor's address,
+ * passed as p_client_ip — and 100 per shop; a new customer is a lead
+ * without marketing consent until the membership is paid).
  * Then the same subscription Checkout as membership_checkout; the webhook
  * activates the membership (managers get 'membership_joined').
  */
@@ -553,6 +557,7 @@ export const JOIN_UNAVAILABLE_MESSAGE =
 
 export async function membershipJoinCheckout(
   s: Services,
+  req: Request,
   input: z.output<typeof membershipJoinCheckoutInput>,
 ): Promise<Record<string, unknown>> {
   // Card payments first: no customer or membership is created for a shop
@@ -560,10 +565,14 @@ export async function membershipJoinCheckout(
   const shop = await loadShopBySlug(s.admin, input.slug);
   await loadAccount(s.admin, shop.id);
   const { request_nonce: nonce, slug: _slug, plan_id: planId, ...payload } = input;
+  // The visitor's address: the RPC's per-connection limit (0110) cannot see
+  // it through this service-role call.
+  const ip = clientIp(req);
   const prepared = await s.admin.rpc("membership_join_prepare", {
     p_slug: shop.slug,
     p_plan_id: planId,
     p_payload: payload,
+    ...(ip ? { p_client_ip: ip } : {}),
   });
   if (prepared.error) {
     switch (prepared.error.code) {

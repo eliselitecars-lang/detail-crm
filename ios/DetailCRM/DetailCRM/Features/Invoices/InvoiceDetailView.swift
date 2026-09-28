@@ -64,7 +64,8 @@ struct InvoiceDetailView: View {
                 permissions: permissions,
                 currencyCode: appState.currencyCode,
                 clock: appState.clock,
-                present: { sheet in activeSheet = sheet }
+                present: { sheet in activeSheet = sheet },
+                retry: { await load() }
             )
         }
         .screenBackground()
@@ -176,6 +177,8 @@ private struct InvoiceDetailContent: View {
     let currencyCode: String
     let clock: ShopClock
     let present: (InvoiceDetailSheet) -> Void
+    /// Re-reads the invoice (after saved cards or the pay link failed).
+    let retry: () async -> Void
 
     var body: some View {
         ScrollView {
@@ -185,7 +188,8 @@ private struct InvoiceDetailContent: View {
                     data: data,
                     permissions: permissions,
                     currencyCode: currencyCode,
-                    present: present
+                    present: present,
+                    retry: retry
                 ))
                 AnyView(MoneyInvoiceGroupedLinesSection(
                     lines: data.lines,
@@ -214,8 +218,10 @@ private struct InvoiceDetailContent: View {
                 AnyView(InvoiceManageSection(
                     invoice: data.invoice,
                     linkToken: data.linkToken,
+                    linkTokenProblem: data.linkTokenProblem,
                     permissions: permissions,
-                    present: present
+                    present: present,
+                    retry: retry
                 ))
                 AnyView(InvoiceNotesSection(invoice: data.invoice, showInternal: permissions.canManage))
             }
@@ -322,6 +328,7 @@ private struct InvoiceBalanceSection: View {
     let permissions: InvoicePermissions
     let currencyCode: String
     let present: (InvoiceDetailSheet) -> Void
+    let retry: () async -> Void
 
     var body: some View {
         let invoice = data.invoice
@@ -369,13 +376,21 @@ private struct InvoiceBalanceSection: View {
             Label("Collect card payment", systemImage: "creditcard")
         }
         .buttonStyle(.themeMoney)
-        if permissions.canUseSavedCards && !data.savedCards.isEmpty {
-            Button {
-                present(.chargeSavedCard)
-            } label: {
-                Label("Charge card on file", systemImage: "creditcard.and.123")
+        if permissions.canUseSavedCards {
+            if !data.savedCards.isEmpty {
+                Button {
+                    present(.chargeSavedCard)
+                } label: {
+                    Label("Charge card on file", systemImage: "creditcard.and.123")
+                }
+                .buttonStyle(.themeSecondary)
+            } else if let problem = data.savedCardsProblem {
+                // A failed read is not "no card on file": say so, with a retry.
+                JobReferenceLoadError(
+                    text: "Couldn't check for a card on file, so Charge card on file isn't shown. \(problem)",
+                    retry: retry
+                )
             }
-            .buttonStyle(.themeSecondary)
         }
         Button {
             present(.redeemGiftCard)
@@ -536,8 +551,11 @@ private struct InvoiceManageSection: View {
     let invoice: Invoice
     /// The customer's pay-link token; loaded for managers+ only.
     let linkToken: UUID?
+    /// Why the token couldn't be read (shown instead of the share button).
+    let linkTokenProblem: String?
     let permissions: InvoicePermissions
     let present: (InvoiceDetailSheet) -> Void
+    let retry: () async -> Void
 
     var body: some View {
         VStack(spacing: Theme.Spacing.sm) {
@@ -552,14 +570,22 @@ private struct InvoiceManageSection: View {
                 }
                 .buttonStyle(.themePrimary)
             }
-            if permissions.canManage, let linkToken, invoice.status != .draft && invoice.status != .void {
-                if let url = MoneyLinks.invoice(token: linkToken) {
-                    ShareLink(item: url) {
-                        Label("Share pay link", systemImage: "square.and.arrow.up")
+            if permissions.canManage, invoice.status != .draft && invoice.status != .void {
+                if let linkToken {
+                    if let url = MoneyLinks.invoice(token: linkToken) {
+                        ShareLink(item: url) {
+                            Label("Share pay link", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.themeSecondary)
+                    } else {
+                        InlineMessage(text: "Pay links need WEB_APP_URL in the app configuration.", kind: .info)
                     }
-                    .buttonStyle(.themeSecondary)
-                } else {
-                    InlineMessage(text: "Pay links need WEB_APP_URL in the app configuration.", kind: .info)
+                } else if let linkTokenProblem {
+                    // A failed read is not "no pay link": say so, with a retry.
+                    JobReferenceLoadError(
+                        text: "Couldn't load the pay link, so Share pay link isn't shown. \(linkTokenProblem)",
+                        retry: retry
+                    )
                 }
             }
             if permissions.canVoid && invoice.status != .void {
