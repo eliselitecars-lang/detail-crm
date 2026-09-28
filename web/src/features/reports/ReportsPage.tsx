@@ -1,5 +1,5 @@
 import { CalendarRange } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { Card, EmptyState, PageHeader, Tabs, type TabItem } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
@@ -60,20 +60,22 @@ export default function ReportsPage() {
   const rawTab = params.get('tab');
   const tab: ReportTab = tabs.find((t) => t === rawTab) ?? tabs[0] ?? 'team';
 
-  // Functional update: quick successive edits (From then To) each apply to
-  // the latest URL, never to a stale render's params.
+  // react-router hands a functional setParams the params of the last render,
+  // so two quick edits before a re-render (From, then To) would build the
+  // second on a URL without the first. Chain edits through a ref that always
+  // holds the newest params instead.
+  const latestParams = useRef(params);
+  useEffect(() => {
+    latestParams.current = params;
+  }, [params]);
   const update = (patch: Record<string, string | null>) => {
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        for (const [key, value] of Object.entries(patch)) {
-          if (value === null) next.delete(key);
-          else next.set(key, value);
-        }
-        return next;
-      },
-      { replace: true },
-    );
+    const next = new URLSearchParams(latestParams.current);
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) next.delete(key);
+      else next.set(key, value);
+    }
+    latestParams.current = next;
+    setParams(next, { replace: true });
   };
 
   const onPresetChange = (nextPreset: Preset) => {
