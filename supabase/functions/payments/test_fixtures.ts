@@ -243,6 +243,8 @@ export function fixture(options: FixtureOptions = {}): Fixture {
       invoice_jobs: [...invoiceJobs, ...(options.invoiceJobs ?? [])],
       shop_terminal_locations: options.terminalLocations ?? [],
       gift_card_orders: [],
+      // 0100: the shop's platform subscription (delete_shop cancels it)
+      shop_billing: [],
       quotes: options.quotes ?? [],
       payments: [
         {

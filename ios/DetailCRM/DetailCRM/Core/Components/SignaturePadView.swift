@@ -40,8 +40,8 @@ struct SignatureDrawing: Equatable {
                 let points = stroke.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) }
                 guard let first = points.first else { continue }
                 if points.count == 1 {
-                    let dot = CGRect(x: first.x - lineWidth / 2, y: first.y - lineWidth / 2,
-                                     width: lineWidth, height: lineWidth)
+                    let half: CGFloat = lineWidth / 2
+                    let dot = CGRect(x: first.x - half, y: first.y - half, width: lineWidth, height: lineWidth)
                     UIBezierPath(ovalIn: dot).fill()
                     continue
                 }

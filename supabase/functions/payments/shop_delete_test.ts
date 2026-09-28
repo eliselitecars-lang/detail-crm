@@ -99,7 +99,12 @@ Deno.test("delete_shop: billing is cancelled, links expired, sheets released, th
   const f = busyShop();
   const res = await f.call(del, "owner");
   assertEquals(res.status, 200);
-  assertEquals(await res.json(), { deleted: true, memberships_cancelled: 2, sessions_expired: 3 });
+  assertEquals(await res.json(), {
+    deleted: true,
+    memberships_cancelled: 2,
+    sessions_expired: 3,
+    platform_subscription_cancelled: false,
+  });
 
   // The billing membership's subscription is cancelled now, on the shop's account.
   const cancel = f.stripe("DELETE", `/subscriptions/${SUB}`)[0];
@@ -141,6 +146,155 @@ Deno.test("delete_shop: billing is cancelled, links expired, sheets released, th
   // The Connect account is never touched (the owner keeps payouts).
   assertEquals(f.stripeCalls().some((c) => c.url.pathname.startsWith("/v1/accounts")), false);
   assertEquals(f.logs.events("shop_deleted").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The shop's own platform subscription (shop_billing, 0100)
+// ---------------------------------------------------------------------------
+
+const PLATFORM_SUB = "sub_1Platform";
+
+function billedShop(extra: FixtureOptions = {}) {
+  const f = busyShop(extra);
+  f.db.seed("shop_billing", [{
+    shop_id: SHOP,
+    stripe_customer_id: "cus_1PlatformShop",
+    stripe_subscription_id: PLATFORM_SUB,
+    status: "active",
+  }]);
+  return f;
+}
+
+function stripeError(status: number, type: string, message: string, code?: string) {
+  return () => jsonResponse({ error: { type, message, ...(code ? { code } : {}) } }, status);
+}
+
+Deno.test("delete_shop: the shop's platform subscription is cancelled first, on the platform account", async () => {
+  const f = billedShop();
+  const res = await f.call(del, "owner");
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), {
+    deleted: true,
+    memberships_cancelled: 2,
+    sessions_expired: 3,
+    platform_subscription_cancelled: true,
+  });
+  const cancel = f.stripe("DELETE", `/subscriptions/${PLATFORM_SUB}`);
+  assertEquals(cancel.length, 1);
+  // The platform account itself: never a connected account.
+  assertEquals(cancel[0]?.headers.get("stripe-account"), null);
+  assertEquals(
+    cancel[0]?.headers.get("idempotency-key")?.startsWith(
+      "dcrm:platform_subscription_shop_delete:",
+    ),
+    true,
+  );
+  // Before any link is expired or membership cancelled.
+  const calls = f.stripeCalls();
+  const at = (path: string, method: string) =>
+    calls.findIndex((c) => c.method === method && c.url.pathname === `/v1${path}`);
+  const platform = at(`/subscriptions/${PLATFORM_SUB}`, "DELETE");
+  assertEquals(platform < at("/checkout/sessions/cs_1Invoice/expire", "POST"), true);
+  assertEquals(platform < at(`/subscriptions/${SUB}`, "DELETE"), true);
+  assertEquals(f.logs.events("platform_subscription_cancelled")[0]?.subscription, PLATFORM_SUB);
+  assertEquals(f.logs.events("shop_deleted")[0]?.platform_subscription_cancelled, true);
+  assertEquals(f.db.table("shops").some((x) => x.id === SHOP), false);
+});
+
+Deno.test("delete_shop: a platform subscription already ended or gone in Stripe is fine", async () => {
+  // Stripe refuses a second cancel; the subscription reads canceled.
+  const ended = billedShop({ subscriptions: { [PLATFORM_SUB]: "canceled" } });
+  ended.db.http.once(
+    "DELETE",
+    `${STRIPE}/subscriptions/${PLATFORM_SUB}`,
+    stripeError(400, "invalid_request_error", "This subscription is already canceled."),
+  );
+  const a = await ended.call(del, "owner");
+  assertEquals(a.status, 200);
+  assertEquals((await a.json()).platform_subscription_cancelled, false);
+  assertEquals(
+    ended.stripe("GET", `/subscriptions/${PLATFORM_SUB}`)[0]?.headers.get("stripe-account"),
+    null,
+  );
+  assertEquals(ended.db.table("shops").some((x) => x.id === SHOP), false);
+
+  // Stripe no longer has it.
+  const gone = billedShop();
+  gone.db.http.once(
+    "DELETE",
+    `${STRIPE}/subscriptions/${PLATFORM_SUB}`,
+    stripeError(404, "invalid_request_error", "No such subscription", "resource_missing"),
+  );
+  const b = await gone.call(del, "owner");
+  assertEquals(b.status, 200);
+  assertEquals((await b.json()).platform_subscription_cancelled, false);
+  assertEquals(gone.db.table("shops").some((x) => x.id === SHOP), false);
+
+  // No platform subscription at all (never subscribed, or billing off).
+  const none = busyShop();
+  none.db.seed("shop_billing", [{ shop_id: SHOP, stripe_subscription_id: null, status: "none" }]);
+  const c = await none.call(del, "owner");
+  assertEquals((await c.json()).platform_subscription_cancelled, false);
+  assertEquals(none.stripe("DELETE", `/subscriptions/${PLATFORM_SUB}`).length, 0);
+});
+
+Deno.test("delete_shop: a Stripe failure cancelling the platform subscription is 502 and changes nothing", async () => {
+  for (
+    const failure of [
+      stripeError(500, "api_error", "Something went wrong on Stripe's end."),
+      // a refusal that is not "already canceled": the subscription is still live
+      stripeError(400, "invalid_request_error", "This request cannot be processed right now."),
+    ]
+  ) {
+    const f = billedShop();
+    f.db.http.once("DELETE", `${STRIPE}/subscriptions/${PLATFORM_SUB}`, failure);
+    const res = await f.call(del, "owner");
+    const body = await res.json();
+    assertEquals([res.status, body.code, body.details], [502, "upstream_error", {
+      reason: "platform_subscription_cancel_failed",
+    }]);
+    assertEquals(
+      body.error,
+      "The shop's subscription could not be cancelled, so the shop was not deleted. " +
+        "Try again in a moment.",
+    );
+    // Nothing else changed: links open, memberships and their subscriptions
+    // untouched, the shop and its billing row still there.
+    assertEquals(f.stripe("POST", "/checkout/sessions/:id/expire").length, 0);
+    assertEquals(f.stripe("DELETE", `/subscriptions/${SUB}`).length, 0);
+    assertEquals(f.db.table("memberships").every((m) => m.status !== "cancelled"), true);
+    assertEquals(f.rpcCalls.some((c) => c.name === "sync_stripe_subscription"), false);
+    assertEquals(f.db.table("shops").some((x) => x.id === SHOP), true);
+    assertEquals(f.db.table("shop_billing")[0]?.stripe_subscription_id, PLATFORM_SUB);
+    assertEquals(f.logs.events("shop_deleted").length, 0);
+  }
+});
+
+Deno.test("delete_shop: money still processing keeps the platform subscription too", async () => {
+  const f = billedShop({
+    intents: {
+      pi_1Sheet: { status: "processing", metadata: { shop_id: SHOP, source: "payment_sheet" } },
+    },
+  });
+  assertEquals((await errorOf(await f.call(del, "owner")))[2], { reason: "payment_in_progress" });
+  assertEquals(f.stripe("DELETE", "/subscriptions/:id").length, 0);
+});
+
+Deno.test("delete_shop: a shop without Stripe Connect still cancels its platform subscription", async () => {
+  const f = fixture({ account: null });
+  f.db.seed("shop_billing", [{
+    shop_id: SHOP,
+    stripe_subscription_id: PLATFORM_SUB,
+    status: "trialing",
+  }]);
+  const res = await f.call({ ...del, confirm_name: "Shine Co" }, "owner");
+  assertEquals((await res.json()).platform_subscription_cancelled, true);
+  // Only the platform call: nothing on a connected account.
+  assertEquals(f.stripeCalls().map((c) => [c.method, c.url.pathname]), [[
+    "DELETE",
+    `/v1/subscriptions/${PLATFORM_SUB}`,
+  ]]);
+  assertEquals(f.stripeCalls()[0]?.headers.get("stripe-account"), null);
 });
 
 Deno.test("delete_shop: money still processing refuses the deletion before anything changes", async () => {
@@ -199,7 +353,12 @@ Deno.test("delete_shop: a subscription Stripe no longer has is still recorded ca
 Deno.test("delete_shop: a shop without Stripe is deleted without Stripe calls", async () => {
   const f = fixture({ account: null });
   const res = await f.call({ ...del, confirm_name: "Shine Co" }, "owner");
-  assertEquals(await res.json(), { deleted: true, memberships_cancelled: 1, sessions_expired: 0 });
+  assertEquals(await res.json(), {
+    deleted: true,
+    memberships_cancelled: 1,
+    sessions_expired: 0,
+    platform_subscription_cancelled: false,
+  });
   assertEquals(f.stripeCalls().length, 0);
   assertEquals(f.db.table("memberships").find((m) => m.id === MEMBERSHIP)?.status, "cancelled");
 });

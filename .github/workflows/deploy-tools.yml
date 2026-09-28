@@ -2,9 +2,10 @@
 # end against a fake Supabase CLI and fake Management/Stripe APIs,
 # verify_live.mjs against a fake project, the web header generator and the
 # Pages-semantics static server. No secrets, no network: runs on every change
-# to the tooling or to the files it reads (config.toml verify_jwt, cron.sql
-# placeholders, function env names, the webhook's event list and Stripe API
-# version).
+# to the tooling or to the files the tests read (config.toml verify_jwt,
+# cron.sql placeholders, the migration list, function directories and env
+# names, both webhooks' event lists and the Stripe API version, and web/src +
+# web/index.html for the CSP's external origins).
 name: deploy-tools
 
 on:
@@ -13,20 +14,28 @@ on:
       - "scripts/deploy/**"
       - "supabase/config.toml"
       - "supabase/setup/cron.sql"
+      - "supabase/migrations/*.sql"
       - "supabase/functions/*/index.ts"
       - "supabase/functions/_shared/env.ts"
       - "supabase/functions/_shared/stripe.ts"
       - "supabase/functions/stripe-webhook/handlers.ts"
+      - "supabase/functions/billing-webhook/handlers.ts"
+      - "web/index.html"
+      - "web/src/**"
       - ".github/workflows/deploy-tools.yml"
   pull_request:
     paths:
       - "scripts/deploy/**"
       - "supabase/config.toml"
       - "supabase/setup/cron.sql"
+      - "supabase/migrations/*.sql"
       - "supabase/functions/*/index.ts"
       - "supabase/functions/_shared/env.ts"
       - "supabase/functions/_shared/stripe.ts"
       - "supabase/functions/stripe-webhook/handlers.ts"
+      - "supabase/functions/billing-webhook/handlers.ts"
+      - "web/index.html"
+      - "web/src/**"
       - ".github/workflows/deploy-tools.yml"
   workflow_dispatch:
 

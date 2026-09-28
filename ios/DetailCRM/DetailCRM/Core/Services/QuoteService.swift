@@ -506,8 +506,8 @@ enum QuoteService {
                     .insert(inserts, returning: .minimal)
                     .execute()
             },
-            addFeeLine: { feeID in
-                try await JobService.addFeeLine(kind: .quote, documentID: quoteID, feeID: feeID)
+            addFeeLine: { feeID, nonce in
+                try await JobService.addFeeLine(kind: .quote, documentID: quoteID, feeID: feeID, requestNonce: nonce)
             },
             updateQuote: updateQuote
         )

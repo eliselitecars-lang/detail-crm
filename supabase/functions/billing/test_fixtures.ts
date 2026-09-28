@@ -251,7 +251,10 @@ export interface BillingState {
   shopNames: Record<string, string>;
 }
 
-const LIVE = new Set(["active", "trialing", "past_due"]);
+/** 0101 billing_checkout_context has_live_subscription / billing_apply_subscription v_live. */
+const LIVE = new Set(["trialing", "active", "past_due", "unpaid", "paused"]);
+/** 0101 billing_apply_subscription v_ended. */
+const ENDED = new Set(["canceled", "incomplete_expired"]);
 const STATUSES = new Set([
   "trialing",
   "active",
@@ -304,9 +307,17 @@ export function installBillingRpcs(
     const customer = a.p_stripe_customer_id as string;
     const row = state.billing.get(shopId);
     if (!row) throw new FakeRpcError("P0002", "shop not found");
+    if (row.stripe_customer_id === customer) return undefined;
+    if (row.stripe_customer_id !== null) {
+      throw new FakeRpcError("23505", "this shop is already linked to another billing customer", {
+        status: 409,
+      });
+    }
     for (const other of state.billing.values()) {
       if (other.shop_id !== shopId && other.stripe_customer_id === customer) {
-        throw new FakeRpcError("23505", "customer belongs to another shop", { status: 409 });
+        throw new FakeRpcError("23505", "this billing customer belongs to another shop", {
+          status: 409,
+        });
       }
     }
     row.stripe_customer_id = customer;
@@ -324,15 +335,31 @@ export function installBillingRpcs(
     if (row.last_event_at !== null && Date.parse(created) < Date.parse(row.last_event_at)) {
       return { shop_id: row.shop_id, applied: false };
     }
-    const plan = db.table("platform_plans").find((p) => p.stripe_price_id === a.p_price_id);
-    row.stripe_subscription_id = a.p_subscription_id as string;
-    row.plan_id = (plan?.id as string | undefined) ?? null;
-    row.status = a.p_status as string;
-    if (a.p_trial_end !== null) row.trial_used = true;
-    if (a.p_status !== "canceled" || a.p_current_period_end !== null) {
-      row.current_period_end = a.p_current_period_end as string | null;
+    const status = a.p_status as string;
+    const subId = a.p_subscription_id as string;
+    // another subscription replaces the shop's only when it can be current
+    if (
+      row.stripe_subscription_id !== null && row.stripe_subscription_id !== subId &&
+      (ENDED.has(status) || (status === "incomplete" && LIVE.has(row.status)))
+    ) {
+      return { shop_id: row.shop_id, applied: false };
     }
-    row.cancel_at_period_end = a.p_cancel_at_period_end === true;
+    for (const other of state.billing.values()) {
+      if (other.shop_id !== row.shop_id && other.stripe_subscription_id === subId) {
+        throw new FakeRpcError("23505", "this subscription belongs to another shop", {
+          status: 409,
+        });
+      }
+    }
+    const plan = db.table("platform_plans").find((p) => p.stripe_price_id === a.p_price_id);
+    row.stripe_subscription_id = subId;
+    row.plan_id = (plan?.id as string | undefined) ?? null;
+    row.status = status;
+    const trialEnd = (a.p_trial_end as string | null) ?? null;
+    row.trial_ends_at = trialEnd ?? row.trial_ends_at;
+    row.trial_used = row.trial_used || trialEnd !== null || status === "trialing";
+    row.current_period_end = (a.p_current_period_end as string | null) ?? row.current_period_end;
+    row.cancel_at_period_end = !ENDED.has(status) && a.p_cancel_at_period_end === true;
     row.last_event_at = created;
     return { shop_id: row.shop_id, applied: true };
   });

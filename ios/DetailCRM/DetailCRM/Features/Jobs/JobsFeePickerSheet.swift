@@ -19,6 +19,10 @@ struct JobsFeePickerSheet: View {
     @Environment(ToastCenter.self) private var toasts
     @State private var state: LoadState<[JobsShopFee]> = .idle
     @State private var adding: UUID?
+    /// `add_fee_line` request nonces of fees whose add failed (0095): tapping
+    /// the same fee again retries that action with its nonce, so a request
+    /// the server did apply before its response was lost is not added twice.
+    @State private var pendingNonces: [UUID: String] = [:]
 
     var body: some View {
         LoadStateView(state, loadingLabel: "Loading fees…", retry: { await load() }) { fees in
@@ -94,8 +98,11 @@ struct JobsFeePickerSheet: View {
     private func add(_ fee: JobsShopFee) async {
         adding = fee.id
         defer { adding = nil }
+        let nonce = pendingNonces[fee.id] ?? JobService.newFeeRequestNonce()
+        pendingNonces[fee.id] = nonce
         do {
-            try await model.addFee(fee)
+            try await model.addFee(fee, requestNonce: nonce)
+            pendingNonces[fee.id] = nil
             toasts.show("\(fee.name) added")
             onDone()
         } catch {

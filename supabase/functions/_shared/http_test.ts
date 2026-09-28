@@ -255,6 +255,39 @@ Deno.test("handler: logs redact credentials", async () => {
   assertEquals(logs.events("request_completed")[0]?.status, 200);
 });
 
+Deno.test("handler: a database PT402 passed on unmapped is 402 payment_required, never 500", async () => {
+  const inactive =
+    "This shop's subscription is inactive, so new records can't be created right now.";
+  const { handler, logs } = setup((req) => {
+    const kind = new URL(req.url).searchParams.get("kind");
+    const pg = kind === "seats"
+      ? { code: "PT402", message: "This shop's plan allows 2 team members.", hint: null }
+      : { code: "PT402", message: inactive, details: null, hint: null };
+    // A call site that wrapped the PostgREST error in its own "... failed".
+    throw new Error("create_invoice_from_job failed", { cause: pg });
+  });
+  const a = await handler(jsonRequest("fn", {}));
+  assertEquals(a.status, 402);
+  assertEquals(
+    await errorOf(a).then(({ code, message, details }) => ({ code, message, details })),
+    {
+      code: "payment_required",
+      message: inactive,
+      details: { reason: "subscription_inactive" },
+    },
+  );
+  const b = await handler(jsonRequest("fn", {}, { query: { kind: "seats" } }));
+  assertEquals(b.status, 402);
+  const seats = await errorOf(b);
+  assertEquals([seats.code, seats.message, seats.details], [
+    "payment_required",
+    "This shop's plan allows 2 team members.",
+    { reason: "seat_limit" },
+  ]);
+  // An expected refusal: not logged as an unexpected error.
+  assertEquals(logs.events("request_failed").length, 0);
+});
+
 Deno.test("mapError: HttpError 5xx counts as unexpected; 4xx does not", () => {
   assertEquals(mapError(new HttpError("service_unavailable", "x")).unexpected, true);
   assertEquals(mapError(new HttpError("not_found", "x")).unexpected, false);

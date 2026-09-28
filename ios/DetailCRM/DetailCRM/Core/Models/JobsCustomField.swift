@@ -118,7 +118,10 @@ enum JobsCustomValue: Hashable, Sendable {
     /// `YYYY-MM-DD` for a picked day (the day as shown, time zone free).
     static func dayString(from date: Date, calendar: Calendar) -> String {
         let parts = calendar.dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", parts.year ?? 1970, parts.month ?? 1, parts.day ?? 1)
+        let year: Int = parts.year ?? 1970
+        let month: Int = parts.month ?? 1
+        let day: Int = parts.day ?? 1
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     /// The picked day for a `YYYY-MM-DD` value, at noon in `calendar`'s zone

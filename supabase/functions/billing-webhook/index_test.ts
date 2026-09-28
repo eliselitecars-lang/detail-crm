@@ -439,7 +439,7 @@ Deno.test("customer.subscription.*: a subscription Stripe no longer has falls ba
 });
 
 Deno.test("customer.subscription.*: an unknown customer (not a Detail CRM shop) is ignored", async () => {
-  const { db, stripe, handler, state } = setup();
+  const { db, stripe, handler, state, logs } = setup();
   stripe.putSubscription(subscription({ id: "sub_1Foreign", customer: "cus_1Stranger" }));
   const res = await ok(
     await deliver(
@@ -451,7 +451,31 @@ Deno.test("customer.subscription.*: an unknown customer (not a Detail CRM shop) 
     ),
   );
   assertEquals(res.result, "ignored");
+  // 0101 answers {shop_id: null, applied: false} (never P0002)
+  assertEquals(logs.events("billing_event_ignored").at(-1)?.reason, "unknown_customer");
   assertEquals([...state.billing.values()].map((r) => r.status), ["none", "none"]);
+  assertEquals(rpcCalls(db, "billing_apply_subscription").length, 1);
+});
+
+Deno.test("customer.subscription.*: a subscription another shop holds (23505) is acknowledged, not retried", async () => {
+  const { db, stripe, handler, logs, row, state } = setup();
+  const other = state.billing.get(OTHER_SHOP);
+  assert(other);
+  other.stripe_subscription_id = "sub_1Shop";
+  other.status = "active";
+  stripe.putSubscription(subscription({ status: "past_due" }));
+  const res = await ok(
+    await deliver(
+      handler,
+      event("customer.subscription.updated", subscription({ status: "past_due" })),
+    ),
+  );
+  assertEquals(res.result, "ignored");
+  const ignored = logs.events("billing_event_ignored").at(-1);
+  assertEquals([ignored?.reason, ignored?.code], ["subscription_conflict", "23505"]);
+  // logged as a warning (possible abuse or a bug)
+  assertEquals(ignored?.level, "warn");
+  assertEquals([row().status, row().stripe_subscription_id], ["none", null]);
   assertEquals(rpcCalls(db, "billing_apply_subscription").length, 1);
 });
 

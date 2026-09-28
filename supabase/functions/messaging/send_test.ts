@@ -502,6 +502,38 @@ Deno.test("send: the database re-check refuses even if the function check were b
   assertEquals(body.error, "Your role does not allow this message.");
 });
 
+Deno.test("send: an inactive subscription (PT402) is 402 payment_required on every queueing path", async () => {
+  const inactive =
+    "This shop's subscription is inactive, so new records can't be created right now.";
+  const paths: Array<[string, Record<string, unknown>]> = [
+    ["queue_message", { customer_id: CUSTOMER, channel: "sms", body: "See you at 10!" }],
+    ["enqueue_template_message", { job_id: JOB, channel: "email", template_key: "job_completed" }],
+    ["enqueue_document_message", { quote_id: QUOTE, channel: "sms", template_key: "quote_sent" }],
+    ["enqueue_customer_template", {
+      customer_id: CUSTOMER,
+      channel: "sms",
+      template_key: "follow_up",
+    }],
+  ];
+  for (const [rpc, input] of paths) {
+    const { db, handler } = setup();
+    db.onRpc(rpc, () => {
+      throw new FakeRpcError("PT402", inactive, { status: 402 });
+    });
+    const err = await expectError(
+      await handler(sendRequest("tok-manager", input)),
+      402,
+      "payment_required",
+    );
+    // The database's neutral sentence, verbatim (shown as is on iPhone).
+    assertEquals([err.error, err.details], [inactive, { reason: "subscription_inactive" }], rpc);
+    assertEquals(db.requests.filter((r) => r.target === rpc).length, 1, rpc);
+    assertEquals(db.table("messages").length, 0, rpc);
+    assertEquals(db.http.callsTo("POST", TWILIO_MESSAGES_URL).length, 0, rpc);
+    assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0, rpc);
+  }
+});
+
 Deno.test("send: signed-out, outsiders and other shops are refused", async () => {
   const { handler } = setup();
   await expectError(

@@ -48,6 +48,26 @@ export function services(deps: Deps, ctx: ActionContext): Services {
 export interface DbError {
   code?: string;
   message?: string;
+  /** The exception's HINT: a machine-readable refusal reason where one is set (0095). */
+  hint?: string | null;
+}
+
+/**
+ * True when the database refused with SQLSTATE `code` and HINT `hint` (the
+ * machine-readable reason some RPCs add, e.g. 0095's `already_member`), or —
+ * for a database without the HINT yet — when its message matches `legacy`.
+ */
+export function refusedWith(
+  error: DbError,
+  code: string,
+  hint: string,
+  legacy?: RegExp,
+): boolean {
+  if (error.code !== code) return false;
+  if (typeof error.hint === "string" && error.hint.trim() !== "") {
+    return error.hint.trim() === hint;
+  }
+  return legacy !== undefined && legacy.test(error.message ?? "");
 }
 
 /** Unexpected database failure -> 500 (details only in logs). */

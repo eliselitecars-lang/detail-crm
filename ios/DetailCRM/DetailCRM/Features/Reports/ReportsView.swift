@@ -187,10 +187,22 @@ struct ReportsView: View {
         loadedRange = range
     }
 
+    /// The first section error, in display order. Built from a typed array
+    /// rather than one long `??` chain, which Xcode's type checker gives up
+    /// on ("unable to type-check this expression in reasonable time").
     private func firstError(_ fresh: ReportsSnapshot) -> String? {
-        fresh.revenue.errorMessage ?? fresh.revenueTotals.errorMessage ?? fresh.payments.errorMessage ?? fresh.services.errorMessage
-            ?? fresh.team.errorMessage ?? fresh.outstanding.errorMessage ?? fresh.customers.errorMessage
-            ?? fresh.leadSources.errorMessage ?? fresh.quoteConversion.errorMessage
+        var messages: [String?] = []
+        messages.append(fresh.revenue.errorMessage)
+        messages.append(fresh.revenueTotals.errorMessage)
+        messages.append(fresh.payments.errorMessage)
+        messages.append(fresh.services.errorMessage)
+        messages.append(fresh.team.errorMessage)
+        messages.append(fresh.outstanding.errorMessage)
+        messages.append(fresh.customers.errorMessage)
+        messages.append(fresh.leadSources.errorMessage)
+        messages.append(fresh.quoteConversion.errorMessage)
+        let present: [String] = messages.compactMap { $0 }
+        return present.first
     }
 }
 

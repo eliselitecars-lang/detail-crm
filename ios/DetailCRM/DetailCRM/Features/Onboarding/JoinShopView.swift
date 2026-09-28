@@ -65,7 +65,7 @@ struct JoinShopView: View {
     private var introText: String {
         let base = "Paste the invite link from your email. Invites are tied to the address they were sent to"
         if let email = appState.userEmail {
-            return base + " — you're signed in as " + email + "."
+            return "\(base) — you're signed in as \(email)."
         }
         return base + "."
     }

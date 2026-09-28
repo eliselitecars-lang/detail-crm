@@ -791,7 +791,7 @@ private struct CustomerSummaryGrid: View {
                 title: "Lifetime paid",
                 value: Money.format(cents: summary.lifetimePaidCents, currencyCode: currencyCode),
                 detail: summary.tipsCents > 0
-                    ? "+ " + Money.format(cents: summary.tipsCents, currencyCode: currencyCode) + " tips"
+                    ? "+ \(Money.format(cents: summary.tipsCents, currencyCode: currencyCode)) tips"
                     : nil,
                 tone: .money
             )
@@ -799,7 +799,7 @@ private struct CustomerSummaryGrid: View {
                 title: "Open balance",
                 value: Money.format(cents: summary.openBalanceCents, currencyCode: currencyCode),
                 detail: summary.overdueBalanceCents > 0
-                    ? Money.format(cents: summary.overdueBalanceCents, currencyCode: currencyCode) + " overdue"
+                    ? "\(Money.format(cents: summary.overdueBalanceCents, currencyCode: currencyCode)) overdue"
                     : nil,
                 tone: summary.overdueBalanceCents > 0 ? .danger : .plain
             )

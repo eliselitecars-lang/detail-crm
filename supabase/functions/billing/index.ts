@@ -121,11 +121,30 @@ function rpcError(what: string, error: { code?: string; message?: string }): Err
       });
     case "23505":
       return new HttpError("conflict", "This billing account belongs to another shop.", {
+        details: { reason: "customer_conflict" },
         cause: error,
       });
     default:
       return dbFailure(what, error);
   }
+}
+
+/**
+ * billing_link_customer (0101) raises 23505 in two cases, told apart by its
+ * message (there is no HINT): this shop is already linked to a DIFFERENT
+ * platform customer ("this shop is already linked to another billing
+ * customer" — e.g. a concurrent first checkout linked its own customer
+ * first; never silently swapped), or the customer belongs to another shop.
+ */
+export function linkCustomerError(error: { code?: string; message?: string }): Error {
+  if (error.code === "23505" && /already linked/i.test(error.message ?? "")) {
+    return new HttpError(
+      "conflict",
+      "This shop's billing account was just set up by another request. Refresh and try again.",
+      { details: { reason: "billing_account_changed" }, cause: error },
+    );
+  }
+  return rpcError("billing_link_customer", error);
 }
 
 async function billingEnabled(admin: SupabaseClient): Promise<boolean> {
@@ -254,7 +273,16 @@ async function shopCustomer(
     p_shop_id: shopId,
     p_stripe_customer_id: customer.id,
   });
-  if (error) throw rpcError("billing_link_customer", error);
+  if (error) {
+    // The Stripe customer made above stays unused (no subscription, no
+    // charge); logged so the operator can tidy it up.
+    s.log.warn("billing_customer_not_linked", {
+      shop_id: shopId,
+      customer: customer.id,
+      code: error.code ?? null,
+    });
+    throw linkCustomerError(error);
+  }
   s.log.info("billing_customer_created", { shop_id: shopId, customer: customer.id });
   return customer.id;
 }

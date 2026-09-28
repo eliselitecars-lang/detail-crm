@@ -44,6 +44,7 @@ import {
   paymentInProgress,
   platformFee,
   publicValidationMessage,
+  refusedWith,
   rpcError,
   type Services,
   SLUG_RE,
@@ -217,11 +218,20 @@ export async function giftCardCheckout(
           cause: prepared.error,
         });
       case "22023": {
-        const outOfRange = /amount out of range/i.test(prepared.error.message ?? "");
+        // HINT amount_out_of_range (0095); the message text for an older database.
+        const outOfRange = refusedWith(
+          prepared.error,
+          "22023",
+          "amount_out_of_range",
+          /amount out of range/i,
+        );
         throw new HttpError(
           "unprocessable",
           publicValidationMessage(prepared.error, "Check the gift card details and try again."),
-          { details: { reason: outOfRange ? "amount_out_of_range" : "invalid_order" } },
+          {
+            details: { reason: outOfRange ? "amount_out_of_range" : "invalid_order" },
+            cause: prepared.error,
+          },
         );
       }
       default:

@@ -8,6 +8,7 @@
 import { assert, assertEquals, assertMatch, assertNotEquals } from "@std/assert";
 import {
   emptyRequest,
+  FakeRpcError,
   preflightRequest,
   responseJson,
   stripeErrorBody,
@@ -135,7 +136,9 @@ Deno.test("checkout: 422 billing_disabled while billing is off", async () => {
 });
 
 Deno.test("checkout: 409 already_subscribed for a live subscription; a canceled one may subscribe again", async () => {
-  for (const status of ["active", "trialing", "past_due"]) {
+  // 0101 has_live_subscription: unpaid and paused subscriptions still exist in
+  // Stripe (the Customer Portal settles them); a new checkout would bill twice
+  for (const status of ["active", "trialing", "past_due", "unpaid", "paused"]) {
     const f = fixture({
       billing: { stripe_customer_id: "cus_1Shop", stripe_subscription_id: "sub_1", status },
     });
@@ -146,12 +149,76 @@ Deno.test("checkout: 409 already_subscribed for a live subscription; a canceled 
     );
     assertEquals(f.stripeCalls().length, 0, status);
   }
-  for (const status of ["canceled", "unpaid", "incomplete_expired", "paused"]) {
+  for (const status of ["canceled", "incomplete_expired", "incomplete"]) {
     const f = fixture({
       billing: { stripe_customer_id: "cus_1Shop", stripe_subscription_id: "sub_1", status },
     });
     assertEquals((await f.call(checkoutBody())).status, 200, status);
   }
+});
+
+Deno.test("checkout: billing_link_customer 23505 — already linked elsewhere, or another shop's customer", async () => {
+  // A concurrent first checkout linked its own customer between our read and
+  // our link: this shop is now linked to a DIFFERENT customer (never swapped).
+  const raced = fixture();
+  raced.db.onRpc("billing_link_customer", (a) => {
+    const row = raced.state.billing.get(SHOP);
+    if (row) row.stripe_customer_id = "cus_1Winner";
+    assertEquals(a.p_stripe_customer_id, "cus_1NewShop");
+    throw new FakeRpcError("23505", "this shop is already linked to another billing customer", {
+      status: 409,
+    });
+  });
+  const a = await raced.call(checkoutBody());
+  const bodyA = await a.json();
+  assertEquals([a.status, bodyA.code, bodyA.details], [409, "conflict", {
+    reason: "billing_account_changed",
+  }]);
+  assertEquals(
+    bodyA.error,
+    "This shop's billing account was just set up by another request. Refresh and try again.",
+  );
+  assertEquals(raced.stripeCalls("POST", "/checkout/sessions").length, 0);
+  assertEquals(raced.logs.events("billing_customer_not_linked")[0]?.customer, "cus_1NewShop");
+  // the retry the message asks for uses the linked customer
+  raced.db.onRpc("billing_link_customer", () => {
+    throw new Error("must not relink");
+  });
+  assertEquals(
+    (await raced.call(checkoutBody({ request_nonce: "nonce-retry-000001" }))).status,
+    200,
+  );
+  assertEquals(
+    raced.stripeCalls("POST", "/checkout/sessions")[0]?.form.get("customer"),
+    "cus_1Winner",
+  );
+
+  // The Stripe customer is already another shop's.
+  const taken = fixture();
+  const other = taken.state.billing.get(OTHER_SHOP);
+  if (other) other.stripe_customer_id = "cus_1NewShop";
+  assertEquals(await errorOf(await taken.call(checkoutBody())), [409, "conflict", {
+    reason: "customer_conflict",
+  }]);
+  assertEquals(taken.state.billing.get(SHOP)?.stripe_customer_id, null);
+  assertEquals(taken.stripeCalls("POST", "/checkout/sessions").length, 0);
+});
+
+Deno.test("plans / checkout: platform_plans, platform_config and shop_billing are read only with the service role", async () => {
+  // 0100: platform_plans has no client access at all; clients read plans
+  // through public_billing_plans() (granted to anon and authenticated).
+  const f = fixture();
+  assertEquals((await f.call({ action: "plans" }, "tech")).status, 200);
+  assertEquals((await f.call(checkoutBody())).status, 200);
+  const direct = f.db.requests.filter((r) =>
+    ["platform_plans", "platform_config", "shop_billing"].includes(r.target)
+  );
+  assert(direct.length > 0);
+  for (const r of direct) assertEquals(r.role, "service_role", r.target);
+  assertEquals(
+    f.db.requests.filter((r) => r.target === "public_billing_plans").map((r) => r.role),
+    ["authenticated"],
+  );
 });
 
 Deno.test("checkout: 404 plan_not_found for an unknown or inactive plan", async () => {

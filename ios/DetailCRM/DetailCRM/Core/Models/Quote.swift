@@ -433,6 +433,11 @@ struct QuoteDraftLine: Hashable, Sendable {
     /// A new fee line nobody edited yet: saved exactly as the server adds it
     /// (only its place and option are set afterwards).
     var feeIsPristine: Bool = false
+    /// `add_fee_line`'s request nonce for this line (0095): made once, when
+    /// the fee is added to the draft, and sent by every save that adds it —
+    /// a save retried after a lost response gets the same line back instead
+    /// of a second fee.
+    var feeRequestNonce: String = UUID().uuidString
     /// Kept from the saved line (the server's value); preview only.
     var discountEligible: Bool = true
     /// The option the saved row is on right now (nil = shared, or not
@@ -641,8 +646,9 @@ extension QuoteDraft {
         /// Inserts custom lines (one request) with the ids chosen here.
         var insertLines: (_ lines: [NewLine]) async throws -> Void
         /// `add_fee_line`: the server adds and prices the fee; returns the
-        /// new line's id.
-        var addFeeLine: (_ feeID: UUID) async throws -> UUID
+        /// new line's id. `nonce` is the line's `feeRequestNonce` (a retry
+        /// returns the line the first call added).
+        var addFeeLine: (_ feeID: UUID, _ nonce: String) async throws -> UUID
         /// Writes the quote's own fields.
         var updateQuote: () async throws -> Void
     }
@@ -770,7 +776,7 @@ extension QuoteDraft {
         // Preset fees are added (and priced) by the server, then placed.
         for index in lines.indices {
             guard lines[index].id == nil, let feeID = lines[index].feeID else { continue }
-            let id = try await requests.addFeeLine(feeID)
+            let id = try await requests.addFeeLine(feeID, lines[index].feeRequestNonce)
             lines[index].id = id
             lines[index].savedOptionID = nil
             originalLineIDs.append(id)

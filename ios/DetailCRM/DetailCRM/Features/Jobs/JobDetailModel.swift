@@ -720,9 +720,10 @@ final class JobDetailModel {
     }
 
     /// Adds a preset fee as a line (priced by the server, P-21).
-    func addFee(_ fee: JobsShopFee) async throws {
+    /// `requestNonce`: one per tap, reused when that tap is retried (0095).
+    func addFee(_ fee: JobsShopFee, requestNonce: String) async throws {
         _ = try requireShop()
-        try await JobService.addFeeLine(kind: .job, documentID: jobID, feeID: fee.id)
+        try await JobService.addFeeLine(kind: .job, documentID: jobID, feeID: fee.id, requestNonce: requestNonce)
         await refreshJobAndLines()
     }
 

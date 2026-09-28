@@ -170,7 +170,12 @@ logged with the request id. Mapped automatically: zod errors ->
 `validation_failed` (with `details.issues[{path,message}]`), `EnvError` ->
 `server_misconfigured`, Stripe card errors -> `402 payment_failed` (Stripe's
 customer-safe message), other Stripe errors -> `upstream_error` /
-`service_unavailable`, Twilio/Resend failures -> `502 upstream_error`.
+`service_unavailable`, Twilio/Resend failures -> `502 upstream_error`, and a
+database `PT402` (shop subscription inactive / plan seat limit, migration
+0102) -> `402 payment_required` wherever it surfaces: the RPC refusal helpers
+(`payments` `rpcError`, `messaging` `rpcRefusal`, `invites`) map it first,
+and the handler maps one that a call site passed on wrapped in its own error
+(`subscriptionRefusalIn`, `_shared/errors.ts`), never a 500.
 
 | code | status | when |
 |---|---|---|
@@ -178,6 +183,7 @@ customer-safe message), other Stripe errors -> `upstream_error` /
 | `invalid_signature` | 400 | webhook signature failed |
 | `unauthorized` | 401 | no/invalid session, bad cron secret |
 | `payment_failed` | 402 | card declined |
+| `payment_required` | 402 | database PT402: `details.reason` `subscription_inactive` or `seat_limit`; `error` is the database's neutral sentence verbatim |
 | `forbidden`, `origin_not_allowed` | 403 | role/membership, CORS |
 | `not_found` | 404 | row missing (or not visible) |
 | `method_not_allowed` | 405 | |
@@ -747,26 +753,38 @@ owner typed it (compared trimmed and case-insensitively). In order:
    PaymentSheets and reader intents cancelled, money that already landed
    recorded); a payment still processing (a card attempt, or an ACH debit
    clearing) refuses the deletion before anything else changes;
-2. every open Checkout link the CRM created on the account (pay, deposit,
+2. the shop's own **platform** subscription (what the shop pays for the
+   CRM: `shop_billing.stripe_subscription_id`, read with the service role;
+   [`docs/BILLING.md`](../../docs/BILLING.md)) is cancelled **now** on the
+   platform Stripe account (no `Stripe-Account` header). One that already
+   ended, or that Stripe no longer has, is fine. Any other Stripe failure
+   stops the deletion here with `502 upstream_error` reason
+   `platform_subscription_cancel_failed` — no link, membership or record
+   has changed yet;
+3. every open Checkout link the CRM created on the account (pay, deposit,
    card-saving, gift card and membership links) is expired;
-3. every membership that is not cancelled is cancelled **now**: its Stripe
+4. every membership that is not cancelled is cancelled **now**: its Stripe
    subscription is cancelled on the connected account (and any subscription
    a completed link started), then it is recorded `cancelled`;
-4. the shop is deleted. The database cascades to every tenant row, queues
+5. the shop is deleted. The database cascades to every tenant row, queues
    the shop's stored files for `storage-purge` and logs its SMS number in
    `sms_number_releases` (the operator releases it in Twilio).
 
 The Stripe Connect account is left intact: the owner keeps the Express
-dashboard, the balance and the payouts. A shop without Stripe skips steps
-1-3's Stripe calls.
+dashboard, the balance and the payouts. A shop without Stripe Connect skips
+steps 1, 3 and 4's Stripe calls (step 2 still runs).
 
-200: `{deleted: true, memberships_cancelled, sessions_expired}`. Afterwards
-drop every cached query of that shop and leave its screens.
+200: `{deleted: true, memberships_cancelled, sessions_expired,
+platform_subscription_cancelled}` (`platform_subscription_cancelled`: this
+deletion ended a live platform subscription). Afterwards drop every cached
+query of that shop and leave its screens.
 
 Errors: `403 forbidden` (not the owner), `404 not_found`,
 `409 conflict` reason `payment_in_progress` (a card payment is still
 processing or a pay link was just paid: nothing was deleted; try again in a
-moment), `422 unprocessable` reason `name_mismatch`.
+moment), `422 unprocessable` reason `name_mismatch`, `502 upstream_error`
+reason `platform_subscription_cancel_failed` (nothing was deleted; try again
+in a moment).
 
 ### `stripe-webhook` (Stripe only)
 
@@ -817,14 +835,21 @@ again, `set_stripe_refund_total`), subscriptions and saved cards, it:
   `gift_card_order_paid` (once; replays hand back the same card) and never
   writes a payment; refunds of such a charge call `gift_card_order_refunded`.
   An amount that does not match the order is logged
-  (`gift_card_order_unpaid`) for staff and acknowledged;
+  (`gift_card_order_unpaid`) for staff and acknowledged. When such a
+  Checkout expires unpaid (`checkout.session.expired`),
+  `gift_card_order_expired` turns its pending order `expired` (idempotent;
+  a paid or refunded order is never touched; an order that never recorded
+  the session, P0002, is acknowledged). Other expired sessions need nothing;
 - records Terminal / Tap to Pay payments (metadata `channel: terminal`) as
   `card_present` with the card's brand and last4; a declined tap stays
   pending (retryable), and a reader intent still waiting when the invoice is
   paid in full elsewhere is cancelled like a sibling PaymentSheet;
 - credits money paid through a link opened for a customer who has since been
   merged into another (P-20) to the surviving customer
-  (`customers.merged_into_id`).
+  (`customers.merged_into_id`); a saved card is re-saved (refreshed) only on
+  its own Stripe customer (`customer_payment_methods.stripe_customer_id`, so
+  a card a merge moved keeps refreshing), and a new card only on the
+  customer's.
 
 ### `messaging`
 
@@ -1343,9 +1368,10 @@ Errors (plus the common ones):
 |---|---|---|---|
 | `checkout`, `portal` | 403 `forbidden` | | not the shop's owner (also non-members) |
 | `checkout` | 422 `unprocessable` | `billing_disabled` | the platform has not turned billing on |
-| `checkout` | 409 `conflict` | `already_subscribed` | status active / trialing / past_due with a subscription: use `portal` to switch plans |
+| `checkout` | 409 `conflict` | `already_subscribed` | a subscription that still exists in Stripe (status trialing / active / past_due / unpaid / paused, 0101 `has_live_subscription`): use `portal` to switch plans or settle it |
 | `checkout` | 404 `not_found` | `plan_not_found` | unknown or inactive plan (refresh the plan list) |
-| `checkout` | 409 `conflict` | | the Stripe customer belongs to another shop (support case) |
+| `checkout` | 409 `conflict` | `billing_account_changed` | `billing_link_customer` 23505: this shop was just linked to a different platform customer (a concurrent first checkout); refresh and retry — the retry uses the linked one |
+| `checkout` | 409 `conflict` | `customer_conflict` | `billing_link_customer` 23505: the Stripe customer belongs to another shop (support case) |
 | `portal` | 409 `conflict` | `no_billing_account` | no platform customer yet: choose a plan first |
 | `portal` | 503 `service_unavailable` | `portal_not_configured` | the operator has not saved the Customer Portal settings in Stripe |
 | `sync_plans` | 401 `unauthorized` | | missing / wrong `x-cron-secret` |
@@ -1382,8 +1408,10 @@ CORS, no JWT, not called by apps. Responses as `stripe-webhook`:
   `past_due`), then `billing_payment_failed` notifies the owner
   (`billing_payment_failed` notification, deep link to Settings > Billing).
 - `product.*` / `price.*`: the whole plan sync runs again.
-- Not ours (a customer no shop is linked to, a customer another shop owns,
-  an unknown status) is `result: "ignored"`, never retried.
+- Not ours (a customer no shop is linked to — `billing_apply_subscription`
+  answers `{shop_id: null, applied: false}`, never an error — a customer or
+  subscription another shop owns (23505), an unknown status) is
+  `result: "ignored"`, never retried.
 
 ## Testing
 
@@ -1553,7 +1581,9 @@ account, so payment events are emitted **on the connected account**.
    version `2026-08-26.dahlia` (= `STRIPE_API_VERSION`).
 4. Events: `checkout.session.completed`,
    `checkout.session.async_payment_succeeded`,
-   `checkout.session.async_payment_failed`, `payment_intent.processing`
+   `checkout.session.async_payment_failed`, `checkout.session.expired` (an
+   online gift card order whose Checkout expired unpaid becomes `expired`),
+   `payment_intent.processing`
    (ACH debits clearing), `payment_intent.succeeded`,
    `payment_intent.payment_failed`, `payment_intent.canceled`,
    `charge.refunded`, `charge.refund.updated`, `refund.updated`,

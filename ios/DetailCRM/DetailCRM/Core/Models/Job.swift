@@ -1187,23 +1187,27 @@ enum JobAvailability {
             if item.isBlockedTime {
                 if let member = item.memberID {
                     if assigneeIDs.contains(member) {
-                        let name = memberName(member) ?? "A team member"
-                        warnings.append(name + " is blocked " + when + ".")
+                        let name: String = memberName(member) ?? "A team member"
+                        warnings.append("\(name) is blocked \(when).")
                     }
                 } else {
-                    warnings.append("The shop is blocked " + when + (item.title?.trimmedNonEmpty.map { " (" + $0 + ")" } ?? "") + ".")
+                    // Interpolation, not a long `+` chain (Xcode's type
+                    // checker times out on those).
+                    let title: String? = item.title?.trimmedNonEmpty
+                    let reason: String = title.map { " (\($0))" } ?? ""
+                    warnings.append("The shop is blocked \(when)\(reason).")
                 }
                 continue
             }
-            let label = item.jobNumber.map { "job #\($0)" } ?? "another job"
+            let label: String = item.jobNumber.map { "job #\($0)" } ?? "another job"
             if let resourceID, item.resourceID == resourceID {
-                let name = resourceName(resourceID) ?? "This bay / van"
-                warnings.append(name + " is already booked for " + label + ", " + when + ".")
+                let name: String = resourceName(resourceID) ?? "This bay / van"
+                warnings.append("\(name) is already booked for \(label), \(when).")
             }
             let shared = item.assignedMemberIDs.filter { assigneeIDs.contains($0) }
             for member in shared {
-                let name = memberName(member) ?? "A team member"
-                warnings.append(name + " is already on " + label + ", " + when + ".")
+                let name: String = memberName(member) ?? "A team member"
+                warnings.append("\(name) is already on \(label), \(when).")
             }
         }
         return warnings

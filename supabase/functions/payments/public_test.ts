@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { FakeRpcError, jsonResponse, stripeErrorBody } from "../_shared/testing/mod.ts";
+import type { HttpError } from "../_shared/errors.ts";
 import { rpcError } from "./lib.ts";
 import {
   ACCT,
@@ -298,6 +299,22 @@ Deno.test("public not-found (PT404, 0042) is a 404, like P0002", async () => {
       "Invoice not found.",
     ]);
   }
+});
+
+Deno.test("rpcError: PT402 is 402 payment_required with the database's sentence (not ours)", () => {
+  const inactive =
+    "This shop's subscription is inactive, so new records can't be created right now.";
+  const mapped = rpcError("create_invoice_from_job", { code: "PT402", message: inactive }, {
+    invalid: "never used for PT402",
+  }) as HttpError;
+  assertEquals([mapped.status, mapped.code, mapped.message, mapped.details], [
+    402,
+    "payment_required",
+    inactive,
+    { reason: "subscription_inactive" },
+  ]);
+  const seats = rpcError("x", { code: "PT402", message: "This shop's plan allows 1 team member." });
+  assertEquals((seats as HttpError).details, { reason: "seat_limit" });
 });
 
 Deno.test("booking_deposit_checkout: never charges more than the job's invoice still owes", async () => {

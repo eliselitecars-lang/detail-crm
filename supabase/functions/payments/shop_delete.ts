@@ -6,24 +6,31 @@
  *      PaymentSheets cancelled, money that already landed recorded); a
  *      payment still processing refuses the deletion (409
  *      payment_in_progress) before anything else changes;
- *   2. every open Checkout link the CRM created on the account (invoice pay
+ *   2. the shop's own subscription to the platform (shop_billing, 0100 —
+ *      what the shop pays the operator, docs/BILLING.md) is cancelled
+ *      immediately on the PLATFORM account (no Stripe-Account header;
+ *      already ended or missing in Stripe is fine). A Stripe failure stops
+ *      the deletion here with 502 upstream_error, before any link,
+ *      membership or record changed;
+ *   3. every open Checkout link the CRM created on the account (invoice pay
  *      links, booking deposits, card-saving and membership links) is expired
  *      (one just paid: 409 payment_in_progress);
- *   3. every membership that is not cancelled: its subscription is cancelled
+ *   4. every membership that is not cancelled: its subscription is cancelled
  *      immediately on the connected account (resource_missing ignored), its
  *      open membership Checkout links are expired (a subscription a completed
  *      link started is stopped too), then it is recorded `cancelled` through
  *      the same service-role path membership_cancel uses
  *      (sync_stripe_subscription, or the incomplete -> cancelled update);
- *   4. the shop row is deleted (the database cascades to every tenant row,
+ *   5. the shop row is deleted (the database cascades to every tenant row,
  *      queues its stored files for storage-purge and logs its SMS number in
  *      sms_number_releases; shops_money_delete_guard re-checks memberships and
  *      payments in flight).
  *
- * A shop that never connected Stripe skips the Stripe calls. The Connect
- * account itself is left intact: the owner keeps the Express dashboard, the
- * balance and the payouts. `confirm_name` must be the shop's name (trimmed,
- * case-insensitive), so a stray request cannot delete a shop.
+ * A shop that never connected Stripe skips the Connect calls (1, 3 and the
+ * memberships' subscriptions). The Connect account itself is left intact:
+ * the owner keeps the Express dashboard, the balance and the payouts.
+ * `confirm_name` must be the shop's name (trimmed, case-insensitive), so a
+ * stray request cannot delete a shop.
  */
 import { z } from "zod";
 import { requireShopRole, requireUser, ROLES } from "../_shared/auth.ts";
@@ -59,7 +66,14 @@ export interface DeleteShopResponse {
   deleted: true;
   memberships_cancelled: number;
   sessions_expired: number;
+  /** True when this deletion ended the shop's live platform subscription. */
+  platform_subscription_cancelled: boolean;
 }
+
+/** The 502 when the platform subscription could not be cancelled (nothing was deleted). */
+export const PLATFORM_CANCEL_FAILED_MESSAGE =
+  "The shop's subscription could not be cancelled, so the shop was not deleted. " +
+  "Try again in a moment.";
 
 /** Same comparison the web confirmation uses: trimmed, case-insensitive. */
 export function confirmsName(typed: string, shopName: string): boolean {
@@ -108,6 +122,62 @@ async function cancelSubscription(
       throw readErr;
     }
     throw err;
+  }
+}
+
+function platformCancelFailed(cause: unknown): HttpError {
+  return new HttpError("upstream_error", PLATFORM_CANCEL_FAILED_MESSAGE, {
+    details: { reason: "platform_subscription_cancel_failed" },
+    cause,
+  });
+}
+
+/**
+ * Cancels the shop's platform subscription now (step 2). true when this call
+ * ended a live subscription; false when the shop has none, or it had already
+ * ended, or Stripe no longer has it. Any other failure is a 502
+ * (platformCancelFailed).
+ */
+async function cancelPlatformSubscription(s: Services, shopId: string): Promise<boolean> {
+  // Service role: authenticated has no column grant on the Stripe ids.
+  const { data, error } = await s.admin
+    .from("shop_billing")
+    .select("stripe_subscription_id")
+    .eq("shop_id", shopId)
+    .maybeSingle<{ stripe_subscription_id: string | null }>();
+  if (error) throw dbFailure("shop_billing lookup", error);
+  const subscriptionId = data?.stripe_subscription_id ?? null;
+  if (!subscriptionId) return false;
+  try {
+    // The platform account itself: no Stripe-Account header.
+    const cancelled = await s.stripe.subscriptions.cancel(subscriptionId, {}, {
+      idempotencyKey: await idempotencyKey(
+        "platform_subscription_shop_delete",
+        shopId,
+        subscriptionId,
+      ),
+    });
+    if (!ENDED.has(cancelled.status)) {
+      throw new Error(`platform subscription still ${cancelled.status} after cancel`);
+    }
+    s.log.info("platform_subscription_cancelled", {
+      shop_id: shopId,
+      subscription: subscriptionId,
+    });
+    return true;
+  } catch (err) {
+    if (isMissing(err)) return false;
+    if (isInvalidRequest(err)) {
+      // Already cancelled (Stripe refuses a second cancel): read its state.
+      try {
+        const current = await s.stripe.subscriptions.retrieve(subscriptionId);
+        if (ENDED.has(current.status)) return false;
+      } catch (readErr) {
+        if (isMissing(readErr)) return false;
+        throw platformCancelFailed(readErr);
+      }
+    }
+    throw platformCancelFailed(err);
   }
 }
 
@@ -225,7 +295,6 @@ export async function deleteShop(
 
   // Money still moving refuses the deletion before anything is cancelled.
   const account = await findAccount(s.admin, shop.id);
-  let sessionsExpired = 0;
   if (account) {
     const settled = await settleShop(s, account, shop.id);
     if (settled.in_progress > 0) throw paymentInProgress();
@@ -238,8 +307,11 @@ export async function deleteShop(
       .limit(1);
     if (clearing.error) throw dbFailure("processing payments lookup", clearing.error);
     if ((clearing.data ?? []).length > 0) throw paymentInProgress();
-    sessionsExpired = await expireShopSessions(s, account, shop.id);
   }
+  // The shop's own platform subscription ends first: when Stripe fails here
+  // (502) no link, membership or record has changed yet.
+  const platformCancelled = await cancelPlatformSubscription(s, shop.id);
+  const sessionsExpired = account ? await expireShopSessions(s, account, shop.id) : 0;
   const membershipsCancelled = await cancelMemberships(s, account, shop.id);
 
   const { data, error } = await s.admin.from("shops").delete().eq("id", shop.id).select("id");
@@ -260,11 +332,13 @@ export async function deleteShop(
     deleted_by: caller.id,
     memberships_cancelled: membershipsCancelled,
     sessions_expired: sessionsExpired,
+    platform_subscription_cancelled: platformCancelled,
     stripe_account: account?.stripe_account_id ?? null,
   });
   return {
     deleted: true,
     memberships_cancelled: membershipsCancelled,
     sessions_expired: sessionsExpired,
+    platform_subscription_cancelled: platformCancelled,
   };
 }

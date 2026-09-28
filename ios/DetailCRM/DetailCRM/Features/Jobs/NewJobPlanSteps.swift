@@ -149,7 +149,7 @@ struct NewJobScheduleStep: View {
                             .foregroundStyle(Theme.textSecondary)
                     }
                 }
-                Text("Ends " + model.clock.dateTimeText(model.end) + " · shop time (" + model.clock.timeZone.identifier + ")")
+                Text(verbatim: "Ends \(model.clock.dateTimeText(model.end)) · shop time (\(model.clock.timeZone.identifier))")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary)
                 JobDivider()

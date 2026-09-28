@@ -135,6 +135,9 @@ struct JobsNotificationPrefsView: View {
             switch kind {
             case .smsNumberStatus, .webhookFailing:
                 return role.isAdminOrAbove
+            case .billingPaymentFailed:
+                // Sent to the shop's owner only (billing_payment_failed, 0101).
+                return role == .owner
             default:
                 return kind.isForEveryMember || role.isManagerOrAbove
             }

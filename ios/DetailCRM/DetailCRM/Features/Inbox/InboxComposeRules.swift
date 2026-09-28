@@ -104,10 +104,13 @@ enum InboxComposeRules {
     /// same values the server uses when no job is attached).
     static func customerValues(customer: Customer, shop: Shop?) -> [String: String] {
         var values: [String: String] = [:]
-        let first = customer.firstName?.trimmedNonEmpty
-            ?? customer.company?.trimmedNonEmpty
-            ?? customer.lastName?.trimmedNonEmpty
-            ?? "there"
+        // A typed list, not a long `??` chain (Xcode's type checker times out).
+        let firstCandidates: [String?] = [
+            customer.firstName?.trimmedNonEmpty,
+            customer.company?.trimmedNonEmpty,
+            customer.lastName?.trimmedNonEmpty,
+        ]
+        let first: String = firstCandidates.compactMap { $0 }.first ?? "there"
         values["customer_first_name"] = first
         let fullName = [customer.firstName?.trimmedNonEmpty, customer.lastName?.trimmedNonEmpty]
             .compactMap { $0 }

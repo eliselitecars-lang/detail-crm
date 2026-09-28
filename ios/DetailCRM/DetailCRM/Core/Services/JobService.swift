@@ -327,17 +327,33 @@ enum JobService {
     }
 
     /// Adds a preset fee as a line (priced by the server; managers+).
+    /// `requestNonce` (0095) is one value per user action — make it with
+    /// `newFeeRequestNonce()` when the person adds the fee and pass the same
+    /// one when that action is retried: the server then returns the line the
+    /// first call added instead of adding the fee twice.
     @discardableResult
-    static func addFeeLine(kind: JobsShopFee.DocumentKind, documentID: UUID, feeID: UUID) async throws -> UUID {
+    static func addFeeLine(
+        kind: JobsShopFee.DocumentKind,
+        documentID: UUID,
+        feeID: UUID,
+        requestNonce: String
+    ) async throws -> UUID {
         let params: [String: AnyJSON] = [
             "p_doc_kind": .string(kind.rawValue),
             "p_doc_id": .string(documentID.uuidString),
             "p_fee_id": .string(feeID.uuidString),
+            "p_request_nonce": .string(requestNonce),
         ]
         return try await Supa.client
             .rpc("add_fee_line", params: params)
             .execute()
             .value
+    }
+
+    /// A fresh `add_fee_line` request nonce: a UUID string (36 characters
+    /// of `[0-9A-F-]`, inside the server's 8-64 `[A-Za-z0-9_-]` rule).
+    static func newFeeRequestNonce() -> String {
+        UUID().uuidString
     }
 
     // MARK: - Route (P-18)

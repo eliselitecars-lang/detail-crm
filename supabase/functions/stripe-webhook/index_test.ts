@@ -256,19 +256,20 @@ function installMoneyRpcs(db: FakeSupabase): void {
       c.id === a.p_customer_id && c.shop_id === a.p_shop_id
     );
     if (!customer) throw new FakeRpcError("P0002", "customer not found");
-    // 0011: the card's Stripe customer must be this customer's
-    if (
-      a.p_stripe_customer_id !== undefined && a.p_stripe_customer_id !== null &&
-      a.p_stripe_customer_id !== customer.stripe_customer_id
-    ) {
-      throw new FakeRpcError("22023", "payment method belongs to another Stripe customer");
-    }
     return mutate(db, "customer_payment_methods", (rows) => {
       const existing = rows.find((r) =>
         r.shop_id === a.p_shop_id && r.stripe_payment_method_id === a.p_stripe_payment_method_id
       );
       if (existing && existing.customer_id !== a.p_customer_id) {
         throw new FakeRpcError("22023", "payment method belongs to another customer");
+      }
+      // 0095: the card's Stripe customer must be the saved card's own (a
+      // merge moved it) or, for a new card, this customer's
+      if (
+        a.p_stripe_customer_id !== undefined && a.p_stripe_customer_id !== null &&
+        a.p_stripe_customer_id !== (existing?.stripe_customer_id ?? customer.stripe_customer_id)
+      ) {
+        throw new FakeRpcError("22023", "payment method belongs to another Stripe customer");
       }
       const makeDefault = a.p_make_default === true || existing?.is_default === true ||
         !rows.some((r) =>
@@ -293,7 +294,12 @@ function installMoneyRpcs(db: FakeSupabase): void {
         Object.assign(existing, values);
         return { ...existing };
       }
-      const row = { id: crypto.randomUUID(), ...values };
+      // 0074 trigger: a new card records the owning customer's Stripe customer
+      const row = {
+        id: crypto.randomUUID(),
+        ...values,
+        stripe_customer_id: customer.stripe_customer_id ?? null,
+      };
       rows.push(row);
       return { ...row };
     });
@@ -872,6 +878,8 @@ Deno.test("payment_intent.succeeded with setup_future_usage saves the card (firs
     last4: "4242",
     exp_month: 12,
     exp_year: 2030,
+    // recorded on insert (0074 trigger): the Stripe customer the card is on
+    stripe_customer_id: "cus_1Customer",
     is_default: true,
   }]);
 });
@@ -2683,6 +2691,71 @@ Deno.test("card save: a setup intent whose card is attached to another Stripe cu
   assertEquals(db.table("customer_payment_methods"), []);
 });
 
+Deno.test("card save: a card a merge moved is refreshed on its own Stripe customer (0095)", async () => {
+  const { db, stripe, logs, handler } = setup();
+  // pm_1Merged was saved on the duplicate's Stripe customer, then the
+  // duplicate was merged into CUSTOMER (whose own Stripe customer differs)
+  db.seed("customer_payment_methods", [{
+    id: crypto.randomUUID(),
+    shop_id: SHOP,
+    customer_id: CUSTOMER,
+    stripe_payment_method_id: "pm_1Merged",
+    stripe_customer_id: "cus_1Duplicate",
+    brand: "visa",
+    last4: "4242",
+    exp_month: 1,
+    exp_year: 2027,
+    is_default: true,
+  }]);
+  const setupIntent = (id: string, pm: string) => ({
+    id,
+    object: "setup_intent",
+    status: "succeeded",
+    customer: "cus_1Duplicate",
+    payment_method: pm,
+    metadata: { shop_id: SHOP, customer_id: CUSTOMER },
+  });
+  // Stripe updated the card (new expiry): the re-save refreshes the row
+  stripe.put(paymentMethod({
+    id: "pm_1Merged",
+    customer: "cus_1Duplicate",
+    card: { brand: "visa", last4: "4242", exp_month: 6, exp_year: 2031 },
+  }));
+  const res = await ok(
+    await deliver(
+      handler,
+      event("setup_intent.succeeded", setupIntent("seti_1Merged", "pm_1Merged")),
+    ),
+  );
+  assertEquals(res.result, "applied");
+  assertEquals(mismatches(logs), 0);
+  const call = rpcCalls(db, "upsert_customer_payment_method")[0];
+  assertEquals([call?.p_customer_id, call?.p_stripe_customer_id], [CUSTOMER, "cus_1Duplicate"]);
+  assertEquals(
+    db.table("customer_payment_methods").map((r) => [
+      r.customer_id,
+      r.stripe_payment_method_id,
+      r.stripe_customer_id,
+      r.exp_month,
+      r.exp_year,
+      r.is_default,
+    ]),
+    [[CUSTOMER, "pm_1Merged", "cus_1Duplicate", 6, 2031, true]],
+  );
+  // a NEW card on that other Stripe customer is still not CUSTOMER's
+  stripe.put(paymentMethod({ id: "pm_1Fresh", customer: "cus_1Duplicate" }));
+  const fresh = await ok(
+    await deliver(
+      handler,
+      event("setup_intent.succeeded", setupIntent("seti_1Fresh", "pm_1Fresh")),
+    ),
+  );
+  assertEquals(fresh.result, "ignored");
+  assertEquals(mismatches(logs), 1);
+  assertEquals(rpcCalls(db, "upsert_customer_payment_method").length, 1);
+  assertEquals(db.table("customer_payment_methods").length, 1);
+});
+
 function mismatches(logs: ReturnType<typeof memoryLogger>): number {
   return logs.events("stripe_event_ignored").filter((e) =>
     e.reason === "payment_method_customer_mismatch"
@@ -3211,8 +3284,23 @@ function giftSetup(orderShop = SHOP) {
         status: "pending",
         gift_card_id: null,
         price_cents: 9_000,
+        stripe_checkout_session_id: "cs_1Gift",
       }],
     },
+  });
+  // 0095 rules: the pending order of the session expires once; paid ones never
+  ctx.db.onRpc("gift_card_order_expired", (a, { role }) => {
+    assertEquals(role, "service_role");
+    if (!/^cs_[A-Za-z0-9_]+$/.test(String(a.p_session_id))) {
+      throw new FakeRpcError("22023", "invalid Checkout Session id");
+    }
+    return mutate(ctx.db, "gift_card_orders", (rows) => {
+      const order = rows.find((o) => o.stripe_checkout_session_id === a.p_session_id);
+      if (!order) throw new FakeRpcError("P0002", "gift card order not found");
+      const changed = order.status === "pending";
+      if (changed) order.status = "expired";
+      return { order_id: order.id, status: order.status, changed };
+    });
   });
   // 0066 rules: issue once per order (replays hand back the card), amount must match
   ctx.db.onRpc("gift_card_order_paid", (a, { role }) => {
@@ -3363,6 +3451,123 @@ Deno.test("gift card sale: a refund that arrives before the sale issues the card
   assertEquals(res.result, "applied");
   assertEquals(rpcCalls(db, "gift_card_order_paid").length, 1);
   assertEquals(rpcCalls(db, "gift_card_order_refunded")[0]?.p_refunded_total_cents, 9_000);
+});
+
+function expiredGiftSession(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "cs_1Gift",
+    object: "checkout.session",
+    mode: "payment",
+    status: "expired",
+    payment_status: "unpaid",
+    payment_intent: null,
+    metadata: { shop_id: SHOP, gift_card_order_id: ORDER, kind: "gift_card" },
+    ...overrides,
+  };
+}
+
+/** The reason of the last acknowledged-without-changes event. */
+function lastIgnored(logs: ReturnType<typeof memoryLogger>): unknown {
+  return logs.events("stripe_event_ignored").at(-1)?.reason;
+}
+
+Deno.test("gift card sale: an expired Checkout expires its pending order, once", async () => {
+  const { db, logs, handler } = giftSetup();
+  const first = await ok(
+    await deliver(handler, event("checkout.session.expired", expiredGiftSession())),
+  );
+  assertEquals([first.handled, first.result], [true, "applied"]);
+  assertEquals(logs.events("stripe_event_applied").at(-1)?.detail, "gift_card_order_expired");
+  assertEquals(rpcCalls(db, "gift_card_order_expired"), [{ p_session_id: "cs_1Gift" }]);
+  assertEquals(db.table("gift_card_orders")[0]?.status, "expired");
+  // another delivery of the same expiry (a new event id) changes nothing
+  const again = await ok(
+    await deliver(handler, event("checkout.session.expired", expiredGiftSession())),
+  );
+  assertEquals([again.result, lastIgnored(logs)], ["ignored", "gift_card_order_not_pending"]);
+  assertEquals(db.table("gift_card_orders")[0]?.status, "expired");
+  assertEquals(db.table("payments").length, 0);
+});
+
+Deno.test("gift card sale: an expiry never touches a paid order", async () => {
+  const { db, stripe, logs, handler } = giftSetup();
+  const pi = giftIntent();
+  stripe.put(pi).put(charge({ id: "ch_1Gift", amount: 9_000, payment_intent: "pi_1Gift" }));
+  await ok(await deliver(handler, event("payment_intent.succeeded", pi)));
+  const res = await ok(
+    await deliver(handler, event("checkout.session.expired", expiredGiftSession())),
+  );
+  assertEquals([res.result, lastIgnored(logs)], ["ignored", "gift_card_order_not_pending"]);
+  assertEquals(db.table("gift_card_orders")[0]?.status, "paid");
+});
+
+Deno.test("checkout.session.expired: other sessions, other shops and unknown orders are acknowledged", async () => {
+  // an invoice pay link: nothing was recorded, nothing to expire
+  const invoiceLink = giftSetup();
+  const link = await ok(
+    await deliver(
+      invoiceLink.handler,
+      event(
+        "checkout.session.expired",
+        expiredGiftSession({
+          id: "cs_1Invoice",
+          metadata: { shop_id: SHOP, invoice_id: INVOICE, kind: "payment" },
+        }),
+      ),
+    ),
+  );
+  assertEquals([link.result, lastIgnored(invoiceLink.logs)], ["ignored", "nothing_to_expire"]);
+  // metadata naming another shop
+  const foreignMeta = giftSetup();
+  const mismatch = await ok(
+    await deliver(
+      foreignMeta.handler,
+      event(
+        "checkout.session.expired",
+        expiredGiftSession({
+          metadata: { shop_id: OTHER_SHOP, gift_card_order_id: ORDER, kind: "gift_card" },
+        }),
+      ),
+    ),
+  );
+  assertEquals([mismatch.result, lastIgnored(foreignMeta.logs)], ["ignored", "shop_mismatch"]);
+  // this shop's session naming another shop's order
+  const foreignOrder = giftSetup(OTHER_SHOP);
+  const notOurs = await ok(
+    await deliver(foreignOrder.handler, event("checkout.session.expired", expiredGiftSession())),
+  );
+  assertEquals([notOurs.result, lastIgnored(foreignOrder.logs)], [
+    "ignored",
+    "gift_card_order_not_found",
+  ]);
+  assertEquals(foreignOrder.db.table("gift_card_orders")[0]?.status, "pending");
+  // an unknown connected account
+  const unknown = giftSetup();
+  const stranger = await ok(
+    await deliver(
+      unknown.handler,
+      event("checkout.session.expired", expiredGiftSession(), { account: "acct_1Stranger" }),
+    ),
+  );
+  assertEquals([stranger.result, lastIgnored(unknown.logs)], ["ignored", "unknown_account"]);
+  for (const f of [invoiceLink, foreignMeta, foreignOrder, unknown]) {
+    assertEquals(rpcCalls(f.db, "gift_card_order_expired").length, 0);
+  }
+  // the order never recorded this session (P0002): acknowledged, not retried
+  const unsaved = giftSetup();
+  unsaved.db.seed(
+    "gift_card_orders",
+    unsaved.db.table("gift_card_orders").map((o) => ({ ...o, stripe_checkout_session_id: null })),
+  );
+  const missing = await ok(
+    await deliver(unsaved.handler, event("checkout.session.expired", expiredGiftSession())),
+  );
+  assertEquals([missing.result, lastIgnored(unsaved.logs)], [
+    "ignored",
+    "gift_card_order_not_found",
+  ]);
+  assertEquals(rpcCalls(unsaved.db, "gift_card_order_expired").length, 1);
+  assertEquals(unsaved.db.table("gift_card_orders")[0]?.status, "pending");
 });
 
 // ---------------------------------------------------------------------------

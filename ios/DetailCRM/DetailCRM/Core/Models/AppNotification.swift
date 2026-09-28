@@ -32,6 +32,10 @@ enum AppNotificationKind: String, CaseIterable, Sendable {
     case taskDue = "task_due"
     case smsNumberStatus = "sms_number_status"
     case webhookFailing = "webhook_failing"
+    /// The shop's subscription payment failed (0100/0101; owners only).
+    /// Neutral on iPhone: a plain notification — no prices, no plan, no
+    /// link or call to action toward buying (App Store 3.1.1 / 3.1.3).
+    case billingPaymentFailed = "billing_payment_failed"
 
     var systemImage: String {
         switch self {
@@ -54,6 +58,7 @@ enum AppNotificationKind: String, CaseIterable, Sendable {
         case .taskDue: return "alarm"
         case .smsNumberStatus: return "phone.badge.checkmark"
         case .webhookFailing: return "exclamationmark.arrow.triangle.2.circlepath"
+        case .billingPaymentFailed: return "exclamationmark.circle"
         }
     }
 
@@ -78,6 +83,7 @@ enum AppNotificationKind: String, CaseIterable, Sendable {
         case .taskDue: return "Task due"
         case .smsNumberStatus: return "Texting number update"
         case .webhookFailing: return "Webhook failing"
+        case .billingPaymentFailed: return "Subscription payment"
         }
     }
 
@@ -194,6 +200,10 @@ struct AppNotification: Codable, Hashable, Sendable, Identifiable {
             return customerID.map { AppRoute.customer($0) }
         case .lowStock, .smsNumberStatus, .webhookFailing:
             // Inventory, texting numbers and webhooks are managed on the web.
+            return nil
+        case .billingPaymentFailed:
+            // A plain notification: nothing to open on iPhone (the list
+            // itself is the destination; no billing screen, no links).
             return nil
         case .newBooking, .bookingCancelled, .formSigned, .general,
              .inspectionAcknowledged, .jobAssigned, .jobRescheduled:

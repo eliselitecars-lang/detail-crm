@@ -187,8 +187,31 @@ Deno.test("gift_card_checkout: shop rules map to stable errors", async () => {
     },
   });
   assertEquals((await errorOf(await offer.call(buy)))[2], { reason: "invalid_order" });
+  // 0095: the HINT decides, whatever the wording (a reworded message still
+  // maps; another HINT is never mistaken for the range)
+  const hinted = shop({
+    prepare: () => {
+      throw new FakeRpcError("22023", "choose an amount between $10.00 and $500.00", {
+        hint: "amount_out_of_range",
+      });
+    },
+  });
+  const hintedRes = await hinted.call(buy);
+  const hintedBody = await hintedRes.json();
+  assertEquals([hintedRes.status, hintedBody.code, hintedBody.details], [422, "unprocessable", {
+    reason: "amount_out_of_range",
+  }]);
+  assertEquals(hintedBody.error, "Choose an amount between $10.00 and $500.00.");
+  const otherHint = shop({
+    prepare: () => {
+      throw new FakeRpcError("22023", "amount out of range: choose between $10.00 and $500.00", {
+        hint: "something_else",
+      });
+    },
+  });
+  assertEquals((await errorOf(await otherHint.call(buy)))[2], { reason: "invalid_order" });
   // nothing reached Stripe in any of these
-  for (const f of [disabled, limited, range, offer]) {
+  for (const f of [disabled, limited, range, offer, hinted, otherHint]) {
     assertEquals(f.stripe("POST", "/checkout/sessions").length, 0);
   }
 });

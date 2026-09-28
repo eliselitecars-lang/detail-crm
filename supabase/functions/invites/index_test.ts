@@ -240,6 +240,52 @@ Deno.test("send_invite: the database role check is enforced too", async () => {
   assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
 });
 
+Deno.test("send_invite: the plan's seat limit (PT402) is 402 payment_required, reason seat_limit", async () => {
+  const { db, handler } = setup();
+  for (const n of [1, 5]) {
+    const sentence = `This shop's plan allows ${n} team member${n === 1 ? "" : "s"}.`;
+    db.onRpc("invite_member", () => {
+      throw new FakeRpcError("PT402", sentence, { status: 402 });
+    });
+    const err = await expectError(
+      await handler(sendInvite("tok-admin", { email: "x@example.com", role: "technician" })),
+      402,
+      "payment_required",
+    );
+    // The database's own sentence, verbatim.
+    assertEquals([err.error, err.details], [sentence, { reason: "seat_limit" }]);
+  }
+  // An inactive subscription refuses the same way, with its own reason.
+  const inactive =
+    "This shop's subscription is inactive, so new records can't be created right now.";
+  db.onRpc("invite_member", () => {
+    throw new FakeRpcError("PT402", inactive, { status: 402 });
+  });
+  const paused = await expectError(
+    await handler(sendInvite("tok-owner", { email: "y@example.com", role: "manager" })),
+    402,
+    "payment_required",
+  );
+  assertEquals([paused.error, paused.details], [inactive, { reason: "subscription_inactive" }]);
+  assertEquals(db.table("shop_invites").length, 0);
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+});
+
+Deno.test("resend_invite: re-issuing an expired invite past the seat limit is 402 seat_limit", async () => {
+  const expired = invite({ expires_at: "2026-09-20T15:00:00.000Z" });
+  const { db, handler } = setup({ invites: [expired] });
+  db.onRpc("invite_member", () => {
+    throw new FakeRpcError("PT402", "This shop's plan allows 2 team members.", { status: 402 });
+  });
+  const err = await expectError(
+    await handler(resendInvite("tok-admin", String(expired.id))),
+    402,
+    "payment_required",
+  );
+  assertEquals(err.details, { reason: "seat_limit" });
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+});
+
 Deno.test("send_invite: validation, owner role and existing members", async () => {
   const { handler } = setup();
   for (

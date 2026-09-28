@@ -401,6 +401,26 @@ Deno.test("membership_join_checkout: errors", async () => {
   const memberBody = await memberRes.json();
   assertEquals([memberRes.status, memberBody.details], [409, { reason: "join_unavailable" }]);
   assertEquals(memberBody.error, JOIN_UNAVAILABLE_MESSAGE);
+  // 0095: the HINT already_member decides, whatever the message says
+  const hinted = joinShop(() => {
+    throw new FakeRpcError("22023", "this person is signed up already", { hint: "already_member" });
+  });
+  const hintedRes = await hinted.call(join);
+  const hintedBody = await hintedRes.json();
+  assertEquals([hintedRes.status, hintedBody.details, hintedBody.error], [
+    409,
+    { reason: "join_unavailable" },
+    JOIN_UNAVAILABLE_MESSAGE,
+  ]);
+  // another HINT is a plain validation refusal, even with the old wording
+  const otherHint = joinShop(() => {
+    throw new FakeRpcError("22023", "this customer already has this membership", {
+      hint: "invalid_vehicle",
+    });
+  });
+  assertEquals((await errorOf(await otherHint.call(join))).slice(0, 3), [422, "unprocessable", {
+    reason: "invalid_details",
+  }]);
   const invalid = joinShop(() => {
     throw new FakeRpcError("22023", "enter a valid phone number");
   });

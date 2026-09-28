@@ -1,11 +1,11 @@
 /**
  * Stripe Connect event handlers. Each one maps a verified event on a shop's
  * connected account to the service_role money helpers in migrations 0011,
- * 0013, 0064, 0066 and 0093 (upsert_stripe_payment, apply_stripe_refund,
- * set_stripe_refund_total, apply_stripe_dispute,
+ * 0013, 0064, 0066, 0093 and 0095 (upsert_stripe_payment,
+ * apply_stripe_refund, set_stripe_refund_total, apply_stripe_dispute,
  * upsert_customer_payment_method, sync_stripe_subscription,
- * gift_card_order_paid, gift_card_order_refunded) or to
- * shop_stripe_accounts.
+ * gift_card_order_paid, gift_card_order_refunded, gift_card_order_expired)
+ * or to shop_stripe_accounts.
  *
  * Rules every handler follows:
  *  - The shop is ALWAYS the one that owns event.account
@@ -56,8 +56,10 @@
  *    Stripe's own type is stored in payments.stripe_method_type; a type the
  *    CRM has no method for is stored as `card` with a note.
  *  - Online gift card sales (metadata kind 'gift_card' + gift_card_order_id)
- *    are never payments: gift_card_order_paid issues the card and
- *    gift_card_order_refunded follows refunds (0066).
+ *    are never payments: gift_card_order_paid issues the card,
+ *    gift_card_order_refunded follows refunds (0066) and
+ *    gift_card_order_expired closes the order of a Checkout that expired
+ *    unpaid (0095).
  *  - Money for a customer merged into another (P-20) goes to the surviving
  *    customer (customers.merged_into_id).
  */
@@ -102,6 +104,7 @@ export const HANDLED_EVENT_TYPES = [
   "checkout.session.completed",
   "checkout.session.async_payment_succeeded",
   "checkout.session.async_payment_failed",
+  "checkout.session.expired",
   "payment_intent.processing",
   "payment_intent.succeeded",
   "payment_intent.payment_failed",
@@ -196,6 +199,8 @@ export async function handleEvent(ctx: WebhookContext): Promise<Outcome> {
       return await onCheckoutSessionCompleted(ctx, object as Stripe.Checkout.Session, {
         asyncFailed: true,
       });
+    case "checkout.session.expired":
+      return await onCheckoutSessionExpired(ctx, object as Stripe.Checkout.Session);
     case "payment_intent.processing":
       return await onPaymentIntent(ctx, object as Stripe.PaymentIntent, "processing");
     case "payment_intent.succeeded":
@@ -725,13 +730,14 @@ async function syncRefund(
  * Missing customer / card of another customer are permanent -> ignored.
  *
  * `cardOwner` is the Stripe customer the card is attached to (pm.customer).
- * A card is only ever saved for the CRM customer whose stripe_customer_id IS
- * that Stripe customer: the SQL helper does not check it, and the payment it
- * came with may have been relinked to another customer (e.g. the payer was
- * deleted and the deposit fell to the job's new customer). Saving it there
- * would show the payer's card as someone else's and make charge_saved_card
- * pick a card Stripe refuses for that customer. The SQL helper enforces the
- * same rule (p_stripe_customer_id).
+ * A new card is only ever saved for the CRM customer whose
+ * stripe_customer_id IS that Stripe customer: the payment it came with may
+ * have been relinked to another customer (e.g. the payer was deleted and the
+ * deposit fell to the job's new customer). Saving it there would show the
+ * payer's card as someone else's and make charge_saved_card pick a card
+ * Stripe refuses for that customer. An already saved card is compared with
+ * its own Stripe customer instead (a merge moved it; 0095). The SQL helper
+ * enforces the same rule (p_stripe_customer_id).
  */
 async function saveCard(
   ctx: WebhookContext,
@@ -749,7 +755,19 @@ async function saveCard(
     .maybeSingle<{ id: string; stripe_customer_id: string | null }>();
   if (error) throw new DbError("customers lookup", error);
   if (!target) return ignore(ctx, "customer_not_found", { payment_method: pmId });
-  if (target.stripe_customer_id !== cardOwner) {
+  // The Stripe customer the card must be attached to: an already saved
+  // card's own (customer_payment_methods.stripe_customer_id, 0071) — a card a
+  // customer merge moved keeps charging on the Stripe customer that owns it,
+  // so its re-save is a refresh (0095) — else this customer's. A card saved
+  // for another CRM customer is refused by the RPC (payment_method_conflict).
+  const { data: saved, error: savedError } = await ctx.admin
+    .from("customer_payment_methods")
+    .select("stripe_customer_id")
+    .eq("shop_id", shopId)
+    .eq("stripe_payment_method_id", pmId)
+    .maybeSingle<{ stripe_customer_id: string | null }>();
+  if (savedError) throw new DbError("customer_payment_methods lookup", savedError);
+  if ((saved?.stripe_customer_id ?? target.stripe_customer_id) !== cardOwner) {
     return ignore(ctx, "payment_method_customer_mismatch", { payment_method: pmId });
   }
   try {
@@ -1286,6 +1304,63 @@ async function giftCardSold(
       gift_card_id: result?.gift_card_id ?? null,
     },
   );
+}
+
+/**
+ * checkout.session.expired: a Checkout that ended unpaid. Only an online gift
+ * card sale has a record waiting on it: gift_card_order_expired (0095) turns
+ * its pending order `expired` (idempotent: a replay, or an order already
+ * paid or refunded, changes nothing). Every other session the CRM creates
+ * (invoice and deposit links, card saving, memberships) recorded nothing
+ * before payment, so its expiry needs nothing.
+ */
+async function onCheckoutSessionExpired(
+  ctx: WebhookContext,
+  session: Stripe.Checkout.Session,
+): Promise<Outcome> {
+  const shopId = await shopForAccount(ctx);
+  if (!shopId) return ignore(ctx, "unknown_account");
+  const owner = ownership(shopId, session.metadata);
+  if (owner !== "ours") return ignore(ctx, owner, { shop_id: shopId });
+  const md = readMetadata(session.metadata);
+  noteProblems(ctx, md);
+  if (md.giftCardOrderId === null) return ignore(ctx, "nothing_to_expire");
+  const sessionId = checkoutSessionId(session.id);
+  if (!sessionId) return ignore(ctx, "invalid_object");
+  // The order must be this shop's (the RPC finds it by the session alone).
+  const order = await giftOrder(ctx, shopId, md.giftCardOrderId);
+  if (!order) return ignore(ctx, "gift_card_order_not_found", { session: sessionId });
+  let result: { order_id?: string; status?: string; changed?: boolean } | null;
+  try {
+    result = await rpc(ctx, "gift_card_order_expired", { p_session_id: sessionId });
+  } catch (err) {
+    // P0002: no order carries this session (its id was never saved on the
+    // order); 22023: not a Checkout Session id. No retry changes either.
+    if (err instanceof DbError && (err.code === "P0002" || err.code === "22023")) {
+      return ignore(ctx, "gift_card_order_not_found", { session: sessionId, code: err.code });
+    }
+    throw err;
+  }
+  if (result?.order_id !== order.id) {
+    // The session's metadata and the order that recorded it disagree: a bug
+    // or tampering upstream. The RPC only ever expires a pending order.
+    ctx.log.warn("gift_card_order_session_mismatch", {
+      session: sessionId,
+      order_id: order.id,
+      expired_order_id: result?.order_id ?? null,
+    });
+  }
+  if (result?.changed !== true) {
+    return ignore(ctx, "gift_card_order_not_pending", {
+      session: sessionId,
+      order_id: result?.order_id ?? order.id,
+      status: result?.status ?? null,
+    });
+  }
+  return applied(ctx, "gift_card_order_expired", {
+    session: sessionId,
+    order_id: result.order_id ?? order.id,
+  });
 }
 
 /**

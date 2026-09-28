@@ -45,6 +45,7 @@ import {
   loadShopBySlug,
   metadata,
   publicValidationMessage,
+  refusedWith,
   requestPart,
   rpcError,
   type Services,
@@ -570,7 +571,10 @@ export async function membershipJoinCheckout(
           cause: prepared.error,
         });
       case "22023":
-        if (/already has this membership/i.test(prepared.error.message ?? "")) {
+        // HINT already_member (0095); the message text for an older database.
+        if (
+          refusedWith(prepared.error, "22023", "already_member", /already has this membership/i)
+        ) {
           // Anyone can type any email here: the answer must not confirm
           // that this person holds the plan (as portal_membership_access
           // never confirms ids). A neutral reason and wording, which a

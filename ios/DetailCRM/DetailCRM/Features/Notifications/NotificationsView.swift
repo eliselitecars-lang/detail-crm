@@ -317,7 +317,7 @@ private struct NotificationsRow: View {
         case .paymentReceived, .giftCardPurchased, .membershipJoined: return Theme.amber
         case .bookingCancelled, .quoteDeclined, .webhookFailing: return Theme.danger
         case .quoteApproved, .formSigned, .inspectionAcknowledged: return Theme.success
-        case .lowStock, .taskDue: return Theme.warning
+        case .lowStock, .taskDue, .billingPaymentFailed: return Theme.warning
         case .newBooking, .inboundMessage, .general, .jobAssigned, .jobRescheduled,
              .newLead, .taskAssigned, .smsNumberStatus:
             return Theme.glacier

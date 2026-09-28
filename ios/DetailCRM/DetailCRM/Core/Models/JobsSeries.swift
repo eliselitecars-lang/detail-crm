@@ -266,7 +266,10 @@ struct JobsSeriesDraft: Hashable, Sendable {
     /// `YYYY-MM-DD` of `date` in `calendar`'s time zone (the shop's).
     static func dayString(_ date: Date, calendar: Calendar) -> String {
         let parts = calendar.dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", parts.year ?? 1970, parts.month ?? 1, parts.day ?? 1)
+        let year: Int = parts.year ?? 1970
+        let month: Int = parts.month ?? 1
+        let day: Int = parts.day ?? 1
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     /// `HH:MM` of `date` in `calendar`'s time zone.

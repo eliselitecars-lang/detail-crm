@@ -233,7 +233,8 @@ function ignore(
   reason: string,
   fields: Record<string, unknown> = {},
 ): Outcome {
-  const suspicious = reason === "shop_mismatch" || reason === "customer_conflict";
+  const suspicious = reason === "shop_mismatch" || reason === "customer_conflict" ||
+    reason === "subscription_conflict" || reason === "subscription_rejected";
   if (suspicious) ctx.log.warn("billing_event_ignored", { reason, ...fields });
   else ctx.log.info("billing_event_ignored", { reason, ...fields });
   return { result: "ignored", reason };
@@ -298,11 +299,20 @@ async function applySubscription(
       p_event_created: args.p_event_created,
     });
   } catch (err) {
-    if (err instanceof DbError && err.code === "P0002") {
-      return { outcome: ignore(ctx, "unknown_customer", { subscription: sub.id }), shopId: null };
+    // Answers no retry can change (FINAL_DB_CODES): 23505 the subscription is
+    // already another shop's (0101), 22023 a value the database refuses.
+    // Acknowledged — a 500 would only make Stripe redeliver it for days.
+    if (isFinal(err)) {
+      const reason = err.code === "23505" ? "subscription_conflict" : "subscription_rejected";
+      return {
+        outcome: ignore(ctx, reason, { subscription: sub.id, code: err.code }),
+        shopId: null,
+      };
     }
     throw err;
   }
+  // 0101: an unknown customer (not a Detail CRM shop's) is not an error but
+  // {shop_id: null, applied: false}.
   const shopId = typeof row?.shop_id === "string" && isUuid(row.shop_id) ? row.shop_id : null;
   if (!shopId) {
     return { outcome: ignore(ctx, "unknown_customer", { subscription: sub.id }), shopId: null };

@@ -69,7 +69,8 @@ struct OpsMemberEarning: Codable, Identifiable, Hashable, Sendable {
     /// Commission of every kind plus tips on this job (hourly pay is not
     /// per job, so it is not part of this sum).
     var earnedCents: Int {
-        commissionCents + serviceCommissionCents + salesCommissionCents + tipsCents
+        let commission: Int = commissionCents + serviceCommissionCents + salesCommissionCents
+        return commission + tipsCents
     }
 
     /// Totals of a list of rows (the money matches the report_team row).
@@ -95,7 +96,8 @@ struct OpsMemberEarning: Codable, Identifiable, Hashable, Sendable {
         }
 
         var earnedCents: Int {
-            commissionCents + serviceCommissionCents + salesCommissionCents + tipsCents
+            let commission: Int = commissionCents + serviceCommissionCents + salesCommissionCents
+            return commission + tipsCents
         }
     }
 }

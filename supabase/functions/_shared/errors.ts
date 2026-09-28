@@ -104,11 +104,16 @@ export type PaymentRequiredReason = "subscription_inactive" | "seat_limit";
 export const SUBSCRIPTION_INACTIVE_MESSAGE =
   "This shop's subscription is inactive, so new records can't be created right now.";
 
-/** 0102 billing_seats_message: "This shop's plan allows N team member(s)." */
-const SEAT_LIMIT_MESSAGE = /^This shop's plan allows \d+ team members?\.$/;
+/**
+ * How 0102 billing_seats_message begins ("This shop's plan allows N team
+ * member(s)."); every other PT402 is the inactive-subscription refusal.
+ */
+export const SEAT_LIMIT_MESSAGE_PREFIX = "This shop's plan allows";
 
 export function paymentRequiredReason(message: string): PaymentRequiredReason {
-  return SEAT_LIMIT_MESSAGE.test(message.trim()) ? "seat_limit" : "subscription_inactive";
+  return message.trim().startsWith(SEAT_LIMIT_MESSAGE_PREFIX)
+    ? "seat_limit"
+    : "subscription_inactive";
 }
 
 interface PgErrorLike {

@@ -157,7 +157,11 @@ ios/
 * **Quotes** support up to 4 proposal options (`MoneyQuoteOption`,
   `MoneyQuoteOptionPicker`, `MoneyQuoteOptionsSection`); an approval
   records the chosen option; preset fees in the builder are added by
-  `add_fee_line` on save.
+  `add_fee_line` on save. Every `add_fee_line` call sends
+  `p_request_nonce`: a UUID string made once per user action (a fee line
+  added to the quote draft, `QuoteDraftLine.feeRequestNonce`; a fee tapped
+  in the job's fee picker) and reused when that action is retried, so a
+  retry after a lost response never adds the fee twice.
 * **Quotes and invoices** show their automatic follow-ups with a pause
   switch (`MoneyFollowupStatusRow`) and "Share PDF" (`MoneyPDFService`
   calls `pdf` `staff_document` and opens the share sheet).
@@ -196,7 +200,13 @@ and manage the shop's subscription on the web app.
   plan's seat limit) with errcode `PT402` (HTTP 402). `ErrorText` shows
   the server's sentence for a `PostgrestError` with code PT402, a raw
   `HTTPError` 402 and an edge-function 402 (the neutral paused text when
-  the server sent none).
+  the server sent none). Edge functions answer it with the envelope
+  `{error: <the database's sentence>, code: "payment_required", details:
+  {reason: "subscription_inactive" | "seat_limit"}}`; `EdgeErrorDecoder`
+  keeps `error` verbatim.
+* `billing_payment_failed` notifications (owners only) are plain
+  notifications: a neutral icon and the server's title and body; tapping
+  one (in the list or as a push) opens nothing but the Notifications list.
 
 ## In-person payments (Stripe Terminal) — ships switched off
 
