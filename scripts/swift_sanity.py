@@ -30,6 +30,14 @@ mechanical mistakes that would otherwise burn a macOS CI run:
     / `MoneyEdge.invoke(` in app code names its function with a string
     literal, and that function exists (supabase/functions/<name>/index.ts);
     only the wrappers themselves pass their `functionName` parameter on
+  * sign-out: app code calls `appState.signOut()` only through
+    `ConfirmationRequest.signOut` (SignOutConfirmation.swift, which warns
+    about unsent job videos that signing out deletes) or after deleting the
+    account (AccountDeletionView.swift)
+  * iOS toolchain: the workflows that run Xcode pick it with
+    ios/ci/select_xcode.sh (no hard-coded `Xcode_1x` / own `xcode-select`),
+    and its MIN_XCODE_MAJOR matches MIN_UPLOAD_SDK_MAJOR in the Fastfile
+    (App Store Connect accepts only builds from the current minimum SDK)
   * FEATURE_STUB markers: counted and reported; `--strict` fails if any
     remain
 
@@ -327,6 +335,19 @@ def check_forbidden(path: Path, code_lines: list[str], source: str, report: Repo
                                  "(state-driven layout loop risk) — restructure")
 
 
+SIGN_OUT_CALL = re.compile(r"\bappState\.signOut\(\)")
+SIGN_OUT_ALLOWED = {"SignOutConfirmation.swift", "AccountDeletionView.swift"}
+
+
+def check_sign_out(path: Path, code_lines: list[str], report: Report) -> None:
+    if path.name in SIGN_OUT_ALLOWED:
+        return
+    for index, text in enumerate(code_lines):
+        if SIGN_OUT_CALL.search(text):
+            report.error(path, index + 1, "sign out through `confirmation = .signOut(appState)` — it warns about "
+                                          "unsent job videos, which signing out deletes")
+
+
 HSTACK_OPEN = re.compile(r"\bHStack\b[^{\n]*\{")
 THEME_BUTTON = re.compile(r"\.buttonStyle\(\.theme(?:Primary|Money|Secondary|Destructive)")
 
@@ -394,7 +415,53 @@ def check_swift_file(path: Path, report: Report, is_app: bool, functions_dir: Pa
     check_structure(path, source_lines, code_lines, report, is_app)
     if is_app:
         check_forbidden(path, code_lines, source, report)
+        check_sign_out(path, code_lines, report)
         check_edge_calls(path, code, source, report, functions_dir)
+
+
+# ---------------------------------------------------------------------------
+# iOS toolchain (workflows + Fastfile)
+# ---------------------------------------------------------------------------
+
+OLD_XCODE_GLOB = re.compile(r"Xcode_1\d")
+XCODE_SELECT = re.compile(r"\bxcode-select\s+(?:-s|--switch)\b")
+USES_XCODE = re.compile(r"\b(?:xcodebuild|xcode-select|fastlane|select_xcode\.sh)\b")
+MIN_XCODE = re.compile(r"^MIN_XCODE_MAJOR=\"\$\{MIN_XCODE_MAJOR:-(\d+)\}\"", re.M)
+MIN_SDK = re.compile(r"^MIN_UPLOAD_SDK_MAJOR\s*=\s*(\d+)\s*$", re.M)
+
+
+def check_toolchain(root: Path, report: Report) -> None:
+    workflows = root / ".github" / "workflows"
+    if workflows.is_dir():
+        for path in sorted(workflows.glob("*.y*ml")):
+            text = path.read_text(encoding="utf-8")
+            if not USES_XCODE.search(text):
+                continue
+            for index, line in enumerate(text.split("\n")):
+                if line.lstrip().startswith("#"):
+                    continue
+                if OLD_XCODE_GLOB.search(line):
+                    report.error(path, index + 1, "selects an Xcode older than 26 — App Store Connect rejects "
+                                                  "builds from older SDKs; use ios/ci/select_xcode.sh")
+                elif XCODE_SELECT.search(line):
+                    report.error(path, index + 1, "selects Xcode itself — use ios/ci/select_xcode.sh (the "
+                                                  "minimum-SDK choice shared by the iOS workflows)")
+            if "xcodebuild" in text or "fastlane" in text:
+                if "select_xcode.sh" not in text:
+                    report.error(path, None, "runs Xcode without ios/ci/select_xcode.sh (the runner's default "
+                                             "Xcode may be older than App Store Connect's minimum SDK)")
+    script = root / "ios" / "ci" / "select_xcode.sh"
+    fastfile = root / "ios" / "fastlane" / "Fastfile"
+    if script.is_file() and fastfile.is_file():
+        xcode = MIN_XCODE.search(script.read_text(encoding="utf-8"))
+        sdk = MIN_SDK.search(fastfile.read_text(encoding="utf-8"))
+        if not xcode:
+            report.error(script, None, "MIN_XCODE_MAJOR default not found")
+        if not sdk:
+            report.error(fastfile, None, "MIN_UPLOAD_SDK_MAJOR not found")
+        if xcode and sdk and xcode.group(1) != sdk.group(1):
+            report.error(fastfile, None, f"MIN_UPLOAD_SDK_MAJOR {sdk.group(1)} differs from MIN_XCODE_MAJOR "
+                                         f"{xcode.group(1)} in ios/ci/select_xcode.sh — raise them together")
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +602,7 @@ def run(root: Path) -> Report:
         check_swift_file(path, report, is_app, functions_dir if functions_dir.is_dir() else None)
     for path in sorted(ios.rglob("project.pbxproj")):
         check_pbxproj(path, report)
+    check_toolchain(root, report)
     return report
 
 
@@ -716,6 +784,41 @@ def self_test() -> int:
     expect("implicit flow in a comment does not count", bool(run_swift(
         "// flowType: .implicit\nlet c = SupabaseClient(supabaseURL: u, supabaseKey: k)\n",
         filename="Supa.swift").errors))
+    expect("direct sign-out detected", any("signOut(appState)" in e for e in run_swift(
+        "let b = Button(\"Sign out\") { Task { await appState.signOut() } }\n").errors))
+    expect("sign-out in SignOutConfirmation.swift allowed", not run_swift(
+        "func f() async { await appState.signOut() }\n", filename="SignOutConfirmation.swift").errors)
+    expect("sign-out after account deletion allowed", not run_swift(
+        "func f() async { await appState.signOut() }\n", filename="AccountDeletionView.swift").errors)
+    expect("confirmed sign-out passes", not run_swift("let b = Button(\"x\") { confirmation = .signOut(appState) }\n").errors)
+
+    def run_toolchain(workflow: str, script_min: str = "26", fastfile_min: str = "26") -> Report:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / ".github" / "workflows" / "ios.yml").write_text(workflow, encoding="utf-8")
+            (root / "ios" / "ci").mkdir(parents=True)
+            (root / "ios" / "ci" / "select_xcode.sh").write_text(
+                f'MIN_XCODE_MAJOR="${{MIN_XCODE_MAJOR:-{script_min}}}"\n', encoding="utf-8")
+            (root / "ios" / "fastlane").mkdir(parents=True)
+            (root / "ios" / "fastlane" / "Fastfile").write_text(
+                f"MIN_UPLOAD_SDK_MAJOR = {fastfile_min}\n", encoding="utf-8")
+            report = Report()
+            check_toolchain(root, report)
+            return report
+
+    good_wf = "jobs:\n  b:\n    steps:\n      - run: bash ios/ci/select_xcode.sh\n      - run: xcodebuild build\n"
+    expect("shared Xcode selection passes", not run_toolchain(good_wf).errors)
+    expect("Xcode 16 glob detected", any("older than 26" in e for e in run_toolchain(
+        good_wf + "      - run: XCODE=$(ls -d /Applications/Xcode_16*.app | tail -1)\n").errors))
+    expect("own xcode-select detected", any("select_xcode.sh" in e for e in run_toolchain(
+        good_wf + "      - run: sudo xcode-select -s /Applications/Xcode.app\n").errors))
+    expect("xcodebuild without the selection detected", any("without" in e for e in run_toolchain(
+        "jobs:\n  b:\n    steps:\n      - run: xcodebuild build\n").errors))
+    expect("workflow without Xcode ignored", not run_toolchain("jobs:\n  b:\n    steps:\n      - run: npm test\n").errors)
+    expect("commented Xcode 16 ignored", not run_toolchain(good_wf + "      # was Xcode_16*.app\n").errors)
+    expect("minimum mismatch detected", any("raise them together" in e for e in run_toolchain(good_wf, "27", "26").errors))
+
     stub = run_swift("// FEATURE_STUB: later\nstruct V {}\n")
     expect("stub counted", len(stub.stubs) == 1 and not stub.errors)
 

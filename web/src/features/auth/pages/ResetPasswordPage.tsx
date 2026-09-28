@@ -9,6 +9,7 @@ import { errorMessage } from '@/lib/errors';
 import { useAuth } from '../authContext';
 import { updatePassword } from '../api';
 import { FormAlert } from '../FormAlert';
+import { startupRefusal } from '@/lib/authUrlSession';
 import { endPasswordRecovery } from '../recoverySession';
 import { readRecoveryLinkError } from '../redirects';
 import { resetPasswordSchema } from '../schemas';
@@ -17,10 +18,13 @@ type FormInput = z.input<typeof resetPasswordSchema>;
 type FormOutput = z.output<typeof resetPasswordSchema>;
 
 export default function ResetPasswordPage() {
-  const { status, recovery, recoveryChecking } = useAuth();
+  const { status, user, recovery, recoveryChecking } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
   const [linkError] = useState(() => readRecoveryLinkError(window.location.href));
+  // A reset link for another account than the one signed in here is ignored
+  // (lib/authUrlSession.ts): it never replaces this browser's session.
+  const [otherAccount] = useState(() => startupRefusal() === 'other_account');
   const [submitError, setSubmitError] = useState<string | null>(null);
   const {
     register,
@@ -44,6 +48,22 @@ export default function ResetPasswordPage() {
     return (
       <AuthLayout title="Set a new password">
         <LoadingState label="Checking your reset link…" />
+      </AuthLayout>
+    );
+  }
+
+  if (otherAccount && linkError === null) {
+    return (
+      <AuthLayout title="Set a new password" footer={requestNew}>
+        <div className="flex flex-col gap-4">
+          <FormAlert>
+            This reset link is for a different account than the one signed in here. Sign out, then
+            open the link from the email again.
+          </FormAlert>
+          <Link to="/app" className={buttonClasses({ variant: 'secondary', fullWidth: true })}>
+            Back to the app
+          </Link>
+        </div>
       </AuthLayout>
     );
   }
@@ -87,7 +107,19 @@ export default function ResetPasswordPage() {
   });
 
   return (
-    <AuthLayout title="Set a new password" description="Choose a new password for your account.">
+    <AuthLayout
+      title="Set a new password"
+      description={
+        // Named, so a reset link for someone else's account is recognisable.
+        user?.email ? (
+          <>
+            Choose a new password for <span className="text-ink break-all">{user.email}</span>.
+          </>
+        ) : (
+          'Choose a new password for your account.'
+        )
+      }
+    >
       <form noValidate onSubmit={(event) => void onSubmit(event)} className="flex flex-col gap-4">
         {submitError && <FormAlert>{submitError}</FormAlert>}
         <FormField

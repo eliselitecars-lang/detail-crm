@@ -337,7 +337,13 @@ struct MoneyGiftCardRedeemSheet: View {
         errorText = nil
         guard let card, let amount = validatedAmount(maxCents: card.balanceCents) else { return }
         do {
-            let applied = try await MoneyGiftCardService.redeem(invoiceID: invoice.id, code: checkedCode, amountCents: amount)
+            let shopID = try appState.requireShopID()
+            let code = checkedCode
+            // An open card payment page blocks redemptions (0109
+            // checkout_open): it is released and the redemption retried.
+            let applied = try await PaymentService.releasingOpenCheckouts(shopID: shopID, invoiceID: invoice.id) {
+                try await MoneyGiftCardService.redeem(invoiceID: invoice.id, code: code, amountCents: amount)
+            }
             await finish(applied: applied, source: card.label)
         } catch {
             errorText = ErrorText.message(for: error)
@@ -362,11 +368,14 @@ struct MoneyGiftCardRedeemSheet: View {
         errorText = nil
         guard let amount = validatedAmount(maxCents: credit.balanceCents) else { return }
         do {
-            let applied = try await MoneyGiftCardService.redeemCredit(
-                invoiceID: invoice.id,
-                giftCardID: credit.id,
-                amountCents: amount
-            )
+            let shopID = try appState.requireShopID()
+            let applied = try await PaymentService.releasingOpenCheckouts(shopID: shopID, invoiceID: invoice.id) {
+                try await MoneyGiftCardService.redeemCredit(
+                    invoiceID: invoice.id,
+                    giftCardID: credit.id,
+                    amountCents: amount
+                )
+            }
             await finish(applied: applied, source: "store credit …\(credit.codeLast4)")
         } catch {
             errorText = ErrorText.message(for: error)

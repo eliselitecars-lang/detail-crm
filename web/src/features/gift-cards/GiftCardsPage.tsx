@@ -22,6 +22,8 @@ import { formatCents } from '@/lib/money';
 import { useCan } from '@/features/shop/useCan';
 import { useShop } from '@/features/shop/shopContext';
 import { customerName } from '@/features/quotes/shared/format';
+import { useShopLapsed } from '@/features/billing/api';
+import { LapsedNotice } from '@/features/billing/components/LapsedNotice';
 import {
   effectiveCardStatus,
   GIFT_CARD_PAGE_SIZE,
@@ -41,8 +43,10 @@ const KINDS = ['gift', 'credit'] as const satisfies readonly GiftCardKind[];
 
 /** /app/gift-cards — every gift card and store credit of the shop (managers+). */
 export default function GiftCardsPage() {
-  const { timezone, currency, shop } = useShop();
+  const { shopId, timezone, currency, shop } = useShop();
   const canIssue = useCan('giftCards.manage');
+  // A lapsed shop sells no gift cards, online or by staff (0103).
+  const lapsed = useShopLapsed(shopId);
   const settings = useGiftCardSettings();
   const [params, setParams] = useSearchParams();
   const rawKind = params.get('kind');
@@ -119,7 +123,8 @@ export default function GiftCardsPage() {
     },
   ];
 
-  const onlineOn = settings.data?.online_enabled === true;
+  const onlineSetting = settings.data?.online_enabled === true;
+  const onlineOn = onlineSetting && !lapsed;
   const filtered = kind !== 'all' || status !== 'all' || search.trim() !== '';
 
   return (
@@ -127,7 +132,13 @@ export default function GiftCardsPage() {
       <PageHeader
         title="Gift cards"
         description="Gift cards and store credit. Cards are paid off invoices like cash; the code is only ever shown once."
-        meta={onlineOn ? <Badge tone="success">Selling online</Badge> : undefined}
+        meta={
+          onlineOn ? (
+            <Badge tone="success">Selling online</Badge>
+          ) : onlineSetting && lapsed ? (
+            <Badge tone="warning">Online sales paused</Badge>
+          ) : undefined
+        }
         actions={
           <div className="flex flex-wrap gap-2">
             {onlineOn && (
@@ -145,6 +156,7 @@ export default function GiftCardsPage() {
               <Button
                 leadingIcon={<Plus className="size-4" aria-hidden="true" />}
                 onClick={() => setIssueOpen(true)}
+                disabled={lapsed}
               >
                 Issue gift card
               </Button>
@@ -152,6 +164,13 @@ export default function GiftCardsPage() {
           </div>
         }
       />
+      {lapsed && (
+        <LapsedNotice>
+          Selling gift cards is paused while this shop’s subscription is inactive: the online gift
+          card shop tells customers sales are off, and new gift cards can’t be issued. Existing
+          cards can still be redeemed.
+        </LapsedNotice>
+      )}
       <Card>
         <div className="flex flex-wrap items-end gap-3 p-4">
           <div className="w-full sm:w-72">
@@ -202,7 +221,9 @@ export default function GiftCardsPage() {
             }
             action={
               !filtered && canIssue ? (
-                <Button onClick={() => setIssueOpen(true)}>Issue gift card</Button>
+                <Button onClick={() => setIssueOpen(true)} disabled={lapsed}>
+                  Issue gift card
+                </Button>
               ) : undefined
             }
           />

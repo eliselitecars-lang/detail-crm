@@ -459,6 +459,25 @@ select tests.as_anon();
 select set_config('request.headers', '{"x-forwarded-for": "198.51.100.40"}', true);
 select tests.eq(public.public_submit_lead(tests.fx('tok2'), '{"first_name": "Ip", "email": "ip-13@example.com"}'::jsonb) ->> 'ok',
                 'true', 'the window is a rolling 24 hours');
+-- 0105: an IPv6 client is one connection per /64 (it picks its own interface
+-- id: each submission from a fresh address used to have a full allowance)
+do $$ begin
+  for g in 1 .. 10 loop
+    perform set_config('request.headers', jsonb_build_object('x-forwarded-for', '2001:db8:40:1::' || to_hex(g))::text, true);
+    perform public.public_submit_lead(tests.fx('tok2'), jsonb_build_object('first_name', 'Six', 'email', 'ip6-' || g || '@example.com'));
+  end loop;
+end $$;
+select set_config('request.headers', '{"x-forwarded-for": "2001:db8:40:1:dead:beef:1:2"}', true);
+select tests.throws_like($$select public.public_submit_lead(tests.fx('tok2'), '{"first_name": "Six", "email": "ip6-11@example.com"}'::jsonb)$$,
+                         'PT429', '%this connection%', 'the 11th from the same /64 is refused, whatever its interface id');
+select set_config('request.headers', '{"x-forwarded-for": "2001:db8:40:2::1"}', true);
+select tests.eq(public.public_submit_lead(tests.fx('tok2'), '{"first_name": "Six", "email": "ip6-12@example.com"}'::jsonb) ->> 'ok',
+                'true', 'another /64 is another connection');
+select tests.as_superuser();
+select tests.eq((select count(distinct signer_ip) from public.lead_submissions
+                  where lead_form_id = tests.fx('form2') and signer_ip << '2001:db8:40:1::/64'::inet),
+                10::bigint, 'ten leads from ten addresses of one /64 were accepted, each with its exact address');
+select tests.as_anon();
 select set_config('request.headers', '', true);
 
 -- ============================================================ submissions RLS

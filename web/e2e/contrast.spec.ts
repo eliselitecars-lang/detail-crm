@@ -4,7 +4,8 @@ import { mockSupabase } from './support/mockSupabase';
 /**
  * WCAG 1.4.3 for the text colour tokens as the browser resolves them from the
  * built stylesheet: ink, muted and subtle (subtle carries real content — 12px
- * hints, keys, timestamps) reach 4.5:1 on every surface, in both themes.
+ * hints, keys, timestamps) and primary-ink (links) reach 4.5:1 on every
+ * surface, in both themes.
  */
 
 function luminance(hex: string): number {
@@ -20,7 +21,9 @@ function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-const TEXT = ['ink', 'muted', 'subtle'];
+// primary-ink is the link / text-button colour (the primary fill, --dc-primary,
+// is for buttons and icons only: 3.7:1 on the dark surface).
+const TEXT = ['ink', 'muted', 'subtle', 'primary-ink'];
 const SURFACES = ['canvas', 'surface', 'surface-2', 'surface-3'];
 
 for (const theme of ['light', 'dark'] as const) {

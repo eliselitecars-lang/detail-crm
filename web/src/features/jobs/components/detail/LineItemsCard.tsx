@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, ChevronDown, Pencil, Plus, Receipt, Tag, Trash2 } from 'lucide-react';
 import { useState } from 'react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import {
   Badge,
   Button,
@@ -26,6 +26,7 @@ import {
   type JobDetail,
   type LineItem,
 } from '../../api';
+import { usePaymentSummary } from '../../fieldApi';
 import { vehicleLabel } from '../../model';
 import { useCustomerVehicles } from '../../newJobApi';
 import { DiscountDialog } from './DiscountDialog';
@@ -54,6 +55,16 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleting, setDeleting] = useState<LineItem | null>(null);
   const money = (cents: number | null) => formatCents(cents, { currency });
+  // A job with a live (non-void) invoice is billed: the server refuses new,
+  // deleted or re-priced lines and discount changes (0097, 23514). Name,
+  // description and order stay editable there, but the line dialog edits the
+  // price too, so editing is locked here as a whole.
+  const summary = usePaymentSummary(job.id, canManage);
+  const billedOn =
+    summary.data?.invoice_id && summary.data.invoice_status !== 'void'
+      ? { id: summary.data.invoice_id, number: summary.data.invoice_number }
+      : null;
+  const editable = canManage && billedOn === null;
 
   const rows = lines.data ?? [];
   const nextSort = rows.reduce((max, l) => Math.max(max, l.sort), 0) + 1;
@@ -90,7 +101,7 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
     <SectionCard
       title="Services & items"
       actions={
-        canManage ? (
+        editable ? (
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
@@ -139,6 +150,16 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
         ) : undefined
       }
     >
+      {canManage && billedOn && (
+        <p role="note" className="bg-surface-2 text-muted rounded-control mb-3 px-3 py-2 text-sm">
+          Billed on{' '}
+          <Link to={`/app/invoices/${billedOn.id}`} className="text-primary-ink hover:underline">
+            invoice{billedOn.number !== null ? ` #${billedOn.number}` : ''}
+          </Link>
+          : its services, prices and discount can’t change. Void that invoice first, or bill extra
+          work on a new invoice.
+        </p>
+      )}
       {lines.isPending ? (
         <LoadingState label="Loading items…" />
       ) : lines.isError ? (
@@ -147,7 +168,7 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
         <EmptyState
           compact
           title="No services yet"
-          description={canManage ? 'Add services from your catalog or a custom item.' : undefined}
+          description={editable ? 'Add services from your catalog or a custom item.' : undefined}
         />
       ) : (
         <ul className="divide-line -my-2 divide-y">
@@ -194,6 +215,7 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
                     size="sm"
                     label={`Edit ${line.name}`}
                     icon={<Pencil className="size-4" />}
+                    disabled={!editable}
                     onClick={() => setDialog({ kind: 'edit', line })}
                   />
                   <IconButton
@@ -201,6 +223,7 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
                     variant="danger"
                     label={`Delete ${line.name}`}
                     icon={<Trash2 className="size-4" />}
+                    disabled={!editable}
                     onClick={() => setDeleting(line)}
                   />
                 </div>
@@ -219,7 +242,7 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
           <div className="flex items-center justify-between gap-3">
             <dt className="text-muted flex items-center gap-2">
               {discountLabel}
-              {canManage && (
+              {editable && (
                 <Button
                   size="sm"
                   variant="ghost"

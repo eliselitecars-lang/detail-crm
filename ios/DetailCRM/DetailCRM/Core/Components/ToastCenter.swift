@@ -9,9 +9,17 @@
 //  The banner view is always in the hierarchy and animates opacity/offset
 //  (never inserted with `if`), so there is no insert-at-final-value glitch.
 //
+//  VoiceOver: every toast is also posted as an accessibility announcement
+//  (errors start with "Error:"), queued behind whatever VoiceOver is saying
+//  and sent a moment after the toast so a sheet closing at the same time
+//  doesn't cut it off. While VoiceOver runs the banner stays longer, so it
+//  can still be reached with a swipe (DetailCore `ToastSpeech`).
+//
 
 import SwiftUI
+import UIKit
 import Observation
+import DetailCore
 
 struct Toast: Equatable, Identifiable {
     enum Style: Equatable {
@@ -34,16 +42,39 @@ final class ToastCenter {
     private(set) var lastShown: Toast?
 
     @ObservationIgnored private var dismissTask: Task<Void, Never>?
+    @ObservationIgnored private var announceTask: Task<Void, Never>?
 
     func show(_ message: String, style: Toast.Style = .success, duration: Duration = .seconds(3)) {
         let toast = Toast(message: message, style: style)
         lastShown = toast
         current = toast
+        let visible = ToastSpeech.visibleDuration(
+            requested: duration,
+            isError: style == .error,
+            voiceOverRunning: UIAccessibility.isVoiceOverRunning
+        )
         dismissTask?.cancel()
         dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: duration)
+            try? await Task.sleep(for: visible)
             guard !Task.isCancelled else { return }
             self?.dismiss(id: toast.id)
+        }
+        announce(toast)
+    }
+
+    /// Speaks the toast with VoiceOver (a newer toast replaces one not yet
+    /// announced).
+    private func announce(_ toast: Toast) {
+        announceTask?.cancel()
+        let text = ToastSpeech.announcement(message: toast.message, isError: toast.style == .error)
+        announceTask = Task { [weak self] in
+            try? await Task.sleep(for: ToastSpeech.announcementDelay)
+            guard !Task.isCancelled, self?.lastShown?.id == toast.id else { return }
+            let announcement = NSAttributedString(
+                string: text,
+                attributes: [.accessibilitySpeechQueueAnnouncement: true]
+            )
+            UIAccessibility.post(notification: .announcement, argument: announcement)
         }
     }
 

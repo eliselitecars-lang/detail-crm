@@ -203,6 +203,35 @@ describe('TeamPage', () => {
     );
   });
 
+  it('keeps an invite link on screen when the browser refuses to copy it', async () => {
+    const { user } = renderAs('owner');
+    const copy = await screen.findByRole('button', {
+      name: 'Copy invite link for new@example.com',
+    });
+    const write = vi
+      .spyOn(navigator.clipboard, 'writeText')
+      .mockRejectedValue(new DOMException('denied', 'NotAllowedError'));
+    const exec = vi.fn(() => false);
+    Object.defineProperty(document, 'execCommand', { value: exec, configurable: true });
+    try {
+      await user.click(copy);
+      const dialog = await screen.findByRole('dialog', { name: 'Copy this link' });
+      // Not a vanishing toast: the link stays until the dialog is closed.
+      expect(within(dialog).getByRole('status', { name: 'Invite link' })).toHaveTextContent(
+        `${window.location.origin}/invite/tok-1`,
+      );
+      expect(exec).toHaveBeenCalledWith('copy');
+      expect(screen.queryByText('Invite link copied')).not.toBeInTheDocument();
+      await user.click(within(dialog).getByRole('button', { name: 'Done' }));
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: 'Copy this link' })).not.toBeInTheDocument(),
+      );
+    } finally {
+      write.mockRestore();
+      Reflect.deleteProperty(document, 'execCommand');
+    }
+  });
+
   it('transfers ownership only after typing the shop name', async () => {
     const refetch = vi.fn(() => Promise.resolve());
     const { user } = renderAs('owner', refetch);
@@ -223,6 +252,27 @@ describe('TeamPage', () => {
         p_member_id: 'm-tech',
       }),
     );
+    // the shop's billing emails follow the new owner right away
+    await waitFor(() =>
+      expect(invoke()).toHaveBeenCalledWith('billing', {
+        body: { action: 'sync_customer', shop_id: 'shop-1' },
+      }),
+    );
+    await waitFor(() => expect(refetch).toHaveBeenCalled());
+  });
+
+  it('a failed billing sync never fails the transfer', async () => {
+    const refetch = vi.fn(() => Promise.resolve());
+    invoke().mockRejectedValue(new Error('offline'));
+    const { user } = renderAs('owner', refetch);
+    await user.click(await screen.findByRole('button', { name: 'Transfer ownership…' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Transfer ownership' });
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: /New owner/ }), 'm-tech');
+    await user.type(
+      within(dialog).getByRole('textbox', { name: /Type the shop name/ }),
+      'Glacier Detailing',
+    );
+    await user.click(within(dialog).getByRole('button', { name: 'Transfer ownership' }));
     await waitFor(() => expect(refetch).toHaveBeenCalled());
   });
 });

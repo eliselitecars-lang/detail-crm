@@ -169,6 +169,26 @@ describe('customer form schema', () => {
     expect(paths).toContain('phone');
     expect(paths).toContain('country');
   });
+
+  it('accepts every email the database stores, so an iPhone/imported customer stays editable', () => {
+    // public.is_valid_email accepts these; zod's z.email() rejected them.
+    for (const email of ['josé@example.com', 'user@münchen.de', 'a!b@example.com', 'x@y.z']) {
+      const result = customerFormSchema.safeParse({
+        ...emptyCustomerForm(),
+        firstName: 'Jane',
+        email,
+        notes: 'Only the notes changed',
+      });
+      expect(result.success, email).toBe(true);
+    }
+    const bad = customerFormSchema.safeParse({
+      ...emptyCustomerForm(),
+      firstName: 'Jane',
+      email: 'jane@example',
+    });
+    expect(bad.success).toBe(false);
+    expect(bad.error?.issues[0]?.message).toBe('Enter a valid email address.');
+  });
 });
 
 describe('vehicle form schema', () => {

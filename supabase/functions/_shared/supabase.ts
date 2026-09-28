@@ -73,6 +73,23 @@ export function userClient(req: Request, options: ClientOptions = {}): SupabaseC
   });
 }
 
+/**
+ * Client that acts as whoever called: the caller's bearer token when there
+ * is one (a signed-in user, or the anon key a signed-out web page sends),
+ * else the anon role. For public RPCs whose own checks depend on auth.uid().
+ */
+export function callerClient(req: Request, options: ClientOptions = {}): SupabaseClient {
+  if (bearerToken(req)) return userClient(req, options);
+  const { url, anonKey } = (options.env ?? defaultEnv).supabase();
+  return createClient(url, anonKey, {
+    auth: SERVER_AUTH,
+    global: {
+      headers: { "x-client-info": "detail-crm-edge" },
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+    },
+  });
+}
+
 export interface Caller {
   id: string;
   email: string | null;

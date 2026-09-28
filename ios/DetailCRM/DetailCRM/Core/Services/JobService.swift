@@ -183,12 +183,18 @@ enum JobService {
         // before/after photo minimums; 23514 when they block) and the
         // manager override (`p_force`, recorded with its reason). For a
         // move to cancelled the reason is stored as the cancel reason.
+        // The reason is sent whole: a cancel reason is shown to the customer
+        // on their booking page, so it is never cut short. Over the server's
+        // limit the save is refused with the same rule the server applies.
         let reason = status == .cancelled ? cancelReason?.trimmedNonEmpty : overrideReason?.trimmedNonEmpty
+        if let reason, let problem = Validation.statusReasonProblem(reason) {
+            throw AppError.message(problem)
+        }
         let params: [String: AnyJSON] = [
             "p_job_id": .string(jobID.uuidString),
             "p_status": .string(status.rawValue),
             "p_force": .bool(force),
-            "p_reason": reason.map { AnyJSON.string(String($0.prefix(500))) } ?? .null,
+            "p_reason": reason.map { AnyJSON.string($0) } ?? .null,
         ]
         return try await Supa.client
             .rpc("set_job_status", params: params)

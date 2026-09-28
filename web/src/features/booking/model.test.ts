@@ -369,6 +369,22 @@ describe('booking questions and weekdays', () => {
     expect(classifyBookingError(error, ['Gate code']).step).toBe('details');
   });
 
+  it('sends "<label> is required" to details when the questions failed to load', () => {
+    const required = (label: string) =>
+      Object.assign(new Error(`${label} is required`), { code: '22023' });
+    // Labels unknown: neither matches a question, and "Vehicle color" would
+    // otherwise go to the vehicle step, where the question can't be answered.
+    expect(classifyBookingError(required('Gate code'), []).step).toBeNull();
+    for (const label of ['Gate code', 'Vehicle color', 'Service notes']) {
+      expect(classifyBookingError(required(label), [], { questionsLoaded: false }).step).toBe(
+        'details',
+      );
+    }
+    // Other errors keep their step.
+    const time = Object.assign(new Error('That time is no longer available'), { code: '22023' });
+    expect(classifyBookingError(time, [], { questionsLoaded: false }).step).toBe('time');
+  });
+
   it('describes category weekday limits', () => {
     const catalog = catalogFixture();
     expect(weekdayRestriction(catalog, [WASH])).toBeNull();

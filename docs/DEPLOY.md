@@ -45,7 +45,9 @@ Later releases: backend and web deploys are independent. Deploy the backend
 first when a web/iOS change needs a new migration or function. A backend
 release is a plain run (`dry_run` first, then without it): `stripe_webhooks`
 is needed again only to create an endpoint (first launch, billing turned on)
-or together with the recreate / adopt inputs (3.3).
+or together with the recreate / adopt inputs (3.3). A new iPhone build for
+the App Store needs a higher app version once the current one is approved
+(section 5, "Versions").
 
 ## 2. Settings reference
 
@@ -241,6 +243,14 @@ and the test suite asserts `config push` is never invoked. Production Auth is
 set only through the Management API with email confirmations **ON** (3.4).
 Do not run `supabase config push` by hand against production either.
 
+Because of that, `config.toml`'s `[storage] file_size_limit = "200MiB"`
+never reaches production. The five buckets (`job-photos`, `signatures`,
+`shop-assets`, `documents` 25 MiB, `job-media` 200 MiB) and their per-bucket
+limits come from the migrations, but the **project-wide upload limit** caps
+every bucket: set it by hand to at least 200 MB (Dashboard -> Storage ->
+Settings; plan-dependent, see LAUNCH.md 1.1), or job videos over the project
+limit fail to upload.
+
 ### 3.2 Migrations
 
 - `db push` applies every file in `supabase/migrations` that the project has
@@ -323,11 +333,15 @@ Email links (both apps): the web app and the iPhone app both use Supabase
 Auth's **implicit flow**. A sign-up confirmation, password-reset or
 email-change link carries the session in the URL fragment, so it works in
 any browser on any device, whichever app sent it. The iPhone app has no URL
-scheme: its password-reset emails link to `APP_BASE_URL/reset-password` (the
-build's `WEB_APP_URL`, which ios-testflight takes from the same
-`APP_BASE_URL` variable) and its sign-up confirmations to the Site URL (the
-web app, which signs the person in). Both are on the allow-list above, so
-nothing is set by hand. Keep the web app and the iPhone build on the same
+scheme: its password-reset emails link to `APP_BASE_URL/reset-password` and
+its sign-up confirmations to `APP_BASE_URL/auth/callback` (the build's
+`WEB_APP_URL`, which ios-testflight takes from the same `APP_BASE_URL`
+variable), the same pages the web's own emails use. The web accepts link
+tokens only on those two pages; a link to the Site URL root is scrubbed and
+refused, so it would land on the sign-in page without signing anyone in.
+Both are on the allow-list above (`APP_BASE_URL/**`), so nothing is set by
+hand. A build without `WEB_APP_URL` sends no redirect and its links fall
+back to the Site URL. Keep the web app and the iPhone build on the same
 `APP_BASE_URL`; a reset link to another origin needs that origin in
 `AUTH_ADDITIONAL_REDIRECT_URLS`, otherwise Supabase falls back to the Site
 URL, which signs the person in but shows no new-password form.
@@ -341,11 +355,15 @@ way breaks confirmation and reset links.
 
 `supabase/setup/cron.sql` is the one-time SQL that stores `APP_BASE_URL` in
 `platform_config` (every customer link in messages is built from it) and
-schedules the ten pg_cron jobs (message queue, automations, quote expiry,
+schedules the twelve pg_cron jobs (message queue, automations, quote expiry,
 payment sheet sweep, storage purge, push notifications, outbound webhooks,
-SMS verification status, recurring job series, billing plan sync) with the functions URL and
-`CRON_SECRET` kept in Vault. The deploy replaces exactly the three
-assignments the file asks you to edit (`v_functions_url`, `v_cron_secret`,
+SMS verification status, recurring job series, billing plan sync, billing
+customer sync, SMS number releases) with the functions URL and
+`CRON_SECRET` kept in Vault. The file's header lists each job's name,
+schedule and purpose; `detail-crm-billing-sync-customers` keeps each shop's
+platform Stripe customer on its current owner's email, and
+`detail-crm-sms-releases` releases the Twilio numbers of deleted shops.
+The deploy replaces exactly the three assignments the file asks you to edit (`v_functions_url`, `v_cron_secret`,
 `v_app_base_url`), in memory, and sends the result over HTTPS to the
 Management API; no edited copy is written anywhere. It then checks
 `platform_config.app_base_url`, that every job in cron.sql is active, and the
@@ -557,7 +575,8 @@ deposit payment) open in the top window.
 
 An embedded lead form is public (its token is in the shop's page source), so
 the database limits what it can do (`public_submit_lead`, migration 0088):
-at most 10 submissions per client IP per form, 3 per email or phone and 200
+at most 10 submissions per client connection per form (an IPv6 /64 counts
+as one connection, migration 0105), 3 per email or phone and 200
 per form in any 24 hours (then HTTP 429). The optional auto-reply never
 repeats what the visitor typed (it greets them as "there"); it is emailed
 to the address given and **texted only to a phone number the shop already
@@ -604,18 +623,24 @@ After any host change run `verify_web.mjs` against it.
 
 ## 5. iPhone: TestFlight
 
-Prerequisites (once, [LAUNCH.md](LAUNCH.md) section 2.6): Apple Developer
+Prerequisites (once, [LAUNCH.md](LAUNCH.md) section 1.6): Apple Developer
 Program membership, the bundle id `com.detailcrm.app` (or `IOS_BUNDLE_ID`)
 registered, an App Store Connect app record with that bundle id, and a team
 API key with the Admin role.
 
-The workflow (macOS 15, the same Xcode choice as `ios.yml`) runs
-`scripts/swift_sanity.py`, writes the API key to a private temp file, then
-`bundle exec fastlane ios beta`:
+The workflow runs on `macos-26` and selects the newest release Xcode 26 or
+later with `ios/ci/select_xcode.sh` (the same choice as `ios.yml`, so a green
+`ios.yml` build means the archive compiles), runs `scripts/swift_sanity.py`,
+writes the API key to a private temp file, then `bundle exec fastlane ios beta`:
 
+0. SDK check: the selected Xcode's iOS SDK must be 26 or later (see
+   "Xcode and the iOS SDK" below); an upload run stops here otherwise.
 1. API key session (`app_store_connect_api_key`); build number = latest
    TestFlight build number + 1 (`latest_testflight_build_number`, or
-   `BUILD_NUMBER` to force one).
+   `BUILD_NUMBER` to force one); app version = the `app_version` input
+   (`APP_VERSION` locally), else the project's `MARKETING_VERSION`. Before
+   archiving, an upload run compares it with the version live on the App
+   Store and stops with a message when it is not higher (see "Versions").
 2. `Config.plist` gets `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `WEB_APP_URL`
    (= `APP_BASE_URL`) for this build (`AppConfig.swift` reads that file); the
    committed placeholders are restored afterwards. The app bundles no Stripe
@@ -623,15 +648,58 @@ The workflow (macOS 15, the same Xcode choice as `ios.yml`) runs
 3. `xcodebuild archive` with `-allowProvisioningUpdates` and the API key
    (`-authenticationKeyPath/-authenticationKeyID/-authenticationKeyIssuerID`):
    Xcode automatic signing with cloud-managed certificates.
-   `DEVELOPMENT_TEAM` and `CURRENT_PROJECT_VERSION` are build-setting
-   overrides; the project file is not edited. A non-default `IOS_BUNDLE_ID` is
+   `DEVELOPMENT_TEAM`, `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` are
+   build-setting overrides; the project file is not edited. A non-default `IOS_BUNDLE_ID` is
    applied to the app target only for the build and restored (a command-line
    `PRODUCT_BUNDLE_IDENTIFIER` would also rename the Swift packages' resource
    bundles, which App Store Connect rejects as duplicates).
 4. `xcodebuild -exportArchive` (method `app-store-connect`, automatic
-   signing), then `upload_to_testflight` without waiting for processing.
-5. Artifacts: `DetailCRM.ipa`, `DetailCRM.app.dSYM.zip`, the build number, and
-   the xcodebuild logs.
+   signing); the archive's SDK (`DTSDKName` in the app's Info.plist) is
+   checked again, then `upload_to_testflight` without waiting for processing.
+5. Artifacts: `DetailCRM.ipa`, `DetailCRM.app.dSYM.zip`, the build number,
+   the version, and the xcodebuild logs.
+
+**Xcode and the iOS SDK.** Apple raises the minimum SDK for App Store
+Connect uploads every spring; since April 28, 2026 apps uploaded to App Store
+Connect, TestFlight included, must be built with Xcode 26 / the iOS 26 SDK or
+later. An archive made with Xcode 16 (iOS 18 SDK) still archives and exports,
+but its upload or processing is rejected with an SDK-version error, so no
+build reaches testers or App Review. Both iOS workflows therefore run on
+`macos-26` and use `ios/ci/select_xcode.sh`, which picks the newest installed
+release Xcode (betas skipped) whose major version is at least
+`MIN_XCODE_MAJOR` (26) and fails the job when the image has none; the lane
+checks the SDK before archiving (`MIN_UPLOAD_SDK_MAJOR` in
+`ios/fastlane/Fastfile`) and the archive's SDK before uploading, so a wrong
+Xcode stops the run with a message instead of an App Store Connect rejection.
+When Apple announces the next minimum, raise `MIN_XCODE_MAJOR` and
+`MIN_UPLOAD_SDK_MAJOR` together (and `runs-on` if the new Xcode needs a newer
+image). Locally, `xcode-select -s` an Xcode 26+ before `fastlane beta`
+(`SKIP_UPLOAD=1` only warns). The deployment target stays iOS 17; building
+with the iOS 26 SDK gives the system bars, tab bar, sheets and alerts the
+iOS 26 look on iOS 26 devices, so check those screens on a TestFlight build
+(Apple's temporary `UIDesignRequiresCompatibility` Info.plist key keeps the
+previous look while Apple still honors it, if a screen needs time).
+
+**Versions.** App Store Connect groups builds by app version (the project's
+`MARKETING_VERSION`, 1.0 in git; "Version" in App Store Connect). The build
+number goes up by itself; the version does not. Builds of a version can be
+uploaded until that version is approved for the App Store: then its train
+is closed and every later upload of it is rejected ("The train version ... is
+closed" / `CFBundleShortVersionString` must be higher than the previously
+approved version), even though the archive and export succeed. So after each
+App Store approval, raise the version before the next build:
+
+- for one run: Actions -> ios-testflight -> Run workflow -> `app_version`
+  (e.g. `1.1`; locally `APP_VERSION=1.1`);
+- for good (so pushes to `.github/trigger-testflight` use it too): set
+  `MARKETING_VERSION` in `ios/DetailCRM/DetailCRM.xcodeproj/project.pbxproj`
+  (the Debug and Release lines, which must match; Xcode -> target DetailCRM
+  -> General -> Version edits both) and commit it.
+
+Use one to three numbers (`1.1`, `1.2.0`, `2`), each release higher than the
+last approved one. The lane checks only the version that is live on the App
+Store: a version approved but not yet released (manual release) also closes
+its train, so raise the version past it yourself.
 
 `ITSAppUsesNonExemptEncryption = NO` is already set, so builds need no export
 compliance answer. Local run on a Mac: `cd ios && bundle install &&
@@ -668,7 +736,9 @@ fixing the cause.
   production deployment -> Rollback
   ([docs](https://developers.cloudflare.com/pages/configuration/rollbacks/)).
 - **iPhone**: TestFlight builds cannot be replaced; expire the bad build in
-  App Store Connect and ship a new one.
+  App Store Connect and ship a new one (a fixed build of the reverted code).
+  If the bad build's version is already approved for the App Store, the new
+  build needs a higher version (section 5, "Versions").
 
 ## 8. Troubleshooting
 
@@ -691,3 +761,4 @@ fixing the cause.
 | `billing sync_plans: HTTP ...` | the plan sync failed after the functions deploy: the code names why (`unauthorized` = `CRON_SECRET` differs; `service_unavailable` = Stripe); [BILLING.md](BILLING.md) section 11 |
 | Stripe shows 400s on the `billing-webhook` endpoint | its signing secret differs from the stored `STRIPE_BILLING_WEBHOOK_SECRET`: run with `stripe_webhooks` and `stripe_webhook_recreate` = `billing` |
 | fastlane: `Could not read TestFlight builds` | the App Store Connect app record for the bundle id is missing, or the key's role is too low |
+| fastlane: `Version X is not higher than Y, the version on the App Store`, or the upload is rejected because the train version is closed | raise the app version (section 5, "Versions") |

@@ -579,3 +579,77 @@ Deno.test("delete_shop: the database guard (55000) is 409 payment_in_progress", 
     { reason: "payment_in_progress" },
   ]);
 });
+
+const TWILIO = "https://api.twilio.com/2010-04-01/Accounts/AC00000000000000000000000000000000";
+const TWILIO_MSG = "https://messaging.twilio.com/v1";
+const SELF_SERVE = {
+  phone_number: "+18445550123",
+  shop_id: SHOP,
+  twilio_number_sid: `PN${"1".repeat(32)}`,
+  messaging_service_sid: `MG${"2".repeat(32)}`,
+};
+const HAND_BOUND = {
+  phone_number: "+12055550100",
+  shop_id: SHOP,
+  twilio_number_sid: null,
+  messaging_service_sid: null,
+};
+/** What 0093's trigger logs when the cascade removes the shop's numbers. */
+const LOGGED = [SELF_SERVE, HAND_BOUND].map((n, i) => ({
+  id: `91000000-0000-4000-8000-00000000000${i + 1}`,
+  phone_number: n.phone_number,
+  shop_id: SHOP,
+  shop_name: "Shine Co",
+  released_at: new Date(NOW).toISOString(),
+}));
+
+Deno.test("delete_shop: the shop's self-serve text number goes back to Twilio once the shop is gone", async () => {
+  const f = fixture({ account: null, smsNumbers: [SELF_SERVE, HAND_BOUND], smsReleases: LOGGED });
+  const order: string[] = [];
+  f.db.http.on("DELETE", `${TWILIO}/IncomingPhoneNumbers/:pn`, () => {
+    order.push(`number:${f.db.table("shops").some((s) => s.id === SHOP) ? "shop" : "gone"}`);
+    return new Response(null, { status: 204 });
+  });
+  f.db.http.on("DELETE", `${TWILIO_MSG}/Services/:mg`, () => {
+    order.push("service");
+    return new Response(null, { status: 204 });
+  });
+  const res = await f.call({ ...del, confirm_name: "Shine Co" }, "owner");
+  assertEquals(res.status, 200);
+  assertEquals(order, ["number:gone", "service"]);
+  const number = f.db.http.callsTo("DELETE", `${TWILIO}/IncomingPhoneNumbers/:pn`)[0];
+  assertEquals(number?.url.pathname.endsWith(`/${SELF_SERVE.twilio_number_sid}.json`), true);
+  const service = f.db.http.callsTo("DELETE", `${TWILIO_MSG}/Services/:mg`)[0];
+  assertEquals(service?.url.pathname.endsWith(`/${SELF_SERVE.messaging_service_sid}`), true);
+  // Released: off the worklist. The hand-bound number stays for the operator.
+  assertEquals(f.db.table("sms_number_releases").map((r) => r.phone_number), [
+    HAND_BOUND.phone_number,
+  ]);
+  assertEquals(f.logs.events("shop_deleted")[0]?.sms_numbers_released, 1);
+});
+
+Deno.test("delete_shop: a Twilio failure keeps the number on the worklist; the deletion stands", async () => {
+  const f = fixture({ account: null, smsNumbers: [SELF_SERVE], smsReleases: LOGGED.slice(0, 1) });
+  f.db.http.on(
+    "DELETE",
+    `${TWILIO}/IncomingPhoneNumbers/:pn`,
+    () => jsonResponse({ code: 20500, message: "Internal error" }, 500),
+  );
+  const res = await f.call({ ...del, confirm_name: "Shine Co" }, "owner");
+  assertEquals(res.status, 200);
+  assertEquals(f.db.table("shops").some((s) => s.id === SHOP), false);
+  assertEquals(f.db.table("sms_number_releases").length, 1);
+  assertEquals(f.logs.events("sms_number_release_failed").length, 1);
+});
+
+Deno.test("delete_shop: a failed deletion keeps the shop's number", async () => {
+  const f = fixture({ account: null, smsNumbers: [SELF_SERVE] });
+  f.db.http.once(
+    "DELETE",
+    "https://fake-project.supabase.co/rest/v1/shops",
+    () => jsonResponse({ code: "55000", message: "busy", details: null, hint: null }, 400),
+  );
+  const res = await f.call({ ...del, confirm_name: "Shine Co" }, "owner");
+  assertEquals(res.status, 409);
+  assertEquals(f.db.http.calls.filter((c) => c.url.hostname.endsWith("twilio.com")).length, 0);
+});

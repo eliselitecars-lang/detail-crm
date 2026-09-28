@@ -101,6 +101,49 @@ describe('TimesheetsPage', () => {
     );
   });
 
+  it('totals every entry past PostgREST’s 1,000-row cap (read in pages)', async () => {
+    // 1,100 one-minute shifts on Mar 10: one response would stop at 1,000.
+    const all = Array.from({ length: 1100 }, (_, i) => {
+      const start = Date.parse('2026-03-10T13:00:00Z') + i * 2 * 60_000;
+      return {
+        ...entries[0],
+        id: `s${i}`,
+        clock_in: new Date(start).toISOString(),
+        clock_out: new Date(start + 60_000).toISOString(),
+      };
+    });
+    const original = supabase.from.getMockImplementation()!;
+    const ranges: [number, number][] = [];
+    supabase.from.mockImplementation((table: string) => {
+      const builder = original(table);
+      if (table === 'time_entries') {
+        builder.range.mockImplementation((from: number, to: number) => {
+          ranges.push([from, to]);
+          return createBuilder({
+            data: all.slice(from, Math.min(to + 1, from + 1000)),
+            count: all.length,
+          });
+        });
+      }
+      return builder;
+    });
+    try {
+      renderAs('manager');
+      await setRange('2026-03-09', '2026-03-15');
+      const totals = await screen.findByRole('table', { name: 'Totals per team member' });
+      await waitFor(() =>
+        expect(within(totals).getByRole('row', { name: /Theo Tech/ })).toHaveTextContent('18h 20m'),
+      );
+      expect(ranges.slice(-2)).toEqual([
+        [0, 999],
+        [1000, 1099],
+      ]);
+      expect(screen.queryByText(/most recent entries/)).not.toBeInTheDocument();
+    } finally {
+      supabase.from.mockImplementation(original);
+    }
+  });
+
   it('highlights running entries', async () => {
     setTableResult('time_entries', { data: [{ ...entries[0], clock_out: null }] });
     renderAs('manager');

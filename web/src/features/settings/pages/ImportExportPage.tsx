@@ -1,4 +1,5 @@
 import { Download, FileSpreadsheet, RotateCcw, Upload } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import {
@@ -6,8 +7,10 @@ import {
   Button,
   DateInput,
   EmptyState,
+  ErrorState,
   FileDropzone,
   FormField,
+  LoadingState,
   RadioGroup,
   SectionCard,
   Select,
@@ -32,7 +35,7 @@ import { errorMessage } from '@/lib/errors';
 import { readLocal, storageKeys, writeLocal } from '@/lib/storage';
 import { useVehicleCategories } from '../api';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
-import { useCustomFields } from '../data/customFields';
+import { customFieldsQuery } from '../data/customFields';
 import {
   fetchExportCustomers,
   fetchExportJobs,
@@ -122,6 +125,26 @@ function ImportCard() {
 
   const sizes = useMemo(() => (categories.data ?? []).map((c) => c.name), [categories.data]);
   const targets = useMemo(() => importTargets(kind, sizes), [kind, sizes]);
+  // A services file has one price column per vehicle size: until the sizes
+  // are loaded those columns can't be matched (they'd silently map to "don't
+  // import"), so the file waits for them — or for their error and a retry.
+  const sizesStatus: 'ready' | 'loading' | 'error' =
+    kind !== 'services' || categories.isSuccess
+      ? 'ready'
+      : categories.isError
+        ? 'error'
+        : 'loading';
+  const sizesReady = sizesStatus === 'ready';
+  // The mapping follows the targets it was made for: sizes that arrive (or
+  // change) after the file was read re-run the suggestions; choices made by
+  // hand are kept (they are remembered per header).
+  const targetsKey = targets.map((t) => t.id).join('\u0000');
+  const [mappedFor, setMappedFor] = useState(targetsKey);
+  if (file && sizesReady && mappedFor !== targetsKey) {
+    setMappedFor(targetsKey);
+    setMapping(autoMap(file.csv.headers, targets, readSavedMapping(shopId, kind)));
+    setPreview(null);
+  }
   const built = useMemo(
     () => (file ? buildImportRows(file.csv.records, mapping) : null),
     [file, mapping],
@@ -141,10 +164,11 @@ function ImportCard() {
 
   const changeKind = (next: ImportKind) => {
     setKind(next);
-    if (file)
-      setMapping(
-        autoMap(file.csv.headers, importTargets(next, sizes), readSavedMapping(shopId, next)),
-      );
+    if (file) {
+      const nextTargets = importTargets(next, sizes);
+      setMapping(autoMap(file.csv.headers, nextTargets, readSavedMapping(shopId, next)));
+      setMappedFor(nextTargets.map((t) => t.id).join('\u0000'));
+    }
     setPreview(null);
     setDone(null);
   };
@@ -170,6 +194,7 @@ function ImportCard() {
       }
       setFile({ name: picked.name, csv });
       setMapping(autoMap(csv.headers, targets, readSavedMapping(shopId, kind)));
+      setMappedFor(targetsKey);
     } catch (error) {
       setFileError(`Couldn’t read that file: ${errorMessage(error)}`);
     } finally {
@@ -229,6 +254,7 @@ function ImportCard() {
   };
 
   const canCheck =
+    sizesReady &&
     file !== null &&
     built !== null &&
     built.rows.length > 0 &&
@@ -269,12 +295,25 @@ function ImportCard() {
           disabled={locked}
         />
 
+        {!done && sizesStatus === 'loading' && (
+          <LoadingState label="Loading your vehicle sizes (one price column per size)…" />
+        )}
+        {!done && sizesStatus === 'error' && (
+          <ErrorState
+            compact
+            title="Couldn’t load your vehicle sizes"
+            error={categories.error}
+            onRetry={() => void categories.refetch()}
+            retrying={categories.isFetching}
+          />
+        )}
         {done ? (
           <ImportDone kind={kind} result={done} onAgain={reset} />
         ) : !file ? (
           <FileDropzone
             accept={['.csv', 'text/csv']}
             maxBytes={IMPORT_MAX_BYTES}
+            disabled={!sizesReady}
             busy={parsing}
             label="Drop a CSV file here"
             description="Up to 10 MB and 20,000 rows. The first row must be the column names."
@@ -313,15 +352,17 @@ function ImportCard() {
                 </ul>
               </div>
             )}
-            <MappingTable
-              csv={file.csv}
-              mapping={mapping}
-              targets={targets}
-              duplicates={duplicates}
-              disabled={locked}
-              onChange={setTarget}
-            />
-            {needsName && (
+            {sizesReady && (
+              <MappingTable
+                csv={file.csv}
+                mapping={mapping}
+                targets={targets}
+                duplicates={duplicates}
+                disabled={locked}
+                onChange={setTarget}
+              />
+            )}
+            {sizesReady && needsName && (
               <p
                 role="note"
                 className="bg-warning-soft text-warning-ink rounded-control px-3 py-2 text-xs"
@@ -655,7 +696,7 @@ function ImportDone({
       )}
       <div className="flex flex-wrap gap-2">
         <Link
-          className="text-primary text-sm underline"
+          className="text-primary-ink text-sm underline"
           to={kind === 'customers' ? '/app/customers' : '/app/catalog'}
         >
           {kind === 'customers' ? 'Open customers' : 'Open the catalog'}
@@ -734,7 +775,7 @@ function yesNo(value: boolean): string {
 function ExportCard() {
   const { shop, shopId, timezone } = useShop();
   const toast = useToast();
-  const customerFields = useCustomFields('customer');
+  const queryClient = useQueryClient();
   const today = shopToday(timezone);
   const [from, setFrom] = useState(addLocalDays(today, -90));
   const [to, setTo] = useState(today);
@@ -752,8 +793,14 @@ function ExportCard() {
   const exportCustomers = async () => {
     setBusy('customers');
     try {
-      const rows = await fetchExportCustomers(shopId);
-      const fields = (customerFields.data ?? []).filter((f) => !f.archived_at);
+      // Awaited, never `data ?? []`: if the field list isn't loaded (or its
+      // request fails) the export fails with that error instead of writing a
+      // file that silently drops every custom-field column.
+      const [rows, allFields] = await Promise.all([
+        fetchExportCustomers(shopId),
+        queryClient.fetchQuery(customFieldsQuery(shopId, 'customer')),
+      ]);
+      const fields = allFields.filter((f) => !f.archived_at);
       const columns: CsvColumn<ExportCustomer>[] = [
         { header: 'First name', value: (c) => c.first_name },
         { header: 'Last name', value: (c) => c.last_name },

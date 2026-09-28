@@ -88,7 +88,9 @@ struct CustomerDetailContent: View {
                 AnyView(CustomerSavedCardsSection(
                     state: history.savedCards,
                     canRemove: permissions.canRemoveCards,
+                    canAdd: permissions.canAddCards && !customer.isArchived,
                     remove: actions.removeCard,
+                    add: actions.addCard,
                     retry: actions.retryHistory
                 ))
             }
@@ -693,7 +695,10 @@ private struct CustomerMembershipRow: View {
 private struct CustomerSavedCardsSection: View {
     let state: LoadState<[SavedCard]>
     let canRemove: Bool
+    /// Managers and above can save a card without charging it.
+    let canAdd: Bool
     let remove: (SavedCard) -> Void
+    let add: () -> Void
     let retry: () async -> Void
 
     var body: some View {
@@ -712,8 +717,19 @@ private struct CustomerSavedCardsSection: View {
                         CustomerSavedCardRow(card: card, canRemove: canRemove, remove: { remove(card) })
                     }
                 }
+                if canAdd {
+                    CustomersRowDivider()
+                    Button(action: add) {
+                        Label("Save a card", systemImage: "plus")
+                    }
+                    .buttonStyle(.themeSecondaryCompact)
+                    .padding(.vertical, Theme.Spacing.xxs)
+                    .accessibilityHint("The customer enters a card on this phone. Nothing is charged.")
+                }
                 CustomersRowDivider()
-                Text("Cards are stored securely by Stripe. Charge them from an invoice.")
+                Text(canAdd
+                     ? "Cards are stored securely by Stripe. Save one here without charging it, then charge it from an invoice."
+                     : "Cards are stored securely by Stripe. Charge them from an invoice.")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)

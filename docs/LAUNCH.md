@@ -46,11 +46,18 @@ you will paste them into GitHub in step 4.
 - [ ] Create a personal **access token** (Account -> [Access Tokens](https://supabase.com/dashboard/account/tokens)).
 - [ ] Note the project **Reference ID** (Project Settings -> General) and the
       **anon key** (Project Settings -> API).
+- [ ] Raise the project's **upload size limit** to at least **200 MB**
+      (Dashboard -> Storage -> Settings -> Upload file size limit; the
+      maximum depends on the plan). Job videos (`job-media` bucket) go up to
+      200 MB and documents up to 25 MB; the migrations set each bucket's own
+      limit, but the project-wide limit caps them all and the deploy does not
+      change it (the Free plan allows 50 MB, so videos above that fail).
 - [ ] Read Supabase's [production checklist](https://supabase.com/docs/guides/deployment/going-into-prod)
       (MFA on your Supabase account, who has access to the organization).
 
 You do **not** configure sign-in settings, email settings or scheduled jobs by
-hand: the deploy does it (email confirmations stay ON in production).
+hand: the deploy does it (email confirmations stay ON in production). The
+upload size limit above is the one storage setting you set yourself.
 
 ### 1.2 Stripe (payments, as a platform)
 
@@ -343,8 +350,11 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
 - [ ] **Demo account**: create a real shop yourself (e.g. "Review Demo
       Detailing") with an owner login, a few services, a customer and a job,
       and give the email/password in App Store Connect -> App Review
-      Information. Reviewers cannot sign up for a business on their own. The
-      app only shows what you enter (no fake data ships with it).
+      Information. Reviewers can also sign up and create a shop on the phone
+      (Create account -> confirm the email -> Create my shop), but that shop
+      is empty, and with billing on it is a trial. The demo shop shows the
+      app with real records. The app only shows what you enter (no fake data
+      ships with it).
 - [ ] **Privacy "nutrition" labels** (App Store Connect -> App Privacy,
       [details](https://developer.apple.com/app-store/app-privacy-details/)).
       From what this build of the iPhone app actually handles:
@@ -397,11 +407,18 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
 - [ ] **Account deletion inside the app** (Guideline 5.1.1(v), required for any
       app that lets people create an account:
       [Apple's page](https://developer.apple.com/support/offering-account-deletion-in-your-app/)).
-      Built: More -> Your account -> Delete account in the iPhone app, and
-      the Your account page on the web (the `account` function). Shop owners
-      must first transfer ownership or delete the shop (on the web; deleting
-      a shop also ends its subscription to you, [BILLING.md](BILLING.md)
-      section 8.1). Mention the path in App Review Information if asked.
+      Built: More -> Your account -> Delete account in the iPhone app (also
+      in the account menu of the shop picker), and the Your account page on
+      the web (the `account` function). A shop can't be left without an
+      owner, so the app's Delete account screen first lists the shops the
+      person owns (`account_deletion_blockers`), and each can be handled in
+      the app: delete the shop there (type its name; `payments` ->
+      `delete_shop`, which also ends its subscription to you,
+      [BILLING.md](BILLING.md) section 8.1), or make another team member the
+      owner (Team -> the member -> Make owner, `transfer_ownership`). A solo
+      owner who signed up on the phone therefore deletes the shop and then
+      the account without leaving the app. Mention the path in App Review
+      Information if asked.
 - [ ] **Privacy manifest**: the app stores its chosen shop in `UserDefaults`,
       a "required reason" API; `PrivacyInfo.xcprivacy` in the app target
       declares it (reason CA92.1) and no tracking
@@ -423,10 +440,25 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       explain exactly that (guidelines 3.1.1 and 3.1.3); do not add a link
       to the web billing or pricing page in the app. The web's owner-only
       "Go to Billing" links and banners exist only on the web.
+      Know the weak spot of that answer: the app lets anyone create an
+      account and a shop (Create my shop, `create_shop`). With billing on,
+      that shop starts a trial, and after the trial it can only be paid for
+      on the web. A reviewer who tries this may read it as a subscription
+      sold outside the app for an account made in the app (3.1.1 / 3.1.3(b)).
+      Decide before you submit how you answer that: explain that the
+      subscription is a business service bought by the shop on the web, and
+      that most shops start on the web; or keep billing off
+      (`BILLING_ENABLED`, [BILLING.md](BILLING.md) section 5) for the first
+      review. Either way, test the path yourself on TestFlight first.
 - [ ] Sign in with Apple is not required: the app has no third-party sign-in
       (email and password only).
 - [ ] Support URL, screenshots, description, age rating in App Store Connect
       (the privacy policy URL is above).
+- [ ] **Later releases**: once a version (1.0 first) is approved, App Store
+      Connect closes it and rejects further uploads of it. Before the next
+      iPhone release raise the app version: run ios-testflight with
+      `app_version` (e.g. `1.1`) or change `MARKETING_VERSION` in the project
+      ([DEPLOY.md section 5](DEPLOY.md#5-iphone-testflight), "Versions").
 
 ---
 

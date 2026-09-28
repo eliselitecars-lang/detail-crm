@@ -85,11 +85,13 @@ select tests.eq((select count(*) from public.notifications n join public.shop_me
                   where n.job_id = tests.fx('anon_job') and m.role = 'technician'), 0::bigint, 'technicians are not notified');
 select tests.eq((select string_agg(channel::text || ':' || to_address, ',' order by channel)
                    from public.messages where job_id = tests.fx('anon_job') and template_key = 'booking_request_received'),
-                'sms:+12055550142,email:nina@example.com', 'booking_request_received queued on both channels');
-select tests.ok((select body like 'Hi Nina, thanks for your booking request with Shop A%'
+                'email:nina@example.com',
+                'booking_request_received is emailed; never texted to the phone an anonymous booker typed (0104)');
+select tests.ok((select body like 'Hi there,%'
                         and body like '%https://app.example.test/booking/' || (select r ->> 'job_token' from anon_res) || '%'
-                   from public.messages where job_id = tests.fx('anon_job') and channel = 'sms'),
-                'the SMS is rendered with the booking link');
+                        and body not like '%Nina%' and body not like '%Toyota%' and body not like '%Vehicle:%'
+                   from public.messages where job_id = tests.fx('anon_job') and channel = 'email'),
+                'the email carries the booking link and nothing the anonymous booker typed (no name, no vehicle)');
 select tests.ok((select body like '%Services: Full Detail, Pet Hair%' from public.messages
                   where job_id = tests.fx('anon_job') and channel = 'email'), 'the email lists the booked services');
 select tests.eq((select count(*) from public.messages where job_id = tests.fx('anon_job') and template_key = 'booking_confirmed'),
@@ -314,7 +316,8 @@ select tests.as_superuser();
 select tests.fx_set('ac_job', (select id from public.jobs where public_token = (select (r ->> 'job_token')::uuid from ac)));
 select tests.eq((select string_agg(template_key::text || ':' || channel::text, ',' order by channel)
                    from public.messages where job_id = tests.fx('ac_job')),
-                'booking_confirmed:sms,booking_confirmed:email', 'booking_confirmed (not request_received) is queued');
+                'booking_confirmed:email',
+                'booking_confirmed (not request_received) is queued: emailed, not texted to the guest''s unverified phone');
 select tests.eq((select count(*) from public.notifications where job_id = tests.fx('ac_job') and title = 'New booking from Guest N20'),
                 3::bigint, 'staff notified of the confirmed booking');
 select tests.eq((select string_agg(event, ',' order by event) from public.integration_events where job_id = tests.fx('ac_job')),
@@ -323,7 +326,7 @@ select tests.eq((select string_agg(event, ',' order by event) from public.integr
 select tests.authenticate_as(tests.fx('u_manager_a'));
 update public.jobs set status = 'confirmed' where id = tests.fx('ac_job');
 select tests.as_superuser();
-select tests.eq((select count(*) from public.messages where job_id = tests.fx('ac_job')), 2::bigint, 'no second confirmation');
+select tests.eq((select count(*) from public.messages where job_id = tests.fx('ac_job')), 1::bigint, 'no second confirmation');
 update public.booking_settings set auto_confirm = false where shop_id = tests.fx('shop_a');
 
 -- ============================================================ mobile bookings

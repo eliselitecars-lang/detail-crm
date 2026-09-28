@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
-import { membershipRow, OWNER } from './support/fixtures';
-import { mockSupabase, sessionFor } from './support/mockSupabase';
+import { membershipRow, OWNER, TECH } from './support/fixtures';
+import { mockSupabase, sessionFor, STORAGE_KEY } from './support/mockSupabase';
 
 test.describe('sign in', () => {
   test('login page validates and shows server errors', async ({ page }) => {
@@ -68,5 +68,34 @@ test.describe('password reset', () => {
       'open the reset link from your latest email',
     );
     await expect(page.getByLabel(/^New password/)).toHaveCount(0);
+  });
+});
+
+test.describe('sign-in links in the URL (login CSRF)', () => {
+  test('another account’s tokens on an app page never replace the signed-in session', async ({
+    page,
+  }) => {
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: { shop_members: [membershipRow(OWNER, 'owner')] },
+    });
+    const attacker = sessionFor(TECH);
+    await page.goto(
+      `/app#access_token=${attacker.access_token}&refresh_token=${attacker.refresh_token}` +
+        '&expires_in=3600&token_type=bearer&type=magiclink',
+    );
+    await expect(page).toHaveURL(/\/app(?:\/[a-z-]*)?$/);
+    const stored = await page.evaluate(
+      (key) =>
+        JSON.parse(window.localStorage.getItem(key) ?? '{}') as {
+          access_token?: string;
+          refresh_token?: string;
+        },
+      STORAGE_KEY,
+    );
+    expect(stored.refresh_token).toBe(sessionFor(OWNER).refresh_token);
+    expect(stored.access_token).not.toBe(attacker.access_token);
+    // …and the tokens are gone from the address bar.
+    expect(await page.evaluate(() => window.location.hash)).toBe('');
   });
 });

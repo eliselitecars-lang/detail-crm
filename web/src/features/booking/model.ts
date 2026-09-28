@@ -600,7 +600,17 @@ export function classifyBookingError(
   error: unknown,
   /** Labels of the booking questions, so "<label> is required" goes back to details. */
   questionLabels: readonly string[] = [],
+  options: {
+    /**
+     * False when the booking questions failed to load: their labels are
+     * unknown, so any "<something> is required" goes back to the details
+     * step (where the questions can be loaded again and answered) instead
+     * of dead-ending on review.
+     */
+    questionsLoaded?: boolean;
+  } = {},
 ): ClassifiedBookingError {
+  const questionsLoaded = options.questionsLoaded ?? true;
   const appError = toAppError(error);
   const code = appError.code ?? '';
   const message = appError.message;
@@ -626,6 +636,7 @@ export function classifyBookingError(
     if (aboutQuestion || /booking question|answers/.test(text)) step = 'details';
     else if (/starts_at|time zone|daylight|time is no longer|not available on/.test(text))
       step = 'time';
+    else if (!questionsLoaded && /\bis required\b/.test(text)) step = 'details';
     else if (/not offered for this vehicle/.test(text)) step = 'services';
     else if (
       /service area|address|city|postal|region|mobile service|coupon|name|email|phone|notes|contact/.test(

@@ -32,6 +32,7 @@ import {
 } from '@/features/payments/paymentFormat';
 import {
   collectibleHelp,
+  isCheckoutOpenError,
   useCustomerCredits,
   useLookupGiftCard,
   useRecordManualPayment,
@@ -39,6 +40,7 @@ import {
   useRedeemGiftCard,
   type GiftCardLookup,
 } from '../api';
+import { CheckoutOpenNotice } from './CheckoutOpenNotice';
 
 export interface RecordPaymentDialogProps {
   open: boolean;
@@ -145,8 +147,10 @@ function RecordPaymentForm({
     defaultValues: { method: 'cash', amount: balanceCents, tip: null, note: '' },
   });
   const { errors, isSubmitting } = form.formState;
+  /** Refused while a card payment page is open: offer to release it and retry. */
+  const [held, setHeld] = useState<{ error: unknown; values: FormOutput } | null>(null);
 
-  const submit = form.handleSubmit(async (values) => {
+  const recordValues = async (values: FormOutput) => {
     try {
       await record.mutateAsync({
         amountCents: values.amount,
@@ -154,12 +158,19 @@ function RecordPaymentForm({
         tipCents: values.tip,
         note: values.note,
       });
+      setHeld(null);
       toast.success(`${formatCents(values.amount, { currency })} payment recorded`);
       onClose();
     } catch (error) {
-      toast.error(error);
+      if (isCheckoutOpenError(error)) setHeld({ error, values });
+      else {
+        setHeld(null);
+        toast.error(error);
+      }
     }
-  });
+  };
+
+  const submit = form.handleSubmit(recordValues);
 
   return (
     <form noValidate className="flex flex-col gap-4" onSubmit={(event) => void submit(event)}>
@@ -208,6 +219,13 @@ function RecordPaymentForm({
       <FormField label="Note" error={errors.note?.message} help="Check number, reference…">
         <Textarea rows={2} {...form.register('note')} />
       </FormField>
+      {held && (
+        <CheckoutOpenNotice
+          invoiceId={invoiceId}
+          error={held.error}
+          onRetry={() => recordValues(held.values)}
+        />
+      )}
       <div className="flex flex-wrap justify-end gap-2">
         <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
           Cancel
@@ -276,6 +294,8 @@ function GiftCodeForm({ invoiceId, balanceCents, currency, onClose }: RecordPaym
   const [card, setCard] = useState<GiftCardLookup | null | undefined>(undefined);
   const [amount, setAmount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Refused while a card payment page is open (see CheckoutOpenNotice). */
+  const [held, setHeld] = useState<unknown>(null);
   const trimmed = code.trim();
   const usable = card?.status === 'active' && card.balance_cents > 0;
   const max = card ? Math.min(card.balance_cents, balanceCents) : 0;
@@ -309,6 +329,7 @@ function GiftCodeForm({ invoiceId, balanceCents, currency, onClose }: RecordPaym
     }
     try {
       const payment = await redeem.mutateAsync({ code: trimmed, amountCents: amount });
+      setHeld(null);
       if (payment === null) {
         setCard(null);
         setError('No gift card has that code.');
@@ -317,7 +338,11 @@ function GiftCodeForm({ invoiceId, balanceCents, currency, onClose }: RecordPaym
       toast.success(`${formatCents(amount, { currency })} paid with gift card …${card.last4}`);
       onClose();
     } catch (err) {
-      setError(errorMessage(err));
+      if (isCheckoutOpenError(err)) setHeld(err);
+      else {
+        setHeld(null);
+        setError(errorMessage(err));
+      }
     }
   };
 
@@ -347,6 +372,7 @@ function GiftCodeForm({ invoiceId, balanceCents, currency, onClose }: RecordPaym
               setCode(event.target.value);
               setCard(undefined);
               setError(null);
+              setHeld(null);
             }}
           />
           <Button
@@ -393,6 +419,9 @@ function GiftCodeForm({ invoiceId, balanceCents, currency, onClose }: RecordPaym
       {card && !usable && (
         <p className="text-muted text-sm">This card can’t be used for payment.</p>
       )}
+      {held !== null && usable && (
+        <CheckoutOpenNotice invoiceId={invoiceId} error={held} onRetry={apply} />
+      )}
 
       <div className="flex flex-wrap justify-end gap-2">
         <Button variant="secondary" onClick={onClose} disabled={redeem.isPending}>
@@ -425,6 +454,8 @@ function StoreCreditForm({
   const max = selected ? Math.min(selected.balance_cents, balanceCents) : 0;
   const [amount, setAmount] = useState<number | null>(max > 0 ? max : null);
   const [error, setError] = useState<string | null>(null);
+  /** Refused while a card payment page is open (see CheckoutOpenNotice). */
+  const [held, setHeld] = useState<unknown>(null);
 
   if (credits.isPending) return <LoadingState variant="rows" rows={2} label="Loading credit…" />;
   if (list.length === 0) return <EmptyState compact title="No store credit left" />;
@@ -442,10 +473,15 @@ function StoreCreditForm({
     }
     try {
       await redeem.mutateAsync({ giftCardId: selected.id, amountCents: amount });
+      setHeld(null);
       toast.success(`${formatCents(amount, { currency })} of store credit applied`);
       onClose();
     } catch (err) {
-      setError(errorMessage(err));
+      if (isCheckoutOpenError(err)) setHeld(err);
+      else {
+        setHeld(null);
+        setError(errorMessage(err));
+      }
     }
   };
 
@@ -483,6 +519,7 @@ function StoreCreditForm({
       >
         <MoneyInput value={amount} onChange={setAmount} maxCents={max} />
       </FormField>
+      {held !== null && <CheckoutOpenNotice invoiceId={invoiceId} error={held} onRetry={apply} />}
       <div className="flex flex-wrap justify-end gap-2">
         <Button variant="secondary" onClick={onClose} disabled={redeem.isPending}>
           Cancel

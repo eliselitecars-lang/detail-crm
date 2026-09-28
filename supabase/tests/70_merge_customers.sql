@@ -301,13 +301,14 @@ select tests.ok((select notes like 'Prefers mornings' || E'\n\n' || 'Merged from
 select tests.eq((select jsonb_build_array(lifecycle, sms_opt_in, email_opt_in, sms_opted_out_at is not null, email_opted_out_at,
                                           portal_user_id = tests.fx('u_client'), stripe_customer_id, referral_code)
                    from public.customers where id = tests.fx('tgt')),
-                '["customer", false, true, true, null, true, "cus_TGT", "ALLY10"]'::jsonb,
-                'opt-ins stay the survivor''s, opt-outs are carried over, portal link and referral code taken from the duplicate');
+                '["customer", false, true, true, null, null, "cus_TGT", "ALLY10"]'::jsonb,
+                'opt-ins stay the survivor''s, opt-outs are carried over, referral code taken from the duplicate; the duplicate''s portal link is NOT (0107: the survivor keeps alice@, the link was for ally@)');
 
--- the portal client now sees the survivor's records
+-- the duplicate's portal account does not get the survivor's records (0107;
+-- 100_portal_link_realtime.sql covers a survivor that takes the duplicate's email)
 select tests.authenticate_as(tests.fx('u_client'));
-select tests.eq((select jsonb_array_length(o -> 'upcoming_jobs') + jsonb_array_length(o -> 'past_jobs')
-                   from (select public.portal_overview() as o) x), 3, 'the linked client sees all three jobs');
+select tests.eq((select jsonb_array_length(o -> 'customers') + jsonb_array_length(o -> 'upcoming_jobs') + jsonb_array_length(o -> 'past_jobs')
+                   from (select public.portal_overview() as o) x), 0, 'the duplicate''s portal account sees nothing of the survivor');
 
 -- ============================================================ refused merges
 select tests.authenticate_as(tests.fx('u_admin_a'));

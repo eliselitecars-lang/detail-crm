@@ -11,6 +11,7 @@ import {
   billingBanner,
   daysLeftText,
   GO_TO_BILLING,
+  LAPSED_BANNER_DETAIL,
   LAPSED_MESSAGE,
   PAST_DUE_MESSAGE,
   type BillingBannerKind,
@@ -77,7 +78,7 @@ export function BillingBanner() {
   } else if (banner.kind === 'past_due') {
     text = PAST_DUE_MESSAGE;
   } else {
-    text = `${LAPSED_MESSAGE} You can still view everything.`;
+    text = `${LAPSED_MESSAGE} ${LAPSED_BANNER_DETAIL}`;
   }
 
   return (

@@ -575,6 +575,17 @@ final class NewJobModel {
     /// Whether this job is created as a recurring series.
     var createsSeries: Bool { repeatEnabled && !scheduleLater }
 
+    /// Whether the member discount applies to what Create makes. A
+    /// repeating job always gets it: `create_job_series` takes no discount
+    /// choice and prices every visit it generates with the membership's
+    /// suggested percent (0051), so the switch only decides a one-off job.
+    var appliesMemberDiscount: Bool {
+        MemberDiscountChoice.applies(switchOn: applyMemberDiscount, repeating: createsSeries)
+    }
+
+    /// The member discount can be switched off (a one-off job only).
+    var memberDiscountIsOptional: Bool { MemberDiscountChoice.isOptional(repeating: createsSeries) }
+
     /// What stops a series from being created, if anything.
     var repeatProblem: String? {
         guard createsSeries else { return nil }
@@ -725,7 +736,7 @@ final class NewJobModel {
             if let createdJob {
                 job = createdJob
             } else {
-                let discountBps = applyMemberDiscount ? suggestedDiscountBps : 0
+                let discountBps = appliesMemberDiscount ? suggestedDiscountBps : 0
                 let isMobile = locationType == .mobile
                 let draft = JobCreateDraft(
                     customerID: customer.id,

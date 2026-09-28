@@ -50,7 +50,11 @@ ios/
   supabase-swift defaults to PKCE): the app has no URL scheme, so
   password-reset and sign-up confirmation emails open the web app, which
   can only redeem a link that carries the session in its fragment, not a
-  PKCE `?code=` whose verifier is in the phone's keychain.
+  PKCE `?code=` whose verifier is in the phone's keychain. `AuthLinks`
+  (DetailCore) sends them to `WEB_APP_URL/reset-password` and
+  `WEB_APP_URL/auth/callback`: the web accepts link tokens only on those
+  pages and scrubs them anywhere else, so a confirmation to the Site URL
+  root would leave the person on the sign-in page, not signed in.
   **Session expiry:** when the session is over (Auth refuses a refresh, or
   the Auth client drops the session itself) AppState signs out through its
   one sign-out path, on this device only, and the sign-in screen shows
@@ -109,7 +113,9 @@ ios/
   slug rules identical to the database), `SessionExpiry` (when a refused
   request means the session is over; `SessionExpiryGate`),
   `ShopEntitlement` (the shop's subscription standing, which status line
-  to show, and the PT402 / HTTP 402 refusal text).
+  to show, and the PT402 / HTTP 402 refusal text), `UnsentVideoWarning`
+  (the sign-out / discard / account-deletion wording while job videos
+  haven't finished uploading).
 
 ## Shared building blocks (jobs agent; other features use them read-only)
 
@@ -131,7 +137,13 @@ ios/
   resumable across launches); used for job videos (`job-media` bucket).
   Pending uploads belong to the account that recorded them: only that user
   lists and resumes them, Sign out deletes them (and the local copies), and
-  another account signing in deletes the previous one's.
+  another account signing in deletes the previous one's. The camera
+  recorder doesn't save to Photos, so a pending upload is the only copy:
+  every Sign out button confirms through `ConfirmationRequest.signOut`,
+  which names the unsent videos it would delete (DetailCore
+  `UnsentVideoWarning`; account deletion adds the same note), and a paused
+  upload's menu has "Save or share video" (share sheet, incl. Save Video)
+  and a confirmed "Discard this video".
 * Theme additions: `Theme.scrim` (dark overlay behind white text on
   camera / video) and `Theme.Typography.caption2`.
 
@@ -152,6 +164,13 @@ ios/
   or not found) and send it with `clock_in` / `clock_out` through
   `TimeClockService` (`p_lat`, `p_lng`, `p_accuracy_m`). The punch goes
   through without a location; nothing is tracked in the background.
+* **Week totals (Time Clock, Team time).** `TimeClockService.entries`
+  loads every entry that overlaps the shop week (starts before it ends and
+  is open or ends after it starts), and `TimeClockTotalsRow` counts only
+  each entry's part inside the week (DetailCore `TimeTotals`), the same cut
+  as the web timesheet and `report_team`: a shift across Sunday night is
+  split between the two weeks, and a shift left open from last week is
+  listed (so a manager can close it) and counts from Monday.
 * **Customer screen:** custom fields (`OpsCustomerCustomDataSection`),
   documents (`OpsCustomerDocumentsSection`), referral link
   (`OpsReferralCodeRow`).
@@ -185,6 +204,15 @@ ios/
   location access first (see below).
 * **Memberships** support weekly plans, visit limits (`Membership.Usage`,
   `MoneyMembershipUsageRow`) and "Offer on the online join page".
+* **Save a card without charging** (customer screen, managers and above):
+  `CustomerAddCardSheet` calls `payments` `setup_card` and opens Stripe's
+  PaymentSheet in setup mode; the webhook stores the card and the sheet
+  polls `PaymentService.awaitNewSavedCard` until it shows.
+* **Status reasons** (cancel reason, completion-gate override) are checked
+  against the server's 500-character limit (DetailCore
+  `Validation.statusReasonMaxLength`, counted like Postgres `char_length`)
+  and sent whole; the app never cuts a reason short. The cancel reason is
+  shown to the customer on their booking page.
 
 ## Shop subscription status (billing)
 
@@ -247,7 +275,9 @@ verification, geostamped clock-in, the day map), Bluetooth (card readers).
 2. **Every data screen owns a `LoadState<T>`** and renders it with
    `LoadStateView` (loading / error-with-retry / content); empty collections
    render `EmptyStateView`. Refresh failures while content is on screen go to
-   `toasts.showError(error)`. Human text for any error: `ErrorText.message(for:)`
+   `toasts.showError(error)`. Every toast is also announced to VoiceOver
+   (`ToastCenter`, DetailCore `ToastSpeech`), so don't post a second
+   announcement for the same outcome. Human text for any error: `ErrorText.message(for:)`
    (PostgREST errors keep the server's wording; PT402 / HTTP 402 is the
    shop's inactive subscription, see "Shop subscription status").
 3. **Theme tokens only.** Colors, fonts, spacing, radii and button styles come
@@ -305,8 +335,28 @@ verification, geostamped clock-in, the day map), Bluetooth (card readers).
    Quote / invoice messages are rendered and queued by the server
    (`messaging` send with `quote_id` / `invoice_id`; preview from
    `preview_document_message`) — the app never renders document wording.
+11. **Money attempts.** Stripe refunds and saved-card charges send a
+   `request_nonce` per attempt (`RequestAttempt` in DetailCore, the same rule
+   as the web dialogs): kept when the server may have acted without
+   answering (no answer, 5xx), so tapping again is a retry and never moves
+   money twice; replaced after a success or a 4xx, so a deliberate second
+   refund of the same amount is a new refund (without a nonce the server
+   refuses it for 10 minutes as `possible_duplicate_refund`).
+   Cash / check payments and gift card / store credit redemptions go
+   through `PaymentService.releasingOpenCheckouts`: while a card payment
+   page of the invoice (or of a job it bills) can still be paid the
+   database refuses them (0109, 55000 HINT `checkout_open`), so the app
+   releases the pages (`cancel_open_payments`) and tries once more
+   (`OpenCheckoutRefusal` in DetailCore); a page already processing keeps
+   the server's message, which names when it closes.
+12. **Complete lists page.** PostgREST returns at most `max_rows` (1,000)
+   rows per request whatever `.limit(...)` asks for, without saying so. A
+   list the app must hold in full (the catalog's services and prices, which
+   the price editor diffs against) is read with `PagedQuery.all`: ranges of
+   500 with an exact count, ordered by a unique key; `PagedRows`
+   (DetailCore) throws rather than return a partial list.
 
-## Running locally (macOS with Xcode 16+)
+## Running locally (macOS with Xcode 26+)
 
 1. Put your Supabase project URL and anon key in
    `DetailCRM/DetailCRM/Config.plist` (never commit real values). Until then
@@ -322,15 +372,29 @@ verification, geostamped clock-in, the day map), Bluetooth (card readers).
 3. DetailCore tests: `cd ios/DetailCore && swift test` (works on macOS and on
    Linux with a Swift 5.9+ toolchain).
 
+TestFlight builds come from `.github/workflows/ios-testflight.yml`
+(`fastlane/Fastfile`, docs/DEPLOY.md section 5). They must be built with
+Xcode 26 / the iOS 26 SDK or later: App Store Connect rejects uploads from
+older SDKs (Apple's minimum since April 28, 2026). Both workflows pick the
+Xcode with `ci/select_xcode.sh` (newest release Xcode, at least
+`MIN_XCODE_MAJOR` = 26; tests in `ci/select_xcode_test.sh`) and the lane
+refuses to upload an archive built with an older SDK (`MIN_UPLOAD_SDK_MAJOR`). The build number rises by
+itself; the app version (`MARKETING_VERSION`, 1.0) does not: after each App
+Store approval run the workflow with `app_version` or raise
+`MARKETING_VERSION` in the project, or the upload is rejected.
+
 ## How CI verifies (`.github/workflows/ios.yml`)
 
-Runs on `macos-15` for pushes that touch `ios/**`, `scripts/swift_sanity.py`
+Runs on `macos-26` with the TestFlight workflow's Xcode (`ci/select_xcode.sh`,
+26 or later) for pushes that touch `ios/**`, `scripts/swift_sanity.py`
 or the workflow, and on manual dispatch (macOS minutes are expensive — batch
 iOS changes):
 
 1. `python3 scripts/swift_sanity.py --self-test` and `python3 scripts/swift_sanity.py`
    (bracket balance ignoring strings/comments, pbxproj id integrity,
-   model annotations, forbidden patterns, FEATURE_STUB count; `--strict`
+   model annotations, forbidden patterns, sign-out only through
+   `ConfirmationRequest.signOut`, the workflows' Xcode choice through
+   `ci/select_xcode.sh`, FEATURE_STUB count; `--strict`
    additionally fails while any stub remains).
 2. `swift test` in `ios/DetailCore`.
 3. `xcodebuild -resolvePackageDependencies` (SPM checkouts cached by

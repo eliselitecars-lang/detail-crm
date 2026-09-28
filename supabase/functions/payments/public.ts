@@ -7,6 +7,9 @@
  *   quote_deposit_checkout    /q/<token>        pay the deposit of the job the
  *                                               customer scheduled from the
  *                                               approved quote (P-16)
+ *   booking_cancel            /booking/<token>  the customer cancels the booking:
+ *                                               its open payment pages are
+ *                                               expired first (0106)
  * Amounts come from the database; the client can only add a bounded tip.
  * Sessions live ~30–40 minutes (checkoutRequest) and a new one expires the
  * document's older open sessions, so a stale link cannot be paid twice. The
@@ -27,17 +30,24 @@
  * debits and pay-later when the shop enabled them in Stripe. The card is
  * saved for later through the card options (SAVE_CARD_OPTIONS); Link is not
  * offered (NO_LINK_WALLET), since a Link payment would leave no card on file.
+ *
+ * Holds (0106, checkout_holds.ts): a deposit link and a single-job invoice's
+ * pay link are recorded against the job before the URL is returned, so the
+ * customer's online cancel waits for (booking_cancel: expires) them.
  */
 import { z } from "zod";
-import { errors } from "../_shared/errors.ts";
+import { getMembership, hasRole, ROLES } from "../_shared/auth.ts";
+import { errors, HttpError, subscriptionRefusal } from "../_shared/errors.ts";
 import { links, withQuery } from "../_shared/links.ts";
 import { nonNegativeCents, publicToken, requestNonce } from "../_shared/schemas.ts";
+import { bearerToken, callerClient, getCaller } from "../_shared/supabase.ts";
 import {
   assertPayable,
   boundedTip,
   chargeable,
   checkoutRequest,
   createCheckoutSession,
+  type DbError,
   dbFailure,
   ensureStripeCustomer,
   expireOpenSessions,
@@ -55,11 +65,15 @@ import {
   payableBalance,
   paymentInProgress,
   platformFee,
+  publicValidationMessage,
+  refusedWith,
+  rpcError,
   SAVE_CARD_OPTIONS,
   type Services,
   sessionFor,
 } from "./lib.ts";
 import { settleInvoice, settleJob } from "./settle.ts";
+import { holdJobCheckout, refuseClosedJobSession, releaseJobCheckouts } from "./checkout_holds.ts";
 
 export const invoiceCheckoutInput = z.object({
   token: publicToken,
@@ -182,6 +196,11 @@ export async function invoiceCheckout(
     "invoice_checkout",
     [invoice.id, balance, tip, stripeCustomer, request.part],
   );
+  // 0106: the job's customer cannot cancel the booking online while this
+  // link can still be paid. A closed job (completed, cancelled, no-show)
+  // cannot be cancelled anyway, so its invoice stays payable without a hold.
+  // A grouped invoice (no job_id) pays several jobs and is not held.
+  if (invoice.job_id) await holdJobCheckout(s, shop.id, invoice.job_id, session);
   // One live link per invoice: older sessions (other device, old balance or
   // tip) can no longer be paid.
   await expireOpenSessions(
@@ -430,6 +449,11 @@ async function depositCheckout(
     "deposit_checkout",
     [job.id, due, stripeCustomer, request.part],
   );
+  // 0106: held before the URL is handed out, so the customer's online cancel
+  // waits for this page; a job that closed meanwhile gets no deposit link.
+  if (await holdJobCheckout(s, shop.id, job.id, session) === "closed") {
+    await refuseClosedJobSession(s, account, session.id);
+  }
   // One live deposit link per job (whichever page opened it).
   await expireOpenSessions(
     s,
@@ -445,4 +469,153 @@ async function depositCheckout(
     tip_cents: 0,
     currency: shop.currency,
   };
+}
+
+// ---------------------------------------------------------------------------
+// booking_cancel — the customer cancels their booking (/booking/<token>, portal)
+// ---------------------------------------------------------------------------
+
+export const bookingCancelInput = z.object({
+  token: publicToken,
+  /** Optional note for the shop (the database allows 1,000 characters). */
+  reason: z.string().max(4_000).optional(),
+}).strict();
+
+const TECHNICIAN_CANCEL_REFUSED = "Only owners, admins and managers can cancel appointments.";
+
+/**
+ * The customer's online cancel (0106). Every payment page of the booking
+ * that can still be paid — its deposit links, its invoice's pay links — is
+ * expired and released first (409 payment_in_progress when one was just
+ * paid), then public_cancel_booking runs AS THE CALLER, so its own rules
+ * apply unchanged: the status and cancel deadline, 0096's payment_pending,
+ * 0106's checkout_open (a page opened meanwhile), and a technician of the
+ * shop is refused (42501) unless they are the booking's own customer.
+ * Links are left alone when the cancel would be refused anyway (the
+ * booking page's `cancellation.allowed` is false, or a payment is going
+ * through), so a customer past the deadline keeps their deposit page.
+ * Returns the booking document (public_get_booking's shape).
+ */
+export async function bookingCancel(
+  s: Services,
+  req: Request,
+  input: z.output<typeof bookingCancelInput>,
+): Promise<unknown> {
+  const { data, error } = await s.admin
+    .from("jobs")
+    .select(JOB_COLUMNS)
+    .eq("public_token", input.token)
+    .maybeSingle();
+  if (error) throw dbFailure("jobs lookup", error);
+  const job = data as JobRow | null;
+  if (!job) throw errors.notFound("Booking not found.");
+  await refuseTechnicianCancel(s, req, job);
+
+  if (await cancelWouldProceed(s, job)) {
+    const account = await findAccount(s.admin, job.shop_id);
+    if (account) {
+      const live = await liveInvoiceForJob(s.admin, job.shop_id, job.id);
+      const deposit = sessionFor.deposit(job.shop_id, job.id);
+      const invoiceLinks = sessionFor.jobInvoices(job.shop_id, job.id, live?.id ?? null);
+      await releaseJobCheckouts(
+        s,
+        account,
+        job,
+        (session) => deposit(session) || invoiceLinks(session),
+        { refuseCompleted: true },
+      );
+    }
+  }
+
+  const reason = input.reason?.trim() ?? "";
+  const cancelled = await callerClient(req, {
+    env: s.env,
+    ...(s.fetch ? { fetch: s.fetch } : {}),
+  }).rpc("public_cancel_booking", {
+    p_token: job.public_token,
+    ...(reason ? { p_reason: reason } : {}),
+  });
+  if (cancelled.error) throw cancelRefusal(cancelled.error);
+  return cancelled.data;
+}
+
+/**
+ * public_cancel_booking's technician rule, checked before any payment page
+ * is touched: an active technician of the shop may not cancel unless they
+ * are the booking's own customer (signed in to the portal).
+ */
+async function refuseTechnicianCancel(s: Services, req: Request, job: JobRow): Promise<void> {
+  const token = bearerToken(req);
+  // Signed out: the web page sends the anon key, which is nobody.
+  if (!token || token === s.env.supabase().anonKey) return;
+  const caller = await getCaller(req, { admin: s.admin });
+  if (!caller || caller.isAnonymous) return;
+  const membership = await getMembership(s.admin, job.shop_id, caller.id);
+  if (!membership || hasRole(membership, ROLES.managerPlus)) return;
+  const { data, error } = await s.admin
+    .from("customers")
+    .select("id")
+    .eq("shop_id", job.shop_id)
+    .eq("id", job.customer_id)
+    .eq("portal_user_id", caller.id)
+    .maybeSingle();
+  if (error) throw dbFailure("customers lookup", error);
+  if (!data) throw errors.forbidden(TECHNICIAN_CANCEL_REFUSED);
+}
+
+/**
+ * Would public_cancel_booking go ahead? Its status / deadline rule
+ * (`cancellation.allowed`) and 0096's payment check, read from the booking
+ * page's own document.
+ */
+async function cancelWouldProceed(s: Services, job: JobRow): Promise<boolean> {
+  const summary = await s.admin.rpc("public_get_booking", { p_token: job.public_token });
+  if (summary.error) {
+    if (summary.error.code === "PT404" || summary.error.code === "P0002") {
+      throw errors.notFound("Booking not found.");
+    }
+    throw dbFailure("public_get_booking", summary.error);
+  }
+  const doc = summary.data as {
+    cancellation?: { allowed?: unknown };
+    deposit?: { payment_pending?: unknown };
+  } | null;
+  return doc?.cancellation?.allowed === true && doc.deposit?.payment_pending !== true;
+}
+
+/** public_cancel_booking's refusals as stable HTTP errors (its messages are written for the customer). */
+function cancelRefusal(error: DbError): Error {
+  const paused = subscriptionRefusal(error);
+  if (paused) return paused;
+  const message = (fallback: string) => publicValidationMessage(error, fallback);
+  switch (error.code) {
+    case "PT404":
+    case "P0002":
+      return errors.notFound("Booking not found.");
+    case "42501":
+      return errors.forbidden(TECHNICIAN_CANCEL_REFUSED);
+    case "22023":
+      return new HttpError(
+        "unprocessable",
+        message("This booking can no longer be cancelled online. Please call the shop."),
+        { cause: error },
+      );
+    case "55000": {
+      const reason = refusedWith(error, "55000", "checkout_open")
+        ? "checkout_open"
+        : refusedWith(error, "55000", "payment_in_progress", /payment .* still going through/)
+        ? "payment_in_progress"
+        : null;
+      if (reason) {
+        return new HttpError(
+          "conflict",
+          message("A payment for this booking is still open. Try again in a few minutes."),
+          { cause: error, details: { reason } },
+        );
+      }
+      return rpcError("public_cancel_booking", error);
+    }
+    default:
+      return rpcError("public_cancel_booking", error);
+  }
 }

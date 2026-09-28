@@ -5,34 +5,77 @@
 
 export type E164 = string;
 
-const E164_RE = /^\+[1-9]\d{7,14}$/;
+/**
+ * E.164 exactly as the database checks it (`public.is_valid_e164`, 0001:
+ * `^\+[1-9][0-9]{6,14}$`): 7–15 digits, no leading 0. The iPhone app
+ * (DetailCore PhoneNumber.swift) applies the same rules, so a number saved
+ * on one is accepted by the other.
+ */
+const E164_RE = /^\+[1-9]\d{6,14}$/;
+
+/** Extension markers, checked in this order (same as the iPhone app). */
+const EXTENSION_MARKERS = ['ext.', 'ext', 'x', '#'] as const;
+/** Characters allowed between the digits. */
+const PUNCTUATION = new Set([' ', '-', '.', '(', ')', '/', '\u00A0']);
 
 function isValidNanp(national: string): boolean {
   // NXX-NXX-XXXX: area code and exchange cannot start with 0 or 1.
   return /^[2-9]\d{2}[2-9]\d{6}$/.test(national);
 }
 
+/** Leading spaces / "(" before a "+" ("( +44 …"). */
+function leadingOffset(text: string): number {
+  let offset = 0;
+  for (const ch of text) {
+    if (ch === ' ' || ch === '\u00A0' || ch === '(') offset += 1;
+    else break;
+  }
+  return offset;
+}
+
 /**
  * Normalises user input to E.164 or returns `null` if it can't be a valid
  * number. Accepts "(205) 555-0123", "205.555.0123", "1-205-555-0123",
- * "+1 205 555 0123", "+44 20 7946 0958". Extensions are not supported.
+ * "+1 205 555 0123", "+44 20 7946 0958", "0044 20 7946 0958". An extension
+ * ("x12", "ext. 4", "#5") is dropped. NANP (+1) numbers are checked strictly;
+ * other international numbers need a leading "+" or "00".
  */
 export function normalizePhone(input: string | null | undefined): E164 | null {
   if (!input) return null;
-  const trimmed = input.trim();
-  if (trimmed === '') return null;
-  if (/[a-z]/i.test(trimmed)) return null;
+  let text = input.trim();
+  if (text === '') return null;
 
-  const hasPlus = trimmed.startsWith('+') || trimmed.startsWith('00');
-  let digits = trimmed.replace(/\D/g, '');
-  if (trimmed.startsWith('00')) digits = digits.slice(2);
-
-  if (hasPlus) {
-    if (digits.startsWith('1')) {
-      return digits.length === 11 && isValidNanp(digits.slice(1)) ? `+${digits}` : null;
+  const lower = text.toLowerCase();
+  for (const marker of EXTENSION_MARKERS) {
+    const at = lower.indexOf(marker);
+    if (at >= 0) {
+      text = text.slice(0, at);
+      break;
     }
+  }
+
+  let international = false;
+  let digits = '';
+  const plusAt = leadingOffset(text);
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charAt(i);
+    if (ch >= '0' && ch <= '9') digits += ch;
+    else if (ch === '+' && i === plusAt && digits === '') international = true;
+    else if (!PUNCTUATION.has(ch)) return null;
+  }
+
+  if (!international && digits.startsWith('00')) {
+    international = true;
+    digits = digits.slice(2);
+  }
+
+  if (international) {
     const candidate = `+${digits}`;
-    return E164_RE.test(candidate) ? candidate : null;
+    if (!E164_RE.test(candidate)) return null;
+    if (digits.startsWith('1')) {
+      return digits.length === 11 && isValidNanp(digits.slice(1)) ? candidate : null;
+    }
+    return candidate;
   }
 
   if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);

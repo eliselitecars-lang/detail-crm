@@ -67,12 +67,14 @@ export async function startFakeLive({ ref, anon, service, token, app, faults = [
         if (/platform_config/.test(q)) return send(201, [{ value: app }]);
         if (/cron\.job/.test(q)) {
           const jobs = [
+            'detail-crm-billing-sync-customers',
             'detail-crm-billing-sync-plans',
             'detail-crm-expire-quotes',
             'detail-crm-generate-series',
             'detail-crm-process-queue',
             'detail-crm-push',
             'detail-crm-run-automations',
+            'detail-crm-sms-releases',
             'detail-crm-sms-status',
             'detail-crm-storage-purge',
             'detail-crm-sweep-payment-sheets',

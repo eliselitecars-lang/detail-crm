@@ -110,6 +110,15 @@ describe('PrivacyPage', () => {
     expect(text).toContain('Clocking in or out in the web app records no location');
   });
 
+  it('discloses the IP address (and account) recorded with each online booking (0104/0105)', () => {
+    renderPage('privacy', UNSET);
+    const text = (document.body.textContent ?? '').replace(/\s+/g, ' ');
+    expect(text).toContain(
+      'When an online booking is accepted, the IP address of the device (and, if the customer is signed in, their account) is also recorded',
+    );
+    expect(text).toContain('these records older than two days are deleted');
+  });
+
   it('says the operator’s Stripe account receives the shop’s subscription billing details', () => {
     renderPage('privacy', UNSET);
     const text = document.body.textContent ?? '';

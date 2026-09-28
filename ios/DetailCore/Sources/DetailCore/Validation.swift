@@ -114,6 +114,35 @@ public enum Validation {
     public static func isAcceptablePassword(_ password: String) -> Bool {
         password.count >= minimumPasswordLength
     }
+
+    // MARK: - Status reasons
+
+    /// Longest reason `set_job_status` accepts, for a cancel reason (shown
+    /// to the customer on their booking page) and a completion-gate
+    /// override reason. Server: 0073 `char_length(v_reason) > 500`; web:
+    /// `REASON_MAX` in StatusControl.
+    public static let statusReasonMaxLength = 500
+
+    /// Length as Postgres `char_length` counts it (Unicode scalars, so an
+    /// emoji with modifiers counts as several), after the trim the server
+    /// applies.
+    public static func serverLength(_ input: String) -> Int {
+        input.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count
+    }
+
+    /// The message to show when a status reason is too long, else nil.
+    /// The app never cuts a reason short: the text the person typed is the
+    /// text that is saved, or nothing is saved.
+    public static func statusReasonProblem(_ input: String) -> String? {
+        let length = serverLength(input)
+        guard length > statusReasonMaxLength else { return nil }
+        return "Keep the reason to \(statusReasonMaxLength) characters or fewer (it's \(length) now)."
+    }
+
+    /// "123 / 500" counter text for a status reason field.
+    public static func statusReasonCounter(_ input: String) -> String {
+        "\(serverLength(input)) / \(statusReasonMaxLength)"
+    }
 }
 
 extension Character {

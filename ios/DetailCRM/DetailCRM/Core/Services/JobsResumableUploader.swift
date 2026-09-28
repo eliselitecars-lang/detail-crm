@@ -12,7 +12,8 @@
 //
 //  Uploads belong to the account that recorded them: only that user sees
 //  and resumes them, a deliberate sign-out deletes every pending upload
-//  (and its local copy), and signing in as someone else deletes the
+//  (and its local copy; the sign-out confirmation names them, since the
+//  camera recorder never saves to Photos), and signing in as someone else deletes the
 //  previous accounts' ones. An expired session keeps them for when the
 //  same user signs back in.
 //

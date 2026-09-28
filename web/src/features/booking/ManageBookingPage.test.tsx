@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderRoute } from '@/test/render';
 import { navigation } from '@/features/public-docs/shared/checkout';
 import {
+  edgeHttpError,
   mockRpc,
-  pgError,
   resetSupabaseMock,
   setFunctionResult,
   supabase,
@@ -96,7 +96,7 @@ describe('ManageBookingPage', () => {
     expect(assign).not.toHaveBeenCalled();
   });
 
-  it('cancels with a reason and shows the cancelled state', async () => {
+  it('cancels with a reason through the payments edge (booking_cancel) and shows the cancelled state', async () => {
     const cancelled = bookingDocFixture({
       booking: {
         ...bookingDocFixture().booking,
@@ -106,21 +106,40 @@ describe('ManageBookingPage', () => {
       },
       cancellation: { ...bookingDocFixture().cancellation, allowed: false },
     });
-    const calls = mockRpc({
-      public_get_booking: { data: bookingDocFixture() },
-      public_cancel_booking: { data: cancelled },
-    });
+    const calls = mockRpc({ public_get_booking: { data: bookingDocFixture() } });
+    setFunctionResult('payments', { data: cancelled });
     const { user } = render();
     await user.click(await screen.findByRole('button', { name: 'Cancel booking' }));
     const dialog = screen.getByRole('alertdialog');
-    await user.type(within(dialog).getByLabelText('Reason (optional)'), 'Out of town');
+    await user.type(within(dialog).getByLabelText('Reason (optional)'), '  Out of town ');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel booking' }));
     expect(await screen.findByText('This booking was cancelled')).toBeInTheDocument();
-    expect(calls.find((c) => c.fn === 'public_cancel_booking')?.args).toEqual({
-      p_token: TOKEN,
-      p_reason: 'Out of town',
+    // The edge expires the booking's open payment pages, then cancels as the
+    // caller; the RPC is never called directly (it would refuse while a
+    // deposit page the customer opened is still alive — 0106).
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+      body: { action: 'booking_cancel', token: TOKEN, reason: 'Out of town' },
     });
+    expect(calls.some((c) => c.fn === 'public_cancel_booking')).toBe(false);
     expect(screen.queryByRole('button', { name: /deposit/ })).not.toBeInTheDocument();
+  });
+
+  it('sends no reason when none was typed', async () => {
+    const cancelled = bookingDocFixture({
+      booking: { ...bookingDocFixture().booking, status: 'cancelled' },
+      cancellation: { ...bookingDocFixture().cancellation, allowed: false },
+    });
+    mockRpc({ public_get_booking: { data: bookingDocFixture() } });
+    setFunctionResult('payments', { data: cancelled });
+    const { user } = render();
+    await user.click(await screen.findByRole('button', { name: 'Cancel booking' }));
+    await user.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel booking' }),
+    );
+    expect(await screen.findByText('This booking was cancelled')).toBeInTheDocument();
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+      body: { action: 'booking_cancel', token: TOKEN },
+    });
   });
 
   it('does not show the job total as a balance on a cancelled booking', async () => {
@@ -146,12 +165,12 @@ describe('ManageBookingPage', () => {
   });
 
   it('shows the server’s reason when cancelling is refused', async () => {
-    mockRpc({
-      public_get_booking: { data: bookingDocFixture() },
-      public_cancel_booking: pgError(
-        '22023',
-        'online cancellation closed 24 hours before the appointment; please call the shop',
-      ),
+    const calls = mockRpc({ public_get_booking: { data: bookingDocFixture() } });
+    setFunctionResult('payments', {
+      error: edgeHttpError(422, {
+        error: 'Online cancellation closed 24 hours before the appointment; please call the shop.',
+        code: 'unprocessable',
+      }),
     });
     const { user } = render();
     await user.click(await screen.findByRole('button', { name: 'Cancel booking' }));
@@ -163,6 +182,46 @@ describe('ManageBookingPage', () => {
         'Online cancellation closed 24 hours before the appointment; please call the shop.',
       ),
     ).toBeInTheDocument();
+    // The page reloads the booking so its cancellation window is current.
+    await waitFor(() =>
+      expect(calls.filter((c) => c.fn === 'public_get_booking').length).toBeGreaterThan(1),
+    );
+  });
+
+  it('shows the server’s reason when a payment page opened meanwhile blocks the cancel (409)', async () => {
+    mockRpc({ public_get_booking: { data: bookingDocFixture() } });
+    setFunctionResult('payments', {
+      error: edgeHttpError(409, {
+        error:
+          'A payment page for this booking is still open; please close it and try again in a few minutes, or call the shop.',
+        code: 'conflict',
+        details: { reason: 'checkout_open' },
+      }),
+    });
+    const { user } = render();
+    await user.click(await screen.findByRole('button', { name: 'Cancel booking' }));
+    await user.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel booking' }),
+    );
+    expect(
+      await screen.findByText(
+        'A payment page for this booking is still open; please close it and try again in a few minutes, or call the shop.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('holds online cancelling while a deposit payment is still going through', async () => {
+    const pending = bookingDocFixture({
+      deposit: { ...bookingDocFixture().deposit, payment_pending: true },
+    });
+    const calls = mockRpc({ public_get_booking: { data: pending } });
+    render();
+    const button = await screen.findByRole('button', { name: 'Cancel booking' });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription(
+      expect.stringContaining('A payment for this booking is still going through'),
+    );
+    expect(calls.some((c) => c.fn === 'public_cancel_booking')).toBe(false);
   });
 
   it('confirms a returning deposit payment once the webhook has landed', async () => {

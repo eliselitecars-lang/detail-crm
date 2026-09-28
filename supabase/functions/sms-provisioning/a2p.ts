@@ -22,7 +22,7 @@ import {
   str,
   TRUSTHUB_API,
   type TwilioClient,
-} from "./twilio_api.ts";
+} from "../_shared/twilio_api.ts";
 
 const text = (min: number, max: number) => z.string().trim().min(min).max(max);
 const httpsUrl = z.url({ protocol: /^https?$/ }).max(500);

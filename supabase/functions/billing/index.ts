@@ -19,11 +19,25 @@
  *               expired, so at most one payable link exists at a time.
  *   portal      {shop_id}                           owner only -> {url}
  *               Stripe Customer Portal (plan changes, cancellation, card).
+ *   sync_customer  {shop_id}                        owner/admin -> {synced}
+ *               Readdresses the shop's platform customer to its CURRENT
+ *               owner (call it after transfer_ownership).
  *   sync_plans  {}                                  pg_cron / deploy (x-cron-secret)
  *               -> {upserted, deactivated, skipped, warnings}
+ *   sync_customers {}                               pg_cron (x-cron-secret)
+ *               -> {checked, updated, failed}
+ *
+ * The platform customer is where Stripe sends the shop's receipts, renewal
+ * notices and failed-payment (dunning) emails, so it must follow the shop's
+ * owner: it carries the owner's email and metadata.owner_user_id. checkout,
+ * portal and sync_customer update it when the owner (or the owner's email)
+ * changed; sync_customers (daily) catches every ownership transfer the
+ * client did not report, by comparing metadata.owner_user_id with the
+ * shop's current owner.
  *
  * verify_jwt = false (config.toml): pg_cron and the deploy call sync_plans
- * without a Supabase JWT. plans / checkout / portal verify the caller's
+ * and sync_customers without a Supabase JWT. plans / checkout / portal /
+ * sync_customer verify the caller's
  * session here (requireUser) and the role in the shop (requireShopRole), so a
  * missing session is this function's own 401 envelope.
  *
@@ -79,6 +93,7 @@ export const CHECKOUT_TTL_MS = 60 * 60 * 1000;
 const ENDED_SUBSCRIPTION = new Set<string>(["canceled", "incomplete_expired"]);
 
 const CUSTOMER_ID = /^cus_[A-Za-z0-9]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const emptyInput = z.object({}).strict();
 const checkoutInput = z.object({
@@ -87,6 +102,7 @@ const checkoutInput = z.object({
   request_nonce: requestNonce.optional(),
 }).strict();
 const portalInput = z.object({ shop_id: uuid }).strict();
+const syncCustomerInput = z.object({ shop_id: uuid }).strict();
 
 /** billing_checkout_context (0101): the shop's billing facts for the caller. */
 export interface CheckoutContext {
@@ -205,7 +221,7 @@ export async function listPlans(s: Services, caller: SupabaseClient): Promise<{
 async function checkoutContext(
   admin: SupabaseClient,
   shopId: string,
-  userId: string,
+  userId: string | null,
 ): Promise<CheckoutContext> {
   const { data, error } = await admin.rpc("billing_checkout_context", {
     p_shop_id: shopId,
@@ -228,13 +244,94 @@ async function checkoutContext(
 }
 
 /** The caller, verified as the owner of `shopId` (403 for everyone else). */
-async function requireOwner(s: Services, req: Request, shopId: string): Promise<CheckoutContext> {
+async function requireOwner(
+  s: Services,
+  req: Request,
+  shopId: string,
+): Promise<{ context: CheckoutContext; ownerId: string }> {
   const caller = await requireUser(req, { admin: s.admin });
   await requireShopRole(s.admin, caller, shopId, ROLES.owner);
   const context = await checkoutContext(s.admin, shopId, caller.id);
   // The RPC re-checks ownership (a transfer between the two reads).
   if (!context.is_owner) throw errors.forbidden("Only the shop owner can manage billing.");
-  return context;
+  return { context, ownerId: caller.id };
+}
+
+/** The shop's current (active) owner's user id, or null (service role). */
+async function currentOwnerId(admin: SupabaseClient, shopId: string): Promise<string | null> {
+  const { data, error } = await admin
+    .from("shop_members")
+    .select("user_id")
+    .eq("shop_id", shopId)
+    .eq("role", "owner")
+    .eq("active", true)
+    .limit(1);
+  if (error) throw dbFailure("shop_members lookup", error);
+  return ((data ?? []) as { user_id: string }[])[0]?.user_id ?? null;
+}
+
+/**
+ * Points the shop's platform customer at its current owner: the owner's
+ * email (where Stripe sends receipts and failed-payment emails) and
+ * metadata.owner_user_id (what sync_customers compares). true when Stripe
+ * was updated; false when it already matched, the customer is gone, or the
+ * owner has no email (the address is then left alone).
+ */
+async function syncCustomerContact(
+  s: Services,
+  shopId: string,
+  customerId: string,
+  ownerEmail: string | null,
+  ownerId: string | null,
+  known?: Stripe.Customer,
+): Promise<boolean> {
+  let customer: Stripe.Customer | Stripe.DeletedCustomer;
+  try {
+    customer = known ?? await s.stripe().customers.retrieve(customerId);
+  } catch (err) {
+    if (isStripeError(err) && (err.code === "resource_missing" || err.statusCode === 404)) {
+      s.log.warn("billing_customer_missing", { shop_id: shopId, customer: customerId });
+      return false;
+    }
+    throw err;
+  }
+  if ("deleted" in customer && customer.deleted) {
+    s.log.warn("billing_customer_missing", { shop_id: shopId, customer: customerId });
+    return false;
+  }
+  const current = customer as Stripe.Customer;
+  const update: Stripe.CustomerUpdateParams = {};
+  if (ownerEmail && current.email !== ownerEmail) update.email = ownerEmail;
+  if (ownerId && current.metadata?.owner_user_id !== ownerId) {
+    update.metadata = { owner_user_id: ownerId };
+  }
+  if (update.email === undefined && update.metadata === undefined) return false;
+  await s.stripe().customers.update(customerId, update);
+  s.log.info("billing_customer_contact_synced", {
+    shop_id: shopId,
+    customer: customerId,
+    email_changed: update.email !== undefined,
+  });
+  return true;
+}
+
+/** syncCustomerContact where a failure must not block the owner (logged only). */
+async function trySyncCustomerContact(
+  s: Services,
+  shopId: string,
+  customerId: string,
+  context: CheckoutContext,
+  ownerId: string,
+): Promise<void> {
+  try {
+    await syncCustomerContact(s, shopId, customerId, context.owner_email, ownerId);
+  } catch (err) {
+    s.log.warn("billing_customer_contact_sync_failed", {
+      shop_id: shopId,
+      customer: customerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -346,19 +443,26 @@ function billingUrl(s: Services, checkout?: "success" | "cancelled"): string {
   return checkout ? withQuery(url, { checkout }) : url;
 }
 
-/** The shop's platform Stripe customer: the linked one, else created and linked now. */
+/**
+ * The shop's platform Stripe customer: the linked one (readdressed to the
+ * current owner first), else created and linked now.
+ */
 async function shopCustomer(
   s: Services,
   shopId: string,
   context: CheckoutContext,
+  ownerId: string,
 ): Promise<string> {
-  if (context.stripe_customer_id) return context.stripe_customer_id;
+  if (context.stripe_customer_id) {
+    await trySyncCustomerContact(s, shopId, context.stripe_customer_id, context, ownerId);
+    return context.stripe_customer_id;
+  }
   const name = context.shop_name.trim();
   const customer = await s.stripe().customers.create(
     {
       ...(context.owner_email ? { email: context.owner_email } : {}),
       ...(name ? { name } : {}),
-      metadata: { shop_id: shopId },
+      metadata: { shop_id: shopId, owner_user_id: ownerId },
     },
     // Concurrent or retried first checkouts get the same customer.
     {
@@ -367,6 +471,7 @@ async function shopCustomer(
         shopId,
         context.owner_email ?? "",
         name,
+        ownerId,
       ),
     },
   );
@@ -394,7 +499,7 @@ export async function checkout(
   req: Request,
   input: z.output<typeof checkoutInput>,
 ): Promise<{ url: string }> {
-  const context = await requireOwner(s, req, input.shop_id);
+  const { context, ownerId } = await requireOwner(s, req, input.shop_id);
   if (!context.billing_enabled) {
     throw errors.unprocessable("Subscriptions are not available yet.", {
       reason: "billing_disabled",
@@ -422,7 +527,7 @@ export async function checkout(
   if (context.stripe_customer_id) {
     await refuseIfSubscribedInStripe(s, input.shop_id, context.stripe_customer_id);
   }
-  const customer = await shopCustomer(s, input.shop_id, context);
+  const customer = await shopCustomer(s, input.shop_id, context, ownerId);
   const expiresAt = checkoutExpiresAt(s.now);
   const trialEnd = checkoutTrialEnd(context.trial_end, s.now);
   // Optional Stripe Tax (BILLING_AUTOMATIC_TAX): Checkout collects the address
@@ -488,12 +593,14 @@ export async function portal(
 ): Promise<{ url: string }> {
   // Deliberately not gated on billing_enabled: a shop keeps managing (and
   // cancelling) an existing subscription whatever the platform flag says.
-  const context = await requireOwner(s, req, input.shop_id);
+  const { context, ownerId } = await requireOwner(s, req, input.shop_id);
   if (!context.stripe_customer_id) {
     throw errors.conflict("This shop has no billing account yet. Choose a plan first.", {
       reason: "no_billing_account",
     });
   }
+  // A new owner managing billing gets Stripe's emails from now on.
+  await trySyncCustomerContact(s, input.shop_id, context.stripe_customer_id, context, ownerId);
   let session: Stripe.BillingPortal.Session;
   try {
     session = await s.stripe().billingPortal.sessions.create({
@@ -512,6 +619,99 @@ export async function portal(
   }
   if (!session.url) throw new Error("Stripe returned a billing portal session without a URL");
   return { url: session.url };
+}
+
+/**
+ * sync_customer: after an ownership transfer the client asks for the shop's
+ * platform customer to follow the new owner. Owner or admin (the former
+ * owner is an admin once the transfer is done); nothing else changes.
+ */
+export async function syncCustomer(
+  s: Services,
+  req: Request,
+  input: z.output<typeof syncCustomerInput>,
+): Promise<{ synced: boolean }> {
+  const caller = await requireUser(req, { admin: s.admin });
+  await requireShopRole(s.admin, caller, input.shop_id, ROLES.adminPlus);
+  const context = await checkoutContext(s.admin, input.shop_id, caller.id);
+  if (!context.stripe_customer_id) return { synced: false };
+  const ownerId = await currentOwnerId(s.admin, input.shop_id);
+  return {
+    synced: await syncCustomerContact(
+      s,
+      input.shop_id,
+      context.stripe_customer_id,
+      context.owner_email,
+      ownerId,
+    ),
+  };
+}
+
+export interface CustomerSyncSummary {
+  checked: number;
+  updated: number;
+  failed: number;
+}
+
+/**
+ * sync_customers (daily): every platform customer tagged with a shop
+ * (metadata.shop_id) whose metadata.owner_user_id is not that shop's current
+ * owner (an ownership transfer, or a customer created before this field
+ * existed) is readdressed, provided it is the customer the shop is linked to
+ * (billing_checkout_context). Customers of the platform account that belong
+ * to no shop are never touched.
+ */
+export async function syncCustomers(s: Services): Promise<CustomerSyncSummary> {
+  const summary: CustomerSyncSummary = { checked: 0, updated: 0, failed: 0 };
+  const page: Stripe.Customer[] = [];
+  const flush = async () => {
+    const batch = page.splice(0, page.length);
+    if (batch.length === 0) return;
+    const shopIds = [...new Set(batch.map((c) => c.metadata.shop_id as string))];
+    const { data, error } = await s.admin
+      .from("shop_members")
+      .select("shop_id, user_id")
+      .in("shop_id", shopIds)
+      .eq("role", "owner")
+      .eq("active", true);
+    if (error) throw dbFailure("shop_members lookup", error);
+    const owners = new Map(
+      ((data ?? []) as { shop_id: string; user_id: string }[]).map((r) => [r.shop_id, r.user_id]),
+    );
+    for (const customer of batch) {
+      summary.checked += 1;
+      const shopId = customer.metadata.shop_id as string;
+      const ownerId = owners.get(shopId) ?? null;
+      if (!ownerId || customer.metadata.owner_user_id === ownerId) continue;
+      try {
+        const context = await checkoutContext(s.admin, shopId, null);
+        // Not the shop's billing customer (an unlinked leftover): leave it.
+        if (context.stripe_customer_id !== customer.id) continue;
+        if (
+          await syncCustomerContact(s, shopId, customer.id, context.owner_email, ownerId, customer)
+        ) {
+          summary.updated += 1;
+        }
+      } catch (err) {
+        if (err instanceof HttpError && err.status === 404) continue; // shop deleted
+        summary.failed += 1;
+        s.log.warn("billing_customer_contact_sync_failed", {
+          shop_id: shopId,
+          customer: customer.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  };
+  for await (const customer of s.stripe().customers.list({ limit: 100 })) {
+    const shopId = customer.metadata?.shop_id;
+    if (typeof shopId !== "string" || !UUID_RE.test(shopId)) continue;
+    page.push(customer);
+    if (page.length >= 100) await flush();
+  }
+  await flush();
+  s.log.info("billing_customers_synced", { ...summary });
+  return summary;
 }
 
 export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response> {
@@ -535,6 +735,14 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     }),
     checkout: jsonAction(checkoutInput, (input, ctx) => checkout(services(ctx), ctx.req, input)),
     portal: jsonAction(portalInput, (input, ctx) => portal(services(ctx), ctx.req, input)),
+    sync_customer: jsonAction(
+      syncCustomerInput,
+      (input, ctx) => syncCustomer(services(ctx), ctx.req, input),
+    ),
+    sync_customers: jsonAction(emptyInput, async (_input, ctx) => {
+      requireCronSecret(ctx.req, ctx.env.cronSecret());
+      return await syncCustomers(services(ctx));
+    }),
     sync_plans: jsonAction(emptyInput, async (_input, ctx) => {
       requireCronSecret(ctx.req, ctx.env.cronSecret());
       const s = services(ctx);

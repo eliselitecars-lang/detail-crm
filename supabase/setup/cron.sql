@@ -48,6 +48,15 @@
 --                                              Stripe account's Products/Prices; product/price
 --                                              webhooks resync sooner. Harmless while billing
 --                                              is off: docs/BILLING.md)
+--   detail-crm-billing-sync-customers  daily 06:20  POST billing {"action":"sync_customers"}
+--                               UTC            (each shop's platform Stripe customer follows
+--                                              the shop's current owner, so receipts and
+--                                              failed-payment emails reach the new owner after
+--                                              an ownership transfer)
+--   detail-crm-sms-releases     daily 06:50    POST sms-provisioning {"action":"release_worklist"}
+--                               UTC            (Twilio numbers no shop uses any more:
+--                                              releases those bought for deleted shops,
+--                                              reports the rest; supabase/setup/twilio.md)
 --
 -- Document follow-ups, per-service follow-ups and task reminders ride on
 -- detail-crm-run-automations (enqueue_due_automations); they need no job.
@@ -145,7 +154,8 @@ select cron.unschedule(j.jobid)
  where j.jobname in ('detail-crm-process-queue', 'detail-crm-run-automations', 'detail-crm-expire-quotes',
                      'detail-crm-sweep-payment-sheets', 'detail-crm-storage-purge', 'detail-crm-push',
                      'detail-crm-webhooks', 'detail-crm-sms-status', 'detail-crm-generate-series',
-                     'detail-crm-billing-sync-plans');
+                     'detail-crm-billing-sync-plans', 'detail-crm-billing-sync-customers',
+                     'detail-crm-sms-releases');
 
 -- Send queued messages. The function drains up to 200 messages within ~45 s
 -- per call; overlapping runs are safe (claim_queued_messages skips locked rows).
@@ -306,6 +316,48 @@ select cron.schedule(
       'x-cron-secret', (select s.decrypted_secret from vault.decrypted_secrets s
                          where s.name = 'detail_crm_cron_secret')),
     body := '{"action":"sync_plans"}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $job$
+);
+
+-- Readdress each shop's platform Stripe customer to the shop's current owner
+-- (email + metadata.owner_user_id): Stripe sends the subscription receipts
+-- and failed-payment emails there. The app asks for this right after an
+-- ownership transfer; this daily run catches any it missed.
+select cron.schedule(
+  'detail-crm-billing-sync-customers',
+  '20 6 * * *',
+  $job$
+  select net.http_post(
+    url := (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.name = 'detail_crm_functions_url') || '/billing',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-cron-secret', (select s.decrypted_secret from vault.decrypted_secrets s
+                         where s.name = 'detail_crm_cron_secret')),
+    body := '{"action":"sync_customers"}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $job$
+);
+
+-- Work through sms_number_releases (numbers no longer bound to a shop): a
+-- number bought through sms-provisioning for a deleted shop is released in
+-- Twilio; numbers the platform still rents otherwise are reported (log
+-- sms_numbers_awaiting_release) for the operator (supabase/setup/twilio.md).
+select cron.schedule(
+  'detail-crm-sms-releases',
+  '50 6 * * *',
+  $job$
+  select net.http_post(
+    url := (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.name = 'detail_crm_functions_url') || '/sms-provisioning',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-cron-secret', (select s.decrypted_secret from vault.decrypted_secrets s
+                         where s.name = 'detail_crm_cron_secret')),
+    body := '{"action":"release_worklist"}'::jsonb,
     timeout_milliseconds := 60000
   );
   $job$

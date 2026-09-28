@@ -7,7 +7,7 @@ import {
   RefreshCw,
   XCircle,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
@@ -510,11 +510,15 @@ function CancellationCard({ token, doc }: { token: string; doc: BookingDocument 
   const cancel = useCancelBooking(token);
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState('');
+  const pendingNoteId = useId();
   const { cancellation, booking, shop } = doc;
   const tz = shop.timezone;
   if (CLOSED_STATUSES.has(booking.status)) return null;
   const upcoming = ['requested', 'scheduled', 'confirmed'].includes(booking.status);
   if (!upcoming) return null;
+  // public_cancel_booking refuses (55000, payment_in_progress) while a
+  // deposit payment is going through: the same flag the server checks.
+  const paymentPending = doc.deposit.payment_pending;
 
   return (
     <SectionCard title="Need to cancel?">
@@ -534,11 +538,22 @@ function CancellationCard({ token, doc }: { token: string; doc: BookingDocument 
         {cancellation.policy && (
           <p className="text-muted whitespace-pre-line">{cancellation.policy}</p>
         )}
+        {cancellation.allowed && paymentPending && (
+          <div id={pendingNoteId}>
+            <Banner tone="warning" title="A payment for this booking is still going through">
+              It can’t be cancelled online until the payment finishes. Refresh this page in a few
+              minutes, or contact {shop.name}
+              {shop.phone ? ` at ${formatPhone(shop.phone)}` : ''}.
+            </Banner>
+          </div>
+        )}
         {cancellation.allowed && (
           <Button
             variant="secondary"
             className="self-start"
             leadingIcon={<XCircle className="size-4" aria-hidden="true" />}
+            disabled={paymentPending}
+            aria-describedby={paymentPending ? pendingNoteId : undefined}
             onClick={() => {
               cancel.reset();
               setOpen(true);
@@ -567,6 +582,7 @@ function CancellationCard({ token, doc }: { token: string; doc: BookingDocument 
             <Button
               variant="danger"
               loading={cancel.isPending}
+              disabled={paymentPending}
               onClick={() =>
                 cancel.mutate(reason, {
                   onSuccess: () => {

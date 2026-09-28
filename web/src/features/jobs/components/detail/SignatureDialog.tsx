@@ -20,7 +20,7 @@ export interface SignatureDialogProps {
   onSign: (signerName: string, signature: Blob | null) => Promise<void>;
 }
 
-/** Typed name + drawn signature, collected on this device. */
+/** Typed name + signature (drawn, or typed for keyboard users), collected on this device. */
 export function SignatureDialog({
   title,
   description,
@@ -44,7 +44,7 @@ export function SignatureDialog({
     }
     const blob = (await padRef.current?.toBlob()) ?? null;
     if (requireDrawing && !blob) {
-      setError('Draw a signature in the box.');
+      setError('Sign in the box: draw a signature, or choose Type and type it.');
       return;
     }
     await onSign(name.trim(), blob);
@@ -84,7 +84,12 @@ export function SignatureDialog({
           />
         </FormField>
         {requireDrawing && (
-          <SignaturePad ref={padRef} label="Customer signature" onChange={setHasDrawing} />
+          <SignaturePad
+            ref={padRef}
+            label="Customer signature"
+            typedDefault={name}
+            onChange={setHasDrawing}
+          />
         )}
         {error && (
           <p role="alert" className="text-danger-ink text-sm">

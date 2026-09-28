@@ -8,7 +8,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { useToast } from '@/components/ui';
-import { unwrap, unwrapRequired } from '@/lib/db';
+import { readPages, unwrap, unwrapRequired } from '@/lib/db';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
@@ -36,6 +36,13 @@ export const timeKeys = {
   jobSearch: (shopId: string, q: string) => [...timeKeys.all(shopId), 'job-search', q] as const,
 };
 
+/**
+ * Most entries one range reads (the range is at most MAX_RANGE_DAYS). Read
+ * in pages of PostgREST's max_rows (1,000): a single request would stop at
+ * 1,000 and the per-member totals would undercount without a word.
+ */
+export const TIME_ENTRIES_LIMIT = 10_000;
+
 /** Entries overlapping [from, to) (open entries count as running until now). */
 export function useTimeEntries(filters: EntryFilters, enabled = true) {
   const { shopId } = useShop();
@@ -44,16 +51,23 @@ export function useTimeEntries(filters: EntryFilters, enabled = true) {
     enabled,
     placeholderData: keepPreviousData,
     queryFn: async () => {
-      let query = supabase
-        .from('time_entries')
-        .select(TIME_ENTRY_COLUMNS)
-        .eq('shop_id', shopId)
-        .lt('clock_in', filters.to)
-        .or(`clock_out.is.null,clock_out.gte.${filters.from}`);
-      if (filters.memberId) query = query.eq('member_id', filters.memberId);
-      const result = await query.order('clock_in', { ascending: false }).limit(2000);
-      const rows = z.array(timeEntrySchema).parse(unwrap(result) ?? []);
-      return { entries: rows, truncated: rows.length >= 2000 };
+      const { rows, truncated } = await readPages<unknown>(
+        (from, to, withCount) => {
+          let query = supabase
+            .from('time_entries')
+            .select(TIME_ENTRY_COLUMNS, withCount ? { count: 'exact' } : undefined)
+            .eq('shop_id', shopId)
+            .lt('clock_in', filters.to)
+            .or(`clock_out.is.null,clock_out.gte.${filters.from}`);
+          if (filters.memberId) query = query.eq('member_id', filters.memberId);
+          return query
+            .order('clock_in', { ascending: false })
+            .order('id', { ascending: false })
+            .range(from, to);
+        },
+        { limit: TIME_ENTRIES_LIMIT, key: (row) => String((row as { id?: unknown }).id) },
+      );
+      return { entries: z.array(timeEntrySchema).parse(rows), truncated };
     },
   });
 }

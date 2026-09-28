@@ -110,6 +110,104 @@ describe('InvoiceDetailPage', () => {
     );
   });
 
+  it('a payment refused while a card payment page is open: cancel the open payments, then it is recorded', async () => {
+    const OPEN = {
+      code: '55000',
+      message:
+        'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+      details: null,
+      hint: 'checkout_open',
+    };
+    let refused = true;
+    supabase.rpc.mockImplementation((...args: unknown[]) => {
+      if (args[0] !== 'record_manual_payment') return createBuilder({ data: null });
+      return createBuilder(
+        refused ? { data: null, error: OPEN } : { data: paymentRow({ method: 'cash' }) },
+      );
+    });
+    invoke.mockImplementation(() => {
+      refused = false; // the edge expired the page and released the hold
+      return Promise.resolve({
+        data: {
+          invoice_id: 'inv-1',
+          cancelled: 0,
+          succeeded: 0,
+          in_progress: 0,
+          sessions_expired: 1,
+        },
+        error: null,
+      });
+    });
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: 'Record payment' }));
+    const dialog = await screen.findByRole('dialog');
+    const amount = within(dialog).getByLabelText(/^Amount/);
+    await user.clear(amount);
+    await user.type(amount, '50');
+    await user.click(within(dialog).getByRole('button', { name: 'Record payment' }));
+    expect(
+      await within(dialog).findByText('A card payment page for this invoice is still open'),
+    ).toBeInTheDocument();
+    // The server's own sentence (with the time) is shown, not a generic error.
+    expect(
+      within(dialog).getByText(/Cancel the open payments first, or wait until then/i),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Cancel open payments and try again' }),
+    );
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('payments', {
+        body: { action: 'cancel_open_payments', shop_id: 'shop-1', invoice_id: 'inv-1' },
+      }),
+    );
+    expect(await screen.findByText('$50.00 payment recorded')).toBeInTheDocument();
+    const records = (supabase.rpc.mock.calls as unknown[][]).filter(
+      (c) => c[0] === 'record_manual_payment',
+    );
+    expect(records).toHaveLength(2);
+    expect(records[1]?.[1]).toEqual(records[0]?.[1]);
+  });
+
+  it('does not record on top of a payment the bank is already processing', async () => {
+    supabase.rpc.mockImplementation((...args: unknown[]) =>
+      createBuilder(
+        args[0] === 'record_manual_payment'
+          ? {
+              data: null,
+              error: {
+                code: '55000',
+                message:
+                  'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+                details: null,
+                hint: 'checkout_open',
+              },
+            }
+          : { data: null },
+      ),
+    );
+    invoke.mockResolvedValue({
+      data: {
+        invoice_id: 'inv-1',
+        cancelled: 0,
+        succeeded: 0,
+        in_progress: 1,
+        sessions_expired: 0,
+      },
+      error: null,
+    });
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: 'Record payment' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Record payment' }));
+    await user.click(
+      await within(dialog).findByRole('button', { name: 'Cancel open payments and try again' }),
+    );
+    expect(await within(dialog).findByText(/A payment is still processing/)).toBeInTheDocument();
+    expect(
+      (supabase.rpc.mock.calls as unknown[][]).filter((c) => c[0] === 'record_manual_payment'),
+    ).toHaveLength(1);
+  });
+
   it('managers copy the pay link fetched from invoice_link_token', async () => {
     supabase.rpc.mockImplementation((...args: unknown[]) =>
       createBuilder(

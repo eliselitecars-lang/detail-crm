@@ -131,11 +131,13 @@ export const routes: FeatureRoutes = {
 - `useNavigate`, `Link`, `useParams`, `useSearchParams` from `react-router`.
 
 Route map: `/login`, `/signup`, `/forgot-password`, `/reset-password`,
-`/invite/:token`, `/book/:slug` (`?embed=1`, `?link=<token>`, prefill
+`/auth/callback` (sign-up confirmation links), `/invite/:token`, `/book/:slug` (`?embed=1`, `?link=<token>`, prefill
 `?services=&category=&coupon=`), `/booking/:token`, `/q/:token`, `/i/:token`,
 `/f/:token`, `/r/:token` (customer job report), `/lead/:token` (lead form,
 `?embed=1`), `/join/:slug` (membership sign-up), `/gift/:slug` and
-`/gift/:slug/done` (gift card shop), `/u/:token` (email unsubscribe),
+`/gift/:slug/done` (gift card shop), `/done/:slug` (`?card=saved|canceled`,
+`?membership=active|canceled`: return from a card-setup or membership link
+staff sent), `/u/:token` (email unsubscribe),
 `/portal`, `/account` (every signed-in role: delete account), `/privacy`,
 `/terms` (public; linked under the auth pages, in the public page footer and
 on `/account`), `/pricing` (public: the platform's plans), `/app` (dashboard), `/app/{calendar,jobs,customers,quotes,
@@ -152,6 +154,13 @@ permissions, memberships, switchShop }`. `memberId` is `shop_members.id`
   (use it for assignments / time entries).
 - The last-used shop is remembered per user in localStorage; switching shops
   keeps caches separate because every tenant query key contains the shop id.
+- Sessions in the URL (`src/lib/authUrlSession.ts`, login CSRF): email links
+  use the implicit flow so they work on another device, but supabase-js may
+  save a session from the URL only for a recovery link on `/reset-password`
+  that belongs to the account signed in here (or when nobody is). Sign-up
+  confirmation links (`emailRedirectTo` = `/auth/callback?next=…`) show the
+  account and sign in only when the visitor continues. Tokens anywhere else
+  are ignored and removed from the address bar.
 
 ## Permissions
 
@@ -236,7 +245,28 @@ other domain the server changed (e.g. recording a payment → `invoices`,
 - **Never** optimistically change money, statuses with server-side side
   effects, or anything a trigger recomputes.
 - Mutations never retry automatically; queries don't retry permission/validation errors.
+- Offline: queries and mutations use `networkMode: 'always'` (`app/queryClient.ts`), so
+  nothing is paused and replayed later: a save made offline fails at once with "Can't reach
+  the server…" (dialogs unlock), an unloaded page shows `ErrorState`, and `OfflineBanner`
+  says the browser is offline. TanStack Query is the only retry policy for reads
+  (postgrest-js' own retries are off: `db: { retry: false }` in `lib/supabase.ts`).
 - Show feedback with `useToast()` (`toast.success('Saved')`, `toast.error(err)`).
+  Toasts pause while hovered, focused or the tab is hidden, and one with an
+  `action` stays until used or dismissed (WCAG 2.2.1). Never put something the
+  user must act on or copy only in a toast: a link the browser refused to copy
+  goes in `<CopyLinkDialog>` (use `copyText` from `@/features/quotes/shared/format`,
+  which also tries the legacy copy command).
+- PostgREST caps every response at `max_rows` = 1,000 rows (hosted default and
+  `supabase/config.toml`), whatever `.limit()` / `.range()` asks. Anything that
+  may need more (CSV exports, timesheet totals) reads pages with
+  `readPages(page, { limit, key })` from `@/lib/db` (exact count on the first
+  page, `truncated` when more than `limit` match); order by a unique tiebreaker.
+- The customer's own booking cancel is the payments edge `booking_cancel`
+  (expires the booking's open deposit / invoice pay pages, then
+  `public_cancel_booking` as the caller), never the RPC directly: it refuses
+  (55000 `checkout_open`) while such a page is alive. Manual payments, gift
+  cards and store credit refused with `checkout_open` (`isCheckoutOpenError`)
+  offer "Cancel open payments and try again" (`CheckoutOpenNotice`).
 
 ### Realtime
 
@@ -261,10 +291,13 @@ job|quote|invoice|payment|membership|message), Tabs, Table (sortable headers,
 stacked rows < md, `rowHref`), Pagination (+ `pageRange` for `.range()`),
 Dialog, Drawer, ConfirmDialog, DropdownMenu, Tooltip, Toast (`useToast`),
 Avatar, Skeleton, EmptyState, ErrorState, LoadingState, PageHeader,
-KeyValueList, SignaturePad (`ref` → `toBlob()` for the `signatures` bucket),
+KeyValueList, SignaturePad (`ref` → `toBlob()` for the `signatures` bucket;
+Draw or Type — a typed signature, keyboard-only, is rendered onto the same
+canvas and uploads the same PNG; pass `typedDefault` = the signer's name),
 FileDropzone (drag-and-drop or pick; `accept` list, `fileMatchesAccept`,
 `formatBytes`), QrCode (renders a QR for a URL, PNG / SVG download), CopyField
-(read-only value + copy button, e.g. links and embed snippets).
+(read-only value + copy button, e.g. links and embed snippets), CopyLinkDialog
+(a link the browser wouldn't copy, kept on screen until closed).
 
 `@/components/customFields`: `CustomFieldInputs` (inputs for a list of custom
 field definitions: booking questions, lead forms, customer / job custom data)
@@ -272,7 +305,11 @@ and `CustomFieldValues` (read-only display).
 
 Forms: react-hook-form + zod (`zodResolver`) with shared field schemas in
 `@/lib/validation` (`zEmail`, `zPhone`, `zOptionalPhone`, `zCents`,
-`zPercentBps`, …). Wrap controls in `<FormField label error>`; use
+`zPercentBps`, …). Emails use `isValidEmail`, the database's own
+`is_valid_email` rule (also the iPhone's and CSV import's), never zod's
+stricter `z.email()`: an address the server stores must stay editable.
+Links are `text-primary-ink`, never the fill token `text-primary`
+(`src/lib/linkColor.test.ts`). Wrap controls in `<FormField label error>`; use
 `<Controller>` for MoneyInput/PhoneInput/Combobox.
 
 Class names: `cn(...)` from `@/lib/cn` (clsx + tailwind-merge, token-aware), so a

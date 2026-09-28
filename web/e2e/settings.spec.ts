@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 import { membershipRow, OWNER, SHOP, TECH, type MockUser, type Role } from './support/fixtures';
-import { mockSupabase, type Json } from './support/mockSupabase';
+import { mockSupabase, reply, type Json } from './support/mockSupabase';
 
 const MANAGER: MockUser = {
   id: '00000000-0000-4000-8000-000000000003',
@@ -363,4 +363,82 @@ test.describe('settings', () => {
       expect(overflow).toBeLessThanOrEqual(0);
     });
   }
+});
+
+test.describe('customer export', () => {
+  const customer = {
+    id: '40000000-0000-4000-8000-000000000001',
+    first_name: 'Ada',
+    last_name: 'Park',
+    company: null,
+    email: 'ada@example.test',
+    phone: null,
+    address_line1: null,
+    address_line2: null,
+    city: null,
+    region: null,
+    postal_code: null,
+    country: null,
+    tags: [],
+    lifecycle: 'customer',
+    source: null,
+    sms_opt_in: false,
+    email_opt_in: false,
+    notes: null,
+    custom_data: { gate_code: '4411' },
+    created_at: '2026-01-01T00:00:00Z',
+  };
+  const gateCode = {
+    id: '41000000-0000-4000-8000-000000000001',
+    entity: 'customer',
+    key: 'gate_code',
+    label: 'Gate code',
+    type: 'text',
+    options: [],
+    help_text: null,
+    required: false,
+    show_in_booking: false,
+    show_in_lead_form: false,
+    location_scope: null,
+    sort: 0,
+    archived_at: null,
+  };
+
+  test('fails instead of dropping the custom-field columns when their list will not load', async ({
+    page,
+  }) => {
+    let fieldsDown = true;
+    const downloads: string[] = [];
+    page.on('download', (d) => downloads.push(d.suggestedFilename()));
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: [],
+        customers: [customer],
+        import_batches: [],
+        vehicle_categories: [],
+        custom_fields: () =>
+          fieldsDown ? reply(500, { code: 'XX000', message: 'upstream timeout' }) : [gateCode],
+      },
+    });
+    await page.goto('/app/settings/import-export');
+    const exportCustomers = page.getByRole('button', { name: 'Customers', exact: true });
+
+    await exportCustomers.click();
+    await expect(
+      page.getByRole('region', { name: 'Notifications' }).getByRole('alert'),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/customers exported/)).toHaveCount(0);
+    await expect(exportCustomers).toBeEnabled();
+    expect(downloads).toHaveLength(0);
+
+    fieldsDown = false;
+    const [download] = await Promise.all([page.waitForEvent('download'), exportCustomers.click()]);
+    const csv = readFileSync(await download.path(), 'utf8');
+    const [header, row] = csv.split(/\r?\n/);
+    expect(header).toContain(',Notes,Gate code,Created');
+    expect(row).toContain('4411');
+    await expect(page.getByText('1 customers exported')).toBeVisible();
+  });
 });

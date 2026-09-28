@@ -94,6 +94,16 @@ export interface FixtureOptions {
   extraInvoices?: Row[];
   /** Extra jobs. */
   extraJobs?: Row[];
+  /** shop_sms_numbers rows (delete_shop releases the self-serve ones). */
+  smsNumbers?: Row[];
+  /** sms_number_releases rows (the 0093 worklist). */
+  smsReleases?: Row[];
+  /** job_checkout_holds rows (0106: open Checkout Sessions of a job). */
+  holds?: Row[];
+  /** public_get_booking cancellation.allowed (default true). */
+  cancelAllowed?: boolean;
+  /** public_cancel_booking raises this instead of cancelling. */
+  cancelError?: FakeRpcError;
 }
 
 export interface Fixture {
@@ -187,11 +197,18 @@ export function fixture(options: FixtureOptions = {}): Fixture {
         {
           id: SHOP,
           name: "Shine Co",
+          slug: "shine-co",
           currency: "usd",
           techs_can_collect_payments: true,
           ...options.shop,
         },
-        { id: OTHER_SHOP, name: "Other", currency: "usd", techs_can_collect_payments: true },
+        {
+          id: OTHER_SHOP,
+          name: "Other",
+          slug: "other",
+          currency: "usd",
+          techs_can_collect_payments: true,
+        },
       ],
       shop_stripe_accounts: options.account === null ? [] : [{
         shop_id: SHOP,
@@ -210,6 +227,7 @@ export function fixture(options: FixtureOptions = {}): Fixture {
           phone: "+12055550123",
           stripe_customer_id: null,
           archived_at: null,
+          portal_user_id: null,
           ...options.customer,
         },
         {
@@ -245,7 +263,11 @@ export function fixture(options: FixtureOptions = {}): Fixture {
       gift_card_orders: [],
       // 0100: the shop's platform subscription (delete_shop cancels it)
       shop_billing: [],
+      // 0089 / 0093: text numbers (delete_shop releases self-serve ones)
+      shop_sms_numbers: options.smsNumbers ?? [],
+      sms_number_releases: options.smsReleases ?? [],
       quotes: options.quotes ?? [],
+      job_checkout_holds: options.holds ?? [],
       payments: [
         {
           id: PAYMENT,
@@ -349,7 +371,64 @@ export function fixture(options: FixtureOptions = {}): Fixture {
             due_cents: depositDue,
             payment_pending: options.depositPending ?? false,
           },
+          cancellation: { allowed: options.cancelAllowed ?? true },
         };
+      },
+      // 0106: record an open Checkout Session of a job (service role).
+      payments_hold_job_checkout: (args, ctx) => {
+        record("payments_hold_job_checkout", args);
+        const job = ctx.db.table("jobs").find((j) =>
+          j.id === args.p_job_id && j.shop_id === args.p_shop_id
+        );
+        if (!job) throw new FakeRpcError("P0002", "job not found", { status: 404 });
+        if (["cancelled", "no_show", "completed"].includes(String(job.status))) {
+          throw new FakeRpcError("55000", "this booking is no longer taking payments", {
+            hint: "booking_closed",
+          });
+        }
+        const holds = ctx.db.table("job_checkout_holds")
+          .filter((h) => h.stripe_checkout_session_id !== args.p_session_id);
+        holds.push({
+          stripe_checkout_session_id: args.p_session_id,
+          shop_id: args.p_shop_id,
+          job_id: args.p_job_id,
+          expires_at: args.p_expires_at,
+        });
+        ctx.db.seed("job_checkout_holds", holds);
+        return undefined;
+      },
+      payments_release_job_checkouts: (args, ctx) => {
+        record("payments_release_job_checkouts", args);
+        const ids = args.p_session_ids as string[] | null;
+        const rows = ctx.db.table("job_checkout_holds");
+        const kept = rows.filter((h) =>
+          !(h.shop_id === args.p_shop_id && h.job_id === args.p_job_id &&
+            (ids === null || ids.includes(String(h.stripe_checkout_session_id))))
+        );
+        ctx.db.seed("job_checkout_holds", kept);
+        return rows.length - kept.length;
+      },
+      // 0106 body: refuses while a hold of the job is live, else cancels.
+      public_cancel_booking: (args, ctx) => {
+        record("public_cancel_booking", { ...args, role: ctx.role, user_id: ctx.userId });
+        if (options.cancelError) throw options.cancelError;
+        const jobs = ctx.db.table("jobs");
+        const job = jobs.find((j) => j.public_token === args.p_token);
+        if (!job) throw new FakeRpcError("PT404", "booking not found", { status: 404 });
+        const now = new Date(NOW).toISOString();
+        if (
+          ctx.db.table("job_checkout_holds").some((h) =>
+            h.job_id === job.id && String(h.expires_at) > now
+          )
+        ) {
+          throw new FakeRpcError(
+            "55000",
+            "a payment page for this booking is still open; please close it and try again in a few minutes, or call the shop",
+            { hint: "checkout_open" },
+          );
+        }
+        ctx.db.seed("jobs", jobs.map((j) => j.id === job.id ? { ...j, status: "cancelled" } : j));
+        return { booking: { number: job.number, status: "cancelled" } };
       },
       sync_stripe_subscription: (args) => {
         record("sync_stripe_subscription", args);
@@ -490,7 +569,7 @@ function installStripe(
     });
   });
   http.on("POST", `${STRIPE}/checkout/sessions/:id/expire`, (_req, { params }) => {
-    const found = sessions.find((x) => x.id === params.id);
+    const found = sessions.find((x) => x.id === params.id) ?? created[params.id ?? ""];
     if (!found || found.status !== "open") {
       return jsonResponse(
         stripeErrorBody("invalid_request_error", "Only open sessions can be expired."),

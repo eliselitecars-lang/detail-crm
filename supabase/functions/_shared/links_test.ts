@@ -10,6 +10,8 @@ Deno.test("links: customer-facing web routes", () => {
   assertEquals(links.invite(base, "tok"), "https://app.example.com/invite/tok");
   assertEquals(links.bookingPage(base, "eli-detail"), "https://app.example.com/book/eli-detail");
   assertEquals(links.portal("https://x.example.com/crm"), "https://x.example.com/crm/portal");
+  assertEquals(links.checkoutDone(base, "shine-co"), "https://app.example.com/done/shine-co");
+  assertThrows(() => links.checkoutDone(base, ""), TypeError);
   assertEquals(links.quote(base, "a/b?c"), "https://app.example.com/q/a%2Fb%3Fc");
   assertThrows(() => links.quote(base, ""), TypeError);
 });

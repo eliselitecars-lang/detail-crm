@@ -33,6 +33,9 @@ import {
   useToast,
 } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { useShopLapsed } from '@/features/billing/api';
+import { LapsedNotice } from '@/features/billing/components/LapsedNotice';
+import { lapsedFeatureNotice } from '@/features/billing/model';
 import { toAppError } from '@/lib/errors';
 import { zOptionalText, zRequiredText } from '@/lib/validation';
 import { EmbedSnippets } from '../components/EmbedSnippets';
@@ -69,6 +72,9 @@ const SOURCE_LABELS: Record<(typeof SOURCES)[number], string> = {
 
 export default function LeadFormsPage() {
   const { readOnly, canEdit } = useSettingsAccess();
+  const { shopId } = useShop();
+  // A lapsed shop's forms answer "form not found" (0103 comms_live_lead_form).
+  const lapsed = useShopLapsed(shopId);
   const forms = useLeadForms();
   const fields = useCustomFields('customer');
   const counts = useLeadSubmissionCounts(forms.data?.map((f) => f.id) ?? []);
@@ -95,6 +101,7 @@ export default function LeadFormsPage() {
         email or phone, without changing their details — and can notify your managers. Promotional
         texts and emails need the consent the person ticks on the form.
       </p>
+      {lapsed && <LapsedNotice className="mb-0">{lapsedFeatureNotice('Lead forms')}</LapsedNotice>}
       <QueryView query={forms} label="lead forms">
         {(rows) =>
           rows.length === 0 ? (
@@ -121,6 +128,7 @@ export default function LeadFormsPage() {
                     fields={fields.data ?? []}
                     submissions={counts.data?.get(form.id) ?? null}
                     canEdit={canEdit}
+                    lapsed={lapsed}
                     onEdit={() => setEditing({ form })}
                   />
                 </li>
@@ -149,12 +157,15 @@ function FormCard({
   fields,
   submissions,
   canEdit,
+  lapsed,
   onEdit,
 }: {
   form: LeadForm;
   fields: readonly CustomField[];
   submissions: number | null;
   canEdit: boolean;
+  /** The shop is lapsed: its forms answer "form not found" whatever `active` says. */
+  lapsed: boolean;
   onEdit: () => void;
 }) {
   const { shop } = useShop();
@@ -181,8 +192,8 @@ function FormCard({
       description={`Asks: ${extras.join(', ')}`}
       actions={
         <span className="flex items-center gap-1">
-          <Badge tone={form.active ? 'success' : 'neutral'} dot>
-            {form.active ? 'Live' : 'Off'}
+          <Badge tone={!form.active ? 'neutral' : lapsed ? 'warning' : 'success'} dot>
+            {!form.active ? 'Off' : lapsed ? 'Paused' : 'Live'}
           </Badge>
           {canEdit && (
             <>
@@ -260,7 +271,7 @@ function FormCard({
             <>
               Auto-reply on: emailed, texted only to a verified number on file (
               <Link
-                className="text-primary underline"
+                className="text-primary-ink underline"
                 to="/app/settings/templates?edit=lead_received"
               >
                 wording

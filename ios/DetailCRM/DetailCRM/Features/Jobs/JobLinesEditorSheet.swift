@@ -127,8 +127,9 @@ struct JobLinesEditorSheet: View {
         )
     }
 
-    /// A write that saved but couldn't be re-read, and the "already
-    /// invoiced" warning (job edits never change an issued invoice).
+    /// A write that saved but couldn't be re-read, and the "billed" notice
+    /// (the server refuses price, quantity, discount and tax changes while
+    /// the job has a live invoice, 0097).
     @ViewBuilder
     private var noticesSection: some View {
         if let problem = model.linesRefreshProblem {
@@ -144,10 +145,7 @@ struct JobLinesEditorSheet: View {
         }
         if let invoice = model.issuedInvoice {
             Section {
-                InlineMessage(
-                    text: invoice.title + " has already been issued for this job. Changes here update the job only — the invoice keeps its lines and total.",
-                    kind: .info
-                )
+                InlineMessage(text: invoice.lockedText, kind: .info)
                 .themedRow()
             }
         }

@@ -24,19 +24,68 @@ const icons = {
 
 const MAX_TOASTS = 5;
 
+/**
+ * Toasts dismiss themselves (errors after 8 s, others after 5 s), but the
+ * clock stops while the pointer is over the notifications or focus is inside
+ * one — and while the tab is hidden — then resumes with the time that was
+ * left (at least MIN_RESUME_MS), so a toast can be read, and its text or
+ * action reached, at any pace (WCAG 2.2.1). A toast with an action stays
+ * until it is used or dismissed unless it sets its own `duration`.
+ */
+const MIN_RESUME_MS = 2000;
+
+interface ToastTimer {
+  /** Time left when paused (or when it was started). */
+  remaining: number;
+  /** When the running timeout fires (null while paused). */
+  deadline: number | null;
+  handle: ReturnType<typeof setTimeout> | null;
+}
+
+/** (Re)starts a toast's countdown with `ms` left. */
+function startTimer(timer: ToastTimer, ms: number, onDone: () => void) {
+  timer.remaining = ms;
+  timer.deadline = Date.now() + ms;
+  timer.handle = setTimeout(onDone, ms);
+}
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const seq = useRef(0);
-  const timers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  const timers = useRef(new Map<number, ToastTimer>());
   /** Ids on screen, oldest first (mirrors `toasts`, readable outside a state updater). */
   const visible = useRef<number[]>([]);
   /** Adds an action to recognised errors (see ToastApi.setErrorAction). */
   const errorAction = useRef<ToastErrorAction | null>(null);
+  /** Why the clocks are stopped: pointer over / focus inside the region, tab hidden. */
+  const pausedBy = useRef(new Set<'hover' | 'focus' | 'hidden'>());
+  const dismissRef = useRef<(id: number) => void>(() => undefined);
+  const regionRef = useRef<HTMLDivElement>(null);
 
   const clearTimer = useCallback((id: number) => {
     const timer = timers.current.get(id);
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer?.handle) clearTimeout(timer.handle);
     timers.current.delete(id);
+  }, []);
+
+  const pause = useCallback((reason: 'hover' | 'focus' | 'hidden') => {
+    const wasRunning = pausedBy.current.size === 0;
+    pausedBy.current.add(reason);
+    if (!wasRunning) return;
+    const now = Date.now();
+    for (const timer of timers.current.values()) {
+      if (timer.handle) clearTimeout(timer.handle);
+      if (timer.deadline !== null) timer.remaining = Math.max(timer.deadline - now, 0);
+      timer.handle = null;
+      timer.deadline = null;
+    }
+  }, []);
+
+  const resume = useCallback((reason: 'hover' | 'focus' | 'hidden') => {
+    if (!pausedBy.current.delete(reason) || pausedBy.current.size > 0) return;
+    for (const [id, timer] of timers.current) {
+      startTimer(timer, Math.max(timer.remaining, MIN_RESUME_MS), () => dismissRef.current(id));
+    }
   }, []);
 
   const dismiss = useCallback(
@@ -47,15 +96,36 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     },
     [clearTimer],
   );
+  useEffect(() => {
+    dismissRef.current = dismiss;
+  }, [dismiss]);
 
   // Nothing may fire after the provider unmounts (tests, route teardown).
   useEffect(() => {
     const pending = timers.current;
     return () => {
-      for (const timer of pending.values()) clearTimeout(timer);
+      for (const timer of pending.values()) if (timer.handle) clearTimeout(timer.handle);
       pending.clear();
     };
   }, []);
+
+  // A focused toast that goes away (dismissed, action used) may not fire blur:
+  // once focus is no longer inside the notifications, the clocks run again.
+  useEffect(() => {
+    if (!pausedBy.current.has('focus')) return;
+    const region = regionRef.current;
+    if (!region || !region.contains(document.activeElement)) resume('focus');
+  }, [toasts, resume]);
+
+  // A hidden tab keeps its toasts until the person comes back.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') pause('hidden');
+      else resume('hidden');
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [pause, resume]);
 
   const show = useCallback(
     (input: ToastInput) => {
@@ -69,16 +139,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       }
       visible.current = kept;
       setToasts((list) => [...list.slice(-(MAX_TOASTS - 1)), { ...input, id, tone }]);
-      const duration = input.duration ?? (tone === 'error' ? 8000 : 5000);
+      const duration = input.duration ?? (input.action ? 0 : tone === 'error' ? 8000 : 5000);
       if (duration > 0) {
-        timers.current.set(
-          id,
-          setTimeout(() => dismiss(id), duration),
-        );
+        const timer: ToastTimer = { remaining: duration, deadline: null, handle: null };
+        timers.current.set(id, timer);
+        if (pausedBy.current.size === 0) startTimer(timer, duration, () => dismissRef.current(id));
       }
       return id;
     },
-    [clearTimer, dismiss],
+    [clearTimer],
   );
 
   const api = useMemo<ToastApi>(
@@ -119,7 +188,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         <div
           aria-live="polite"
           aria-atomic="false"
+          ref={regionRef}
           className="flex w-full flex-col items-center gap-2 sm:items-end"
+          onPointerEnter={() => pause('hover')}
+          onPointerLeave={() => resume('hover')}
+          onFocus={() => pause('focus')}
+          onBlur={(event) => {
+            // Still inside another toast (Tab between them): stay paused.
+            if (event.currentTarget.contains(event.relatedTarget)) return;
+            resume('focus');
+          }}
         >
           {toasts.map((toast) => (
             <div

@@ -140,9 +140,23 @@ struct TimeEntry: Codable, Identifiable, Hashable, Sendable {
         return max(0, Int(end.timeIntervalSince(clockIn)))
     }
 
-    /// Sum of worked seconds of `entries` (open entries run until `now`).
-    static func totalSeconds(_ entries: [TimeEntry], now: Date = Date()) -> Int {
-        entries.reduce(0) { $0 + $1.durationSeconds(now: now) }
+    /// Worked seconds that fall inside `range` (an open entry runs until
+    /// `now`): a shift across the week edge, or one left open from an
+    /// earlier week, counts only its part inside the range. Same cut as the
+    /// web timesheet and `report_team`.
+    func seconds(within range: DateInterval, now: Date = Date()) -> Int {
+        TimeTotals.secondsWithin(clockIn: clockIn, clockOut: clockOut, range: range, now: now)
+    }
+
+    /// Whether any part of the entry falls inside `range`.
+    func overlaps(_ range: DateInterval) -> Bool {
+        TimeTotals.overlaps(clockIn: clockIn, clockOut: clockOut, range: range)
+    }
+
+    /// Sum of worked seconds of `entries` inside `range` (open entries run
+    /// until `now`).
+    static func totalSeconds(_ entries: [TimeEntry], within range: DateInterval, now: Date = Date()) -> Int {
+        entries.reduce(0) { $0 + $1.seconds(within: range, now: now) }
     }
 
     /// "7h 30m" style text for a number of seconds (rounded down to minutes).

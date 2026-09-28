@@ -75,17 +75,22 @@ private struct BootstrapErrorView: View {
     @Environment(AppState.self) private var appState
     let message: String
 
+    @State private var confirmation: ConfirmationRequest?
+
     var body: some View {
         VStack(spacing: Theme.Spacing.lg) {
             ErrorStateView(message: message) {
                 await appState.retry()
             }
+            // Usually offline, i.e. just when a job video may still be
+            // waiting to upload: the confirmation says so before deleting it.
             Button("Sign out") {
-                Task { await appState.signOut() }
+                confirmation = .signOut(appState)
             }
             .buttonStyle(.themePlain)
             .padding(.bottom, Theme.Spacing.xl)
         }
         .background(Theme.background.ignoresSafeArea())
+        .confirmation($confirmation)
     }
 }

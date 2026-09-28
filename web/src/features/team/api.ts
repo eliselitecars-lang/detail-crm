@@ -3,7 +3,8 @@
  * details), role/active changes on shop_members (owner/admin; the
  * shop_members_client_guard trigger enforces the matrix), pay rates in
  * member_compensation (owner/admin), invites (invites edge function +
- * revoke_invite), and owner-only transfer_ownership.
+ * revoke_invite), and owner-only transfer_ownership (then billing
+ * sync_customer readdresses the shop's subscription emails).
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
@@ -15,7 +16,7 @@ import { supabase } from '@/lib/supabase';
 import { useCan } from '@/features/shop/useCan';
 import { useShop, useShopContext } from '@/features/shop/shopContext';
 import type { ShopRole } from '@/features/shop/permissions';
-import { resendInvite, sendInvite, type SendInviteInput } from './edge';
+import { resendInvite, sendInvite, syncBillingCustomer, type SendInviteInput } from './edge';
 import { announceInvite } from './inviteNotice';
 import { teamMemberSchema, type Compensation, type PendingInvite } from './model';
 
@@ -179,6 +180,9 @@ export function useTransferOwnership() {
       unwrap(
         await supabase.rpc('transfer_ownership', { p_shop_id: shopId, p_member_id: memberId }),
       );
+      // The shop's subscription emails follow the new owner now, not at the
+      // next daily sync (best effort; never fails the transfer).
+      await syncBillingCustomer(shopId);
     },
     onSuccess: async () => {
       await refetch();

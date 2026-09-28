@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { membershipRow, OWNER, TECH } from './support/fixtures';
-import { mockSupabase, type Json } from './support/mockSupabase';
+import { mockSupabase, SUPABASE_URL, type Json } from './support/mockSupabase';
 
 /**
  * Staff tasks (/app/tasks): a manager assigns a dated task to a technician
@@ -169,5 +169,65 @@ test.describe('tasks', () => {
       notes: 'Driver side door and hood',
       due_at: null,
     });
+  });
+  test('offline: a save fails at once, unlocks the dialog, and is never sent later', async ({
+    page,
+    context,
+  }) => {
+    const tasks = tasksTable([task(TASK_A, { title: 'Order more ceramic coating' })]);
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: { shop_members: [ownerMember], notifications: [], tasks: tasks.handler },
+      rpc: { shop_team: TEAM },
+    });
+
+    // Playwright answers routed (mocked) requests even when the context is
+    // offline, so drop them the way a real disconnected browser would.
+    let offline = false;
+    await page.route(`${SUPABASE_URL}/**`, (route) =>
+      offline ? route.abort('internetdisconnected') : route.fallback(),
+    );
+    const goOffline = async (value: boolean) => {
+      offline = value;
+      await context.setOffline(value);
+    };
+
+    await page.goto('/app/tasks');
+    await expect(page.getByRole('list', { name: 'My tasks' })).toBeVisible();
+    await page.getByRole('button', { name: 'New task' }).first().click();
+    const dialog = page.getByRole('dialog', { name: 'New task' });
+    await dialog.getByRole('textbox', { name: /^Title/ }).fill('Order more clay bars');
+
+    await goOffline(true);
+    await expect(page.getByRole('status').filter({ hasText: 'You’re offline' })).toBeVisible();
+    await dialog.getByRole('button', { name: 'Add task' }).click();
+    // The save fails straight away with the network message instead of spinning.
+    await expect(
+      page
+        .getByRole('region', { name: 'Notifications' })
+        .getByRole('alert')
+        .filter({ hasText: /can't reach the server/i }),
+    ).toBeVisible();
+    const cancel = dialog.getByRole('button', { name: 'Cancel' });
+    await expect(cancel).toBeEnabled();
+    await expect(dialog.getByRole('button', { name: 'Add task' })).toBeEnabled();
+
+    // A list that was never loaded shows the error state with Try again, not "Loading…".
+    await cancel.click();
+    await expect(dialog).toBeHidden();
+    await page.getByRole('tab', { name: 'Done' }).click();
+    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+
+    // Back online: nothing that was abandoned is sent behind the user's back.
+    await goOffline(false);
+    await expect(page.getByRole('status').filter({ hasText: 'You’re offline' })).toHaveCount(0);
+    // The list reloads (on reconnect, or via Try again if that comes first).
+    await expect(async () => {
+      const retry = page.getByRole('button', { name: 'Try again' });
+      if (await retry.isVisible()) await retry.click();
+      await expect(page.getByText('No finished tasks yet')).toBeVisible({ timeout: 1_000 });
+    }).toPass();
+    await page.waitForTimeout(500);
+    expect(tasks.inserts).toHaveLength(0);
   });
 });

@@ -9,6 +9,7 @@ on:
     paths:
       - "ios/DetailCRM/**"
       - "ios/DetailCore/**"
+      - "ios/ci/**"
       - "scripts/swift_sanity.py"
       - ".github/workflows/ios.yml"
 
@@ -28,24 +29,21 @@ env:
 jobs:
   build:
     name: Sanity, DetailCore tests, simulator build
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode (newest 16.x, else newest installed)
+      # The same Xcode as ios-testflight.yml (newest release >= 26: App Store
+      # Connect takes only iOS 26 SDK builds), so a green run here means the
+      # TestFlight archive compiles too.
+      - name: Select Xcode (newest release, 26 or later)
         run: |
           set -euo pipefail
           ls -d /Applications/Xcode*.app || true
-          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
-          if [ -z "$XCODE" ]; then
-            XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1 || true)
-          fi
-          if [ -z "$XCODE" ]; then XCODE=/Applications/Xcode.app; fi
-          echo "Selecting $XCODE"
-          sudo xcode-select -s "$XCODE"
-          xcodebuild -version
+          bash ios/ci/select_xcode_test.sh
+          bash ios/ci/select_xcode.sh
           swift --version
           echo "XCODE_VERSION=$(xcodebuild -version | head -1 | awk '{print $2}')" >> "$GITHUB_ENV"
           mkdir -p "$LOG_DIR"

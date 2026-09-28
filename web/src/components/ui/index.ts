@@ -23,6 +23,7 @@ export { Checkbox, type CheckboxProps } from './Checkbox';
 export { Combobox, type ComboboxProps } from './Combobox';
 export { ConfirmDialog, type ConfirmDialogProps } from './ConfirmDialog';
 export { CopyField, type CopyFieldProps } from './CopyField';
+export { CopyLinkDialog, type CopyLinkDialogProps } from './CopyLinkDialog';
 export { DateInput, TimeInput, type DateInputProps, type TimeInputProps } from './DateTimeInputs';
 export { Dialog, type DialogProps } from './Dialog';
 export { Drawer, type DrawerProps } from './Drawer';

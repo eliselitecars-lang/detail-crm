@@ -324,7 +324,7 @@ private struct TimeClockWeekSection: View {
     var body: some View {
         Section {
             TimelineView(.periodic(from: Date(), by: 60)) { context in
-                TimeClockTotalsRow(entries: entries, now: context.date)
+                TimeClockTotalsRow(entries: entries, range: week, now: context.date)
             }
             .themedRow()
             if entries.isEmpty {
@@ -334,7 +334,7 @@ private struct TimeClockWeekSection: View {
                     .themedRow()
             } else {
                 ForEach(entries) { entry in
-                    TimeClockEntryRow(entry: entry, clock: clock, jobNumber: entry.jobID.flatMap { jobNumbers[$0] }, memberName: nil)
+                    TimeClockEntryRow(entry: entry, clock: clock, jobNumber: entry.jobID.flatMap { jobNumbers[$0] }, memberName: nil, week: week)
                         .themedRow()
                 }
             }
@@ -344,9 +344,14 @@ private struct TimeClockWeekSection: View {
     }
 }
 
-/// "Shift time / Job time" totals (open entries count up to `now`).
+/// "Shift time / Job time" totals for `range` (open entries count up to
+/// `now`). Each entry counts only its part inside the range, so a shift
+/// across the week edge is split between the two weeks and a shift left
+/// open from last week counts from this week's start — the same figures
+/// as the web timesheet and Reports (`report_team`).
 struct TimeClockTotalsRow: View {
     let entries: [TimeEntry]
+    let range: DateInterval
     let now: Date
 
     var body: some View {
@@ -358,11 +363,11 @@ struct TimeClockTotalsRow: View {
     }
 
     private var shiftSeconds: Int {
-        TimeEntry.totalSeconds(entries.filter { $0.kind == .shift }, now: now)
+        TimeEntry.totalSeconds(entries.filter { $0.kind == .shift }, within: range, now: now)
     }
 
     private var jobSeconds: Int {
-        TimeEntry.totalSeconds(entries.filter { $0.kind == .job }, now: now)
+        TimeEntry.totalSeconds(entries.filter { $0.kind == .job }, within: range, now: now)
     }
 }
 
@@ -384,12 +389,15 @@ private struct TimeClockTotalTile: View {
     }
 }
 
-/// One time entry: day, time range, duration, kind, job and notes.
+/// One time entry: day, time range, duration, kind, job and notes. With
+/// `week`, an entry that crosses the week's edges says which part of it
+/// that week's totals count.
 struct TimeClockEntryRow: View {
     let entry: TimeEntry
     let clock: ShopClock
     let jobNumber: Int?
     let memberName: String?
+    var week: DateInterval?
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.md) {
@@ -405,6 +413,11 @@ struct TimeClockEntryRow: View {
                 Text(rangeText)
                     .font(Theme.Typography.subheadline)
                     .foregroundStyle(Theme.textSecondary)
+                if let edgeNote {
+                    Text(edgeNote)
+                        .font(Theme.Typography.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                }
                 if let notes = entry.notes?.trimmedNonEmpty {
                     Text(notes)
                         .font(Theme.Typography.footnote)
@@ -439,5 +452,25 @@ struct TimeClockEntryRow: View {
             return "\(clock.timeText(entry.clockIn)) – now"
         }
         return clock.rangeText(from: entry.clockIn, to: clockOut)
+    }
+
+    /// "Started before this week…" / "Runs into next week…" for an entry
+    /// that crosses the week's edges (the totals count only this week's part).
+    private var edgeNote: String? {
+        guard let week else { return nil }
+        let before = entry.clockIn < week.start
+        let after = (entry.clockOut ?? .distantPast) > week.end
+        switch (before, after) {
+        case (true, true):
+            return "Crosses this week's edges; only the time inside this week counts here."
+        case (true, false):
+            return entry.isOpen
+                ? "Still open from an earlier week; this week counts it from \(clock.shortDayText(week.start))."
+                : "Started before this week; only the time from \(clock.shortDayText(week.start)) counts here."
+        case (false, true):
+            return "Runs into next week; only the time before \(clock.shortDayText(week.end)) counts here."
+        case (false, false):
+            return nil
+        }
     }
 }

@@ -18,7 +18,17 @@
 #                               (AppConfig.swift reads it; restored afterwards)
 #   BUNDLE_ID                   optional (default com.detailcrm.app)
 #   BUILD_NUMBER                optional override (default: latest TestFlight build + 1)
+#   APP_VERSION                 optional: the app version (MARKETING_VERSION, shown as
+#                               "Version" in App Store Connect), e.g. 1.1. Default: the
+#                               project's MARKETING_VERSION. Once a version is approved for
+#                               the App Store its train is closed: later uploads need a
+#                               higher one (docs/DEPLOY.md section 5, "Versions")
 #   SKIP_UPLOAD=1               archive + export only
+#
+# Xcode: the selected one (xcode-select) must have the iOS 26 SDK or later
+# (MIN_UPLOAD_SDK_MAJOR): App Store Connect rejects uploads built with older
+# SDKs. The lane checks it before archiving and checks the archive's SDK
+# before uploading.
 #   SPM_DIR                     optional -clonedSourcePackagesDirPath (CI cache)
 #
 #   cd ios && bundle exec fastlane beta
@@ -87,9 +97,79 @@ def asc_key_file
   file
 end
 
+# MARKETING_VERSION of the committed project (the Debug and Release values
+# must agree).
+def project_marketing_version
+  pbxproj = File.read(File.join(PROJECT, "project.pbxproj"))
+  versions = pbxproj.scan(/MARKETING_VERSION = "?([^";]+?)"?;/).flatten.map(&:strip).uniq
+  UI.user_error!("project.pbxproj has no MARKETING_VERSION") if versions.empty?
+  UI.user_error!("project.pbxproj has different MARKETING_VERSION values (#{versions.join(', ')}); make them equal") if versions.length > 1
+  versions.first
+end
+
+# The version this build ships as: APP_VERSION, else the project's.
+def app_version!
+  version = env_value("APP_VERSION") || project_marketing_version
+  unless version.match?(/\A\d+(\.\d+){0,2}\z/)
+    UI.user_error!("App version #{version.inspect} must be one to three numbers separated by dots (e.g. 1.1 or 1.2.3)")
+  end
+  version
+end
+
+# The next version after `live` (1.0 -> 1.1, 1.2.3 -> 1.3), for the message.
+def next_version(live)
+  parts = live.split(".").map(&:to_i)
+  "#{parts[0]}.#{(parts[1] || 0) + 1}"
+end
+
 def xcode_version
   out = `xcodebuild -version 2>/dev/null`
   Gem::Version.new(out[/Xcode (\d+(\.\d+)*)/, 1] || "0")
+end
+
+# Apple's minimum for App Store Connect uploads, TestFlight included: apps
+# built with Xcode 26 / the iOS 26 SDK or later since April 28, 2026 (the
+# minimum rises every spring). An older SDK archives and exports fine, but
+# the upload or its processing is rejected. Raise it together with
+# MIN_XCODE_MAJOR in ios/ci/select_xcode.sh (docs/DEPLOY.md section 5).
+MIN_UPLOAD_SDK_MAJOR = 26
+
+# "26.0" -> 26; nil for anything that isn't a version.
+def sdk_major(version)
+  text = version.to_s.strip
+  text.match?(/\A\d+(\.\d+)*\z/) ? text.split(".").first.to_i : nil
+end
+
+def sdk_too_old_message(found)
+  "This build uses the iOS #{found || 'unknown'} SDK (Xcode #{xcode_version}); App Store Connect accepts only " \
+    "builds made with Xcode #{MIN_UPLOAD_SDK_MAJOR} / the iOS #{MIN_UPLOAD_SDK_MAJOR} SDK or later. Select " \
+    "Xcode #{MIN_UPLOAD_SDK_MAJOR}+ (xcode-select -s; CI: ios/ci/select_xcode.sh on runs-on: macos-26)."
+end
+
+# Before archiving: the selected Xcode's iPhoneOS SDK. Stops an upload run;
+# an archive-only run (SKIP_UPLOAD=1) only warns.
+def check_upload_sdk!(uploading)
+  found = `xcrun --sdk iphoneos --show-sdk-version 2>/dev/null`.strip
+  major = sdk_major(found)
+  if major && major >= MIN_UPLOAD_SDK_MAJOR
+    UI.message("iOS SDK #{found} (Xcode #{xcode_version})")
+  elsif uploading
+    UI.user_error!(sdk_too_old_message(found.empty? ? nil : found))
+  else
+    UI.important("#{sdk_too_old_message(found.empty? ? nil : found)} SKIP_UPLOAD=1: building anyway; this .ipa can't be uploaded.")
+  end
+end
+
+# After archiving: the SDK recorded in the app's Info.plist (DTSDKName,
+# e.g. "iphoneos26.0"), the value App Store Connect checks.
+def check_archive_sdk!(archive_path)
+  plist = Dir[File.join(archive_path, "Products", "Applications", "*.app", "Info.plist")].first
+  UI.user_error!("The archive has no app Info.plist (see #{LOG_DIR}/archive.log)") unless plist
+  name = `/usr/libexec/PlistBuddy -c 'Print :DTSDKName' #{plist.shellescape} 2>/dev/null`.strip
+  found = name.sub(/\Aiphoneos/, "")
+  major = sdk_major(found)
+  UI.user_error!(sdk_too_old_message(found.empty? ? nil : found)) unless major && major >= MIN_UPLOAD_SDK_MAJOR
+  UI.message("Archive built with the #{name} SDK")
 end
 
 # Runs a command array, output to a log file (and xcbeautify when present).
@@ -171,6 +251,7 @@ platform :ios do
     UI.user_error!("APPLE_TEAM_ID must be the 10-character team id") unless team_id.match?(/\A[A-Z0-9]{10}\z/)
     bundle_id = env_value("BUNDLE_ID") || DEFAULT_BUNDLE_ID
     UI.user_error!("BUNDLE_ID #{bundle_id} is not a reverse-DNS identifier") unless bundle_id.match?(/\A[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+\z/)
+    check_upload_sdk!(env_value("SKIP_UPLOAD") != "1")
     key_path = asc_key_file
 
     api_key = app_store_connect_api_key(
@@ -192,7 +273,26 @@ platform :ios do
       build_number = (latest.to_s.split(".").first.to_i + 1).to_s
     end
     UI.user_error!("BUILD_NUMBER must be a positive integer") unless build_number.match?(/\A[1-9]\d*\z/)
-    UI.message("Bundle #{bundle_id}, team #{team_id}, build number #{build_number}")
+
+    # App Store Connect refuses an upload whose version is not higher than
+    # the one on the App Store (that version's train is closed). Check before
+    # spending an archive on it.
+    version = app_version!
+    if env_value("SKIP_UPLOAD") != "1"
+      live = begin
+        app_store_build_number(api_key: api_key, app_identifier: bundle_id, live: true)
+        Fastlane::Actions.lane_context[Fastlane::Actions::SharedValues::LATEST_VERSION]
+      rescue StandardError => e
+        UI.message("No version live on the App Store yet for #{bundle_id} (#{e.message.to_s.lines.first.to_s.strip})")
+        nil
+      end
+      if live.to_s.match?(/\A\d+(\.\d+)*\z/) && Gem::Version.new(version) <= Gem::Version.new(live)
+        UI.user_error!("Version #{version} is not higher than #{live}, the version on the App Store, so App Store " \
+                       "Connect would reject the upload. Run ios-testflight with app_version (e.g. " \
+                       "#{next_version(live)}), or raise MARKETING_VERSION in the project (docs/DEPLOY.md section 5).")
+      end
+    end
+    UI.message("Bundle #{bundle_id}, team #{team_id}, version #{version}, build number #{build_number}")
 
     auth = [
       "-allowProvisioningUpdates",
@@ -221,6 +321,7 @@ platform :ios do
            "-skipMacroValidation",
            *auth,
            "DEVELOPMENT_TEAM=#{team_id}",
+           "MARKETING_VERSION=#{version}",
            "CURRENT_PROJECT_VERSION=#{build_number}"],
           "archive.log"
         )
@@ -245,11 +346,14 @@ platform :ios do
       sh("cd #{dsyms.shellescape} && zip -qry #{File.join(OUTPUT_DIR, 'DetailCRM.app.dSYM.zip').shellescape} .", log: false)
     end
     File.write(File.join(OUTPUT_DIR, "build_number.txt"), "#{build_number}\n")
+    File.write(File.join(OUTPUT_DIR, "version.txt"), "#{version}\n")
 
     if env_value("SKIP_UPLOAD") == "1"
       UI.important("SKIP_UPLOAD=1: not uploading. The .ipa is in #{OUTPUT_DIR}")
       next
     end
+
+    check_archive_sdk!(archive_path)
 
     upload_to_testflight(
       api_key: api_key,
@@ -258,6 +362,6 @@ platform :ios do
       skip_waiting_for_build_processing: true,
       distribute_external: false
     )
-    UI.success("Uploaded build #{build_number} of #{bundle_id} to TestFlight (processing takes a few minutes)")
+    UI.success("Uploaded version #{version} (#{build_number}) of #{bundle_id} to TestFlight (processing takes a few minutes)")
   end
 end

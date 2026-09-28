@@ -157,13 +157,13 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               <Term>Photos, videos, files and signatures:</Term> before-and-after and inspection
               photos, walkaround videos (with their sound), documents the shop uploads to a job or
               customer (such as PDFs, Word and Excel files and images), and signatures customers
-              draw on inspections and forms. They are kept in private file storage that only the
-              shop’s team can open, according to their role. When a shop shares a job report, the
-              customer’s link shows only the photos, videos, inspection details and documents the
-              shop chose to share, through links that expire after a few minutes; documents the shop
-              marks as shared also appear on the customer’s booking page and in the customer portal
-              the same way. Shop logos and service images are public, because they appear on the
-              shop’s booking pages. When a customer signs a form or an inspection remotely, the
+              draw or type on inspections and forms. They are kept in private file storage that only
+              the shop’s team can open, according to their role. When a shop shares a job report,
+              the customer’s link shows only the photos, videos, inspection details and documents
+              the shop chose to share, through links that expire after a few minutes; documents the
+              shop marks as shared also appear on the customer’s booking page and in the customer
+              portal the same way. Shop logos and service images are public, because they appear on
+              the shop’s booking pages. When a customer signs a form or an inspection remotely, the
               typed name and the time are recorded (and, for forms, the IP address of the signing
               device) as evidence of the signature.
             </li>
@@ -203,15 +203,18 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               questions, the chosen services and time, a coupon or referral code and marketing
               choices) or when filling in a shop’s contact form (name, email, phone, vehicle,
               message, answers and marketing choices, plus the IP address of the device, used to
-              limit abuse). Gift card purchases record the buyer’s and recipient’s names and email
-              addresses, the gift message and the IP address of the buyer’s device; gift card codes
-              are stored only in a scrambled form (plus their last four characters, so staff can
-              find a card) and are emailed to the recipient. When someone enters a gift card code
-              that does not work on an invoice payment page, the IP address of the device is
-              recorded with the failed attempt to stop codes being guessed. A shop can embed its
-              booking page or contact form in its own website: the form then appears inside that
-              website, and the embed script sets no cookies and tells the website only how tall the
-              form is.
+              limit abuse). When an online booking is accepted, the IP address of the device (and,
+              if the customer is signed in, their account) is also recorded with the time, so the
+              number of online bookings from one device or account can be limited; each time the
+              shop receives another online booking, these records older than two days are deleted.
+              Gift card purchases record the buyer’s and recipient’s names and email addresses, the
+              gift message and the IP address of the buyer’s device; gift card codes are stored only
+              in a scrambled form (plus their last four characters, so staff can find a card) and
+              are emailed to the recipient. When someone enters a gift card code that does not work
+              on an invoice payment page, the IP address of the device is recorded with the failed
+              attempt to stop codes being guessed. A shop can embed its booking page or contact form
+              in its own website: the form then appears inside that website, and the embed script
+              sets no cookies and tells the website only how tall the form is.
             </li>
             <li>
               <Term>Customer portal:</Term> customers who create a portal account sign in with an
@@ -774,9 +777,11 @@ export function termsOfService(operator: LegalOperator): LegalText {
                 export everything, finish existing jobs and collect payments on existing invoices
                 and deposits. Until the shop subscribes again, creating new customers, jobs,
                 repeating jobs, quotes, invoices and campaigns, sending new messages to customers,
-                online booking, and scheduled automatic messages (such as reminders, review requests
-                and follow-ups) and campaign sends are paused. Messages about existing work, such as
-                job updates and receipts, still go out.
+                online booking, lead forms (and their automatic replies), selling memberships and
+                gift cards (online and by the shop’s team), and scheduled automatic messages (such
+                as reminders, review requests and follow-ups) and campaign sends are paused.
+                Messages about existing work, such as job updates and receipts, still go out, and
+                store credit earned from referrals and refunds to existing gift cards keep working.
               </li>
               <li>
                 <Term>Free access:</Term> we may give a shop free use of the Service for a period;

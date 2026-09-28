@@ -45,7 +45,9 @@ struct JobsCalendarEventSheet: View {
     @State private var start = Date()
     @State private var end = Date().addingTimeInterval(3_600)
     @State private var memberID: UUID?
-    @State private var customer: JobCustomer?
+    /// The event's customer, kept by id: the loaded customer only labels
+    /// the field, so a failed lookup never unlinks it on save.
+    @State private var customerLink = LinkedRecord<JobCustomer>()
     @State private var customerQuery = ""
     @State private var customerResults: [JobCustomer] = []
     @State private var affectsCapacity = false
@@ -197,20 +199,45 @@ struct JobsCalendarEventSheet: View {
     @ViewBuilder
     private var customerField: some View {
         FormRow("Customer (optional)", hint: "Only managers see which customer an event is for.") {
-            if let customer {
-                HStack {
+            switch customerLink.display {
+            case .record(let customer):
+                linkedCustomerRow {
                     Label(customer.displayName, systemImage: "person")
                         .foregroundStyle(Theme.textPrimary)
-                    Spacer()
-                    Button("Remove") { self.customer = nil }
-                        .font(Theme.Typography.footnote.weight(.semibold))
                 }
-            } else {
+            case .loading:
+                linkedCustomerRow {
+                    HStack(spacing: Theme.Spacing.xs) {
+                        ProgressView()
+                        Text("Loading customer…")
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+            case .failed:
+                linkedCustomerRow {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                        Label("Couldn't load the customer", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(Theme.textPrimary)
+                        Text("It stays linked to this event.")
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                        Button("Try again") {
+                            Task { await loadLinkedCustomer() }
+                        }
+                        .font(Theme.Typography.footnote.weight(.semibold))
+                    }
+                }
+            case .unavailable:
+                linkedCustomerRow {
+                    Label("A customer you can't see", systemImage: "person.crop.circle.badge.questionmark")
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            case .none:
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                     SearchBar(text: $customerQuery, prompt: "Search customers")
                     ForEach(customerResults.prefix(6)) { result in
                         Button {
-                            customer = result
+                            customerLink.pick(result)
                             customerQuery = ""
                             customerResults = []
                         } label: {
@@ -313,7 +340,7 @@ struct JobsCalendarEventSheet: View {
                 kind = newKind
                 if !capacityEdited { affectsCapacity = newKind.defaultAffectsCapacity }
                 if newKind == .closed { memberID = nil; affectsCapacity = true }
-                if !newKind.allowsCustomer { customer = nil }
+                if !newKind.allowsCustomer { customerLink.remove() }
             }
         )
     }
@@ -423,8 +450,31 @@ struct JobsCalendarEventSheet: View {
             untilDay = clock.addingDays(30, to: event.startsAt)
             recurrence.weekdays = [clock.calendar.component(.weekday, from: event.startsAt) - 1]
         }
-        if let customerID = event.customerID {
-            customer = try? await JobService.customer(shopID: shopID, customerID: customerID)
+        customerLink = LinkedRecord(id: event.customerID)
+        await loadLinkedCustomer(shopID: shopID)
+    }
+
+    /// Labels the linked customer. A failure keeps the link (the field
+    /// offers a retry) instead of looking like "no customer".
+    private func loadLinkedCustomer(shopID: UUID? = nil) async {
+        guard let customerID = customerLink.id, customerLink.record == nil,
+              let shopID = shopID ?? appState.shop?.id else { return }
+        customerLink.retryingLookup()
+        do {
+            let found = try await JobService.customer(shopID: shopID, customerID: customerID)
+            customerLink.lookupFinished(found, for: customerID)
+        } catch {
+            customerLink.lookupFailed(for: customerID)
+        }
+    }
+
+    /// A linked customer's row with its Remove button.
+    private func linkedCustomerRow<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack {
+            content()
+            Spacer()
+            Button("Remove") { customerLink.remove() }
+                .font(Theme.Typography.footnote.weight(.semibold))
         }
     }
 
@@ -463,7 +513,7 @@ struct JobsCalendarEventSheet: View {
             "starts_at": .string(Supa.iso(start)),
             "ends_at": .string(Supa.iso(end)),
             "member_id": kind.forbidsMember ? .null : (memberID.map { AnyJSON.string($0.uuidString) } ?? .null),
-            "customer_id": kind.allowsCustomer ? (customer.map { AnyJSON.string($0.id.uuidString) } ?? .null) : .null,
+            "customer_id": kind.allowsCustomer ? (customerLink.id.map { AnyJSON.string($0.uuidString) } ?? .null) : .null,
             "affects_capacity": .bool(kind == .closed ? true : affectsCapacity),
             "reason": notes.trimmedNonEmpty.map { AnyJSON.string($0) } ?? .null,
         ]

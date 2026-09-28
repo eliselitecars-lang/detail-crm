@@ -127,6 +127,8 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
   const locked = inspection.signed_at !== null;
   const numbered = inspection.marks.map((m, i) => ({ ...m, number: i + 1 }));
   const inView = numbered.filter((m) => m.view === view);
+  // Removing a mark also deletes its photo (damage evidence), so it is confirmed.
+  const [markToRemove, setMarkToRemove] = useState<(typeof numbered)[number] | null>(null);
 
   // Local drafts of the details, resynced whenever the server row changes
   // (after a save, a signature, or someone else's edit) — never stale.
@@ -242,9 +244,7 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
                   variant="danger"
                   label={`Remove mark ${m.number}`}
                   icon={<Trash2 className="size-4" />}
-                  onClick={() =>
-                    deleteMark.mutateAsync(m).catch((error: unknown) => toast.error(error))
-                  }
+                  onClick={() => setMarkToRemove(m)}
                 />
               )}
             </li>
@@ -411,6 +411,28 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
           </ul>
         </SignatureDialog>
       )}
+      <ConfirmDialog
+        open={markToRemove !== null}
+        onClose={() => setMarkToRemove(null)}
+        tone="danger"
+        title={markToRemove ? `Remove mark ${markToRemove.number}?` : 'Remove this mark?'}
+        description={
+          markToRemove
+            ? `${DAMAGE_LABELS[markToRemove.damage]}${markToRemove.photo_path ? ' — its photo is deleted too' : ''}. This can’t be undone.`
+            : undefined
+        }
+        confirmLabel="Remove"
+        loading={deleteMark.isPending}
+        onConfirm={async () => {
+          if (!markToRemove) return;
+          try {
+            await deleteMark.mutateAsync(markToRemove);
+            setMarkToRemove(null);
+          } catch (error) {
+            toast.error(error);
+          }
+        }}
+      />
       <ConfirmDialog
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}

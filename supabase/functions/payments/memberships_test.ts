@@ -56,7 +56,12 @@ Deno.test("membership_checkout: creates the plan's product + price lazily and st
   assertEquals(form?.get("metadata[membership_id]"), MEMBERSHIP);
   assertEquals(form?.get("metadata[customer_id]"), CUSTOMER);
   assertEquals(form?.get("subscription_data[application_fee_percent]"), "2.5");
-  assertEquals(form?.get("success_url"), "https://app.example.com/portal?membership=active");
+  // A public page: the customer who got the link has no account (never /portal).
+  assertEquals(form?.get("success_url"), "https://app.example.com/done/shine-co?membership=active");
+  assertEquals(
+    form?.get("cancel_url"),
+    "https://app.example.com/done/shine-co?membership=canceled",
+  );
 });
 
 Deno.test("membership_checkout: reuses a stored price that still matches the plan", async () => {

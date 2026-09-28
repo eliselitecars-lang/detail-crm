@@ -870,3 +870,270 @@ Deno.test("release_number: owner only; releases the number and its service", asy
   );
   assertEquals(again.released, false);
 });
+
+// ---------------------------------------------------------------------------
+// The platform pays for numbers: standing and churn gates
+// ---------------------------------------------------------------------------
+
+const DAY = 24 * 60 * 60 * 1000;
+const CLOCK = new Date("2026-09-28T12:00:00Z");
+
+function release(daysAgo: number, overrides: Row = {}): Row {
+  return {
+    id: crypto.randomUUID(),
+    phone_number: "+18445550999",
+    shop_id: SHOP,
+    shop_name: "Shine Co",
+    released_at: new Date(CLOCK.getTime() - daysAgo * DAY).toISOString(),
+    ...overrides,
+  };
+}
+
+const twilioCalls = (db: ReturnType<typeof fixture>["db"]) =>
+  db.http.calls.filter((c) => c.url.hostname.endsWith("twilio.com"));
+
+Deno.test("purchase_number: only a shop that pays may buy (lapsed 402, trial / past due 422)", async () => {
+  const body = { shop_id: SHOP, phone_e164: NUMBER, request_nonce: NONCE };
+  const lapsed = fixture({ standing: { [SHOP]: "lapsed" } });
+  purchaseRoutes(lapsed.db);
+  const refused = await expectError(
+    await lapsed.handler(call("purchase_number", body, "tok-owner")),
+    402,
+    "subscription_inactive",
+  );
+  assertEquals(refused.code, "payment_required");
+  assertEquals(twilioCalls(lapsed.db).length, 0, "nothing is bought or even looked up");
+
+  for (const state of ["trialing", "past_due"]) {
+    const f = fixture({ standing: { [SHOP]: state } });
+    purchaseRoutes(f.db);
+    const err = await expectError(
+      await f.handler(call("purchase_number", body, "tok-owner")),
+      422,
+      "subscription_required",
+    );
+    assertEquals((err.details as { state?: string }).state, state);
+    assertEquals(twilioCalls(f.db).length, 0);
+    assertEquals(f.rpc.record_sms_number?.length, 0);
+  }
+
+  // Subscribed or comped (billing off also reads active): the number is bought.
+  for (const state of ["active", "comped"]) {
+    const f = fixture({ standing: { [SHOP]: state } });
+    const bought = purchaseRoutes(f.db);
+    assertEquals((await f.handler(call("purchase_number", body, "tok-owner"))).status, 200);
+    assertEquals(bought.length, 1);
+  }
+});
+
+Deno.test("purchase_number: resuming an interrupted purchase is not refused by standing", async () => {
+  // The number was bought and recorded before the shop lapsed; only the
+  // (free) Messaging Service is missing.
+  const f = fixture({
+    standing: { [SHOP]: "lapsed" },
+    numbers: [provisionedRow({ messaging_service_sid: null })],
+  });
+  const bought = purchaseRoutes(f.db);
+  const res = await f.handler(
+    call(
+      "purchase_number",
+      { shop_id: SHOP, phone_e164: NUMBER, request_nonce: NONCE },
+      "tok-owner",
+    ),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(bought.length, 0);
+  assertEquals(f.db.http.callsTo("POST", `${MSG}/Services`).length, 1);
+});
+
+Deno.test("purchase_number: buy / release / buy cannot loop (2 releases per 30 days)", async () => {
+  const f = fixture({ now: CLOCK });
+  const bought = purchaseRoutes(f.db);
+  const buy = (phone: string, nonce: string) =>
+    f.handler(
+      call(
+        "purchase_number",
+        { shop_id: SHOP, phone_e164: phone, request_nonce: nonce },
+        "tok-owner",
+      ),
+    );
+  const giveBack = () => f.handler(call("release_number", { shop_id: SHOP }, "tok-owner"));
+
+  assertEquals((await buy(NUMBER, "nonce-first-0001")).status, 200);
+  assertEquals((await giveBack()).status, 200);
+  assertEquals((await buy("+18445550124", "nonce-second-001")).status, 200);
+  assertEquals((await giveBack()).status, 200);
+  assertEquals(f.db.table("sms_number_releases").length, 2);
+
+  const err = await expectError(
+    await buy("+18445550125", "nonce-third-0001"),
+    429,
+    "number_churn_limit",
+  );
+  assertEquals(err.code, "rate_limited");
+  assertEquals(
+    (err.details as { retry_at?: string }).retry_at,
+    new Date(CLOCK.getTime() + 30 * DAY).toISOString(),
+  );
+  assertEquals(bought.length, 2, "the third number is never bought");
+});
+
+Deno.test("purchase_number: releases older than the window do not count; a found retry is not refused", async () => {
+  const old = fixture({
+    now: CLOCK,
+    releases: [release(31), release(45), release(10)],
+  });
+  const bought = purchaseRoutes(old.db);
+  const body = { shop_id: SHOP, phone_e164: NUMBER, request_nonce: NONCE };
+  assertEquals((await old.handler(call("purchase_number", body, "tok-owner"))).status, 200);
+  assertEquals(bought.length, 1);
+
+  // Another shop's releases never count toward this one.
+  const other = fixture({
+    now: CLOCK,
+    releases: [release(1, { shop_id: CA_SHOP }), release(2, { shop_id: CA_SHOP })],
+  });
+  purchaseRoutes(other.db);
+  assertEquals((await other.handler(call("purchase_number", body, "tok-owner"))).status, 200);
+
+  // At the limit, a retry that finds the number it already bought still records it.
+  const retry = fixture({ now: CLOCK, releases: [release(1), release(2)] });
+  const already = purchaseRoutes(retry.db);
+  already.push({
+    sid: sid("PN"),
+    phone_number: NUMBER,
+    friendly_name: `dcrm-${SHOP}-${await nonceHash(NONCE)}`,
+  });
+  assertEquals((await retry.handler(call("purchase_number", body, "tok-owner"))).status, 200);
+  assertEquals(retry.db.http.callsTo("POST", `${API}/IncomingPhoneNumbers.json`).length, 0);
+  assertEquals(retry.rpc.record_sms_number?.[0]?.p_number_sid, already[0]?.sid);
+});
+
+async function nonceHash(nonce: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(nonce));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")
+    .slice(0, 16);
+}
+
+Deno.test("submit_10dlc: carrier fees need a shop that pays", async () => {
+  const f = fixture({
+    env: { TWILIO_ISV_ENABLED: "true", TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: PRIMARY_PROFILE },
+    numbers: [provisionedRow({ phone_number: LOCAL, kind: "local" })],
+    standing: { [SHOP]: "lapsed" },
+  });
+  await expectError(
+    await f.handler(
+      call(
+        "submit_10dlc",
+        { shop_id: SHOP, business: A2P_BUSINESS, campaign: A2P_CAMPAIGN },
+        "tok-owner",
+      ),
+    ),
+    402,
+    "subscription_inactive",
+  );
+  assertEquals(twilioCalls(f.db).length, 0);
+  assertEquals(f.rpc.set_sms_verification?.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// release_worklist
+// ---------------------------------------------------------------------------
+
+const GONE_SHOP = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+
+/** The platform's Twilio numbers, looked up by PhoneNumber and released by sid. */
+function accountNumbers(db: ReturnType<typeof fixture>["db"], numbers: Row[]) {
+  db.http.on("GET", `${API}/IncomingPhoneNumbers.json`, (_req, match) => {
+    const phone = match.url.searchParams.get("PhoneNumber");
+    if (phone === "+18005550500") return twilioError(503, 20500, "Service unavailable");
+    return jsonResponse({
+      incoming_phone_numbers: numbers.filter((n) => n.phone_number === phone),
+    });
+  });
+  db.http.on(
+    "DELETE",
+    `${API}/IncomingPhoneNumbers/:pn`,
+    () => new Response(null, { status: 204 }),
+  );
+}
+
+Deno.test("release_worklist: needs the cron secret; an empty worklist never calls Twilio", async () => {
+  const f = fixture();
+  await expectError(
+    await f.handler(cron("wrong-secret-0123456789abcdef", "release_worklist")),
+    401,
+  );
+  await expectError(
+    await f.handler(call("release_worklist", {}, "tok-owner")),
+    401,
+  );
+  const res = await f.handler(cron(undefined, "release_worklist"));
+  assertEquals(await responseJson(res), {
+    checked: 0,
+    pending: [],
+    released: 0,
+    pruned: 0,
+    failed: 0,
+  });
+  assertEquals(twilioCalls(f.db).length, 0);
+});
+
+Deno.test("release_worklist: releases deleted shops' self-serve numbers, reports the rest, prunes what is done", async () => {
+  const selfServe = release(3, {
+    phone_number: "+18445550101",
+    shop_id: GONE_SHOP,
+    shop_name: "Closed Co",
+  });
+  const handBound = release(5, {
+    phone_number: "+12055550102",
+    shop_id: GONE_SHOP,
+    shop_name: "Closed Co",
+  });
+  const recentDone = release(2, { phone_number: "+18445550103" }); // SHOP exists: kept (limit)
+  const oldDone = release(40, { phone_number: "+18445550104" });
+  const rebound = release(1, { phone_number: "+18445550105", shop_id: GONE_SHOP });
+  const outage = release(1, { phone_number: "+18005550500", shop_id: GONE_SHOP });
+  const f = fixture({
+    now: CLOCK,
+    releases: [selfServe, handBound, recentDone, oldDone, rebound, outage],
+    numbers: [{ phone_number: "+18445550105", shop_id: CA_SHOP, twilio_number_sid: null }],
+  });
+  const selfServeSid = sid("PN");
+  const handSid = sid("PN");
+  accountNumbers(f.db, [
+    {
+      sid: selfServeSid,
+      phone_number: "+18445550101",
+      friendly_name: `dcrm-${GONE_SHOP}-0123456789abcdef`,
+    },
+    { sid: handSid, phone_number: "+12055550102", friendly_name: "Closed Co main line" },
+  ]);
+
+  const res = await f.handler(cron(undefined, "release_worklist"));
+  assertEquals(res.status, 200);
+  const out = await responseJson<Record<string, unknown>>(res);
+  assertEquals(out, {
+    checked: 6,
+    pending: [{
+      phone_number: "+12055550102",
+      twilio_number_sid: handSid,
+      shop_id: GONE_SHOP,
+      shop_name: "Closed Co",
+      shop_deleted: true,
+      released_at: handBound.released_at,
+    }],
+    released: 1,
+    pruned: 3,
+    failed: 1,
+  });
+  const deleted = f.db.http.callsTo("DELETE", `${API}/IncomingPhoneNumbers/:pn`);
+  assertEquals(deleted.map((c) => c.url.pathname.endsWith(`/${selfServeSid}.json`)), [true]);
+  // Left: the hand-bound number (pending), the failed lookup (retried
+  // tomorrow) and SHOP's recent release (counts toward its limit).
+  assertEquals(
+    f.db.table("sms_number_releases").map((r) => r.phone_number).sort(),
+    ["+12055550102", "+18005550500", "+18445550103"],
+  );
+  assertEquals(f.log.events("sms_numbers_awaiting_release").length, 1);
+});

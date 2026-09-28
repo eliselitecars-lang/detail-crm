@@ -1,7 +1,9 @@
 import { screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { authValue, renderRoute, signedInAuth } from '@/test/render';
 import { createBuilder, resetSupabaseMock, supabase } from '@/test/supabaseMock';
+import { forgetCallbackLink, inspectStartupUrl } from '@/lib/authUrlSession';
+import AuthCallbackPage from './AuthCallbackPage';
 import ForgotPasswordPage from './ForgotPasswordPage';
 import InvitePage from './InvitePage';
 import LoginPage from './LoginPage';
@@ -121,7 +123,8 @@ describe('SignupPage', () => {
       password: 'correct-horse',
       options: {
         data: { full_name: 'Sam Shop' },
-        emailRedirectTo: `${window.location.origin}/invite/abc`,
+        // Via /auth/callback, which asks before signing in (login CSRF).
+        emailRedirectTo: `${window.location.origin}/auth/callback?next=%2Finvite%2Fabc`,
       },
     });
   });
@@ -311,5 +314,122 @@ describe('InvitePage', () => {
       shop: null,
     });
     expect(await screen.findByRole('alert')).toHaveTextContent('expired');
+  });
+});
+
+function fakeJwt(sub: string): string {
+  const part = (value: object) => btoa(JSON.stringify(value)).replace(/=+$/, '');
+  return `${part({ alg: 'HS256' })}.${part({ sub })}.sig`;
+}
+
+/** Loads the page as if the app had just started on `path` (lib/authUrlSession). */
+function startOn(path: string, storedUserId: string | null = null) {
+  window.localStorage.clear();
+  if (storedUserId) {
+    window.localStorage.setItem(
+      'sb-test-auth-token',
+      JSON.stringify({ user: { id: storedUserId } }),
+    );
+  }
+  window.history.replaceState(null, '', path);
+  inspectStartupUrl('sb-test-auth-token');
+}
+
+describe('ResetPasswordPage — link for another account', () => {
+  const previous = window.location.href;
+  afterEach(() => {
+    window.history.replaceState(null, '', previous);
+    window.localStorage.clear();
+  });
+
+  it('keeps the signed-in account and says the link is for someone else', () => {
+    startOn(
+      `/reset-password#access_token=${fakeJwt('attacker')}&refresh_token=rt&type=recovery`,
+      'user-1',
+    );
+    renderRoute(<ResetPasswordPage />, { auth: signedInAuth(), shop: null });
+    expect(screen.getByRole('alert')).toHaveTextContent('for a different account');
+    expect(screen.queryByLabelText(/^New password/)).not.toBeInTheDocument();
+    expect(window.location.hash).toBe('');
+  });
+
+  it('names the account the new password is for', () => {
+    startOn('/reset-password');
+    renderRoute(<ResetPasswordPage />, {
+      auth: { ...signedInAuth('sam@example.com'), recovery: true },
+      shop: null,
+    });
+    expect(screen.getByText('sam@example.com')).toBeInTheDocument();
+  });
+});
+
+describe('AuthCallbackPage', () => {
+  const previous = window.location.href;
+  afterEach(() => {
+    window.history.replaceState(null, '', previous);
+    window.localStorage.clear();
+    forgetCallbackLink();
+  });
+
+  const confirmLink = (sub: string) =>
+    `/auth/callback?next=%2Fapp#access_token=${fakeJwt(sub)}&refresh_token=rt-${sub}&expires_in=3600&token_type=bearer&type=signup`;
+
+  it('signs in only after the visitor confirms the account', async () => {
+    startOn(confirmLink('new-user'));
+    supabase.auth.getUser.mockResolvedValueOnce({
+      data: { user: { id: 'new-user', email: 'new@example.com' } },
+      error: null,
+    });
+    const { user } = renderRoute(<AuthCallbackPage />, {
+      routePath: '/auth/callback',
+      path: '/auth/callback?next=%2Fapp',
+      auth: authValue({ status: 'signedOut' }),
+      routes: [landing('/app', 'App home')],
+      shop: null,
+    });
+    expect(await screen.findByText('new@example.com')).toBeInTheDocument();
+    expect(supabase.auth.getUser).toHaveBeenCalledWith(fakeJwt('new-user'));
+    expect(supabase.auth.setSession).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Continue as new@example.com' }));
+    expect(await screen.findByText('App home')).toBeInTheDocument();
+    expect(supabase.auth.setSession).toHaveBeenCalledWith({
+      access_token: fakeJwt('new-user'),
+      refresh_token: 'rt-new-user',
+    });
+  });
+
+  it('never replaces another signed-in account without asking, and can be declined', async () => {
+    startOn(confirmLink('attacker'), 'user-1');
+    supabase.auth.getUser.mockResolvedValueOnce({
+      data: { user: { id: 'attacker', email: 'someone@evil.test' } },
+      error: null,
+    });
+    const { user } = renderRoute(<AuthCallbackPage />, {
+      routePath: '/auth/callback',
+      path: '/auth/callback?next=%2Fapp',
+      auth: signedInAuth(),
+      routes: [landing('/app', 'App home')],
+      shop: null,
+    });
+    expect(await screen.findByText('someone@evil.test')).toBeInTheDocument();
+    expect(screen.getByText(/You’re signed in here as/)).toHaveTextContent('owner@example.com');
+    await user.click(screen.getByRole('button', { name: 'This isn’t me' }));
+    expect(await screen.findByText('App home')).toBeInTheDocument();
+    expect(supabase.auth.setSession).not.toHaveBeenCalled();
+    expect(supabase.auth.signOut).not.toHaveBeenCalled();
+  });
+
+  it('explains an expired confirmation link', () => {
+    startOn(
+      '/auth/callback?next=%2Fapp#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired',
+    );
+    renderRoute(<AuthCallbackPage />, {
+      routePath: '/auth/callback',
+      path: '/auth/callback?next=%2Fapp',
+      auth: authValue({ status: 'signedOut' }),
+      shop: null,
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('invalid or has expired');
+    expect(supabase.auth.getUser).not.toHaveBeenCalled();
   });
 });

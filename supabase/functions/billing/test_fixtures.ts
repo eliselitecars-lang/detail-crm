@@ -159,6 +159,14 @@ export class FakePlatformStripe {
   /** When set, GET /products answers this error (a Stripe outage mid-sync). */
   listError: { status: number; body: Record<string, unknown> } | null = null;
   customersCreated = 0;
+  /** Platform customers by id (created through POST /customers, or seeded). */
+  readonly customers = new Map<string, Row>();
+
+  putCustomer(customer: Row): Row {
+    const row: Row = { object: "customer", email: null, name: null, metadata: {}, ...customer };
+    this.customers.set(row.id as string, row);
+    return row;
+  }
 
   putSubscription(sub: Row): this {
     this.subscriptions.set(sub.id as string, sub);
@@ -232,15 +240,45 @@ export class FakePlatformStripe {
       }
       return jsonResponse(sub);
     });
+    const metadataOf = (form: URLSearchParams) => {
+      const metadata: Record<string, string> = {};
+      for (const [key, value] of form) {
+        const m = /^metadata\[([^\]]+)\]$/.exec(key);
+        if (m?.[1]) metadata[m[1]] = value;
+      }
+      return metadata;
+    };
+    const noSuchCustomer = () =>
+      jsonResponse(
+        stripeErrorBody("invalid_request_error", "No such customer", { code: "resource_missing" }),
+        404,
+      );
     http.on("POST", `${STRIPE}/customers`, (_req, { call }) => {
       this.customersCreated++;
-      return jsonResponse({
+      return jsonResponse(this.putCustomer({
         id: "cus_1NewShop",
-        object: "customer",
         email: call.form.get("email"),
         name: call.form.get("name"),
-        metadata: { shop_id: call.form.get("metadata[shop_id]") },
-      });
+        metadata: metadataOf(call.form),
+      }));
+    });
+    http.on(
+      "GET",
+      `${STRIPE}/customers`,
+      (_req, { url }) =>
+        page([...this.customers.values()] as Array<Row & { id: string }>, url, "/v1/customers"),
+    );
+    http.on("GET", `${STRIPE}/customers/:id`, (_req, { params }) => {
+      const found = this.customers.get(params.id ?? "");
+      return found ? jsonResponse(found) : noSuchCustomer();
+    });
+    http.on("POST", `${STRIPE}/customers/:id`, (_req, { params, call }) => {
+      const found = this.customers.get(params.id ?? "");
+      if (!found) return noSuchCustomer();
+      const email = call.form.get("email");
+      if (email !== null) found.email = email;
+      found.metadata = { ...(found.metadata as Row), ...metadataOf(call.form) };
+      return jsonResponse(found);
     });
     http.on("GET", `${STRIPE}/subscriptions`, (_req, { url }) => {
       const customer = url.searchParams.get("customer");

@@ -393,7 +393,9 @@ describe('deploy_backend.sh', () => {
 
   test('billing inputs: the billing webhook secret is required only with billing on and without --stripe-webhooks; bad values are named', async () => {
     await freshApi();
-    const on = await run([], { omit: ['STRIPE_BILLING_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'true' } });
+    // --allow-dirty: the stop under test is the project check (step 2), not
+    // the dirty-tree guard, so the result must not depend on the checkout.
+    const on = await run(['--allow-dirty'], { omit: ['STRIPE_BILLING_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'true' } });
     assert.equal(on.code, 1, on.out);
     assert.match(on.out, /STRIPE_BILLING_WEBHOOK_SECRET is neither an input nor stored in the project/);
     assert.deepEqual(mutations(on.requests), []);

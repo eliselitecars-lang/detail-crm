@@ -1,9 +1,10 @@
-import { FileText, Pencil } from 'lucide-react';
+import { Copy, FileText, Pencil, Send } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import {
   Button,
   buttonClasses,
+  CopyField,
   Dialog,
   ErrorState,
   FormField,
@@ -19,10 +20,13 @@ import { formatCents } from '@/lib/money';
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import { useUpdateJob, type JobDetail } from '../../api';
+import { copyText } from '@/features/quotes/shared/format';
 import {
   useCreateInvoice,
   useDepositFollowup,
+  useJobBookingLink,
   usePaymentSummary,
+  useSendJobTemplate,
   useSetDepositFollowupsPaused,
 } from '../../fieldApi';
 import { describeFollowup } from '../../model';
@@ -118,6 +122,9 @@ export function MoneyCard({ job }: { job: JobDetail }) {
               },
             ]}
           />
+          {canManage && (s?.deposit_due_cents ?? 0) > 0 && !DEPOSIT_CLOSED.has(job.status) && (
+            <DepositRequest job={job} />
+          )}
           {canManage && (s?.deposit_due_cents ?? 0) > 0 && <DepositFollowups jobId={job.id} />}
           {hasInvoice && s.invoice_id ? (
             <div className="border-line flex flex-wrap items-center justify-between gap-2 border-t pt-3">
@@ -147,6 +154,84 @@ export function MoneyCard({ job }: { job: JobDetail }) {
       )}
       {editingDeposit && <DepositDialog job={job} onClose={() => setEditingDeposit(false)} />}
     </SectionCard>
+  );
+}
+
+/** Statuses where the booking page no longer takes a deposit. */
+const DEPOSIT_CLOSED: ReadonlySet<JobDetail['status']> = new Set([
+  'completed',
+  'cancelled',
+  'no_show',
+]);
+
+/**
+ * Asking for a deposit that is due (managers+): the customer pays it on the
+ * booking page (/booking/<token>, job_booking_token). Staff copy the link or
+ * send the shop's "Booking confirmed" message, which carries it
+ * ({{booking_link}}); the server re-checks the role and the customer's
+ * consent for the channel.
+ */
+function DepositRequest({ job }: { job: JobDetail }) {
+  const toast = useToast();
+  const link = useJobBookingLink(job.id);
+  const send = useSendJobTemplate(job.id);
+  const [manualCopy, setManualCopy] = useState<string | null>(null);
+  const channel: 'sms' | 'email' = job.customer?.phone ? 'sms' : 'email';
+
+  const onCopy = async () => {
+    try {
+      const url = await link.mutateAsync();
+      if (await copyText(url)) {
+        setManualCopy(null);
+        toast.success('Booking link copied', 'The customer can pay the deposit there.');
+      } else {
+        setManualCopy(url);
+      }
+    } catch (error) {
+      toast.error(error);
+    }
+  };
+
+  const onSend = async () => {
+    try {
+      const result = await send.mutateAsync({ templateKey: 'booking_confirmed', channel });
+      if (result.status === 'failed') {
+        toast.error('The message could not be delivered', result.error ?? undefined);
+      } else {
+        toast.success(channel === 'sms' ? 'Booking link texted' : 'Booking link emailed');
+      }
+    } catch (error) {
+      toast.error(error);
+    }
+  };
+
+  return (
+    <div className="bg-surface-2 rounded-control flex flex-col gap-2 px-3 py-2 text-sm">
+      <p className="text-ink">
+        The customer pays the deposit on their booking page. Send or copy the link.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          loading={send.isPending}
+          leadingIcon={<Send className="size-4" aria-hidden="true" />}
+          onClick={() => void onSend()}
+        >
+          {channel === 'sms' ? 'Text booking link' : 'Email booking link'}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={link.isPending}
+          leadingIcon={<Copy className="size-4" aria-hidden="true" />}
+          onClick={() => void onCopy()}
+        >
+          Copy booking link
+        </Button>
+      </div>
+      {manualCopy && <CopyField label="Booking link" value={manualCopy} />}
+    </div>
   );
 }
 

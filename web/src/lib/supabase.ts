@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from './database.types';
+import { inspectStartupUrl } from './authUrlSession';
 import { readPublicEnv } from './env';
 
 export type TypedSupabaseClient = SupabaseClient<Database>;
@@ -24,21 +25,42 @@ function unconfiguredClient(): TypedSupabaseClient {
   });
 }
 
+/** supabase-js' default storage key, kept explicitly so start-up can read it first. */
+function sessionStorageKey(supabaseUrl: string): string {
+  return `sb-${new URL(supabaseUrl).hostname.split('.')[0]}-auth-token`;
+}
+
+function createConfiguredClient(config: NonNullable<typeof env>): TypedSupabaseClient {
+  const storageKey = sessionStorageKey(config.supabaseUrl);
+  // Decided (and the address bar cleaned) before supabase-js reads the URL.
+  const urlSession = inspectStartupUrl(storageKey);
+  return createClient<Database>(config.supabaseUrl, config.supabaseAnonKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      storageKey,
+      // Implicit flow (a reset link works on another device than the one
+      // that asked for it), but a session in the URL is accepted only for a
+      // recovery link on /reset-password that belongs to the account signed
+      // in here, or when nobody is (lib/authUrlSession.ts: login CSRF).
+      // Sign-up confirmations land on /auth/callback, which asks first.
+      detectSessionInUrl: () => urlSession.detect,
+    },
+    // TanStack Query owns the retry policy for reads (queryClient.ts:
+    // bounded retries, none for permanent errors or while offline).
+    // postgrest-js' own GET retries (1s + 2s + 4s after a network error)
+    // stacked on top of that, so an offline page or the refetch after a
+    // failed save took ~7s per attempt to report "Can't reach the server".
+    db: { retry: false },
+  });
+}
+
 /**
  * The one typed Supabase client. Import it only from feature `api.ts` files
  * and shared data hooks — never from presentational components.
  */
 export const supabase: TypedSupabaseClient = env
-  ? createClient<Database>(env.supabaseUrl, env.supabaseAnonKey, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        // Handles email confirmation, magic links, invites and password
-        // recovery links (implicit flow: works when the link is opened on a
-        // different device than the one that requested it).
-        detectSessionInUrl: true,
-      },
-    })
+  ? createConfiguredClient(env)
   : unconfiguredClient();
 
 /** Public URL for an object in the public `shop-assets` bucket (logos, service images). */

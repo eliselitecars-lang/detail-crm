@@ -31,6 +31,7 @@ import {
   daysLeft,
   daysLeftText,
   hasLiveSubscription,
+  LAPSED_AUTOMATIONS,
   LAPSED_PAUSED,
   LAPSED_STILL_WORKS,
   planPriceText,
@@ -275,6 +276,7 @@ function StandingCard({
         {entitlement.state === 'lapsed' && (
           <div className="bg-danger-soft text-danger-ink rounded-control flex flex-col gap-1 px-3 py-2 text-sm">
             <p>{LAPSED_PAUSED}</p>
+            <p>{LAPSED_AUTOMATIONS}</p>
             <p>{LAPSED_STILL_WORKS}</p>
           </div>
         )}

@@ -32,6 +32,7 @@ export function DetailsStep({
   couponPrefill,
   couponChecking = false,
   notice,
+  questionsProblem = null,
   onBack,
   onContinue,
 }: {
@@ -57,6 +58,11 @@ export function DetailsStep({
   /** The wizard is checking couponPrefill right now. */
   couponChecking?: boolean;
   notice: string | null;
+  /**
+   * Set when the shop's booking questions failed to load: says so and offers
+   * Try again, so a required question can still be shown and answered.
+   */
+  questionsProblem?: { retrying: boolean; onRetry: () => void } | null;
   onBack: () => void;
   onContinue: () => void;
 }) {
@@ -161,6 +167,24 @@ export function DetailsStep({
       onContinue={next}
     >
       {notice && <Banner tone="warning" title={notice} />}
+      {questionsProblem && (
+        <Banner
+          tone="warning"
+          title="We couldn’t load this shop’s booking questions."
+          action={
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={questionsProblem.retrying}
+              onClick={questionsProblem.onRetry}
+            >
+              Try again
+            </Button>
+          }
+        >
+          If the shop asks anything before booking, the questions appear here once they load.
+        </Banner>
+      )}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <FormField label="First name" required error={errors.firstName}>
           <Input

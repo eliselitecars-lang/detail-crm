@@ -17,6 +17,7 @@ import {
   ConfirmDialog,
   Dialog,
   EmptyState,
+  ErrorState,
   FormField,
   Input,
   LoadingState,
@@ -66,7 +67,18 @@ export default function SmsPage() {
             <Card>
               <LoadingState label="Checking text messaging…" />
             </Card>
-          ) : flags.data?.enabled ? (
+          ) : flags.isError ? (
+            // Not knowing is not "not available": the manual form would hide a
+            // number the shop bought here (and invite clearing it).
+            <Card>
+              <ErrorState
+                title="Couldn’t check your text messaging setup"
+                error={flags.error}
+                onRetry={() => void flags.refetch()}
+                retrying={flags.isRefetching}
+              />
+            </Card>
+          ) : flags.data.enabled ? (
             <QueryView query={status} label="your number">
               {(number) => <SelfServe shop={shop} flags={flags.data} number={number} />}
             </QueryView>

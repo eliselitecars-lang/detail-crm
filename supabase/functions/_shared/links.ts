@@ -21,6 +21,15 @@ export const links = {
   bookingPage: (baseUrl: string, slug: string): string => build(baseUrl, `/book/${segment(slug)}`),
   portal: (baseUrl: string): string => build(baseUrl, "/portal"),
   /**
+   * Public (no sign-in) page a customer lands on after a Stripe Checkout a
+   * staff member sent them: the card-setup link (`?card=saved|canceled`) and
+   * the membership sign-up link (`?membership=active|canceled`). The web
+   * route /done/:slug (web/src/features/portal/CheckoutDonePage.tsx) shows
+   * the shop (public_shop_profile) and the outcome. Never /portal:
+   * it needs a customer account the recipient usually does not have.
+   */
+  checkoutDone: (baseUrl: string, slug: string): string => build(baseUrl, `/done/${segment(slug)}`),
+  /**
    * Staff payments settings page Stripe Connect onboarding returns to:
    * `return` after the account link flow, `refresh` when the link expired.
    */

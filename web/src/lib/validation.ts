@@ -20,18 +20,34 @@ export const zOptionalText = (max = 2000) =>
     .max(max, `Must be ${max} characters or fewer.`)
     .transform((v) => (v === '' ? null : v));
 
+/**
+ * The same rule the database enforces (`public.is_valid_email`, also used by
+ * CSV import and mirrored by the iPhone's `Validation.isValidEmail`): at most
+ * 254 characters, one `@`, no whitespace, and a dot inside the domain.
+ * Deliberately looser than zod's `z.email()`, which rejects addresses the
+ * server stores (josé@example.com, a!b@example.com, x@y.z) — a customer saved
+ * on the iPhone or imported with one of those must still be editable here.
+ */
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/u;
+
+export function isValidEmail(input: string): boolean {
+  const v = input.trim();
+  // char_length counts characters (code points), not UTF-16 units.
+  return v !== '' && [...v].length <= 254 && EMAIL_RE.test(v);
+}
+
 export const zEmail = z
   .string()
   .trim()
   .min(1, 'Email is required.')
-  .pipe(z.email('Enter a valid email address.'))
+  .refine(isValidEmail, 'Enter a valid email address.')
   .transform((v) => v.toLowerCase());
 
 export const zOptionalEmail = z
   .string()
   .trim()
   .transform((v) => v.toLowerCase())
-  .refine((v) => v === '' || z.email().safeParse(v).success, 'Enter a valid email address.')
+  .refine((v) => v === '' || isValidEmail(v), 'Enter a valid email address.')
   .transform((v) => (v === '' ? null : v));
 
 /** Required phone → E.164. */

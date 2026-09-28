@@ -7,7 +7,7 @@
  * (archived ones included, so saved answers keep their labels) and
  * `@/components/customFields` + `@/lib/customFields` to show / edit values.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useShop } from '@/features/shop/shopContext';
 import type { CustomFieldDef, CustomFieldEntity } from '@/lib/customFields';
 import { unwrap, type Row } from '@/lib/db';
@@ -55,10 +55,14 @@ export function toFieldDef(field: CustomField): CustomFieldDef {
   };
 }
 
-/** The shop's fields of one entity, in order (archived ones last). */
-export function useCustomFields(entity: CustomFieldEntity) {
-  const { shopId } = useShop();
-  return useQuery({
+/**
+ * Query options for the shop's fields of one entity, in order (archived ones
+ * last). Shared by `useCustomFields` and imperative readers (the customer
+ * export awaits them with `queryClient.fetchQuery` so a missing or failed
+ * list is an error, never a file without the custom-field columns).
+ */
+export function customFieldsQuery(shopId: string, entity: CustomFieldEntity) {
+  return queryOptions({
     queryKey: customFieldKeys.entity(shopId, entity),
     staleTime: 60_000,
     queryFn: async (): Promise<CustomField[]> =>
@@ -73,6 +77,12 @@ export function useCustomFields(entity: CustomFieldEntity) {
           .order('label'),
       ),
   });
+}
+
+/** The shop's fields of one entity, in order (archived ones last). */
+export function useCustomFields(entity: CustomFieldEntity) {
+  const { shopId } = useShop();
+  return useQuery(customFieldsQuery(shopId, entity));
 }
 
 export interface CustomFieldInput {

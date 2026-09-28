@@ -6,7 +6,11 @@ export interface ToastInput {
   title: string;
   description?: string;
   tone?: ToastTone;
-  /** ms before auto-dismiss; errors default to 8000, others 5000. 0 = sticky. */
+  /**
+   * ms before auto-dismiss; errors default to 8000, others 5000, and a toast
+   * with an `action` stays (0) until used or dismissed. 0 = sticky. The clock
+   * pauses while the toast is hovered, focused or the tab is hidden.
+   */
   duration?: number;
   action?: { label: string; onClick: () => void };
 }

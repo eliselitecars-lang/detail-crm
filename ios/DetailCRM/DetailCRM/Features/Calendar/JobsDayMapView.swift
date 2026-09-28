@@ -194,23 +194,50 @@ struct JobsDayMapView: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Stop \(number), \(stop.title)")
+        .accessibilityLabel(stopAccessibilityLabel(stop, number: number))
+    }
+
+    /// Everything the row shows, in reading order: VoiceOver hears the time,
+    /// address, status and any warning, not just the stop number and title.
+    private func stopAccessibilityLabel(_ stop: JobsDayMapModel.Stop, number: Int) -> String {
+        var parts = [
+            "Stop \(number)",
+            stop.title,
+            appState.clock.rangeText(from: stop.event.startsAt, to: stop.event.endsAt),
+        ]
+        if let address = stop.address?.trimmedNonEmpty {
+            parts.append(address)
+        }
+        if let status = stop.event.status {
+            parts.append(status.displayName)
+        }
+        if let note = locationNoteText(stop) {
+            parts.append(note.text)
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    /// The row's map warning or progress line, if any (`isWarning` picks
+    /// the colour).
+    private func locationNoteText(_ stop: JobsDayMapModel.Stop) -> (text: String, isWarning: Bool)? {
+        if model.locating.contains(stop.id) {
+            return ("Finding this address…", false)
+        }
+        if model.notFound.contains(stop.id) {
+            return ("Couldn't place this address on the map. Check it on the job.", true)
+        }
+        if stop.address == nil {
+            return ("No service address on this job.", true)
+        }
+        return nil
     }
 
     @ViewBuilder
     private func locationNote(_ stop: JobsDayMapModel.Stop) -> some View {
-        if model.locating.contains(stop.id) {
-            Text("Finding this address…")
+        if let note = locationNoteText(stop) {
+            Text(note.text)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary)
-        } else if model.notFound.contains(stop.id) {
-            Text("Couldn't place this address on the map. Check it on the job.")
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.warningInk)
-        } else if stop.address == nil {
-            Text("No service address on this job.")
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.warningInk)
+                .foregroundStyle(note.isWarning ? Theme.warningInk : Theme.textTertiary)
         }
     }
 

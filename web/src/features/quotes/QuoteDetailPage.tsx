@@ -6,6 +6,7 @@ import {
   Button,
   buttonClasses,
   ConfirmDialog,
+  CopyLinkDialog,
   DropdownMenu,
   ErrorState,
   LoadingState,
@@ -107,6 +108,8 @@ function QuoteView({
     queryClient.invalidateQueries({ queryKey: quoteKeys.all(shopId) }),
   );
   const [pending, setPending] = useState<Pending>(null);
+  /** A link the browser refused to copy, shown until closed (not a vanishing toast). */
+  const [manualLink, setManualLink] = useState<string | null>(null);
   const [response, setResponse] = useState<'approved' | 'declined' | null>(null);
   const [tab, setTab] = useState<string | null>(null);
 
@@ -129,7 +132,7 @@ function QuoteView({
 
   const copyLink = async () => {
     if (await copyText(link)) toast.success('Client link copied');
-    else toast.error('Couldn’t copy the link', link);
+    else setManualLink(link);
   };
 
   const downloadPdf = async () => {
@@ -493,6 +496,12 @@ function QuoteView({
             toast.error(error);
           }
         }}
+      />
+      <CopyLinkDialog
+        link={manualLink}
+        onClose={() => setManualLink(null)}
+        label="Client link"
+        description="Your browser didn’t let us copy it automatically. Copy it here and send it to the customer."
       />
     </>
   );

@@ -261,6 +261,29 @@ describe('repeating visits', () => {
     );
   });
 
+  it('never saves a repeating visit on its own while the series failed to load', async () => {
+    // A save without the series could only patch this visit, and the server
+    // then detaches it from the repeat for good (0051 jobs_series_guard).
+    setTableResult('job_series', { error: { code: '57014', message: 'timeout' } });
+    const { user } = setup({ job: jobDetailRow({ series_id: 'series-1', series_seq: 3 }) });
+    expect(await screen.findByText(/Couldn’t load the repeat details/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit schedule & location' });
+    expect(within(dialog).getByText('Couldn’t load the repeat details')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect((builders.jobs ?? []).flatMap((b) => b.update.mock.calls)).toEqual([]);
+
+    // Once it loads, the scope choice is back.
+    setTableResult('job_series', { data: SERIES });
+    await user.click(within(dialog).getByRole('button', { name: 'Try again' }));
+    expect(
+      await within(dialog).findByRole('radio', { name: 'This and following visits' }),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
   it('tells technicians it repeats without reading the series', async () => {
     setup({ role: 'technician', job: jobDetailRow({ series_id: 'series-1', series_seq: 3 }) });
     expect(await screen.findByText(/Part of a repeating job/)).toBeInTheDocument();
@@ -543,6 +566,45 @@ describe('files, fees, job fields, follow-ups and sold by', () => {
         p_paused: true,
       }),
     );
+  });
+
+  it('asks for a due deposit: copies and texts the customer’s booking page link', async () => {
+    const { user } = setup({ rpc: { job_booking_token: 'tok-123' } });
+    const copy = await screen.findByRole('button', { name: 'Copy booking link' });
+    await user.click(copy);
+    await waitFor(() =>
+      expect(supabase.rpc).toHaveBeenCalledWith('job_booking_token', { p_job_id: 'job-1' }),
+    );
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        `${window.location.origin}/booking/tok-123`,
+      ),
+    );
+
+    supabase.functions.invoke.mockResolvedValueOnce({
+      data: { message_id: 'msg-1', channel: 'sms', status: 'queued', error: null },
+      error: null,
+    });
+    await user.click(screen.getByRole('button', { name: 'Text booking link' }));
+    await waitFor(() =>
+      expect(supabase.functions.invoke).toHaveBeenCalledWith('messaging', {
+        body: {
+          action: 'send',
+          shop_id: 'shop-1',
+          job_id: 'job-1',
+          channel: 'sms',
+          template_key: 'booking_confirmed',
+        },
+      }),
+    );
+    expect(await screen.findByText('Booking link texted')).toBeInTheDocument();
+  });
+
+  it('offers technicians no booking link', async () => {
+    setup({ role: 'technician' });
+    await screen.findByText(/Schedule & location/);
+    expect(screen.queryByRole('button', { name: 'Copy booking link' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Booking confirmed' })).not.toBeInTheDocument();
   });
 
   it('credits the sale to another member', async () => {

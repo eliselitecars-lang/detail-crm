@@ -17,6 +17,7 @@ import {
   useToast,
 } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { LapsedFeatureNotice } from '@/features/billing/components/LapsedNotice';
 import { toAppError } from '@/lib/errors';
 import { formatCents } from '@/lib/money';
 import { zOptionalText } from '@/lib/validation';
@@ -127,6 +128,7 @@ export default function GiftCardSettingsPage() {
   const query = useGiftCardSettings();
   return (
     <SettingsSectionLayout section="gift-cards" readOnly={readOnly}>
+      <LapsedFeatureNotice subject="Online gift card sales" />
       <QueryView query={query} label="gift card settings">
         {(settings) => (
           <GiftCardForm key={settings.updated_at} settings={settings} canEdit={canEdit} />
@@ -221,7 +223,7 @@ function GiftCardForm({ settings, canEdit }: { settings: GiftCardSettings; canEd
         />
         <p className="text-muted mt-2 text-xs">
           Staff can also issue gift cards and store credit on the{' '}
-          <Link className="text-primary underline" to="/app/gift-cards">
+          <Link className="text-primary-ink underline" to="/app/gift-cards">
             Gift cards
           </Link>{' '}
           page. A gift card is a way to pay, not a discount: it’s used up like cash.

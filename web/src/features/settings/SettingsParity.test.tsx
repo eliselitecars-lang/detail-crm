@@ -4,6 +4,7 @@ import type { ShopSettings } from './api';
 import { renderSettings } from './testing/renderSettings';
 import {
   builders,
+  edgeHttpError,
   mockRpc,
   pgError,
   resetSupabaseMock,
@@ -396,6 +397,38 @@ describe('CalendarFeedPage', () => {
 });
 
 describe('ImportExportPage', () => {
+  it('waits for the vehicle sizes before matching a services file, then maps per-size prices', async () => {
+    setTableResult('import_batches', { data: [] });
+    setTableResult('custom_fields', { data: [] });
+    setTableResult('vehicle_categories', { error: { code: '57014', message: 'timeout' } });
+    const { user } = renderSettings('/app/settings/import-export', { role: 'manager' });
+    await screen.findByText('Import from a spreadsheet');
+    // A customers file does not need the sizes.
+    const csv = 'Service,Price,Price SUV\nFull detail,150,190\n';
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+    await user.upload(input!, new File([csv], 'services.csv', { type: 'text/csv' }));
+    expect(await screen.findByText('services.csv')).toBeVisible();
+
+    await user.click(screen.getByRole('radio', { name: /Services & prices/ }));
+    // Sizes failed: said so, nothing can be matched or checked yet.
+    expect(await screen.findByText('Couldn’t load your vehicle sizes')).toBeVisible();
+    expect(screen.queryByLabelText('Field for the column Price SUV')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check the file' })).toBeDisabled();
+
+    setTableResult('vehicle_categories', {
+      data: [
+        { id: 'cat-1', name: 'Sedan', sort: 1 },
+        { id: 'cat-2', name: 'SUV', sort: 2 },
+      ],
+    });
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    // The mapping is suggested again against the sizes that arrived.
+    expect(await screen.findByLabelText('Field for the column Price SUV')).toHaveValue('price.SUV');
+    expect(screen.getByLabelText('Field for the column Price')).toHaveValue('price.base');
+    expect(screen.getByLabelText('Field for the column Service')).toHaveValue('name');
+    expect(screen.getByRole('button', { name: 'Check the file' })).toBeEnabled();
+  });
+
   it('maps columns, checks the file (dry run) and then imports', async () => {
     setTableResult('import_batches', { data: [] });
     setTableResult('vehicle_categories', { data: [] });
@@ -704,6 +737,69 @@ describe('SmsPage (self-serve numbers)', () => {
         phone_e164: '+18885550123',
       });
     });
+  });
+});
+
+describe('SmsPage when the provisioning check fails', () => {
+  const rejected = {
+    sms_provisioning_status: {
+      data: {
+        number: '+18885550123',
+        kind: 'tollfree',
+        verification_status: 'rejected',
+        rejection_reason: 'Business website does not match',
+        provisioned: true,
+      },
+    },
+  };
+
+  it('shows an error with a retry instead of "not available", then the bought number', async () => {
+    let fail = true;
+    supabase.functions.invoke.mockImplementation(((
+      _name: string,
+      options: { body: { action: string } },
+    ) =>
+      Promise.resolve(
+        options.body.action === 'status' && fail
+          ? { data: null, error: edgeHttpError(503, { error: 'Service unavailable' }) }
+          : { data: { enabled: true, isv_enabled: false }, error: null },
+      )) as never);
+    mockRpc(rejected);
+    const { user } = renderSettings('/app/settings/sms');
+    expect(
+      await screen.findByText('Couldn’t check your text messaging setup', undefined, {
+        timeout: 3000,
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText(/Buying a number yourself isn’t available yet/)).toBeNull();
+    expect(screen.queryByLabelText('SMS from number')).toBeNull();
+    fail = false;
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/Business website does not match/)).toBeVisible();
+  });
+
+  it('still reads a function that is not deployed (404) as "not available"', async () => {
+    supabase.functions.invoke.mockResolvedValue({
+      data: null,
+      error: edgeHttpError(404, { error: 'Function not found' }),
+    });
+    mockRpc(rejected);
+    renderSettings('/app/settings/sms');
+    expect(await screen.findByText(/Buying a number yourself isn’t available yet/)).toBeVisible();
+  });
+
+  it('reads provisioning_disabled as "not available"', async () => {
+    supabase.functions.invoke.mockResolvedValue({
+      data: null,
+      error: edgeHttpError(422, {
+        error: 'Self-serve numbers are not available.',
+        code: 'unprocessable',
+        details: { reason: 'provisioning_disabled' },
+      }),
+    });
+    mockRpc(rejected);
+    renderSettings('/app/settings/sms');
+    expect(await screen.findByText(/Buying a number yourself isn’t available yet/)).toBeVisible();
   });
 });
 

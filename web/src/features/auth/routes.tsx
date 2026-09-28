@@ -10,6 +10,8 @@ export const routes: FeatureRoutes = {
     { path: '/signup', lazy: lazyPage(() => import('./pages/SignupPage')) },
     { path: '/forgot-password', lazy: lazyPage(() => import('./pages/ForgotPasswordPage')) },
     { path: '/reset-password', lazy: lazyPage(() => import('./pages/ResetPasswordPage')) },
+    // Sign-up confirmation links (lib/authUrlSession.ts AUTH_CALLBACK_PATH).
+    { path: '/auth/callback', lazy: lazyPage(() => import('./pages/AuthCallbackPage')) },
     { path: '/invite/:token', lazy: lazyPage(() => import('./pages/InvitePage')) },
     {
       // Every signed-in role (staff and portal clients): delete account.

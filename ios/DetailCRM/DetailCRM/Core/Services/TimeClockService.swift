@@ -89,15 +89,19 @@ enum TimeClockService {
             .value
     }
 
-    /// Entries that start inside `interval`, optionally for one member,
-    /// newest first. Technicians only ever receive their own rows (RLS).
+    /// Entries that overlap `interval` (start before it ends and are still
+    /// open or end after it starts), optionally for one member, newest
+    /// first. A shift across the week edge, or one left open from an
+    /// earlier week, is listed in every week it touches, like the web
+    /// timesheet; totals cut it to the week (`TimeEntry.seconds(within:)`).
+    /// Technicians only ever receive their own rows (RLS).
     static func entries(shopID: UUID, memberID: UUID?, interval: DateInterval) async throws -> [TimeEntry] {
         var query = Supa.client
             .from("time_entries")
             .select(TimeEntry.selectColumns)
             .eq("shop_id", value: shopID.uuidString)
-            .gte("clock_in", value: Supa.iso(interval.start))
             .lt("clock_in", value: Supa.iso(interval.end))
+            .or(overlapFilter(from: interval.start))
         if let memberID {
             query = query.eq("member_id", value: memberID.uuidString)
         }
@@ -106,6 +110,11 @@ enum TimeClockService {
             .limit(1000)
             .execute()
             .value
+    }
+
+    /// PostgREST `or` filter: still open, or clocked out after `from`.
+    static func overlapFilter(from: Date) -> String {
+        "clock_out.is.null,clock_out.gt.\(Supa.iso(from))"
     }
 
     /// Everyone currently clocked in (managers+; technicians see only themselves).

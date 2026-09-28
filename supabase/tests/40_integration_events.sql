@@ -257,7 +257,8 @@ select tests.as_superuser();
 select tests.fx_set('ob_job', (select id from public.jobs where public_token = tests.fx('ob')));
 select public.integration_online_booking_created(tests.fx('ob_job'));
 select tests.eq((select count(*) from public.notifications where kind = 'new_booking'), 3::bigint, 'new_booking once per recipient');
-select tests.eq(pg_temp.msgs(tests.fx('ob_job'), 'booking_request_received'), 'sms,email', 'request received once per channel');
+select tests.eq(pg_temp.msgs(tests.fx('ob_job'), 'booking_request_received'), 'email',
+                'request received once, emailed (the anonymous booker''s phone is unverified: not texted, 0104)');
 select tests.authenticate_as(tests.fx('u_manager_a'));
 update public.jobs set status = 'scheduled' where id = tests.fx('ob_job');
 select tests.as_superuser();

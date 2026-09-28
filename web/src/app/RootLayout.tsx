@@ -2,6 +2,7 @@ import { ExternalLink, ShieldAlert } from 'lucide-react';
 import { Outlet, ScrollRestoration, useLocation } from 'react-router';
 import { LoadingState } from '@/components/ui';
 import { isEmbeddablePath, isFramed } from './framing';
+import { OfflineBanner } from './OfflineBanner';
 
 export function RootLayout() {
   const { pathname } = useLocation();
@@ -12,6 +13,7 @@ export function RootLayout() {
   return (
     <>
       <ScrollRestoration />
+      <OfflineBanner />
       <Outlet />
     </>
   );

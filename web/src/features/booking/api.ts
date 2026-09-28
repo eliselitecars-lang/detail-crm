@@ -6,14 +6,14 @@
  * public_cancel_booking), 0053 (public_booking_slots, public_booking_link),
  * 0062 (public_validate_coupon), 0075 (public_booking_documents), 0088
  * (public_booking_questions, tracking ids) plus the payments
- * (booking_deposit_checkout) and public-media (booking_documents) edge
- * functions. Prices, totals, taxes and deposits are always the server's: the
+ * (booking_deposit_checkout, booking_cancel) and public-media
+ * (booking_documents) edge functions. Prices, totals, taxes and deposits are always the server's: the
  * wizard never sends or sums prices.
  */
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { unwrap } from '@/lib/db';
-import { toAppError } from '@/lib/errors';
+import { edgeFunctionError, toAppError } from '@/lib/errors';
 import { publicKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { createCheckout, navigation } from '@/features/public-docs/shared/checkout';
@@ -480,19 +480,34 @@ export function usePublicBooking(token: string, options: { pollForDeposit?: bool
   return { query, loads };
 }
 
+/**
+ * The customer's own cancel goes through the payments edge function
+ * (`booking_cancel`), never public_cancel_booking directly: since 0106 the
+ * RPC refuses (55000 checkout_open) while a deposit or invoice payment page
+ * of the booking is still open — which is every time the customer has
+ * clicked "Pay deposit" and come back, for as long as Stripe keeps that page
+ * alive (~30–40 minutes). The edge expires and releases those pages first,
+ * then runs public_cancel_booking as the caller (anonymous, or the signed-in
+ * portal client), so the RPC's own rules — status, deadline, a payment going
+ * through, technicians — still decide. Returns public_get_booking's document.
+ */
+export async function cancelBookingOnline(token: string, reason: string) {
+  const note = reason.trim();
+  const body = { action: 'booking_cancel', token, ...(note ? { reason: note } : {}) };
+  let response: Awaited<ReturnType<typeof supabase.functions.invoke<unknown>>>;
+  try {
+    response = await supabase.functions.invoke<unknown>('payments', { body });
+  } catch (error) {
+    throw await edgeFunctionError(error);
+  }
+  if (response.error) throw await edgeFunctionError(response.error);
+  return parseDocument(bookingDocumentSchema, response.data);
+}
+
 export function useCancelBooking(token: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (reason: string) =>
-      parseDocument(
-        bookingDocumentSchema,
-        unwrap(
-          await supabase.rpc('public_cancel_booking', {
-            p_token: token,
-            ...(reason.trim() ? { p_reason: reason.trim() } : {}),
-          }),
-        ),
-      ),
+    mutationFn: (reason: string) => cancelBookingOnline(token, reason),
     onSuccess: (doc) => queryClient.setQueryData(bookingKeys.booking(token), doc),
     onError: () => void queryClient.invalidateQueries({ queryKey: bookingKeys.booking(token) }),
   });

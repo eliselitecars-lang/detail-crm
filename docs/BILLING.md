@@ -392,8 +392,18 @@ Paused:
 - creating new customers, jobs, recurring job series, quotes, invoices and
   campaigns, and sending new messages to customers from staff;
 - **online booking** (the public booking page says booking is unavailable);
+- **lead forms**: the shop's embedded or linked lead form reads as "form not
+  found", so no lead is captured and no lead auto-reply goes out;
+- **online membership sign-ups**: the public membership page lists no plans;
+- **online gift card sales**: the public gift card page shows sales as off;
+- **selling memberships and issuing gift cards from staff** (`PT402`, below).
+  Store credit a referral earns when a job is completed, and refunds back
+  onto an existing gift card, keep working;
 - automations and campaign sends (reminders, follow-ups, document
   follow-ups).
+
+Customers on the public pages never see the subscription sentence below:
+they get the page's usual "not available" answer.
 
 People trying a paused action see the server's neutral sentence: "This
 shop's subscription is inactive, so new records can't be created right

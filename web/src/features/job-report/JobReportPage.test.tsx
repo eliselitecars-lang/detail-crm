@@ -244,7 +244,9 @@ describe('JobReportPage', () => {
     const form = await screen.findByRole('form', { name: 'Review and sign' });
     await user.click(within(form).getByRole('button', { name: 'Sign inspection' }));
     expect(within(form).getByText('Type your full name.')).toBeInTheDocument();
-    expect(within(form).getByText('Draw your signature in the box.')).toBeInTheDocument();
+    expect(
+      within(form).getByText('Sign in the box: draw your signature, or choose Type and type it.'),
+    ).toBeInTheDocument();
     expect(calls.some((c) => c.fn === 'public_ack_inspection')).toBe(false);
 
     await user.type(within(form).getByRole('textbox', { name: /Your full name/ }), 'Ana Lee');

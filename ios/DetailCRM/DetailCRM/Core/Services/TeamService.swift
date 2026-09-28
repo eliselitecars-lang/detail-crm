@@ -161,6 +161,34 @@ enum TeamService {
         }
     }
 
+    /// Owner only: makes another active member the owner
+    /// (`transfer_ownership`); the caller becomes an admin. Then the billing
+    /// function's `sync_customer` points the shop's platform billing
+    /// customer (receipts, renewal and failed-payment emails) at the new
+    /// owner right away.
+    static func transferOwnership(shopID: UUID, memberID: UUID) async throws {
+        struct Params: Encodable {
+            let p_shop_id: UUID
+            let p_member_id: UUID
+        }
+        try await Supa.client
+            .rpc("transfer_ownership", params: Params(p_shop_id: shopID, p_member_id: memberID))
+            .execute()
+        await syncBillingCustomer(shopID: shopID)
+    }
+
+    /// Best effort, after a transfer (the former owner is an admin by then,
+    /// which `sync_customer` allows): a failure never fails the transfer,
+    /// and the daily `sync_customers` run readdresses the customer anyway.
+    private static func syncBillingCustomer(shopID: UUID) async {
+        struct Body: Encodable {
+            let action: String
+            let shop_id: String
+        }
+        let body = Body(action: "sync_customer", shop_id: shopID.uuidString.lowercased())
+        try? await Supa.client.functions.invoke("billing", options: FunctionInvokeOptions(body: body))
+    }
+
     static func setActive(shopID: UUID, memberID: UUID, active: Bool) async throws {
         let rows: [TeamMemberRowRef] = try await Supa.client
             .from("shop_members")

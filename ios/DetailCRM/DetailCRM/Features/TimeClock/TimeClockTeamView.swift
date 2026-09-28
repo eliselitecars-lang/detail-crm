@@ -116,6 +116,7 @@ struct TimeClockTeamView: View {
                 state: sheet,
                 hasMember: selectedMemberID != nil,
                 clock: appState.clock,
+                week: appState.clock.totalsWeekInterval(containing: weekStart),
                 jobNumbers: jobNumbers,
                 canEdit: appState.can(.editTimeEntries),
                 retry: { await reloadSheet() },
@@ -323,6 +324,9 @@ private struct TimeClockSheetSection: View {
     let state: LoadState<[TimeEntry]>
     let hasMember: Bool
     let clock: ShopClock
+    /// The shop week the sheet shows; totals count only the part of each
+    /// entry inside it.
+    let week: DateInterval
     let jobNumbers: [UUID: Int]
     let canEdit: Bool
     let retry: () async -> Void
@@ -356,7 +360,7 @@ private struct TimeClockSheetSection: View {
                     .themedRow()
                 case .loaded(let entries):
                     TimelineView(.periodic(from: Date(), by: 60)) { context in
-                        TimeClockTotalsRow(entries: entries, now: context.date)
+                        TimeClockTotalsRow(entries: entries, range: week, now: context.date)
                     }
                     .themedRow()
                     if entries.isEmpty {
@@ -369,6 +373,7 @@ private struct TimeClockSheetSection: View {
                             TimeClockSheetRow(
                                 entry: entry,
                                 clock: clock,
+                                week: week,
                                 jobNumber: entry.jobID.flatMap { jobNumbers[$0] },
                                 canEdit: canEdit,
                                 edit: edit,
@@ -390,6 +395,7 @@ private struct TimeClockSheetSection: View {
 private struct TimeClockSheetRow: View {
     let entry: TimeEntry
     let clock: ShopClock
+    let week: DateInterval
     let jobNumber: Int?
     let canEdit: Bool
     let edit: (TimeEntry) -> Void
@@ -400,7 +406,7 @@ private struct TimeClockSheetRow: View {
             Button {
                 if canEdit { edit(entry) }
             } label: {
-                TimeClockEntryRow(entry: entry, clock: clock, jobNumber: jobNumber, memberName: nil)
+                TimeClockEntryRow(entry: entry, clock: clock, jobNumber: jobNumber, memberName: nil, week: week)
             }
             .buttonStyle(.plain)
             .accessibilityHint(canEdit ? "Opens the entry editor" : "")

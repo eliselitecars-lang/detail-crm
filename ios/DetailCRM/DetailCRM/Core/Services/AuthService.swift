@@ -8,6 +8,7 @@
 
 import Foundation
 import Supabase
+import DetailCore
 
 enum AuthService {
 
@@ -25,12 +26,16 @@ enum AuthService {
         )
     }
 
+    /// The confirmation email links to the web app's `/auth/callback`
+    /// page (`AuthLinks`): the web accepts link tokens only there, so a
+    /// link to the Site URL root would leave the person on the sign-in page.
     static func signUp(fullName: String, email: String, password: String) async throws -> SignUpOutcome {
         let address = normalized(email)
         let response = try await Supa.client.auth.signUp(
             email: address,
             password: password,
-            data: ["full_name": .string(fullName.trimmingCharacters(in: .whitespacesAndNewlines))]
+            data: ["full_name": .string(fullName.trimmingCharacters(in: .whitespacesAndNewlines))],
+            redirectTo: AuthLinks.signUpConfirmation(webAppBase: AppConfig.webAppURL)
         )
         switch response {
         case .session:
@@ -43,14 +48,10 @@ enum AuthService {
     /// Emails a password-reset link. The link opens the web app's
     /// `/reset-password` page (configured as the project's redirect URL).
     static func sendPasswordReset(email: String) async throws {
-        if let base = AppConfig.webAppURL {
-            try await Supa.client.auth.resetPasswordForEmail(
-                normalized(email),
-                redirectTo: base.appendingPathComponent("reset-password")
-            )
-        } else {
-            try await Supa.client.auth.resetPasswordForEmail(normalized(email))
-        }
+        try await Supa.client.auth.resetPasswordForEmail(
+            normalized(email),
+            redirectTo: AuthLinks.passwordReset(webAppBase: AppConfig.webAppURL)
+        )
     }
 
     /// Signs out. `.global` (the Sign out button) ends every session of the

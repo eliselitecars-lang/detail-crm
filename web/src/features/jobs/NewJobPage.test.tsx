@@ -55,6 +55,8 @@ function setup(
   path: string,
   resources: unknown[] = [],
   categories: unknown[] = [{ id: 'cat-1', name: 'Car', sort: 1 }],
+  /** While true, shop_team fails. */
+  teamFails: () => boolean = () => false,
 ) {
   const rpc: Record<string, unknown> = {
     shop_team: TEAM,
@@ -71,7 +73,9 @@ function setup(
     },
   };
   supabase.rpc.mockImplementation((...args: unknown[]) =>
-    createBuilder({ data: rpc[String(args[0])] ?? null }),
+    args[0] === 'shop_team' && teamFails()
+      ? createBuilder({ data: null, error: { code: 'XX000', message: 'upstream timeout' } })
+      : createBuilder({ data: rpc[String(args[0])] ?? null }),
   );
   setTableResult('customers', { data: [CUSTOMER] });
   setTableResult('vehicles', {
@@ -117,6 +121,20 @@ function setup(
 beforeEach(() => resetSupabaseMock());
 
 describe('NewJobPage', () => {
+  it('says the team didn’t load, with retry, instead of "No team members yet."', async () => {
+    let fails = true;
+    const { user } = setup('/app/jobs/new', [], undefined, () => fails);
+    const assign = (await screen.findByText('Assign to')).closest('fieldset')!;
+    const alert = await within(assign).findByRole('alert');
+    expect(alert).toHaveTextContent('Couldn’t load the team');
+    expect(within(assign).queryByText('No team members yet.')).not.toBeInTheDocument();
+    fails = false;
+    await user.click(within(assign).getByRole('button', { name: /Try again/ }));
+    expect(
+      await within(assign).findByRole('checkbox', { name: 'Olivia Owner' }),
+    ).toBeInTheDocument();
+  });
+
   it('prices at base prices without a size when the shop has no vehicle sizes', async () => {
     const { user } = setup('/app/jobs/new', [], []);
     await user.type(screen.getByRole('combobox', { name: /Customer/ }), 'Jane');

@@ -112,25 +112,27 @@ async function setup(page: Page, getBooking: (call: number) => Doc) {
         loads += 1;
         return getBooking(loads);
       },
-      public_cancel_booking: ({ body }) => {
-        calls.push({ name: 'public_cancel_booking', body });
-        const doc = bookingDoc();
-        return {
-          ...doc,
-          booking: {
-            ...doc.booking,
-            status: 'cancelled',
-            cancelled_at: '2099-09-02T15:00:00Z',
-            cancel_reason: 'Out of town',
-          },
-          cancellation: { ...doc.cancellation, allowed: false },
-          forms: doc.forms.map((f) => ({ ...f, status: 'void' })),
-        };
-      },
     },
     functions: {
       payments: ({ body }) => {
         calls.push({ name: 'payments', body });
+        const action = (body as { action?: string } | null)?.action;
+        if (action === 'booking_cancel') {
+          // The edge expires the booking's open payment pages, then runs
+          // public_cancel_booking as the caller and returns its document.
+          const doc = bookingDoc();
+          return {
+            ...doc,
+            booking: {
+              ...doc.booking,
+              status: 'cancelled',
+              cancelled_at: '2099-09-02T15:00:00Z',
+              cancel_reason: 'Out of town',
+            },
+            cancellation: { ...doc.cancellation, allowed: false },
+            forms: doc.forms.map((f) => ({ ...f, status: 'void' })),
+          };
+        }
         return reply(409, { error: 'This shop cannot take card payments yet.', code: 'conflict' });
       },
     },
@@ -168,14 +170,12 @@ test.describe('manage booking', () => {
     await expect(again).toHaveAttribute('href', '/book/glacier');
     // A new document without a referrer (the booking page may load the shop's tags).
     await expect(again).toHaveAttribute('rel', 'noreferrer');
-    expect(calls.find((c) => c.name === 'public_cancel_booking')?.body).toEqual({
-      p_token: TOKEN,
-      p_reason: 'Out of town',
-    });
-    expect(calls.find((c) => c.name === 'payments')?.body).toMatchObject({
-      action: 'booking_deposit_checkout',
-      token: TOKEN,
-    });
+    const payments = calls.filter((c) => c.name === 'payments').map((c) => c.body);
+    expect(payments[0]).toMatchObject({ action: 'booking_deposit_checkout', token: TOKEN });
+    // The customer's cancel goes through the edge (it releases the deposit
+    // page just opened), never straight to public_cancel_booking.
+    expect(payments[1]).toEqual({ action: 'booking_cancel', token: TOKEN, reason: 'Out of town' });
+    expect(calls.some((c) => c.name === 'public_cancel_booking')).toBe(false);
   });
 
   test('after Stripe returns with ?paid=1 it polls until the deposit lands', async ({ page }) => {

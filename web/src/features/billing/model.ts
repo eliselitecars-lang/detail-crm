@@ -303,11 +303,28 @@ export function standingText(
   }
 }
 
-/** What stops while a shop is lapsed (0102), and what keeps working. */
+/**
+ * What stops while a shop is lapsed (0102 / 0103, docs/BILLING.md §8), and
+ * what keeps working. Keep in step with the server: public lead forms answer
+ * "form not found", online gift card and membership sales are off, staff
+ * can't sell memberships or issue gift cards, and enqueue_due_automations
+ * skips the shop (no reminders, review requests or follow-ups).
+ */
 export const LAPSED_PAUSED =
-  'Creating new customers, jobs, quotes, invoices and campaigns, sending new messages to customers, and online booking are paused.';
+  'Creating new customers, jobs, quotes, invoices and campaigns, selling memberships and issuing gift cards, and sending new messages to customers are paused. Online booking, lead forms, and online gift card and membership sales are off: customers who open them are told they aren’t available.';
+export const LAPSED_AUTOMATIONS =
+  'Automatic messages have stopped too, including for existing jobs: appointment reminders, review requests and follow-ups aren’t sent.';
 export const LAPSED_STILL_WORKS =
-  'Everything already in the shop stays available: you can view and export it, finish existing jobs and collect payments on existing invoices.';
+  'Everything already in the shop stays available: you can view and export it, finish existing jobs (let those customers know yourself) and collect payments on existing invoices.';
+
+/** The short list the app-shell banner shows under LAPSED_MESSAGE. */
+export const LAPSED_BANNER_DETAIL =
+  'Online booking, lead forms, online gift card and membership sales, and automatic reminders and follow-ups are paused. You can still view everything.';
+
+/** A page notice for a feature the lapse turned off for customers (lead forms, online sales). */
+export function lapsedFeatureNotice(subject: string, { plural = true } = {}): string {
+  return `${subject} ${plural ? 'are' : 'is'} off while this shop’s subscription is inactive: customers who open ${plural ? 'them' : 'it'} are told ${plural ? 'they aren’t' : 'it isn’t'} available. ${plural ? 'They come' : 'It comes'} back when the subscription is renewed.`;
+}
 
 /** The neutral payment-problem sentence (the server's notification wording). */
 export const PAST_DUE_MESSAGE = 'There’s a problem with this shop’s subscription payment.';

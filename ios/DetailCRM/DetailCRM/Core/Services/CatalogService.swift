@@ -40,26 +40,31 @@ enum CatalogService {
             .value
     }
 
-    /// Every service row (archived ones are filtered by the caller).
+    /// Every service row (archived ones are filtered by the caller), read
+    /// in pages: one reply holds at most the server's 1,000-row cap.
     static func items(shopID: UUID) async throws -> [CatalogItem] {
-        try await Supa.client
-            .from("services")
-            .select(CatalogItem.selectColumns)
-            .eq("shop_id", value: shopID.uuidString)
-            .order("sort", ascending: true)
-            .limit(2000)
-            .execute()
-            .value
+        try await PagedQuery.all {
+            Supa.client
+                .from("services")
+                .select(CatalogItem.selectColumns, count: .exact)
+                .eq("shop_id", value: shopID.uuidString)
+                .order("sort", ascending: true)
+                .order("id", ascending: true)
+        }
     }
 
+    /// Every price row of the shop, read in pages. The list must be
+    /// complete: the price editor treats a missing row as an empty cell
+    /// and would insert a duplicate of a row that exists (a shop with 170
+    /// services x 6 vehicle sizes already passes the 1,000-row cap).
     static func prices(shopID: UUID) async throws -> [ServicePrice] {
-        try await Supa.client
-            .from("service_prices")
-            .select(ServicePrice.selectColumns)
-            .eq("shop_id", value: shopID.uuidString)
-            .limit(10000)
-            .execute()
-            .value
+        try await PagedQuery.all {
+            Supa.client
+                .from("service_prices")
+                .select(ServicePrice.selectColumns, count: .exact)
+                .eq("shop_id", value: shopID.uuidString)
+                .order("id", ascending: true)
+        }
     }
 
     static func vehicleCategories(shopID: UUID) async throws -> [CatalogVehicleCategory] {

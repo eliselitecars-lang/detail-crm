@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { useSearchParams } from 'react-router';
 import { Badge, Button, SectionCard, Switch, useToast } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { LapsedAutomationsNotice } from '@/features/billing/components/LapsedNotice';
 import { formatPhone } from '@/lib/phone';
 import {
   useMessageTemplates,
@@ -61,6 +62,7 @@ export default function TemplatesPage() {
 
   return (
     <SettingsSectionLayout section="templates" readOnly={readOnly}>
+      <LapsedAutomationsNotice />
       <QueryView query={query} label="message templates">
         {(templates) => {
           const byKey = new Map<TemplateKey, MessageTemplate[]>();

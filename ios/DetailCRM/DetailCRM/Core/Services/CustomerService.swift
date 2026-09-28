@@ -157,15 +157,16 @@ enum CustomerService {
 
     /// Distinct tags in use across the shop's active customers, sorted.
     static func allTags(shopID: UUID) async throws -> [String] {
-        let rows: [CustomerTagsRow] = try await Supa.client
-            .from("customers")
-            .select("tags")
-            .eq("shop_id", value: shopID.uuidString)
-            .is("archived_at", value: nil)
-            .neq("tags", value: "{}")
-            .limit(2000)
-            .execute()
-            .value
+        // Paged: one reply holds at most the server's 1,000-row cap.
+        let rows: [CustomerTagsRow] = try await PagedQuery.all {
+            Supa.client
+                .from("customers")
+                .select("tags", count: .exact)
+                .eq("shop_id", value: shopID.uuidString)
+                .is("archived_at", value: nil)
+                .neq("tags", value: "{}")
+                .order("id", ascending: true)
+        }
         var seen = Set<String>()
         var tags: [String] = []
         for row in rows {

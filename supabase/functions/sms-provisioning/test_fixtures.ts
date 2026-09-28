@@ -26,6 +26,12 @@ export function sid(prefix: string): string {
 export interface FixtureOptions {
   env?: Record<string, string | undefined>;
   numbers?: Row[];
+  /** shop_billing_standing state per shop (0101; default active = billing off / paid). */
+  standing?: Record<string, string>;
+  /** sms_number_releases rows (0093 worklist). */
+  releases?: Row[];
+  /** Extra shops rows. */
+  shops?: Row[];
   /** Wall clock handed to the handler (edit windows). */
   now?: Date;
 }
@@ -71,11 +77,13 @@ export function fixture(options: FixtureOptions = {}): Fixture {
         member("20000000-0000-4000-8000-000000000005", OWNER, "owner", UK_SHOP),
       ],
       shops: [
-        { id: SHOP, country: "US", sms_from_number: null },
-        { id: CA_SHOP, country: "CA", sms_from_number: null },
-        { id: UK_SHOP, country: "GB", sms_from_number: null },
+        { id: SHOP, name: "Shine Co", country: "US", sms_from_number: null },
+        { id: CA_SHOP, name: "Maple", country: "CA", sms_from_number: null },
+        { id: UK_SHOP, name: "Albion", country: "GB", sms_from_number: null },
+        ...(options.shops ?? []),
       ],
       shop_sms_numbers: options.numbers ?? [],
+      sms_number_releases: options.releases ?? [],
     },
     tableOptions: { shop_sms_numbers: { primaryKey: ["phone_number"] } },
   });
@@ -84,6 +92,11 @@ export function fixture(options: FixtureOptions = {}): Fixture {
     db.table("shop_sms_numbers").filter((n) => n.shop_id === shopId);
   const provisionedOf = (shopId: string) => numbersOf(shopId).find((n) => n.twilio_number_sid);
 
+  db.onRpc("shop_billing_standing", (args, ctx) => {
+    if (ctx.role !== "service_role") throw new FakeRpcError("42501", "denied");
+    const state = options.standing?.[String(args.p_shop_id)] ?? "active";
+    return { state, reason: state === "active" ? "subscribed" : state };
+  });
   db.onRpc("sms_provisioning_status", (args, ctx) => {
     if (ctx.role !== "service_role") throw new FakeRpcError("42501", "denied");
     const row = provisionedOf(String(args.p_shop_id)) ?? numbersOf(String(args.p_shop_id))[0];
@@ -149,12 +162,26 @@ export function fixture(options: FixtureOptions = {}): Fixture {
   db.onRpc("release_sms_number", (args, ctx) => {
     if (ctx.role !== "service_role") throw new FakeRpcError("42501", "denied");
     rpc.release_sms_number?.push(args);
+    const gone = db.table("shop_sms_numbers").filter((n) =>
+      n.shop_id === args.p_shop_id && n.twilio_number_sid
+    );
     db.seed(
       "shop_sms_numbers",
       db.table("shop_sms_numbers").filter((n) =>
-        !(n.shop_id === args.p_shop_id && n.twilio_number_sid)
+        !gone.some((g) => g.phone_number === n.phone_number)
       ),
     );
+    // 0093 shop_sms_numbers_log_release: every unbinding is logged.
+    db.seed("sms_number_releases", [
+      ...db.table("sms_number_releases"),
+      ...gone.map((n) => ({
+        id: crypto.randomUUID(),
+        phone_number: n.phone_number,
+        shop_id: n.shop_id,
+        shop_name: db.table("shops").find((x) => x.id === n.shop_id)?.name ?? null,
+        released_at: (options.now ?? new Date()).toISOString(),
+      })),
+    ]);
     return null;
   });
 
@@ -175,8 +202,11 @@ export const call = (action: string, body: Record<string, unknown>, token?: stri
     ...(token ? { token } : {}),
   });
 
-export const cron = (secret: string = CRON_SECRET): Request =>
-  jsonRequest("sms-provisioning", { action: "refresh_status" }, {
+export const cron = (
+  secret: string = CRON_SECRET,
+  action: "refresh_status" | "release_worklist" = "refresh_status",
+): Request =>
+  jsonRequest("sms-provisioning", { action }, {
     headers: { "x-cron-secret": secret },
   });
 

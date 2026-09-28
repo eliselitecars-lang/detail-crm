@@ -1,6 +1,10 @@
 # TestFlight build of the iPhone app (docs/DEPLOY.md "iOS"): archive with
 # Xcode cloud-managed automatic signing through an App Store Connect API key,
 # build number = latest TestFlight build + 1, upload, keep .ipa + dSYMs.
+# Built with Xcode 26 / the iOS 26 SDK or later: App Store Connect refuses
+# uploads from older SDKs (ios/ci/select_xcode.sh, docs/DEPLOY.md section 5).
+# Version = the app_version input, else the project's MARKETING_VERSION; it
+# must be higher than the version on the App Store (docs/DEPLOY.md section 5).
 # Config.plist gets the real Supabase URL / anon key / web URL for this build
 # only (the committed file keeps its YOUR_... placeholders). Runs on manual
 # dispatch or a push that touches .github/trigger-testflight.
@@ -13,6 +17,10 @@ on:
         description: "Archive, sign and export only (no TestFlight upload)"
         type: boolean
         default: false
+      app_version:
+        description: "App version, e.g. 1.1 (empty: the project's MARKETING_VERSION). Must be higher than the version on the App Store"
+        type: string
+        default: ""
   push:
     paths:
       - ".github/trigger-testflight"
@@ -36,7 +44,8 @@ env:
 jobs:
   testflight:
     name: Archive and upload to TestFlight
-    runs-on: macos-15
+    # macOS 26 images ship Xcode 26 (see "Select Xcode").
+    runs-on: macos-26
     timeout-minutes: 60
     environment: production
     env:
@@ -49,6 +58,7 @@ jobs:
       SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY }}
       WEB_APP_URL: ${{ vars.APP_BASE_URL }}
       SKIP_UPLOAD: ${{ (github.event_name == 'workflow_dispatch' && inputs.skip_upload) && '1' || '' }}
+      APP_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.app_version || '' }}
     steps:
       - name: Check required secrets and variables
         run: |
@@ -72,20 +82,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode (newest 16.x, else newest installed)
+      # App Store Connect accepts uploads only from Xcode 26 / the iOS 26 SDK
+      # or later (Apple's minimum since April 28, 2026): the script picks the
+      # newest release Xcode >= 26 and fails when the image has none. The
+      # Fastfile checks the SDK again before archiving (docs/DEPLOY.md section 5).
+      - name: Select Xcode (newest release, 26 or later)
         run: |
           set -euo pipefail
           ls -d /Applications/Xcode*.app || true
-          # Same choice as ios.yml (find instead of ls for shellcheck).
-          XCODE=$(find /Applications -maxdepth 1 -name 'Xcode_16*.app' 2>/dev/null | sort -V | tail -1 || true)
-          if [ -z "$XCODE" ]; then
-            XCODE=$(find /Applications -maxdepth 1 -name 'Xcode_*.app' 2>/dev/null | sort -V | tail -1 || true)
-          fi
-          if [ -z "$XCODE" ]; then XCODE=/Applications/Xcode.app; fi
-          echo "Selecting $XCODE"
-          sudo xcode-select -s "$XCODE"
-          xcodebuild -version
+          bash ios/ci/select_xcode.sh
           echo "XCODE_VERSION=$(xcodebuild -version | head -1 | awk '{print $2}')" >> "$GITHUB_ENV"
+          echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
 
       - name: Swift sanity
         run: python3 scripts/swift_sanity.py
@@ -133,6 +140,8 @@ jobs:
           {
             echo "### TestFlight"
             echo "- bundle id: \`$BUNDLE_ID\`"
+            echo "- Xcode: \`$XCODE_VERSION\` (iOS SDK \`$(xcrun --sdk iphoneos --show-sdk-version)\`)"
+            echo "- version: \`$(cat ios/build/output/version.txt)\`"
             echo "- build number: \`$(cat ios/build/output/build_number.txt)\`"
             if [ "$SKIP_UPLOAD" = "1" ]; then echo "- upload skipped (skip_upload)"; else echo "- uploaded; App Store Connect processes it for a few minutes before testers see it"; fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -146,6 +155,7 @@ jobs:
             ios/build/output/DetailCRM.ipa
             ios/build/output/DetailCRM.app.dSYM.zip
             ios/build/output/build_number.txt
+            ios/build/output/version.txt
           if-no-files-found: warn
           retention-days: 30
 

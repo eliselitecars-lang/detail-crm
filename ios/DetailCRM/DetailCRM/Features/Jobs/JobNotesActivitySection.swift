@@ -184,7 +184,11 @@ struct JobCancelSheet: View {
                 if let errorMessage {
                     InlineMessage(text: errorMessage, kind: .error)
                 }
-                FormRow("Reason", hint: "Optional — kept on the job for your team.") {
+                FormRow(
+                    "Reason",
+                    hint: "Optional. Kept on the job, and shown to the customer on their booking page. \(Validation.statusReasonCounter(reason))",
+                    error: Validation.statusReasonProblem(reason)
+                ) {
                     TextField("Customer rescheduled, weather…", text: $reason, axis: .vertical)
                         .lineLimit(2...6)
                         .inputFieldStyle()
@@ -192,6 +196,7 @@ struct JobCancelSheet: View {
                 AsyncButton("Cancel job", role: .destructive, style: .themeDestructive) {
                     await cancelJob()
                 }
+                .disabled(Validation.statusReasonProblem(reason) != nil)
             }
             .navigationTitle("Cancel job")
             .navigationBarTitleDisplayMode(.inline)
@@ -205,8 +210,10 @@ struct JobCancelSheet: View {
 
     private func cancelJob() async {
         errorMessage = nil
-        guard reason.count <= 1000 else {
-            errorMessage = "Keep the reason under 1,000 characters."
+        // Same limit as the server and the web (500); the reason is saved
+        // whole or not at all.
+        if let problem = Validation.statusReasonProblem(reason) {
+            errorMessage = problem
             return
         }
         do {

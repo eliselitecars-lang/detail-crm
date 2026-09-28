@@ -43,6 +43,7 @@ import {
   loadCustomer,
   loadShop,
   loadShopBySlug,
+  loadShopSlug,
   metadata,
   publicValidationMessage,
   refusedWith,
@@ -432,10 +433,11 @@ export async function membershipCheckout(
   await requireShopRole(s.admin, caller, input.shop_id, ROLES.managerPlus);
   const membership = await loadMembership(s, input.shop_id, input.membership_id);
   const shop = await loadShop(s.admin, membership.shop_id);
-  const portal = links.portal(s.env.appBaseUrl());
+  // A public page: the customer who got this link has no account yet.
+  const done = links.checkoutDone(s.env.appBaseUrl(), await loadShopSlug(s.admin, shop.id));
   return await subscriptionCheckout(s, shop, membership, {
-    successUrl: withQuery(portal, { membership: "active" }),
-    cancelUrl: withQuery(portal, { membership: "canceled" }),
+    successUrl: withQuery(done, { membership: "active" }),
+    cancelUrl: withQuery(done, { membership: "canceled" }),
     nonce: input.request_nonce,
     source: "membership_checkout",
   });

@@ -46,3 +46,24 @@ export function sendInvite(input: SendInviteInput): Promise<InviteResult> {
 export function resendInvite(inviteId: string): Promise<InviteResult> {
   return invoke(resendInviteBody(inviteId));
 }
+
+/**
+ * `billing` sync_customer, right after a successful ownership transfer (the
+ * former owner is an admin by then): the shop's platform billing customer —
+ * receipts, renewal notices and failed-payment emails — is readdressed to
+ * the new owner. Best effort: the transfer has already happened, and the
+ * daily sync_customers run readdresses the customer if this call fails.
+ * True when the customer was updated.
+ */
+export async function syncBillingCustomer(shopId: string): Promise<boolean> {
+  try {
+    const result = await supabase.functions.invoke('billing', {
+      body: { action: 'sync_customer', shop_id: shopId },
+    });
+    if (result.error) return false;
+    const parsed = z.object({ synced: z.boolean() }).safeParse(result.data);
+    return parsed.success && parsed.data.synced;
+  } catch {
+    return false;
+  }
+}

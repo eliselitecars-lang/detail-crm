@@ -174,7 +174,7 @@ function SignOffPanel({
     } else setNameError(null);
     const pad = padRef.current;
     if (!pad || pad.isEmpty()) {
-      setSignatureError('Draw your signature in the box.');
+      setSignatureError('Sign in the box: draw your signature, or choose Type and type it.');
       ok = false;
     } else setSignatureError(null);
     if (!ok || !pad) return;
@@ -224,6 +224,7 @@ function SignOffPanel({
         <SignaturePad
           ref={padRef}
           label="Your signature"
+          typedDefault={name}
           onChange={(signed) => {
             if (signed) setSignatureError(null);
           }}

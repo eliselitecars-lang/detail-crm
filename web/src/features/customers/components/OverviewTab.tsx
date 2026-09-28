@@ -1,5 +1,6 @@
 import { Link2 } from 'lucide-react';
 import { Badge, KeyValueList, SectionCard } from '@/components/ui';
+import { UnappliedPaymentsCard } from '@/features/payments/components/UnappliedPaymentsCard';
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import { formatDate } from '@/lib/dates';
@@ -29,6 +30,7 @@ export function OverviewTab({ customer }: { customer: CustomerRow }) {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       {canSeeTotals && <CustomerSummaryCard customerId={customer.id} />}
+      {canSeeTotals && <UnappliedPaymentsCard customerId={customer.id} />}
       {canInvoice && !customer.merged_into_id && <UnbilledJobsCard customerId={customer.id} />}
       <LeadRequestsCard customerId={customer.id} />
       <SectionCard title="Contact" level={2}>

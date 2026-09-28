@@ -119,7 +119,7 @@ function SignPanel({
     }
     const pad = padRef.current;
     if (requiresSignature && (!pad || pad.isEmpty())) {
-      setSignatureError('Draw your signature in the box.');
+      setSignatureError('Sign in the box: draw your signature, or choose Type and type it.');
       ok = false;
     } else {
       setSignatureError(null);
@@ -138,7 +138,7 @@ function SignPanel({
       title={requiresSignature ? 'Sign this form' : 'Acknowledge this form'}
       description={
         requiresSignature
-          ? 'Type your name and draw your signature to agree.'
+          ? 'Type your name and sign to agree: draw your signature, or choose Type to type it.'
           : 'Type your name to confirm you have read and agree to this form.'
       }
     >
@@ -168,6 +168,7 @@ function SignPanel({
             <SignaturePad
               ref={padRef}
               label="Your signature"
+              typedDefault={name}
               onChange={(signed) => {
                 setHasSignature(signed);
                 if (signed) setSignatureError(null);

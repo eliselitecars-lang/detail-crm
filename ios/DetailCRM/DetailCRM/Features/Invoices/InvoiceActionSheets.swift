@@ -119,19 +119,23 @@ struct InvoiceManualPaymentSheet: View {
             tip = parsed
         }
         do {
+            let shopID = try appState.requireShopID()
             if hasOpenCardAttempt {
                 // The pending card attempt counts against the balance until
                 // released (record_manual_payment would refuse the amount).
-                let shopID = try appState.requireShopID()
                 try await PaymentService.cancelOpenPayments(shopID: shopID, invoiceID: invoice.id)
             }
-            _ = try await PaymentService.recordManualPayment(
-                invoiceID: invoice.id,
-                amountCents: amount,
-                method: method,
-                tipCents: tip,
-                note: note
-            )
+            // An open pay link / deposit page (not shown here) is released
+            // and the payment tried once more (0109 checkout_open).
+            _ = try await PaymentService.releasingOpenCheckouts(shopID: shopID, invoiceID: invoice.id) {
+                try await PaymentService.recordManualPayment(
+                    invoiceID: invoice.id,
+                    amountCents: amount,
+                    method: method,
+                    tipCents: tip,
+                    note: note
+                )
+            }
             await onFinished()
             toasts.show("\(method.displayName) payment recorded")
             dismiss()
@@ -297,8 +301,14 @@ struct InvoiceChargeSavedCardSheet: View {
             await onFinished()
         } catch {
             errorText = ErrorText.message(for: error)
-            // A declined card is final for this attempt; a new tap is a new charge.
-            nonce = MoneyEdge.newNonce()
+            // A declined card (any 4xx) is final for this attempt: a new tap
+            // is a new charge. No answer or a 5xx may mean Stripe charged
+            // anyway: keep the nonce so a new tap is a retry of this charge
+            // and never charges twice (RequestAttempt).
+            if let edgeError = error as? EdgeFunctionError,
+               RequestAttempt.isDefinitiveFailure(status: edgeError.status) {
+                nonce = MoneyEdge.newNonce()
+            }
         }
     }
 
@@ -555,6 +565,11 @@ struct InvoiceRefundSheet: View {
     @State private var amountText = ""
     @State private var didSetUp = false
     @State private var errorText: String?
+    /// One nonce per Stripe refund attempt: kept when the server may have
+    /// refunded without answering (a tap again is a retry and never refunds
+    /// twice), replaced after a definitive answer so a deliberate second
+    /// refund of the same amount goes through.
+    @State private var attempt = RequestAttempt()
 
     var body: some View {
         NavigationStack {
@@ -636,14 +651,19 @@ struct InvoiceRefundSheet: View {
                 _ = try await PaymentService.refundCardPayment(
                     shopID: shopID,
                     paymentID: payment.id,
-                    amountCents: amount == payment.refundableCents ? nil : amount
+                    amountCents: amount == payment.refundableCents ? nil : amount,
+                    nonce: attempt.nonce
                 )
+                attempt.succeeded()
             } else {
                 _ = try await PaymentService.refundManualPayment(paymentID: payment.id, amountCents: amount)
             }
             await onFinished()
             toasts.show("Refunded \(Money.format(cents: amount, currencyCode: currencyCode))")
             dismiss()
+        } catch let edgeError as EdgeFunctionError {
+            attempt.failed(status: edgeError.status)
+            errorText = edgeError.message
         } catch {
             errorText = ErrorText.message(for: error)
         }

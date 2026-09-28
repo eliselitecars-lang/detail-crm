@@ -6,7 +6,10 @@
 //  5.1.1(v)) goes through the `account` edge function (`delete_account`),
 //  which first asks the database whether the caller still owns a shop
 //  (`account_deletion_blockers`): a shop can't be left without an owner,
-//  so the owner must transfer ownership or delete the shop first. What the
+//  so the owner first makes another team member the owner
+//  (`transfer_ownership`, Team) or deletes the shop (`payments` →
+//  `delete_shop`). Both can be done in the app (AccountDeletionView), so an
+//  account made entirely on the iPhone can also be deleted there. What the
 //  person leaves behind is handled by the database (memberships and the
 //  profile go; a shop's customers, jobs and payments stay with the shop).
 //
@@ -26,33 +29,91 @@ enum AccountService {
                 body: AccountDeletionBody()
             )
         } catch let error as EdgeFunctionError where error.reason == "owns_shops" {
-            throw AccountDeletionBlocked(shops: ownedShops(in: error.details))
+            throw AccountDeletionBlocked(owned: ownedShops(in: error.details))
         }
     }
 
-    /// The shop names in the 409 `owns_shops` details (`details.shops`).
-    static func ownedShops(in details: [String: AnyJSON]?) -> [String] {
+    /// The shops the signed-in person owns (`account_deletion_blockers`),
+    /// ordered by name: each must get a new owner or be deleted before the
+    /// account can be.
+    static func ownedShops() async throws -> [AccountOwnedShop] {
+        let reply: AccountDeletionBlockersReply = try await Supa.client
+            .rpc("account_deletion_blockers")
+            .execute()
+            .value
+        return reply.ownedShops
+    }
+
+    /// The shops in the 409 `owns_shops` details (`details.shops`, each
+    /// `{shop_id, name}`).
+    static func ownedShops(in details: [String: AnyJSON]?) -> [AccountOwnedShop] {
         let shops = details?["shops"]?.asArray ?? []
-        return shops.compactMap { $0.asObject?["name"]?.asString?.trimmedNonEmpty }
+        return shops.compactMap { entry in
+            guard let object = entry.asObject,
+                  let name = object["name"]?.asString?.trimmedNonEmpty,
+                  let rawID = object["shop_id"]?.asString,
+                  let id = UUID(uuidString: rawID) else { return nil }
+            return AccountOwnedShop(shopID: id, name: name)
+        }
+    }
+}
+
+/// A shop the signed-in person owns (`account_deletion_blockers`).
+struct AccountOwnedShop: Decodable, Hashable, Identifiable, Sendable {
+    var shopID: UUID
+    var name: String
+
+    var id: UUID { shopID }
+
+    private enum Keys: String, CodingKey {
+        case shopID = "shop_id"
+        case name
+    }
+
+    init(shopID: UUID, name: String) {
+        self.shopID = shopID
+        self.name = name
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        shopID = try c.decode(UUID.self, forKey: .shopID)
+        name = try c.decode(String.self, forKey: .name)
+    }
+}
+
+/// `account_deletion_blockers()` → `{"owned_shops": [{shop_id, name}]}`.
+private struct AccountDeletionBlockersReply: Decodable {
+    var ownedShops: [AccountOwnedShop]
+
+    private enum Keys: String, CodingKey {
+        case ownedShops = "owned_shops"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        ownedShops = try c.decodeIfPresent([AccountOwnedShop].self, forKey: .ownedShops) ?? []
     }
 }
 
 /// The account can't be deleted while the person owns a shop.
 struct AccountDeletionBlocked: LocalizedError, Equatable {
-    let shops: [String]
+    let owned: [AccountOwnedShop]
+
+    var shops: [String] { owned.map(\.name) }
 
     var errorDescription: String? {
-        let owned: String
+        let names: String
         switch shops.count {
         case 0:
-            owned = "a shop"
+            names = "a shop"
         case 1:
-            owned = shops[0]
+            names = shops[0]
         default:
-            owned = shops.dropLast().joined(separator: ", ") + " and " + (shops.last ?? "")
+            names = shops.dropLast().joined(separator: ", ") + " and " + (shops.last ?? "")
         }
-        let noun = shops.count > 1 ? "the shops" : "the shop"
-        return "You own \(owned). Transfer ownership or delete \(noun) on the web first."
+        let noun = shops.count > 1 ? "each shop" : "the shop"
+        return "You own \(names). Make another team member the owner of \(noun), or delete it, then delete your account."
     }
 }
 

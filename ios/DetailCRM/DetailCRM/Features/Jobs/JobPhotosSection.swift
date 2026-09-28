@@ -10,7 +10,8 @@
 //  Videos (P-30): staff on the job record walkaround videos (up to two
 //  minutes, medium quality) that upload with the resumable protocol, with
 //  a poster frame for the grid; an interrupted upload stays listed with
-//  Resume. Photos and videos can be marked "visible to the customer" for
+//  Resume, "Save or share video" and a confirmed Discard (the camera
+//  recorder doesn't save to Photos, so it is the only copy). Photos and videos can be marked "visible to the customer" for
 //  the job report (P-8).
 //
 
@@ -37,6 +38,7 @@ struct JobPhotosSection: View {
     @State private var showingVideoRecorder = false
     @State private var isPreparingVideo = false
     @State private var viewer: JobPhotoViewerRequest?
+    @State private var confirmation: ConfirmationRequest?
 
     private let columns = [GridItem(.adaptive(minimum: 96), spacing: Theme.Spacing.sm)]
 
@@ -72,6 +74,7 @@ struct JobPhotosSection: View {
                 permissions: permissions
             )
         }
+        .confirmation($confirmation)
     }
 
     // MARK: - Grid
@@ -128,7 +131,13 @@ struct JobPhotosSection: View {
                         Button("Resume") { resume(upload) }
                             .buttonStyle(.themeSecondaryCompact)
                         Menu {
-                            Button("Discard this video", role: .destructive) { model.discardUpload(upload) }
+                            // The only copy until it uploads (the camera
+                            // doesn't save to Photos): the share sheet's
+                            // Save Video keeps one in Photos.
+                            ShareLink(item: JobsResumableUploader.localURL(for: upload)) {
+                                Label("Save or share video", systemImage: "square.and.arrow.up")
+                            }
+                            Button("Discard this video", role: .destructive) { confirmDiscard(upload) }
                         } label: {
                             Image(systemName: "ellipsis")
                                 .frame(width: 32, height: 32)
@@ -138,6 +147,21 @@ struct JobPhotosSection: View {
                 }
                 .accessibilityElement(children: .combine)
             }
+        }
+    }
+
+    /// Discarding deletes the only copy of the recording, so it asks first
+    /// (as deleting an uploaded photo does).
+    private func confirmDiscard(_ upload: JobsResumableUploader.Upload) {
+        let prompt = UnsentVideoWarning.discard
+        confirmation = ConfirmationRequest(
+            title: prompt.title,
+            message: prompt.message,
+            confirmTitle: prompt.confirmTitle,
+            isDestructive: true
+        ) {
+            model.discardUpload(upload)
+            toasts.show("Video discarded")
         }
     }
 

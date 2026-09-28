@@ -99,6 +99,49 @@ export function paymentMethodLabel(
   return METHOD_LABELS[payment.method];
 }
 
+/** What refunding a payment needs (an invoice payment or a ledger row). */
+export type RefundablePayment = Pick<
+  Row<'payments'>,
+  | 'id'
+  | 'method'
+  | 'status'
+  | 'amount_cents'
+  | 'tip_cents'
+  | 'refunded_cents'
+  | 'card_brand'
+  | 'card_last4'
+> & { stripe_method_type?: string | null };
+
+/**
+ * Money kept on the customer that pays nothing: no invoice, job or
+ * membership (a payment for a deleted job or invoice, for a void invoice
+ * without a job, or for a document that moved to another customer). The
+ * server leaves a note asking staff to apply it to an invoice or refund it.
+ */
+export function isUnappliedPayment(
+  payment: Pick<Row<'payments'>, 'invoice_id' | 'job_id' | 'membership_id'>,
+): boolean {
+  return payment.invoice_id === null && payment.job_id === null && payment.membership_id === null;
+}
+
+/**
+ * Whether staff may try to put this unapplied payment on an invoice
+ * (apply_payment_to_invoice re-checks: received, something left after
+ * refunds, tips never count, fits the target's balance).
+ */
+export function canApplyToInvoice(
+  payment: Pick<
+    Row<'payments'>,
+    'invoice_id' | 'job_id' | 'membership_id' | 'status' | 'amount_cents' | 'refunded_cents'
+  >,
+): boolean {
+  return (
+    isUnappliedPayment(payment) &&
+    (payment.status === 'succeeded' || payment.status === 'partially_refunded') &&
+    payment.amount_cents - payment.refunded_cents > 0
+  );
+}
+
 export function isCardMethod(method: PaymentMethod): boolean {
   return method === 'card' || method === 'card_present';
 }

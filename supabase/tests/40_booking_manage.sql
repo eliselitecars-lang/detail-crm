@@ -103,6 +103,7 @@ select tests.eq(pg_temp.keys(public.public_get_booking(tests.fx('tok')) -> 'invo
 select tests.eq(public.public_get_booking(tests.fx('tok')) #>> '{invoice,balance_cents}', '16500', 'the invoice carries the deposit');
 select tests.as_superuser();
 select tests.fx_set('inv_tok', (select public_token from public.invoices where job_id = tests.fx('job')));
+select tests.fx_set('inv_id', (select id from public.invoices where job_id = tests.fx('job')));
 select tests.as_anon();
 select tests.eq((public.public_get_booking(tests.fx('tok')) #>> '{invoice,token}')::uuid, tests.fx('inv_tok'), 'invoice token for /i/:token');
 
@@ -134,7 +135,16 @@ select tests.as_service();
 select tests.throws_like($$select public.public_cancel_booking(tests.fx('tok'), null, '2025-06-01 12:00Z')$$, '22023',
                          '%can no longer be cancelled online (it is cancelled)%', 'a cancelled booking cannot be cancelled again');
 select tests.as_superuser();
-select tests.eq((select count(*) from public.notifications where kind = 'booking_cancelled'), 3::bigint, 'still one set of notifications');
+select tests.eq((select count(*) from public.notifications where kind = 'booking_cancelled' and title like 'Booking cancelled by %'),
+                3::bigint, 'still one set of notifications');
+-- 0109: the booking's invoice is still open, so managers are told once each
+select tests.eq((select count(*) from public.notifications
+                  where kind = 'booking_cancelled' and job_id = tests.fx('job') and invoice_id = tests.fx('inv_id')
+                    and title = 'Job #' || (select number from public.jobs where id = tests.fx('job'))
+                                || ' was cancelled; invoice #' || (select number from public.invoices where id = tests.fx('inv_id'))
+                                || ' is still open'),
+                3::bigint, 'the live invoice of the cancelled booking is flagged once to each manager');
+select tests.eq((select count(*) from public.notifications where kind = 'booking_cancelled'), 6::bigint, 'nothing else');
 select tests.ok(exists (select 1 from public.get_available_slots('shop-a', array[tests.fx('svc_a')], '2025-06-09', '2025-06-09', null,
                                                                  '2025-06-01 12:00Z') s where s.starts_at = '2025-06-09 15:00Z'),
                 'the cancelled slot is free again');

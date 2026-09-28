@@ -631,6 +631,9 @@ export function isPaymentInProgressError(error: unknown): boolean {
   return /payment is in progress on this invoice/i.test(errorMessage(error));
 }
 
+/** 55000 checkout_open (a card payment page is still open): see lib/errors. */
+export { isCheckoutOpenError } from '@/lib/errors';
+
 export const refundResultSchema = z.object({
   payment_id: z.string(),
   refund_id: z.string(),
@@ -684,6 +687,61 @@ export function useRefundPayment() {
         }),
       );
     },
+    onSettled: invalidate,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Unapplied money → an invoice (apply_payment_to_invoice, manager+)
+// ---------------------------------------------------------------------------
+
+/** An issued invoice of the customer that can still take money. */
+export type ApplicableInvoice = Pick<
+  InvoiceRow,
+  'id' | 'number' | 'status' | 'total_cents' | 'balance_cents' | 'due_at' | 'issued_at'
+>;
+
+/**
+ * The customer's open / partially paid invoices with a balance: the targets
+ * apply_payment_to_invoice accepts (it re-checks the customer, status and
+ * that the payment fits the balance less card payments in flight).
+ */
+export function useApplicableInvoices(customerId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: [...invoiceKeys.all(shopId), 'applicable', customerId] as const,
+    enabled: enabled && Boolean(customerId),
+    queryFn: async (): Promise<ApplicableInvoice[]> =>
+      unwrapList(
+        await supabase
+          .from('invoices')
+          .select('id, number, status, total_cents, balance_cents, due_at, issued_at')
+          .eq('shop_id', shopId)
+          .eq('customer_id', customerId)
+          .in('status', ['open', 'partially_paid'])
+          .gt('balance_cents', 0)
+          .order('issued_at', { ascending: true })
+          .limit(100),
+      ),
+  });
+}
+
+/**
+ * Moves received money that pays nothing (an unapplied payment, kept on the
+ * customer with a note) onto one of the customer's open invoices. The server
+ * validates everything and appends "Applied to invoice #N" to the note.
+ */
+export function useApplyPaymentToInvoice() {
+  const invalidate = useInvalidateMoney();
+  return useMutation({
+    mutationFn: async ({ paymentId, invoiceId }: { paymentId: string; invoiceId: string }) =>
+      unwrapRequired(
+        await supabase.rpc('apply_payment_to_invoice', {
+          p_payment_id: paymentId,
+          p_invoice_id: invoiceId,
+        }),
+        'payment',
+      ),
     onSettled: invalidate,
   });
 }

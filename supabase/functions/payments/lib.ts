@@ -27,10 +27,13 @@ export interface Services {
   env: Env;
   log: Logger;
   now: number;
+  /** fetch for the other providers (delete_shop releases Twilio numbers); default: global. */
+  fetch?: typeof fetch;
 }
 
 export function services(deps: Deps, ctx: ActionContext): Services {
   return {
+    ...(deps.fetch ? { fetch: deps.fetch } : {}),
     admin: adminClient({ env: deps.env, fetch: deps.fetch }),
     stripe: deps.fetch
       ? stripeFromEnv(ctx.env, { fetch: deps.fetch, maxNetworkRetries: 0 })
@@ -755,6 +758,19 @@ export function appPage(baseUrl: string, ...segments: string[]): string {
 
 /** A shop slug as typed in a public URL (the RPCs lower-case and trim it). */
 export const SLUG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$/;
+
+/** The shop's public slug (links to its public pages, e.g. links.checkoutDone). */
+export async function loadShopSlug(admin: SupabaseClient, shopId: string): Promise<string> {
+  const { data, error } = await admin
+    .from("shops")
+    .select("slug")
+    .eq("id", shopId)
+    .maybeSingle<{ slug: string | null }>();
+  if (error) throw dbFailure("shops lookup", error);
+  if (!data) throw errors.notFound("Shop not found.");
+  if (!data.slug) throw new Error("shop has no slug");
+  return data.slug;
+}
 
 /** The shop with this public slug (404 when none). */
 export async function loadShopBySlug(admin: SupabaseClient, slug: string): Promise<

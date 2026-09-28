@@ -399,7 +399,9 @@ test.describe('public form', () => {
 
     await page.getByRole('button', { name: 'Sign form' }).click();
     await expect(page.getByText('Type your full name.')).toBeVisible();
-    await expect(page.getByText('Draw your signature in the box.')).toBeVisible();
+    await expect(
+      page.getByText('Sign in the box: draw your signature, or choose Type and type it.'),
+    ).toBeVisible();
 
     await page.getByLabel(/^Your full name/).fill('Ana Diaz');
     const pad = page.getByRole('img', { name: /Your signature/ });
@@ -422,5 +424,67 @@ test.describe('public form', () => {
       { p_token: FORM_TOKEN, p_signer_name: 'Ana Diaz', p_signature_path: uploads[0] },
     ]);
     expect(dialogs).toBe(0);
+  });
+
+  test('signs with the keyboard only: a typed signature is rendered and uploaded (WCAG 2.1.1)', async ({
+    page,
+  }) => {
+    const uploads: { path: string; bytes: number }[] = [];
+    const signCalls: { p_signer_name: string; p_signature_path: string }[] = [];
+    await mockSupabase(page, {
+      rpc: {
+        public_get_form: formDoc(),
+        public_sign_form: ({ body }) => {
+          signCalls.push(body as (typeof signCalls)[number]);
+          return formDoc({}, true);
+        },
+      },
+      storage: ({ url, body }) => {
+        const path = url.pathname.replace('/storage/v1/object/signatures/', '');
+        const bytes =
+          body instanceof Uint8Array ? body.byteLength : typeof body === 'string' ? body.length : 0;
+        uploads.push({ path: decodeURIComponent(path), bytes });
+        return { Key: `signatures/${path}`, Id: 'obj-1' };
+      },
+    });
+
+    await page.goto(`/f/${FORM_TOKEN}`);
+    const name = page.getByLabel(/^Your full name/);
+    await name.focus();
+    await page.keyboard.type('Ana Diaz');
+    // Name → the "how to sign" radios (Draw is checked) → Type with an arrow key.
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('radio', { name: 'Draw' })).toBeFocused();
+    await page.keyboard.press('ArrowRight');
+    await expect(page.getByRole('radio', { name: 'Type' })).toBeChecked();
+    // The typed signature starts as the signer's name and can be edited.
+    await page.keyboard.press('Tab');
+    const typed = page.getByLabel('Type your signature');
+    await expect(typed).toBeFocused();
+    await expect(typed).toHaveValue('Ana Diaz');
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type('Ana M. Diaz');
+    await expect(
+      page.getByRole('img', { name: 'Your signature (typed: Ana M. Diaz)' }),
+    ).toBeVisible();
+    // The typed signature is drawn on the canvas (non-transparent pixels).
+    const inked = await page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return 0;
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      let count = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i]! > 0) count += 1;
+      return count;
+    });
+    expect(inked).toBeGreaterThan(100);
+
+    await typed.press('Enter');
+    await expect(page.getByText('Signed — thank you!')).toBeVisible();
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]!.path).toMatch(new RegExp(`^${SHOP_ID}/forms/${FORM_TOKEN}/[^/]+\\.png$`));
+    expect(uploads[0]!.bytes).toBeGreaterThan(500);
+    expect(signCalls).toMatchObject([
+      { p_signer_name: 'Ana Diaz', p_signature_path: uploads[0]!.path },
+    ]);
   });
 });

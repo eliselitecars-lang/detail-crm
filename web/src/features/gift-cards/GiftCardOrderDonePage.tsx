@@ -21,7 +21,7 @@ export default function GiftCardOrderDonePage() {
 function OrderView({ slug, token }: { slug: string; token: string }) {
   const queryClient = useQueryClient();
   const order = useGiftOrderStatus(token);
-  // Branding only: the order page works without it.
+  // Branding and the shop's currency: the order page works without it.
   const shop = useGiftShop(slug);
   const branding = shop.data
     ? {
@@ -30,9 +30,12 @@ function OrderView({ slug, token }: { slug: string; token: string }) {
         brandColor: shop.data.shop.brand_color,
       }
     : null;
-  const currency = shop.data?.currency ?? 'usd';
+  // The order status carries no currency; only the shop's offer does. Never
+  // guess one (a non-USD shop's card must not read "$50.00"): wait for the
+  // shop, and if it can't be loaded, leave the amount out.
+  const currency = shop.data?.currency ?? null;
 
-  if (order.isPending) return <PublicLoading label="Checking your order…" />;
+  if (order.isPending || shop.isPending) return <PublicLoading label="Checking your order…" />;
   if (order.isError) {
     return (
       <PublicError
@@ -58,9 +61,9 @@ function OrderView({ slug, token }: { slug: string; token: string }) {
           <EmptyState
             icon={<Gift aria-hidden="true" />}
             title="Thank you — your gift card is on its way"
-            description={`A ${formatCents(data.value_cents, { currency })} gift card${
-              data.last4 ? ` (ending ${data.last4})` : ''
-            } is being emailed to ${recipient}.`}
+            description={`A ${
+              currency ? `${formatCents(data.value_cents, { currency })} ` : ''
+            }gift card${data.last4 ? ` (ending ${data.last4})` : ''} is being emailed to ${recipient}.`}
           />
         )}
         {stillPending && (

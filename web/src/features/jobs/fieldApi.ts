@@ -966,7 +966,35 @@ export function useJobMessages(jobId: string, customerId: string, enabled: boole
   });
 }
 
-export type JobTemplateKey = 'on_the_way' | 'job_completed';
+/**
+ * Templates the job page sends. `booking_confirmed` (managers+) carries
+ * {{booking_link}}: the customer's /booking page, where they manage the
+ * booking and pay a deposit that is due.
+ */
+export type JobTemplateKey = 'on_the_way' | 'job_completed' | 'booking_confirmed';
+
+/** The customer's booking page (SPEC §6 /booking/:token). */
+export function bookingPageUrl(token: string, origin?: string): string {
+  const base = (origin ?? window.location.origin).replace(/\/+$/, '');
+  return `${base}/booking/${encodeURIComponent(token)}`;
+}
+
+/**
+ * job_booking_token (0042, owner/admin/manager): the link staff share so
+ * the customer can manage the booking and pay its deposit. Asked for on
+ * demand (the token is a credential; jobs.public_token is not readable).
+ */
+export function useJobBookingLink(jobId: string) {
+  return useMutation({
+    mutationFn: async (): Promise<string> => {
+      const token = z
+        .string()
+        .min(1)
+        .parse(unwrap(await supabase.rpc('job_booking_token', { p_job_id: jobId })));
+      return bookingPageUrl(token);
+    },
+  });
+}
 
 const sendResponseSchema = z.object({
   message_id: z.string(),

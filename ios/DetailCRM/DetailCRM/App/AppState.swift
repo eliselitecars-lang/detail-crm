@@ -284,6 +284,8 @@ final class AppState {
         }
         // A deliberate sign-out (not an expired session) leaves no recorded
         // video behind; an expired session keeps them for the same user.
+        // Every sign-out button confirms through `ConfirmationRequest.signOut`,
+        // which names the unsent videos this deletes (they exist nowhere else).
         if notice == nil {
             JobsResumableUploader.discardAll(keepingUserID: nil)
         }

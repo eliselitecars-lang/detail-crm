@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   Checkbox,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
   IconButton,
@@ -40,6 +41,7 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
   const [label, setLabel] = useState('');
   const [required, setRequiredDraft] = useState(false);
   const [templateId, setTemplateId] = useState('');
+  const [itemToRemove, setItemToRemove] = useState<{ id: string; label: string } | null>(null);
 
   const rows = items.data ?? [];
   const done = rows.filter((i) => i.done_at).length;
@@ -135,9 +137,7 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
                     variant="danger"
                     label={`Remove ${item.label}`}
                     icon={<Trash2 className="size-4" />}
-                    onClick={() =>
-                      remove.mutateAsync(item.id).catch((error: unknown) => toast.error(error))
-                    }
+                    onClick={() => setItemToRemove({ id: item.id, label: item.label })}
                   />
                 </span>
               )}
@@ -198,6 +198,24 @@ export function ChecklistCard({ jobId }: { jobId: string }) {
           )}
         </div>
       )}
+      <ConfirmDialog
+        open={itemToRemove !== null}
+        onClose={() => setItemToRemove(null)}
+        tone="danger"
+        title="Remove this item?"
+        description={itemToRemove?.label}
+        confirmLabel="Remove"
+        loading={remove.isPending}
+        onConfirm={async () => {
+          if (!itemToRemove) return;
+          try {
+            await remove.mutateAsync(itemToRemove.id);
+            setItemToRemove(null);
+          } catch (error) {
+            toast.error(error);
+          }
+        }}
+      />
     </SectionCard>
   );
 }

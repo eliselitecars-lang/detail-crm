@@ -811,3 +811,150 @@ Deno.test("billing: unknown action 400, GET 405, CORS only for the app origin", 
   assertEquals(bad.status, 403);
   await bad.body?.cancel();
 });
+
+// ---------------------------------------------------------------------------
+// The platform customer follows the shop's owner (receipts, dunning emails)
+// ---------------------------------------------------------------------------
+
+/** transfer_ownership (0002): the admin becomes the owner, the owner an admin. */
+function transferToAdmin(f: ReturnType<typeof fixture>): void {
+  f.db.seed(
+    "shop_members",
+    f.db.table("shop_members").map((m) => {
+      if (m.shop_id !== SHOP || m.active !== true) return m;
+      if (m.user_id === USERS.owner) return { ...m, role: "admin" };
+      if (m.user_id === USERS.admin) return { ...m, role: "owner" };
+      return m;
+    }),
+  );
+  f.state.ownerEmails[SHOP] = "admin@shine.example.com";
+}
+
+function linkedShop(customer: Record<string, unknown> = {}) {
+  const f = fixture({
+    billing: { stripe_customer_id: "cus_1Shop", stripe_subscription_id: "sub_1", status: "active" },
+  });
+  f.stripe.putCustomer({
+    id: "cus_1Shop",
+    email: "owner@shine.example.com",
+    metadata: { shop_id: SHOP, owner_user_id: USERS.owner },
+    ...customer,
+  });
+  return f;
+}
+
+Deno.test("checkout: a new platform customer records the owner (email + owner_user_id)", async () => {
+  const f = fixture();
+  assertEquals((await f.call(checkoutBody())).status, 200);
+  const customer = f.stripeCalls("POST", "/customers")[0];
+  assertEquals(customer?.form.get("metadata[owner_user_id]"), USERS.owner);
+  assertEquals(customer?.form.get("email"), "owner@shine.example.com");
+});
+
+Deno.test("sync_customer: after a transfer the platform customer is readdressed to the new owner", async () => {
+  const f = linkedShop();
+  transferToAdmin(f);
+  // The former owner (now an admin) reports the transfer.
+  const res = await f.call({ action: "sync_customer", shop_id: SHOP }, "owner");
+  assertEquals(await responseJson(res), { synced: true });
+  const update = f.stripeCalls("POST", "/customers/cus_1Shop")[0];
+  assertEquals(update?.form.get("email"), "admin@shine.example.com");
+  assertEquals(update?.form.get("metadata[owner_user_id]"), USERS.admin);
+  assertEquals(update?.headers.get("stripe-account"), null);
+  assertEquals(f.stripe.customers.get("cus_1Shop")?.email, "admin@shine.example.com");
+
+  // Already in line: nothing is sent again.
+  const again = await f.call({ action: "sync_customer", shop_id: SHOP }, "admin");
+  assertEquals(await responseJson(again), { synced: false });
+  assertEquals(f.stripeCalls("POST", "/customers/cus_1Shop").length, 1);
+});
+
+Deno.test("sync_customer: owner/admin only; a shop without a billing account has nothing to sync", async () => {
+  for (const who of ["manager", "tech", "outsider"] as const) {
+    const f = linkedShop();
+    assertEquals(
+      (await errorOf(await f.call({ action: "sync_customer", shop_id: SHOP }, who))).slice(0, 2),
+      [403, "forbidden"],
+      who,
+    );
+    assertEquals(f.stripeCalls().length, 0, who);
+  }
+  const none = fixture();
+  assertEquals(
+    await responseJson(await none.call({ action: "sync_customer", shop_id: SHOP }, "admin")),
+    { synced: false },
+  );
+  assertEquals(none.stripeCalls().length, 0);
+});
+
+Deno.test("checkout / portal: the new owner's first visit readdresses the customer", async () => {
+  const f = linkedShop({ metadata: { shop_id: SHOP } });
+  transferToAdmin(f);
+  assertEquals((await f.call({ action: "portal", shop_id: SHOP }, "admin")).status, 200);
+  assertEquals(f.stripe.customers.get("cus_1Shop")?.email, "admin@shine.example.com");
+  assertEquals(
+    (f.stripe.customers.get("cus_1Shop")?.metadata as Record<string, string>).owner_user_id,
+    USERS.admin,
+  );
+
+  const c = linkedShop({ email: "former@shine.example.com" });
+  c.state.billing.set(
+    SHOP,
+    billingRow(SHOP, { stripe_customer_id: "cus_1Shop", status: "canceled" }),
+  );
+  assertEquals((await c.call(checkoutBody())).status, 200);
+  assertEquals(c.stripe.customers.get("cus_1Shop")?.email, "owner@shine.example.com");
+  assertEquals(c.stripeCalls("POST", "/customers").length, 0, "the customer is reused");
+});
+
+Deno.test("portal: a Stripe failure while readdressing never blocks managing billing", async () => {
+  const f = linkedShop({ email: "former@shine.example.com" });
+  f.db.http.once(
+    "POST",
+    "https://api.stripe.com/v1/customers/cus_1Shop",
+    () =>
+      new Response(JSON.stringify(stripeErrorBody("api_error", "Stripe is down")), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  assertEquals((await f.call({ action: "portal", shop_id: SHOP })).status, 200);
+  assertEquals(f.logs.events("billing_customer_contact_sync_failed").length, 1);
+});
+
+Deno.test("sync_customers: needs the cron secret; readdresses only shops whose owner changed", async () => {
+  const f = linkedShop();
+  assertEquals((await errorOf(await f.call({ action: "sync_customers" }, "owner"))).slice(0, 2), [
+    401,
+    "unauthorized",
+  ]);
+  // OTHER_SHOP: linked and in line. An orphan with a shop id, and a customer
+  // of the operator's that belongs to no shop, are left alone.
+  f.state.billing.set(OTHER_SHOP, billingRow(OTHER_SHOP, { stripe_customer_id: "cus_1Other" }));
+  f.stripe.putCustomer({
+    id: "cus_1Other",
+    email: "owner@other.example.com",
+    metadata: { shop_id: OTHER_SHOP, owner_user_id: USERS.outsider },
+  });
+  f.stripe.putCustomer({
+    id: "cus_1Orphan",
+    email: "someone@example.com",
+    metadata: { shop_id: SHOP },
+  });
+  f.stripe.putCustomer({ id: "cus_1Unrelated", email: "friend@example.com" });
+  transferToAdmin(f);
+
+  const res = await f.call({ action: "sync_customers" }, "none", CRON);
+  assertEquals(await responseJson(res), { checked: 3, updated: 1, failed: 0 });
+  assertEquals(
+    f.stripeCalls("POST").filter((c) => c.url.pathname.startsWith("/v1/customers/"))
+      .map((c) => c.url.pathname),
+    ["/v1/customers/cus_1Shop"],
+  );
+  assertEquals(f.stripe.customers.get("cus_1Shop")?.email, "admin@shine.example.com");
+  assertEquals(f.stripe.customers.get("cus_1Orphan")?.email, "someone@example.com");
+
+  // A second run finds everything in line.
+  const again = await f.call({ action: "sync_customers" }, "none", CRON);
+  assertEquals(await responseJson(again), { checked: 3, updated: 0, failed: 0 });
+});

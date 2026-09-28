@@ -1,12 +1,12 @@
 /**
- * The Twilio REST calls sms-provisioning makes (no SDK): phone numbers
- * (2010-04-01 API), Messaging Services, toll-free verification and A2P
- * 10DLC brands/campaigns (messaging v1), and Trust Hub profiles (trusthub
- * v1). Requests are form-encoded with Basic auth, capped at 15 s, and a
+ * The Twilio REST calls of sms-provisioning and payments delete_shop (no
+ * SDK): phone numbers (2010-04-01 API), Messaging Services, toll-free
+ * verification and A2P 10DLC brands/campaigns (messaging v1), and Trust Hub
+ * profiles (trusthub v1). Requests are form-encoded with Basic auth, capped at 15 s, and a
  * non-2xx answer becomes a TwilioError carrying Twilio's error code.
  */
-import { withTimeout } from "../_shared/fetch_timeout.ts";
-import { basicAuth, TWILIO_API_BASE, TwilioError } from "../_shared/twilio.ts";
+import { withTimeout } from "./fetch_timeout.ts";
+import { basicAuth, TWILIO_API_BASE, TwilioError } from "./twilio.ts";
 
 export const MESSAGING_API = "https://messaging.twilio.com/v1";
 export const TRUSTHUB_API = "https://trusthub.twilio.com/v1";
@@ -113,4 +113,37 @@ export function twilioClient(
 
 export function str(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
+}
+
+/** A number the platform bought for a shop (a shop_sms_numbers row with a Twilio sid). */
+export interface PlatformNumber {
+  phone_number: string;
+  twilio_number_sid: string;
+  messaging_service_sid: string | null;
+}
+
+/**
+ * Gives a number the platform bought back to Twilio (it stops being rented):
+ * DELETE the IncomingPhoneNumber (a 404 means it is already gone), then its
+ * Messaging Service. A failure on the number throws; one on the service is
+ * handed to `onServiceError` only, since an empty service costs nothing.
+ */
+export async function releasePlatformNumber(
+  client: TwilioClient,
+  number: PlatformNumber,
+  onServiceError: (err: unknown) => void,
+): Promise<void> {
+  await client.requestOrNull(
+    "DELETE",
+    client.account(`IncomingPhoneNumbers/${encodeURIComponent(number.twilio_number_sid)}.json`),
+  );
+  if (!number.messaging_service_sid) return;
+  try {
+    await client.requestOrNull(
+      "DELETE",
+      `${MESSAGING_API}/Services/${encodeURIComponent(number.messaging_service_sid)}`,
+    );
+  } catch (err) {
+    onServiceError(err);
+  }
 }

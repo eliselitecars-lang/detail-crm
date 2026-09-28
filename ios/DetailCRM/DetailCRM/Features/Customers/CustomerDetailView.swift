@@ -8,8 +8,9 @@
 //  that handle money — quotes, invoices, memberships (read-only summary;
 //  the Money screens own the details) and saved cards. Managers and above
 //  see the server's overview (lifetime paid, open balance, visits), can
-//  edit, archive, start a new job, open the message thread and remove a
-//  saved card.
+//  edit, archive, start a new job, open the message thread, save a card on
+//  file without charging it (`setup_card`, CustomerAddCardSheet) and
+//  remove a saved card.
 //
 
 import SwiftUI
@@ -82,6 +83,7 @@ struct CustomerDetailView: View {
             retrySummary: { await reloadSummary() },
             retryCustomFields: { await reloadCustomFields() },
             removeCard: { card in confirmRemoveCard(card) },
+            addCard: { sheet = .addCard },
             customerUpdated: { updated in state = .loaded(updated) }
         )
     }
@@ -145,6 +147,13 @@ struct CustomerDetailView: View {
             )
         case .newJob:
             NewJobView(prefillStart: nil, prefillCustomerID: customerID)
+        case .addCard:
+            CustomerAddCardSheet(
+                customerID: customerID,
+                customerName: state.value?.displayName ?? "Customer",
+                knownCards: Set((history.savedCards.value ?? []).map(\.stripePaymentMethodID)),
+                onFinished: { await reloadSavedCards() }
+            )
         }
     }
 
@@ -204,7 +213,7 @@ struct CustomerDetailView: View {
     private func confirmRemoveCard(_ card: SavedCard) {
         confirmation = ConfirmationRequest(
             title: "Remove \(card.label)?",
-            message: "The card is removed from this customer in Stripe, so it can't be charged again. The customer can save a card again from a pay link.",
+            message: "The card is removed from this customer in Stripe, so it can't be charged again. You can save a card again here with Save a card, or the customer can from a pay link.",
             confirmTitle: "Remove card",
             isDestructive: true
         ) {
@@ -312,6 +321,7 @@ enum CustomerDetailSheet: Identifiable {
     case addVehicle
     case editVehicle(Vehicle)
     case newJob
+    case addCard
 
     var id: String {
         switch self {
@@ -319,6 +329,7 @@ enum CustomerDetailSheet: Identifiable {
         case .addVehicle: return "addVehicle"
         case .editVehicle(let vehicle): return "vehicle-" + vehicle.id.uuidString
         case .newJob: return "newJob"
+        case .addCard: return "addCard"
         }
     }
 }
@@ -341,6 +352,9 @@ struct CustomerDetailPermissions: Equatable {
     var canUseReferrals: Bool
     /// Removing a saved card follows the saved-card capability (manager+).
     var canRemoveCards: Bool { canSeeSavedCards }
+    /// Saving a new card on file (`setup_card`, manager+) follows the same
+    /// capability.
+    var canAddCards: Bool { canSeeSavedCards }
 
     /// Money amounts on job rows follow invoice access.
     var canSeeJobTotals: Bool { canSeeInvoices }
@@ -354,6 +368,8 @@ struct CustomerDetailActions {
     let retrySummary: () async -> Void
     let retryCustomFields: () async -> Void
     let removeCard: (SavedCard) -> Void
+    /// Opens the "Save a card" sheet (PaymentSheet in setup mode).
+    let addCard: () -> Void
     /// A section saved the customer row (custom fields).
     let customerUpdated: (Customer) -> Void
 }

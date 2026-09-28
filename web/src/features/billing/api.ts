@@ -61,6 +61,18 @@ export function useShopEntitlement(shopId: string) {
   });
 }
 
+/**
+ * Whether the current shop is lapsed (billing on, no paid access): the
+ * server has paused online booking, lead forms, online gift card and
+ * membership sales, staff sales of memberships and gift cards, and
+ * automations. False while the standing is loading or can't be read (the
+ * server still enforces it).
+ */
+export function useShopLapsed(shopId: string): boolean {
+  const entitlement = useShopEntitlement(shopId);
+  return entitlement.data?.billing_enabled === true && entitlement.data.state === 'lapsed';
+}
+
 /** shop_entitlement(p_shop_id) once (useShopEntitlement's query; onboarding reads it directly). */
 export async function fetchShopEntitlement(shopId: string): Promise<Entitlement | null> {
   const data = unwrap(await supabase.rpc('shop_entitlement', { p_shop_id: shopId }));

@@ -6,6 +6,9 @@
  *   invoice_checkout           PUBLIC by invoice token
  *   booking_deposit_checkout   PUBLIC by booking (job) token
  *   quote_deposit_checkout     PUBLIC by quote token (a self-scheduled quote's deposit)
+ *   booking_cancel             PUBLIC by booking (job) token: expire the booking's
+ *                              open payment pages, then public_cancel_booking
+ *                              as the caller (its rules, incl. technicians)
  *   gift_card_checkout         PUBLIC by shop slug (buy a gift card online)
  *   membership_join_checkout   PUBLIC by shop slug (join an online membership plan)
  *   portal_membership_cancel   signed-in client: their own membership, at period end
@@ -51,6 +54,8 @@ import {
   portalMembershipInput,
 } from "./memberships.ts";
 import {
+  bookingCancel,
+  bookingCancelInput,
   bookingDepositCheckout,
   bookingDepositCheckoutInput,
   invoiceCheckout,
@@ -100,6 +105,10 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     quote_deposit_checkout: jsonAction(
       quoteDepositCheckoutInput,
       (input, ctx) => quoteDepositCheckout(services(deps, ctx), input),
+    ),
+    booking_cancel: jsonAction(
+      bookingCancelInput,
+      (input, ctx) => bookingCancel(services(deps, ctx), ctx.req, input),
     ),
     gift_card_checkout: jsonAction(
       giftCardCheckoutInput,

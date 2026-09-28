@@ -20,6 +20,7 @@ struct ShopPickerView: View {
     @Environment(ToastCenter.self) private var toasts
     @State private var path: [ShopPickerRoute] = []
     @State private var confirmation: ConfirmationRequest?
+    @State private var showsAccountDeletion = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -45,6 +46,16 @@ struct ShopPickerView: View {
                 }
         }
         .confirmation($confirmation)
+        .sheet(isPresented: $showsAccountDeletion) {
+            NavigationStack {
+                AccountDeletionView()
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close") { showsAccountDeletion = false }
+                        }
+                    }
+            }
+        }
     }
 
     @ViewBuilder
@@ -99,45 +110,16 @@ struct ShopPickerView: View {
                     Text("Signed in as \(email)")
                 }
                 Button("Sign out", role: .destructive) {
-                    confirmation = ConfirmationRequest(
-                        title: "Sign out?",
-                        message: "You'll need your email and password to sign back in.",
-                        confirmTitle: "Sign out",
-                        isDestructive: true
-                    ) {
-                        await appState.signOut()
-                    }
+                    confirmation = .signOut(appState)
                 }
-                Button("Delete account", role: .destructive) {
-                    confirmation = ConfirmationRequest(
-                        title: "Delete your account?",
-                        message: "This can't be undone. Your sign-in and profile are deleted and you're removed from every shop. A shop owner must first transfer ownership or delete the shop.",
-                        confirmTitle: "Delete account",
-                        isDestructive: true
-                    ) {
-                        await deleteAccount()
-                    }
+                Button("Delete account…", role: .destructive) {
+                    showsAccountDeletion = true
                 }
             } label: {
                 Image(systemName: "person.crop.circle")
                     .accessibilityLabel("Account")
             }
         }
-    }
-}
-
-extension ShopPickerView {
-    /// Deletes the account (the `account` function refuses while the person
-    /// owns a shop), then signs out.
-    fileprivate func deleteAccount() async {
-        do {
-            try await AccountService.deleteAccount()
-        } catch {
-            toasts.show(ErrorText.message(for: error), style: .error, duration: .seconds(8))
-            return
-        }
-        toasts.show("Your account was deleted.")
-        await appState.signOut()
     }
 }
 

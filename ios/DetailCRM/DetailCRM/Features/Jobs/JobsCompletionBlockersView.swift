@@ -129,7 +129,11 @@ struct JobsCompletionBlockersView: View {
             AsyncButton("Try again", style: .themePrimary) { await retryMove() }
             if canOverride {
                 if showsOverride {
-                    FormRow("Why are you overriding?", hint: "Saved with the job for the record.") {
+                    FormRow(
+                        "Why are you overriding?",
+                        hint: "Saved with the job for the record. \(Validation.statusReasonCounter(overrideReason))",
+                        error: Validation.statusReasonProblem(overrideReason)
+                    ) {
                         TextField("Reason", text: $overrideReason, axis: .vertical)
                             .lineLimit(2...4)
                             .inputFieldStyle()
@@ -137,7 +141,7 @@ struct JobsCompletionBlockersView: View {
                     AsyncButton(target == .completed ? "Complete anyway" : "Start anyway", role: .destructive, style: .themeDestructive) {
                         await forceMove()
                     }
-                    .disabled(overrideReason.trimmedNonEmpty == nil)
+                    .disabled(overrideReason.trimmedNonEmpty == nil || Validation.statusReasonProblem(overrideReason) != nil)
                 } else {
                     Button(target == .completed ? "Complete anyway…" : "Start anyway…") {
                         showsOverride = true
@@ -179,6 +183,10 @@ struct JobsCompletionBlockersView: View {
 
     private func forceMove() async {
         guard let reason = overrideReason.trimmedNonEmpty else { return }
+        if let problem = Validation.statusReasonProblem(reason) {
+            errorMessage = problem
+            return
+        }
         errorMessage = nil
         do {
             try await model.changeStatus(to: target, force: true, overrideReason: reason)

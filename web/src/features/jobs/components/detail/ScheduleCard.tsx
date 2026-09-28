@@ -4,9 +4,11 @@ import {
   Button,
   DateInput,
   Dialog,
+  ErrorState,
   FormField,
   Input,
   KeyValueList,
+  LoadingState,
   RadioGroup,
   SectionCard,
   Select,
@@ -44,6 +46,18 @@ export function ScheduleCard({ job }: { job: JobDetail }) {
   const [seriesDialog, setSeriesDialog] = useState<'repeat' | 'end' | null>(null);
   const resource = resources.data?.find((r) => r.id === job.resource_id);
   const liveSeries = series.data?.active ? series.data : null;
+  // Until the series row is known, a save could only apply to this visit,
+  // and the server then detaches it from the repeat for good (0051
+  // jobs_series_guard), so the edit waits for it (or its error + retry).
+  const seriesStatus: SeriesStatus =
+    !job.series_id || !canManage
+      ? 'none'
+      : series.isPending
+        ? 'loading'
+        : series.isError
+          ? 'error'
+          : 'ready';
+  const retrySeries = () => void series.refetch();
 
   const minutes =
     job.scheduled_start && job.scheduled_end
@@ -71,7 +85,10 @@ export function ScheduleCard({ job }: { job: JobDetail }) {
         <SeriesBanner
           job={job}
           series={series.data ?? null}
-          loading={canManage && series.isPending}
+          loading={seriesStatus === 'loading'}
+          error={seriesStatus === 'error' ? series.error : null}
+          onRetry={retrySeries}
+          retrying={series.isFetching}
           onEditRepeat={liveSeries ? () => setSeriesDialog('repeat') : undefined}
           onEnd={liveSeries ? () => setSeriesDialog('end') : undefined}
         />
@@ -106,6 +123,10 @@ export function ScheduleCard({ job }: { job: JobDetail }) {
         <ScheduleDialog
           job={job}
           series={liveSeries}
+          seriesStatus={seriesStatus}
+          seriesError={series.error}
+          onRetrySeries={retrySeries}
+          retryingSeries={series.isFetching}
           onClose={() => setEditing(false)}
           resources={(resources.data ?? []).filter(
             (r) => (r.active && !r.archived_at) || r.id === job.resource_id,
@@ -122,17 +143,33 @@ export function ScheduleCard({ job }: { job: JobDetail }) {
   );
 }
 
+/** Whether the job's series row is known (managers only; 'none' = not a repeat / not read). */
+type SeriesStatus = 'none' | 'loading' | 'error' | 'ready';
+
 interface SeriesBannerProps {
   job: JobDetail;
   /** null for technicians (they never read series rows) or while loading. */
   series: SeriesRow | null;
   loading: boolean;
+  /** The series row failed to load (managers). */
+  error: unknown;
+  onRetry: () => void;
+  retrying: boolean;
   onEditRepeat: (() => void) | undefined;
   onEnd: (() => void) | undefined;
 }
 
 /** "Repeats every 2 weeks on Tue · Visit 3 of 12" with the series actions. */
-function SeriesBanner({ job, series, loading, onEditRepeat, onEnd }: SeriesBannerProps) {
+function SeriesBanner({
+  job,
+  series,
+  loading,
+  error,
+  onRetry,
+  retrying,
+  onEditRepeat,
+  onEnd,
+}: SeriesBannerProps) {
   const visit = visitLabel(job.series_seq, series?.max_occurrences ?? null);
   return (
     <div className="bg-surface-2 rounded-control mb-3 flex flex-wrap items-center justify-between gap-2 px-3 py-2">
@@ -155,8 +192,18 @@ function SeriesBanner({ job, series, loading, onEditRepeat, onEnd }: SeriesBanne
               This visit was changed on its own; repeat edits leave it as it is.
             </span>
           )}
+          {error !== null && (
+            <span className="text-danger-ink block text-xs" role="alert">
+              Couldn’t load the repeat details, so the repeat can’t be changed right now.
+            </span>
+          )}
         </span>
       </p>
+      {error !== null && (
+        <Button size="sm" variant="secondary" loading={retrying} onClick={onRetry}>
+          Try again
+        </Button>
+      )}
       {(onEditRepeat || onEnd) && (
         <span className="flex gap-1">
           {onEditRepeat && (
@@ -179,13 +226,27 @@ interface ScheduleDialogProps {
   job: JobDetail;
   /** The job's live series: the change may apply to this and following visits. */
   series: SeriesRow | null;
+  /** Saving waits until a repeating visit's series is known ('loading' / 'error'). */
+  seriesStatus: SeriesStatus;
+  seriesError: unknown;
+  onRetrySeries: () => void;
+  retryingSeries: boolean;
   onClose: () => void;
   resources: { id: string; name: string }[];
 }
 
 type Scope = 'this' | 'following';
 
-function ScheduleDialog({ job, series, onClose, resources }: ScheduleDialogProps) {
+function ScheduleDialog({
+  job,
+  series,
+  seriesStatus,
+  seriesError,
+  onRetrySeries,
+  retryingSeries,
+  onClose,
+  resources,
+}: ScheduleDialogProps) {
   const { timezone } = useShop();
   const toast = useToast();
   const update = useUpdateJob(job.id);
@@ -193,6 +254,7 @@ function ScheduleDialog({ job, series, onClose, resources }: ScheduleDialogProps
   const follow = useFollowSeriesEdit();
   const [scope, setScope] = useState<Scope>('this');
   const saving = update.isPending || updateSeries.isPending;
+  const seriesUnknown = seriesStatus === 'loading' || seriesStatus === 'error';
   const start = job.scheduled_start ? utcToShopLocal(job.scheduled_start, timezone) : null;
   const end = job.scheduled_end ? utcToShopLocal(job.scheduled_end, timezone) : null;
   const [form, setForm] = useState({
@@ -214,6 +276,7 @@ function ScheduleDialog({ job, series, onClose, resources }: ScheduleDialogProps
 
   const save = async () => {
     setError(null);
+    if (seriesUnknown) return;
     const empty = !form.startDate && !form.startTime && !form.endDate && !form.endTime;
     let times: { start: string | null; end: string | null };
     if (empty) {
@@ -336,13 +399,29 @@ function ScheduleDialog({ job, series, onClose, resources }: ScheduleDialogProps
           <Button variant="secondary" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button loading={saving} onClick={() => void save()}>
+          <Button loading={saving} disabled={seriesUnknown} onClick={() => void save()}>
             Save
           </Button>
         </>
       }
     >
       <div className="flex flex-col gap-4">
+        {seriesStatus === 'loading' && <LoadingState label="Loading the repeat…" />}
+        {seriesStatus === 'error' && (
+          <ErrorState
+            compact
+            title="Couldn’t load the repeat details"
+            error={seriesError}
+            onRetry={onRetrySeries}
+            retrying={retryingSeries}
+          />
+        )}
+        {seriesStatus === 'error' && (
+          <p className="text-muted text-sm">
+            Saving now could only change this visit, which would take it out of the repeat for good.
+            Try again to choose between this visit and the following ones.
+          </p>
+        )}
         {series && (
           <RadioGroup<Scope>
             label="Apply to"
@@ -354,6 +433,12 @@ function ScheduleDialog({ job, series, onClose, resources }: ScheduleDialogProps
               { value: 'following', label: 'This and following visits' },
             ]}
           />
+        )}
+        {series && scope === 'this' && !job.series_detached && (
+          <p className="text-muted -mt-2 text-xs">
+            A new time, place or bay / van takes this visit out of the repeat: later repeat edits
+            leave it as it is.
+          </p>
         )}
         <div className="grid grid-cols-2 gap-3">
           <FormField label="Start date">

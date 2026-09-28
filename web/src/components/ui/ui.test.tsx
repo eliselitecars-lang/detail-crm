@@ -1,4 +1,4 @@
-import { act, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { createMemoryRouter, RouterProvider } from 'react-router';
@@ -386,6 +386,114 @@ describe('Toast timers', () => {
     });
     expect(screen.queryAllByRole('status')).toHaveLength(0);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  const region = () => screen.getByRole('region', { name: 'Notifications' }).firstElementChild!;
+
+  it('pauses while the pointer is over the notifications and resumes with the time left (WCAG 2.2.1)', () => {
+    vi.useFakeTimers();
+    const { toast } = renderToasts();
+    act(() => {
+      toast().info('Copy this link', 'https://example.test/f/abc');
+    });
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    fireEvent.pointerEnter(region());
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(screen.getByText('https://example.test/f/abc')).toBeInTheDocument();
+    fireEvent.pointerLeave(region());
+    act(() => {
+      vi.advanceTimersByTime(1999);
+    });
+    expect(screen.getByText('Copy this link')).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.queryByText('Copy this link')).not.toBeInTheDocument();
+  });
+
+  it('pauses while focus is inside a toast, across toasts, until it leaves them', () => {
+    vi.useFakeTimers();
+    const { toast } = renderToasts();
+    act(() => {
+      toast().success('One');
+      toast().success('Two');
+    });
+    const [first, second] = screen.getAllByRole('button', { name: 'Dismiss notification' });
+    act(() => first!.focus());
+    act(() => second!.focus()); // blur → focus inside the same region: still paused
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(screen.getByText('One')).toBeInTheDocument();
+    act(() => second!.blur());
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(screen.queryByText('One')).not.toBeInTheDocument();
+    expect(screen.queryByText('Two')).not.toBeInTheDocument();
+  });
+
+  it('runs again when the focused toast is dismissed (no blur needed)', () => {
+    vi.useFakeTimers();
+    const { toast } = renderToasts();
+    act(() => {
+      toast().success('One');
+      toast().success('Two');
+    });
+    const [first] = screen.getAllByRole('button', { name: 'Dismiss notification' });
+    act(() => first!.focus());
+    fireEvent.click(first!);
+    expect(screen.queryByText('One')).not.toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(screen.queryByText('Two')).not.toBeInTheDocument();
+  });
+
+  it('keeps toasts while the tab is hidden', () => {
+    vi.useFakeTimers();
+    const { toast } = renderToasts();
+    const state = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      toast().error('Couldn’t save');
+    });
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(screen.getByText('Couldn’t save')).toBeInTheDocument();
+    state.mockReturnValue('visible');
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    act(() => {
+      vi.advanceTimersByTime(8000);
+    });
+    expect(screen.queryByText('Couldn’t save')).not.toBeInTheDocument();
+    state.mockRestore();
+  });
+
+  it('a toast with an action stays until used or dismissed', () => {
+    vi.useFakeTimers();
+    const { toast } = renderToasts();
+    act(() => {
+      toast().show({
+        title: 'Paused',
+        tone: 'error',
+        action: { label: 'Billing', onClick: vi.fn() },
+      });
+      toast().show({ title: 'Timed', action: { label: 'Undo', onClick: vi.fn() }, duration: 4000 });
+    });
+    act(() => {
+      vi.advanceTimersByTime(120_000);
+    });
+    expect(screen.getByRole('button', { name: 'Billing' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
   });
 });
 

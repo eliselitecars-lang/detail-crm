@@ -119,14 +119,7 @@ struct MoreView: View {
                 }
                 .themedRow()
                 Button(role: .destructive) {
-                    confirmation = ConfirmationRequest(
-                        title: "Sign out?",
-                        message: "You'll need your email and password to sign back in.",
-                        confirmTitle: "Sign out",
-                        isDestructive: true
-                    ) {
-                        await appState.signOut()
-                    }
+                    confirmation = .signOut(appState)
                 } label: {
                     Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
                         .foregroundStyle(Theme.dangerInk)

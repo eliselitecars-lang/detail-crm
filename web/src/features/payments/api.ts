@@ -8,7 +8,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { z } from 'zod';
 import { pageRange } from '@/components/ui';
 import { shopDateRangeUtc } from '@/lib/dates';
-import { unwrap } from '@/lib/db';
+import { readPages, unwrap, type Row } from '@/lib/db';
 import { sumCents } from '@/lib/money';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
@@ -24,7 +24,11 @@ import {
 } from './paymentFormat';
 
 export const LEDGER_PAGE_SIZE = 50;
-/** CSV export cap (one request). */
+/**
+ * CSV export cap. Read in pages of PostgREST's max_rows (1,000), so every
+ * row up to this many is exported; past it the page says the export was
+ * limited.
+ */
 export const EXPORT_LIMIT = 5000;
 
 export interface LedgerFilters {
@@ -34,6 +38,8 @@ export interface LedgerFilters {
   method: PaymentMethod | 'all';
   status: PaymentStatus | 'all';
   kind: PaymentKind | 'all';
+  /** Only money kept on a customer that pays nothing (no invoice, job or membership). */
+  unapplied?: boolean;
   page: number;
 }
 
@@ -43,6 +49,8 @@ export const paymentKeys = {
     [...paymentKeys.all(shopId), 'ledger', filters] as const,
   totals: (shopId: string, from: string, to: string) =>
     [...paymentKeys.all(shopId), 'totals', from, to] as const,
+  unapplied: (shopId: string, customerId: string) =>
+    [...paymentKeys.all(shopId), 'unapplied', customerId] as const,
 };
 
 const nameEmbed = z.object({
@@ -106,9 +114,16 @@ function ledgerQuery(shopId: string, timezone: string, filters: LedgerFilters, c
   if (filters.method !== 'all') request = request.eq('method', filters.method);
   if (filters.status !== 'all') request = request.eq('status', filters.status);
   if (filters.kind !== 'all') request = request.eq('kind', filters.kind);
-  return request
-    .order('paid_at', { ascending: false, nullsFirst: false })
-    .order('created_at', { ascending: false });
+  if (filters.unapplied) {
+    request = request.is('invoice_id', null).is('job_id', null).is('membership_id', null);
+  }
+  return (
+    request
+      .order('paid_at', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false })
+      // Unique tiebreaker: pages (the ledger's, the export's) never overlap or skip.
+      .order('id', { ascending: false })
+  );
 }
 
 export function useLedger(filters: LedgerFilters, enabled: boolean) {
@@ -129,17 +144,26 @@ export function useLedger(filters: LedgerFilters, enabled: boolean) {
   });
 }
 
-/** Every row matching the filters (up to EXPORT_LIMIT) for the CSV export. */
+export interface LedgerExport {
+  rows: LedgerRow[];
+  /** More payments matched than EXPORT_LIMIT: only the newest were read. */
+  truncated: boolean;
+}
+
+/**
+ * Every row matching the filters (up to EXPORT_LIMIT) for the CSV export,
+ * read in pages: one request would stop at PostgREST's max_rows (1,000).
+ */
 export async function fetchLedgerForExport(
   shopId: string,
   timezone: string,
   filters: LedgerFilters,
-): Promise<LedgerRow[]> {
-  const { data, error } = await ledgerQuery(shopId, timezone, filters, false).range(
-    0,
-    EXPORT_LIMIT - 1,
+): Promise<LedgerExport> {
+  const { rows, truncated } = await readPages<unknown>(
+    (from, to, withCount) => ledgerQuery(shopId, timezone, filters, withCount).range(from, to),
+    { limit: EXPORT_LIMIT, key: (row) => String((row as { id?: unknown }).id) },
   );
-  return z.array(ledgerRowSchema).parse(unwrap({ data, error }) ?? []);
+  return { rows: z.array(ledgerRowSchema).parse(rows), truncated };
 }
 
 export interface LedgerTotals {
@@ -181,4 +205,31 @@ export function usePaymentTotals(
       }
     : undefined;
   return { query, totals };
+}
+
+/**
+ * The customer's unapplied payments that still hold money (received, not
+ * fully refunded): kept on the customer with no invoice, job or membership,
+ * each with the server's note on why. Manager+ (payments RLS).
+ */
+export function useUnappliedPayments(customerId: string, enabled: boolean) {
+  const { shopId } = useShop();
+  return useQuery({
+    queryKey: paymentKeys.unapplied(shopId, customerId),
+    enabled: enabled && Boolean(customerId),
+    queryFn: async (): Promise<Row<'payments'>[]> =>
+      unwrapList(
+        await supabase
+          .from('payments')
+          .select('*')
+          .eq('shop_id', shopId)
+          .eq('customer_id', customerId)
+          .is('invoice_id', null)
+          .is('job_id', null)
+          .is('membership_id', null)
+          .in('status', ['succeeded', 'partially_refunded'])
+          .order('paid_at', { ascending: false, nullsFirst: false })
+          .limit(50),
+      ),
+  });
 }

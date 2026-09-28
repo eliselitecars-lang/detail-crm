@@ -198,6 +198,21 @@ final class VINTests: XCTestCase {
 
 final class ValidationTests: XCTestCase {
 
+    func testStatusReasonLimitMatchesServer() {
+        XCTAssertEqual(Validation.statusReasonMaxLength, 500)
+        XCTAssertNil(Validation.statusReasonProblem(String(repeating: "a", count: 500)))
+        // Surrounding whitespace is trimmed before counting, like btrim.
+        XCTAssertNil(Validation.statusReasonProblem("  " + String(repeating: "a", count: 500) + "\n"))
+        let long = String(repeating: "a", count: 700)
+        XCTAssertEqual(Validation.statusReasonProblem(long), "Keep the reason to 500 characters or fewer (it's 700 now).")
+        // char_length counts Unicode scalars: a family emoji is 7 of them.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
+        XCTAssertEqual(family.count, 1)
+        XCTAssertEqual(Validation.serverLength(family), 7)
+        XCTAssertNotNil(Validation.statusReasonProblem(String(repeating: family, count: 72)))
+        XCTAssertEqual(Validation.statusReasonCounter("abc "), "3 / 500")
+    }
+
     func testEmails() {
         XCTAssertTrue(Validation.isValidEmail("ana@example.com"))
         XCTAssertTrue(Validation.isValidEmail(" first.last+tag@sub.example.co "))
@@ -252,5 +267,21 @@ final class ValidationTests: XCTestCase {
     func testPassword() {
         XCTAssertFalse(Validation.isAcceptablePassword("short"))
         XCTAssertTrue(Validation.isAcceptablePassword("long enough"))
+    }
+}
+
+final class ToastSpeechTests: XCTestCase {
+
+    func testAnnouncementNamesErrors() {
+        XCTAssertEqual(ToastSpeech.announcement(message: "Saved", isError: false), "Saved")
+        XCTAssertEqual(ToastSpeech.announcement(message: " Couldn't save. ", isError: true), "Error: Couldn't save.")
+        XCTAssertEqual(ToastSpeech.announcement(message: "  ", isError: true), "Error.")
+    }
+
+    func testVoiceOverKeepsTheBannerLonger() {
+        XCTAssertEqual(ToastSpeech.visibleDuration(requested: .seconds(3), isError: false, voiceOverRunning: false), .seconds(3))
+        XCTAssertEqual(ToastSpeech.visibleDuration(requested: .seconds(3), isError: false, voiceOverRunning: true), .seconds(10))
+        XCTAssertEqual(ToastSpeech.visibleDuration(requested: .seconds(5), isError: true, voiceOverRunning: true), .seconds(15))
+        XCTAssertEqual(ToastSpeech.visibleDuration(requested: .seconds(20), isError: false, voiceOverRunning: true), .seconds(20))
     }
 }

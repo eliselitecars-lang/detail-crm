@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { toAppError } from '@/lib/errors';
+import { AUTH_CALLBACK_PATH } from '@/lib/authUrlSession';
 import { supabase } from '@/lib/supabase';
 import { SHOP_ROLES } from '@/features/shop/permissions';
 import { absoluteUrl } from './redirects';
@@ -25,11 +26,46 @@ export async function signUp(input: {
     password: input.password,
     options: {
       data: { full_name: input.fullName },
-      emailRedirectTo: absoluteUrl(input.next),
+      // The confirmation link lands on /auth/callback, which shows the
+      // account and signs in only when the visitor continues (login CSRF).
+      emailRedirectTo: absoluteUrl(authCallbackPath(input.next)),
     },
   });
   if (error) throw toAppError(error);
   return { signedIn: data.session !== null };
+}
+
+/** /auth/callback?next=… for a sign-up confirmation email. */
+export function authCallbackPath(next: string): string {
+  return `${AUTH_CALLBACK_PATH}?next=${encodeURIComponent(next)}`;
+}
+
+/**
+ * The account a confirmation link signs in to, checked by the server
+ * (GET /auth/v1/user with the link's token) without saving anything.
+ */
+export async function linkAccountEmail(accessToken: string): Promise<string> {
+  const { data, error } = await supabase.auth.getUser(accessToken);
+  if (error) throw toAppError(error);
+  return data.user.email ?? '';
+}
+
+/** Signs this browser in with the confirmation link's session (the visitor chose to). */
+export async function acceptLinkSession(tokens: {
+  accessToken: string;
+  refreshToken: string;
+}): Promise<void> {
+  const { error } = await supabase.auth.setSession({
+    access_token: tokens.accessToken,
+    refresh_token: tokens.refreshToken,
+  });
+  if (error) throw toAppError(error);
+}
+
+/** Ends the session in this browser only (other devices stay signed in). */
+export async function signOutThisBrowser(): Promise<void> {
+  const { error } = await supabase.auth.signOut({ scope: 'local' });
+  if (error) throw toAppError(error);
 }
 
 export async function sendPasswordReset(email: string): Promise<void> {

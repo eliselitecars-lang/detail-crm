@@ -386,6 +386,32 @@ describe('InvoicePage — parity', () => {
     expect(await screen.findByText('This gift card has expired.')).toBeInTheDocument();
   });
 
+  it('tells the customer to finish or wait while a card payment page is open (checkout_open)', async () => {
+    mockRpc({
+      public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },
+      public_redeem_gift_card: {
+        data: null,
+        error: {
+          code: '55000',
+          message:
+            'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+          details: null,
+          hint: 'checkout_open',
+        },
+      },
+    });
+    const { user } = renderInvoice();
+    await user.type(await screen.findByLabelText(/Gift card code/), 'ABCD-EFGH');
+    await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
+    expect(
+      await screen.findByText(
+        'A card payment page for this invoice is still open. Finish paying there, or try the gift card again after 3:40 PM, when that page expires.',
+      ),
+    ).toBeInTheDocument();
+    // Staff wording ("cancel the open payments") is never shown to a customer.
+    expect(screen.queryByText(/cancel the open payments/i)).not.toBeInTheDocument();
+  });
+
   it('shows clearing bank payments and hides Pay while they cover the balance', async () => {
     mockRpc({
       public_get_invoice: {

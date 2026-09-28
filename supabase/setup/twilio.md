@@ -113,6 +113,49 @@ not provisioned for it on the platform" and inbound texts to it are
 acknowledged but not recorded (logged as `inbound_sms_ignored` /
 `number_not_provisioned`).
 
+## Numbers no shop uses (release worklist)
+
+The platform pays Twilio every month for every number on its account,
+whether or not a shop still uses it. Whenever a number stops being bound to
+a shop (the owner releases it, the shop is deleted, or you move it with the
+`delete` above), the database logs it in `public.sms_number_releases`
+(service role only; phone number, shop id, shop name, time).
+
+- **Numbers bought through self-serve** (`sms-provisioning`, friendly name
+  `dcrm-<SHOP_UUID>-...`) need nothing from you: `release_number` gives
+  them back to Twilio, and deleting a shop releases its self-serve number and
+  Messaging Service right after the shop is gone. If Twilio failed at that
+  moment, the daily job below retries.
+- **Numbers you bound by hand** are never released automatically: you
+  bought them, so you decide (release, or re-assign to another shop).
+
+The daily `detail-crm-sms-releases` job (supabase/setup/cron.sql) calls
+`sms-provisioning` `release_worklist`, which checks each logged number
+against Twilio and removes the entries that are done (no longer on the
+account, or bound to a shop again). What it cannot settle it reports:
+
+- in the function logs as `sms_numbers_awaiting_release` (warn, with the
+  count) — check it after deleting a shop that had a number;
+- in the answer when you run it yourself:
+
+  ```sh
+  curl -sS -X POST "https://<PROJECT_REF>.supabase.co/functions/v1/sms-provisioning" \
+    -H "Content-Type: application/json" -H "x-cron-secret: $CRON_SECRET" \
+    -d '{"action":"release_worklist"}'
+  # {"checked":3,"pending":[{"phone_number":"+12055550100","twilio_number_sid":"PN...",
+  #   "shop_id":"...","shop_name":"...","shop_deleted":true,"released_at":"..."}],
+  #  "released":1,"pruned":2,"failed":0}
+  ```
+
+Every `pending` number is still rented by the platform and bound to no
+shop. Release it in the Twilio Console (Phone Numbers -> Manage -> Active
+numbers -> the number -> Release; also delete that shop's Messaging Service,
+`shop <SHOP_UUID> - ...`) or bind it to a shop again; the next run clears
+the entry. `failed` counts numbers Twilio could not be asked about (they are
+retried the next day). Read the raw table only for history: it also holds
+recent releases that are already done (kept 30 days: they count toward a
+shop's limit of 2 self-serve releases per 30 days).
+
 ## Migrating from a shared platform Messaging Service
 
 Earlier versions of this guide put every shop's number in one platform

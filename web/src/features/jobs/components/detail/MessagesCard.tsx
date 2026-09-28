@@ -1,4 +1,4 @@
-import { CheckCircle2, Navigation } from 'lucide-react';
+import { CalendarCheck, CheckCircle2, Navigation } from 'lucide-react';
 import { useState } from 'react';
 import {
   Button,
@@ -18,11 +18,15 @@ import { useJobMessages, useSendJobTemplate, type JobTemplateKey } from '../../f
 const TEMPLATE_LABELS: Record<JobTemplateKey, string> = {
   on_the_way: '“On my way”',
   job_completed: '“Job complete”',
+  booking_confirmed: '“Booking confirmed”',
 };
 
 export function MessagesCard({ job }: { job: JobDetail }) {
   const { timezone } = useShop();
   const canSend = useCan('messages.sendJobUpdates');
+  // "Booking confirmed" links the customer's booking page (manage, pay the
+  // deposit); the messaging function allows it to managers+ only.
+  const canSendBooking = useCan('jobs.manage');
   const canReadInbox = useCan('messages.inbox');
   const toast = useToast();
   const messages = useJobMessages(job.id, job.customer_id, canReadInbox);
@@ -81,6 +85,18 @@ export function MessagesCard({ job }: { job: JobDetail }) {
               >
                 Job complete
               </Button>
+              {canSendBooking && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={send.isPending && send.variables.templateKey === 'booking_confirmed'}
+                  disabled={send.isPending}
+                  leadingIcon={<CalendarCheck className="size-4" aria-hidden="true" />}
+                  onClick={() => void onSend('booking_confirmed')}
+                >
+                  Booking confirmed
+                </Button>
+              )}
             </div>
           </div>
         )}

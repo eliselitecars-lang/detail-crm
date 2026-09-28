@@ -7,11 +7,12 @@ import {
   isStripeMethod,
   paymentMethodLabel,
   refundableCents,
+  type RefundablePayment,
 } from '@/features/payments/paymentFormat';
-import { useRefundPayment, type InvoicePayment } from '../api';
+import { useRefundPayment } from '../api';
 
 export interface RefundDialogProps {
-  payment: InvoicePayment | null;
+  payment: RefundablePayment | null;
   onClose: () => void;
   currency: string;
 }
@@ -44,7 +45,7 @@ function RefundForm({
   onClose,
   currency,
 }: {
-  payment: InvoicePayment;
+  payment: RefundablePayment;
   onClose: () => void;
   currency: string;
 }) {

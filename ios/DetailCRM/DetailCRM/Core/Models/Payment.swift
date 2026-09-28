@@ -274,6 +274,40 @@ struct PaymentSheetParams: Decodable, Hashable, Sendable {
     }
 }
 
+/// `payments` → `setup_card` (manager+): an off-session SetupIntent on the
+/// shop's connected account plus the Stripe customer and its ephemeral
+/// key — everything StripePaymentSheet needs in setup mode to save a card
+/// without charging it. The webhook (`setup_intent.succeeded`) stores the
+/// card (brand / last4 / expiry only) on the customer.
+struct MoneySetupCardParams: Decodable, Hashable, Sendable {
+    var setupIntentID: String
+    var clientSecret: String
+    var ephemeralKeySecret: String
+    var customerID: String
+    var publishableKey: String
+    /// Connected account (`acct_…`) the SetupIntent lives on.
+    var stripeAccountID: String
+
+    private enum Keys: String, CodingKey {
+        case setupIntentID = "setup_intent_id"
+        case clientSecret = "setup_intent_client_secret"
+        case ephemeralKeySecret = "ephemeral_key_secret"
+        case customerID = "customer_id"
+        case publishableKey = "publishable_key"
+        case stripeAccountID = "stripe_account_id"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        setupIntentID = try c.decode(String.self, forKey: .setupIntentID)
+        clientSecret = try c.decode(String.self, forKey: .clientSecret)
+        ephemeralKeySecret = try c.decode(String.self, forKey: .ephemeralKeySecret)
+        customerID = try c.decode(String.self, forKey: .customerID)
+        publishableKey = try c.decode(String.self, forKey: .publishableKey)
+        stripeAccountID = try c.decode(String.self, forKey: .stripeAccountID)
+    }
+}
+
 /// `payments` → `cancel_open_payments`: what releasing an invoice did.
 /// Unconfirmed PaymentSheet attempts are cancelled and open pay-link
 /// sessions expired; payments already processing are only counted.

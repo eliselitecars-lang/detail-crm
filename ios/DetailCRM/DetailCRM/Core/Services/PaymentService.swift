@@ -32,7 +32,7 @@ enum MoneyEdge {
     /// of the same tap reuses Stripe's idempotency key / the message the
     /// database already queued, while a new tap gets a new one.
     static func newNonce() -> String {
-        UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        RequestAttempt.newNonce()
     }
 
     /// Invokes an edge function with a JSON body and decodes the reply;
@@ -428,6 +428,30 @@ enum PaymentService {
         )
     }
 
+    /// Runs a manual money write on an invoice (`recordManualPayment`, gift
+    /// card and store credit redemptions). The database refuses those (0109:
+    /// 55000 HINT `checkout_open`) while a card payment page of the invoice,
+    /// or of a job it bills, can still be paid, so cash recorded meanwhile
+    /// cannot overpay it. This releases the pages (`cancel_open_payments`)
+    /// and tries once more; a page already processing stays open and the
+    /// server's message (it names when the page closes) is shown.
+    static func releasingOpenCheckouts<T>(
+        shopID: UUID,
+        invoiceID: UUID,
+        _ write: () async throws -> T
+    ) async throws -> T {
+        try await OpenCheckoutRefusal.retryingAfterRelease(
+            isRefusal: { error in
+                guard let postgrest = error as? PostgrestError else { return false }
+                return OpenCheckoutRefusal.matches(code: postgrest.code, hint: postgrest.hint)
+            },
+            release: {
+                _ = try await cancelOpenPayments(shopID: shopID, invoiceID: invoiceID)
+            },
+            write: write
+        )
+    }
+
     /// Releases a job before it is cancelled / marked no-show
     /// (`cancel_open_payments` with `job_id`; collectors only): cancels its
     /// unconfirmed card attempts (deposits and its invoice's sheets) and
@@ -446,6 +470,61 @@ enum PaymentService {
             "payments",
             body: Body(shop_id: MoneyEdge.wire(shopID), job_id: MoneyEdge.wire(jobID))
         )
+    }
+
+    /// Manager+: starts saving a card on file for a customer without
+    /// charging it (`setup_card`): an off-session SetupIntent on the shop's
+    /// connected account, for PaymentSheet in setup mode. `nonce` is one per
+    /// attempt (a retry reuses the same SetupIntent). The card is stored by
+    /// the webhook once Stripe confirms it (`awaitNewSavedCard`).
+    static func setupCard(
+        shopID: UUID,
+        customerID: UUID,
+        nonce: String,
+        ephemeralKeyAPIVersion: String
+    ) async throws -> MoneySetupCardParams {
+        struct Body: Encodable {
+            let action = "setup_card"
+            let shop_id: String
+            let customer_id: String
+            let request_nonce: String
+            let ephemeral_key_api_version: String
+        }
+        return try await MoneyEdge.invoke(
+            "payments",
+            body: Body(
+                shop_id: MoneyEdge.wire(shopID),
+                customer_id: MoneyEdge.wire(customerID),
+                request_nonce: nonce,
+                ephemeral_key_api_version: ephemeralKeyAPIVersion
+            )
+        )
+    }
+
+    /// After PaymentSheet saves a card, the webhook adds it to the
+    /// customer. Polls the saved cards a few times; returns the new card
+    /// (one not in `known`), or nil when it isn't visible yet.
+    static func awaitNewSavedCard(
+        shopID: UUID,
+        customerID: UUID,
+        known: Set<String>,
+        attempts: Int = 8,
+        interval: Duration = .milliseconds(1500)
+    ) async -> SavedCard? {
+        for attempt in 0..<max(1, attempts) {
+            if attempt > 0 {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return nil
+                }
+            }
+            let cards = try? await InvoiceService.savedCards(shopID: shopID, customerID: customerID)
+            if let card = cards?.first(where: { !known.contains($0.stripePaymentMethodID) }) {
+                return card
+            }
+        }
+        return nil
     }
 
     /// Manager+: removes a customer's saved card (`remove_saved_card`): the
@@ -500,17 +579,32 @@ enum PaymentService {
 
     /// Owner/admin: refunds a Stripe payment (card, in person, bank debit
     /// or pay later) through Stripe (full refundable amount when
-    /// `amountCents` is nil).
-    static func refundCardPayment(shopID: UUID, paymentID: UUID, amountCents: Int?) async throws -> MoneyRefundResult {
+    /// `amountCents` is nil). `nonce` is one per refund attempt
+    /// (`RequestAttempt`): a retry of the same attempt reuses it, so a lost
+    /// response never refunds twice, and a deliberate second refund of the
+    /// same amount sends a new one. Without it the server refuses a
+    /// same-amount repeat within 10 minutes (409 `possible_duplicate_refund`).
+    static func refundCardPayment(
+        shopID: UUID,
+        paymentID: UUID,
+        amountCents: Int?,
+        nonce: String
+    ) async throws -> MoneyRefundResult {
         struct Body: Encodable {
             let action = "refund"
             let shop_id: String
             let payment_id: String
             let amount_cents: Int?
+            let request_nonce: String
         }
         return try await MoneyEdge.invoke(
             "payments",
-            body: Body(shop_id: MoneyEdge.wire(shopID), payment_id: MoneyEdge.wire(paymentID), amount_cents: amountCents)
+            body: Body(
+                shop_id: MoneyEdge.wire(shopID),
+                payment_id: MoneyEdge.wire(paymentID),
+                amount_cents: amountCents,
+                request_nonce: nonce
+            )
         )
     }
 

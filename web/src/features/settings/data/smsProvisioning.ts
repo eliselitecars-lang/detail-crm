@@ -70,23 +70,38 @@ export function useSmsNumberStatus() {
 }
 
 /**
- * Whether self-serve numbers are available. A function that is off, not
- * deployed or unreachable all read as "not available" (support connects
- * the number instead) — never as an error on the page.
+ * A failure of the `status` call that means self-serve numbers are off on
+ * this platform: the function refusing with provisioning_disabled, or not
+ * being deployed at all (404). Anything else (offline, 5xx, a gateway
+ * timeout) is a failure to check, not an answer.
+ */
+export function isProvisioningUnavailable(error: unknown): boolean {
+  return isProvisioningOff(error) || (error instanceof EdgeFunctionError && error.status === 404);
+}
+
+/**
+ * Whether self-serve numbers are available. A function that is off or not
+ * deployed reads as "not available" (support connects the number instead).
+ * A failure to reach it is an error the page shows with a retry: reading it
+ * as "not available" would hide a number the shop already bought (its
+ * verification, rejection reason, resubmit and release) behind the manual
+ * support form.
  */
 export function useProvisioningFlags() {
   const { shopId } = useShop();
   return useQuery({
     queryKey: smsKeys.flags(shopId),
-    retry: false,
+    retry: (failures, error) => failures < 1 && !isProvisioningUnavailable(error),
+    retryDelay: 500,
     staleTime: 5 * 60_000,
     queryFn: async (): Promise<ProvisioningFlags> => {
       try {
         const data = await invokeProvisioning('status', { shop_id: shopId });
         const parsed = flagsSchema.safeParse(data);
         return parsed.success ? parsed.data : { enabled: false, isv_enabled: false };
-      } catch {
-        return { enabled: false, isv_enabled: false };
+      } catch (error) {
+        if (isProvisioningUnavailable(error)) return { enabled: false, isv_enabled: false };
+        throw error;
       }
     },
   });

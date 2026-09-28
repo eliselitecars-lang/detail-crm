@@ -3,7 +3,8 @@
 //  DetailCRM
 //
 //  One member: contact (managers+), role change and (de)activation
-//  (owners/admins, never the owner or yourself), and pay settings
+//  (owners/admins, never the owner or yourself), Make owner (the owner
+//  hands the shop to another active member, `transfer_ownership`), and pay settings
 //  (owners/admins edit; a member reads their own). The server enforces
 //  the same rules and its message is shown when it refuses. On your own
 //  row every role (technicians included) can open "Your account" to edit
@@ -32,6 +33,11 @@ struct TeamMemberDetailView: View {
     private var isSelf: Bool { member.memberID == appState.member?.id }
     private var canSeePay: Bool { appState.can(.viewAllCompensation) || isSelf }
     private var canEditPay: Bool { appState.can(.editCompensation) }
+    /// Only the owner can hand the shop to another active member
+    /// (`transfer_ownership`; the server enforces the same rule).
+    private var canMakeOwner: Bool {
+        actorRole == .owner && !isSelf && member.active && member.role != .owner
+    }
 
     var body: some View {
         List {
@@ -58,8 +64,10 @@ struct TeamMemberDetailView: View {
                     assignableRoles: TeamPermissions.assignableRoles(actor: actorRole, target: member.role, isSelf: isSelf),
                     canToggleActive: TeamPermissions.canToggleActive(actor: actorRole, target: member.role, isSelf: isSelf),
                     isSelf: isSelf,
+                    canMakeOwner: canMakeOwner,
                     changeRole: { role in confirmRoleChange(to: role) },
-                    toggleActive: { confirmToggleActive() }
+                    toggleActive: { confirmToggleActive() },
+                    makeOwner: { confirmMakeOwner() }
                 )
             }
             if canSeePay {
@@ -128,6 +136,30 @@ struct TeamMemberDetailView: View {
         case .manager: return "Managers run jobs, customers and money, but can't change settings or pay."
         case .technician: return "Technicians see only their assigned jobs."
         case .owner: return ""
+        }
+    }
+
+    private func confirmMakeOwner() {
+        let name = member.displayName
+        let shopName = appState.shop?.name ?? "this shop"
+        confirmation = ConfirmationRequest(
+            title: "Make \(name) the owner?",
+            message: "\(name) becomes the owner of \(shopName), with full control including billing and deleting the shop. You become an admin. Only the new owner can undo this.",
+            confirmTitle: "Make owner",
+            isDestructive: true
+        ) {
+            do {
+                let shopID = try appState.requireShopID()
+                try await TeamService.transferOwnership(shopID: shopID, memberID: member.memberID)
+                member.role = .owner
+                toasts.show("\(name) is now the owner. You're an admin.")
+                // Your own role changed: the app re-reads it, so screens
+                // follow what an admin may do.
+                try? await appState.refreshCurrentShop()
+                await onChanged()
+            } catch {
+                toasts.showError(error)
+            }
         }
     }
 
@@ -215,8 +247,10 @@ private struct TeamMemberAccessSection: View {
     let assignableRoles: [ShopRole]
     let canToggleActive: Bool
     let isSelf: Bool
+    let canMakeOwner: Bool
     let changeRole: (ShopRole) -> Void
     let toggleActive: () -> Void
+    let makeOwner: () -> Void
 
     var body: some View {
         Section {
@@ -246,6 +280,14 @@ private struct TeamMemberAccessSection: View {
                 .accessibilityLabel("Role: \(member.role.displayName). Change role")
                 .themedRow()
             }
+            if canMakeOwner {
+                Button(role: .destructive, action: makeOwner) {
+                    Text("Make owner…")
+                        .foregroundStyle(Theme.dangerInk)
+                }
+                .accessibilityHint("Hands the shop to this member. You become an admin.")
+                .themedRow()
+            }
             if canToggleActive {
                 Button(role: member.active ? .destructive : nil) {
                     toggleActive()
@@ -264,8 +306,9 @@ private struct TeamMemberAccessSection: View {
 
     private var footerText: String {
         if isSelf { return "You can't change your own role or deactivate yourself." }
-        if member.role == .owner { return "The owner's role changes only by transferring ownership (on the web)." }
-        return "Only owners and admins can change roles. Nobody can be made owner here."
+        if member.role == .owner { return "The owner's role changes only when the owner makes someone else the owner." }
+        if canMakeOwner { return "Only owners and admins can change roles. Make owner hands the shop to this member; you become an admin." }
+        return "Only owners and admins can change roles. Only the owner can make someone else the owner."
     }
 }
 

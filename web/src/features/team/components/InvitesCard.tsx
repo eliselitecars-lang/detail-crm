@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   ConfirmDialog,
+  CopyLinkDialog,
   ErrorState,
   IconButton,
   LoadingState,
@@ -13,6 +14,7 @@ import {
 import { formatDate } from '@/lib/dates';
 import { ROLE_LABELS } from '@/features/shop/permissions';
 import { useShop } from '@/features/shop/shopContext';
+import { copyText } from '@/features/quotes/shared/format';
 import { usePendingInvites, useResendInvite, useRevokeInvite } from '../api';
 import { isInviteExpired, type PendingInvite } from '../model';
 
@@ -24,14 +26,15 @@ export function InvitesCard({ onInvite, now }: { onInvite: () => void; now: Date
   const resend = useResendInvite();
   const revoke = useRevokeInvite();
   const [revoking, setRevoking] = useState<PendingInvite | null>(null);
+  /** A link the browser refused to copy, shown until closed. */
+  const [manualLink, setManualLink] = useState<string | null>(null);
 
   const copyLink = async (invite: PendingInvite) => {
     const link = `${window.location.origin}/invite/${invite.token}`;
-    try {
-      await navigator.clipboard.writeText(link);
+    if (await copyText(link)) {
       toast.success('Invite link copied', 'Share it only with the person you invited.');
-    } catch {
-      toast.info('Copy this link', link);
+    } else {
+      setManualLink(link);
     }
   };
 
@@ -131,6 +134,13 @@ export function InvitesCard({ onInvite, now }: { onInvite: () => void; now: Date
             setRevoking(null);
           }
         }}
+      />
+      <CopyLinkDialog
+        link={manualLink}
+        onClose={() => setManualLink(null)}
+        label="Invite link"
+        description="Your browser didn’t let us copy it automatically. Copy it here, and share it only with the person you invited."
+        copiedMessage="Invite link copied"
       />
     </SectionCard>
   );

@@ -1,10 +1,11 @@
-import { Download, Wallet } from 'lucide-react';
+import { Download, FileInput, Undo2, Wallet } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import {
   Badge,
   Button,
   Card,
+  Checkbox,
   DateInput,
   EmptyState,
   ErrorState,
@@ -31,7 +32,9 @@ import {
 import { formatCents } from '@/lib/money';
 import { useRealtime } from '@/lib/useRealtime';
 import { useShop } from '@/features/shop/shopContext';
+import { useCan } from '@/features/shop/useCan';
 import { customerName } from '@/features/quotes/shared/format';
+import { RefundDialog } from '@/features/invoices/components/RefundDialog';
 import {
   fetchLedgerForExport,
   LEDGER_PAGE_SIZE,
@@ -41,14 +44,18 @@ import {
   type LedgerFilters,
   type LedgerRow,
 } from './api';
+import { ApplyPaymentDialog } from './components/ApplyPaymentDialog';
 import { downloadCsv, ledgerToCsv } from './csv';
 import {
+  canApplyToInvoice,
+  isUnappliedPayment,
   KIND_LABELS,
   METHOD_LABELS,
   PAYMENT_KINDS,
   PAYMENT_METHODS,
   PAYMENT_STATUSES,
   paymentMethodLabel,
+  refundableCents,
   type PaymentKind,
   type PaymentMethod,
   type PaymentStatus,
@@ -68,8 +75,13 @@ export default function PaymentsPage() {
   const method = pick<PaymentMethod>(params.get('method'), PAYMENT_METHODS);
   const status = pick<PaymentStatus>(params.get('status'), PAYMENT_STATUSES);
   const kind = pick<PaymentKind>(params.get('kind'), PAYMENT_KINDS);
+  const unapplied = params.get('unapplied') === '1';
   const page = Math.max(1, Number(params.get('page') ?? '1') || 1);
   const [exporting, setExporting] = useState(false);
+  const canRefund = useCan('payments.refund');
+  const canApply = useCan('invoices.manage');
+  const [refunding, setRefunding] = useState<LedgerRow | null>(null);
+  const [applying, setApplying] = useState<LedgerRow | null>(null);
 
   const rangeError =
     !isLocalDate(from) || !isLocalDate(to)
@@ -80,7 +92,7 @@ export default function PaymentsPage() {
           ? 'Choose a range of 10 years or less.'
           : undefined;
 
-  const filters: LedgerFilters = { from, to, method, status, kind, page };
+  const filters: LedgerFilters = { from, to, method, status, kind, unapplied, page };
   const ledger = useLedger(filters, !rangeError);
   const { query: totalsQuery, totals } = usePaymentTotals(from, to, method, !rangeError);
   useRealtime({ table: 'payments', shopId });
@@ -99,12 +111,12 @@ export default function PaymentsPage() {
     if (rangeError) return;
     setExporting(true);
     try {
-      const rows = await fetchLedgerForExport(shopId, timezone, filters);
+      const { rows, truncated } = await fetchLedgerForExport(shopId, timezone, filters);
       downloadCsv(`payments-${from}-to-${to}.csv`, ledgerToCsv(rows, timezone));
-      if (rows.length >= EXPORT_LIMIT) {
+      if (truncated) {
         toast.info(
           'Export limited',
-          `Only the newest ${EXPORT_LIMIT} payments were exported. Narrow the dates.`,
+          `Only the newest ${EXPORT_LIMIT.toLocaleString('en-US')} payments were exported. Narrow the dates.`,
         );
       } else {
         toast.success(`Exported ${rows.length} payment${rows.length === 1 ? '' : 's'}`);
@@ -139,20 +151,30 @@ export default function PaymentsPage() {
     {
       key: 'ref',
       header: 'For',
-      cell: (p) =>
-        p.invoice ? (
-          <Link to={`/app/invoices/${p.invoice.id}`} className="text-primary-ink hover:underline">
-            Invoice #{p.invoice.number}
-          </Link>
-        ) : p.job ? (
-          <Link to={`/app/jobs/${p.job.id}`} className="text-primary-ink hover:underline">
-            Job #{p.job.number}
-          </Link>
-        ) : p.membership_id ? (
-          'Membership'
-        ) : (
-          '—'
-        ),
+      cell: (p) => (
+        <span className="flex flex-col items-end gap-0.5 md:items-start">
+          {p.invoice ? (
+            <Link to={`/app/invoices/${p.invoice.id}`} className="text-primary-ink hover:underline">
+              Invoice #{p.invoice.number}
+            </Link>
+          ) : p.job ? (
+            <Link to={`/app/jobs/${p.job.id}`} className="text-primary-ink hover:underline">
+              Job #{p.job.number}
+            </Link>
+          ) : p.membership_id ? (
+            'Membership'
+          ) : isUnappliedPayment(p) ? (
+            <Badge tone="warning">Unapplied</Badge>
+          ) : (
+            '—'
+          )}
+          {p.note && (
+            <span className="text-muted max-w-xs text-xs break-words whitespace-pre-line">
+              {p.note}
+            </span>
+          )}
+        </span>
+      ),
     },
     {
       key: 'method',
@@ -184,6 +206,42 @@ export default function PaymentsPage() {
           )}
         </span>
       ),
+    },
+    {
+      key: 'actions',
+      header: <span className="sr-only">Actions</span>,
+      align: 'right',
+      cell: (p) => {
+        const apply = canApply && canApplyToInvoice(p);
+        const refund = canRefund && refundableCents(p) > 0;
+        if (!apply && !refund) return null;
+        return (
+          <span className="inline-flex flex-wrap justify-end gap-1">
+            {apply && (
+              <Button
+                size="sm"
+                variant="secondary"
+                leadingIcon={<FileInput className="size-4" aria-hidden="true" />}
+                onClick={() => setApplying(p)}
+                aria-label={`Apply ${money(p.amount_cents)} from ${customerName(p.customer)} to an invoice`}
+              >
+                Apply
+              </Button>
+            )}
+            {refund && (
+              <Button
+                size="sm"
+                variant="ghost"
+                leadingIcon={<Undo2 className="size-4" aria-hidden="true" />}
+                onClick={() => setRefunding(p)}
+                aria-label={`Refund ${paymentMethodLabel(p)} payment of ${money(p.amount_cents)} from ${customerName(p.customer)}`}
+              >
+                Refund
+              </Button>
+            )}
+          </span>
+        );
+      },
     },
   ];
 
@@ -239,6 +297,14 @@ export default function PaymentsPage() {
               options={selectOptions(PAYMENT_KINDS, (k) => KIND_LABELS[k])}
             />
           </FormField>
+        </div>
+        <div className="border-line border-t px-4 py-3">
+          <Checkbox
+            checked={unapplied}
+            onChange={(e) => setParam('unapplied', e.target.checked ? '1' : null)}
+            label="Only unapplied money"
+            description="Received money that pays no invoice, job or membership. Apply it to one of the customer’s invoices or refund it."
+          />
         </div>
       </Card>
 
@@ -321,7 +387,7 @@ export default function PaymentsPage() {
         ) : ledger.data.rows.length === 0 ? (
           <EmptyState
             icon={<Wallet aria-hidden="true" />}
-            title="No payments in this period"
+            title={unapplied ? 'No unapplied money in this period' : 'No payments in this period'}
             description="Try a wider date range or different filters."
           />
         ) : (
@@ -347,6 +413,12 @@ export default function PaymentsPage() {
           </>
         )}
       </Card>
+      <RefundDialog payment={refunding} onClose={() => setRefunding(null)} currency={currency} />
+      <ApplyPaymentDialog
+        payment={applying}
+        onClose={() => setApplying(null)}
+        currency={currency}
+      />
     </>
   );
 }

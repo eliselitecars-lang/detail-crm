@@ -1,6 +1,6 @@
 import type { BannerTone } from '@/features/public-docs/shared/PublicPage';
 
-/** Stripe Checkout return parameters the payments function puts on /portal links. */
+/** Stripe Checkout return parameters of the card-setup and membership links (/done/:slug; older links returned to /portal). */
 export const RETURN_PARAMS = ['card', 'membership'] as const;
 
 /** Wait before re-reading the overview after a membership sign-up (the webhook activates it). */
@@ -35,6 +35,21 @@ export function returnNotice(
   }
   if (value === 'canceled') {
     return { tone: 'info', title: 'Membership sign-up was cancelled; nothing was charged.' };
+  }
+  return null;
+}
+
+export type CheckoutOutcome =
+  | { kind: 'card'; value: 'saved' | 'canceled' }
+  | { kind: 'membership'; value: 'active' | 'canceled' };
+
+/** The Stripe Checkout outcome in the query string; null when there is none we know. */
+export function checkoutOutcome(params: URLSearchParams): CheckoutOutcome | null {
+  const card = params.get('card');
+  if (card === 'saved' || card === 'canceled') return { kind: 'card', value: card };
+  const membership = params.get('membership');
+  if (membership === 'active' || membership === 'canceled') {
+    return { kind: 'membership', value: membership };
   }
   return null;
 }

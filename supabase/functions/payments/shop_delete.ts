@@ -29,6 +29,12 @@
  *   6. only now are the platform subscriptions cancelled immediately. A
  *      failure here is logged (platform_subscription_cancel_failed); the
  *      deletion stands, and step 2 already guarantees no further renewal.
+ *   7. every text number the platform bought for the shop (sms-provisioning;
+ *      read before step 5 removed its shop_sms_numbers row) is given back to
+ *      Twilio with its Messaging Service, and its sms_number_releases entry
+ *      is removed. A failure is logged (sms_number_release_failed) and the
+ *      entry stays: sms-provisioning release_worklist retries it daily.
+ *      Numbers support bound by hand stay on the worklist for the operator.
  *
  * When 3, 4 or 5 fails the shop still exists, so step 2 is undone: each
  * subscription it scheduled to end is set to renew again (a failure to undo
@@ -44,6 +50,7 @@ import { requireShopRole, requireUser, ROLES } from "../_shared/auth.ts";
 import { errors, HttpError } from "../_shared/errors.ts";
 import { uuid } from "../_shared/schemas.ts";
 import { idempotencyKey, onAccount, type Stripe } from "../_shared/stripe.ts";
+import { type PlatformNumber, releasePlatformNumber, twilioClient } from "../_shared/twilio_api.ts";
 import {
   type AccountRow,
   dbFailure,
@@ -350,6 +357,72 @@ async function cancelMemberships(s: Services, account: AccountRow | null, shopId
   return cancelled;
 }
 
+/** Step 7's input: the numbers the platform bought for the shop (service role). */
+async function platformNumbers(s: Services, shopId: string): Promise<PlatformNumber[]> {
+  const { data, error } = await s.admin
+    .from("shop_sms_numbers")
+    .select("phone_number, twilio_number_sid, messaging_service_sid")
+    .eq("shop_id", shopId)
+    .not("twilio_number_sid", "is", null);
+  if (error) throw dbFailure("shop_sms_numbers lookup", error);
+  return (data ?? []) as PlatformNumber[];
+}
+
+/**
+ * Step 7 (the shop is gone): each number goes back to Twilio, so the
+ * platform stops paying for it, and leaves the operator's worklist. Returns
+ * how many were released; failures are logged and stay on the worklist.
+ */
+async function releaseShopNumbers(
+  s: Services,
+  shopId: string,
+  numbers: PlatformNumber[],
+): Promise<number> {
+  if (numbers.length === 0) return 0;
+  let released = 0;
+  try {
+    const twilio = twilioClient(s.env.twilio(), s.fetch ?? fetch);
+    for (const number of numbers) {
+      try {
+        await releasePlatformNumber(
+          twilio,
+          number,
+          (err) =>
+            s.log.warn("sms_service_delete_failed", {
+              shop_id: shopId,
+              error: err instanceof Error ? err.message : String(err),
+            }),
+        );
+        released += 1;
+        s.log.info("sms_number_released", { shop_id: shopId, source: "delete_shop" });
+        const { error } = await s.admin
+          .from("sms_number_releases")
+          .delete()
+          .eq("shop_id", shopId)
+          .eq("phone_number", number.phone_number);
+        if (error) {
+          s.log.warn("sms_number_release_entry_kept", {
+            shop_id: shopId,
+            code: error.code ?? null,
+          });
+        }
+      } catch (err) {
+        s.log.error("sms_number_release_failed", {
+          shop_id: shopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  } catch (err) {
+    // Twilio credentials missing or invalid: every number stays on the worklist.
+    s.log.error("sms_number_release_failed", {
+      shop_id: shopId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return released;
+}
+
 /** Expires every open Checkout Session the CRM created for this shop on its account. */
 async function expireShopSessions(s: Services, account: AccountRow, shopId: string) {
   let expired = 0;
@@ -417,9 +490,12 @@ export async function deleteShop(
   const held = await holdPlatformSubscriptions(s, shop.id);
   let sessionsExpired: number;
   let membershipsCancelled: number;
+  let numbers: PlatformNumber[];
   try {
     sessionsExpired = account ? await expireShopSessions(s, account, shop.id) : 0;
     membershipsCancelled = await cancelMemberships(s, account, shop.id);
+    // Read now: the cascade of the delete below removes these rows.
+    numbers = await platformNumbers(s, shop.id);
     const deleted = await s.admin.from("shops").delete().eq("id", shop.id).select("id");
     if (deleted.error) {
       if (deleted.error.code === "55000") {
@@ -441,12 +517,14 @@ export async function deleteShop(
     throw err;
   }
   const platformCancelled = await cancelPlatformSubscriptions(s, shop.id, held);
+  const numbersReleased = await releaseShopNumbers(s, shop.id, numbers);
   s.log.info("shop_deleted", {
     shop_id: shop.id,
     deleted_by: caller.id,
     memberships_cancelled: membershipsCancelled,
     sessions_expired: sessionsExpired,
     platform_subscription_cancelled: platformCancelled,
+    sms_numbers_released: numbersReleased,
     stripe_account: account?.stripe_account_id ?? null,
   });
   return {

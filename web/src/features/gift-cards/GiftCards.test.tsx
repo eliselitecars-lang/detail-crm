@@ -4,6 +4,7 @@ import { membership, renderRoute, shopValue } from '@/test/render';
 import {
   builders,
   mockRpc,
+  pgError,
   resetSupabaseMock,
   setTableResult,
   supabase,
@@ -258,5 +259,41 @@ describe('Public gift card pages', () => {
     });
     expect(await screen.findByText('Thank you — your gift card is on its way')).toBeInTheDocument();
     expect(screen.getByText(/ending PQRS\) is being emailed to Sam Lee/)).toBeInTheDocument();
+  });
+
+  it('shows the amount in the shop’s currency, never a guessed USD', async () => {
+    mockRpc({
+      public_gift_card_order_status: {
+        data: { status: 'paid', value_cents: 5000, recipient_name: 'Sam Lee', last4: null },
+      },
+      public_gift_card_offer: { data: { ...offer, currency: 'eur' } },
+    });
+    renderRoute(<GiftCardOrderDonePage />, {
+      path: `/gift/glacier/done?order=${TOKEN}`,
+      routePath: '/gift/:slug/done',
+      shop: null,
+    });
+    expect(
+      await screen.findByText('A €50.00 gift card is being emailed to Sam Lee.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\$50\.00/)).not.toBeInTheDocument();
+  });
+
+  it('leaves the amount out when the shop (and so its currency) can’t be loaded', async () => {
+    mockRpc({
+      public_gift_card_order_status: {
+        data: { status: 'paid', value_cents: 5000, recipient_name: 'Sam Lee', last4: 'PQRS' },
+      },
+      public_gift_card_offer: pgError('PT404', 'shop not found'),
+    });
+    renderRoute(<GiftCardOrderDonePage />, {
+      path: `/gift/renamed/done?order=${TOKEN}`,
+      routePath: '/gift/:slug/done',
+      shop: null,
+    });
+    expect(
+      await screen.findByText('A gift card (ending PQRS) is being emailed to Sam Lee.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\$/)).not.toBeInTheDocument();
   });
 });

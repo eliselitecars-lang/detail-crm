@@ -672,6 +672,14 @@ struct JobIssuedInvoiceInfo: Hashable, Sendable {
     var title: String {
         number.map { "Invoice #\($0)" } ?? "The invoice"
     }
+
+    /// The server locks a billed job (0097 `job_line_items_97_billed_guard`
+    /// / `jobs_97_billed_guard`): while this invoice isn't void, adding,
+    /// removing or repricing services and changing the discount or tax
+    /// rate are refused (23514).
+    var lockedText: String {
+        "This job is billed on \(number.map { "invoice #\($0)" } ?? "an invoice"), so its services, prices, discount and tax can't change. To change them, void that invoice first, or bill extra work on a new invoice."
+    }
 }
 
 // rpc: create_invoice_from_job

@@ -33,6 +33,7 @@ import {
 } from "../_shared/auth.ts";
 import { errors, HttpError } from "../_shared/errors.ts";
 import { links, withQuery } from "../_shared/links.ts";
+import { releaseJobCheckouts } from "./checkout_holds.ts";
 import { nonNegativeCents, positiveCents, requestNonce, uuid } from "../_shared/schemas.ts";
 import { idempotencyKey, onAccount, type Stripe, STRIPE_API_VERSION } from "../_shared/stripe.ts";
 import { isStripeError } from "../_shared/stripe_errors.ts";
@@ -55,6 +56,7 @@ import {
   loadCustomer,
   loadInvoice,
   loadShop,
+  loadShopSlug,
   metadata,
   payableBalance,
   paymentInProgress,
@@ -535,18 +537,26 @@ export async function cancelOpenPayments(
   if (!account) return { ...released, ...NOTHING_RELEASED };
   const settled = await settleInvoice(s, account, invoice.shop_id, invoice.id);
   const customer = await loadCustomer(s.admin, invoice.shop_id, invoice.customer_id);
+  const jobIds = await invoiceJobIds(s.admin, invoice);
   const expired = customer.stripe_customer_id
     ? await expireOpenSessions(
       s,
       account,
       customer.stripe_customer_id,
-      sessionFor.invoiceOrDeposit(
-        invoice.shop_id,
-        invoice,
-        await invoiceJobIds(s.admin, invoice),
-      ),
+      sessionFor.invoiceOrDeposit(invoice.shop_id, invoice, jobIds),
     )
     : [];
+  // 0106: an expired page no longer holds its job's online cancel.
+  if (expired.length > 0) {
+    for (const jobId of jobIds) {
+      const { error } = await s.admin.rpc("payments_release_job_checkouts", {
+        p_shop_id: invoice.shop_id,
+        p_job_id: jobId,
+        p_session_ids: expired,
+      });
+      if (error) throw dbFailure("payments_release_job_checkouts", error);
+    }
+  }
   return {
     ...released,
     cancelled: settled.cancelled,
@@ -574,13 +584,14 @@ async function cancelOpenJobPayments(
   // Every card row that carries the job: its deposits and the payments of
   // its invoice (payments_before_write stamps the invoice's job on them).
   const settled = await settleJob(s, account, job.shop_id, job.id);
-  const customer = await loadCustomer(s.admin, job.shop_id, job.customer_id);
   const match = invoice
     ? sessionFor.invoiceOrDeposit(job.shop_id, invoice, [job.id])
     : sessionFor.deposit(job.shop_id, job.id);
-  const expired = customer.stripe_customer_id
-    ? await expireOpenSessions(s, account, customer.stripe_customer_id, match)
-    : [];
+  // The current customer's matching sessions and every page the database
+  // still holds for the job (0106), released so a job staff reopen is not
+  // left blocked for the customer's online cancel until Stripe expires them.
+  // A page that was just paid is reported through `settled`, not refused.
+  const expired = await releaseJobCheckouts(s, account, job, match, { refuseCompleted: false });
   return {
     ...released,
     cancelled: settled.cancelled,
@@ -1002,7 +1013,8 @@ export async function setupCardLink(
     input.shop_id,
     input.customer_id,
   );
-  const portal = links.portal(s.env.appBaseUrl());
+  // A public page: the customer who got this link by text has no account.
+  const done = links.checkoutDone(s.env.appBaseUrl(), await loadShopSlug(s.admin, shop.id));
   const session = await s.stripe.checkout.sessions.create(
     {
       mode: "setup",
@@ -1015,8 +1027,8 @@ export async function setupCardLink(
         metadata: { ...meta, source: "setup_card_link" },
       },
       metadata: { ...meta, source: "setup_card_link" },
-      success_url: withQuery(portal, { card: "saved" }),
-      cancel_url: withQuery(portal, { card: "canceled" }),
+      success_url: withQuery(done, { card: "saved" }),
+      cancel_url: withQuery(done, { card: "canceled" }),
     },
     onAccount(account.stripe_account_id, {
       idempotencyKey: await idempotencyKey(

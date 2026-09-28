@@ -1,6 +1,6 @@
 import { ImagePlus, Trash2 } from 'lucide-react';
 import { useId, useRef, useState } from 'react';
-import { Button, SectionCard, useToast } from '@/components/ui';
+import { Button, ConfirmDialog, SectionCard, useToast } from '@/components/ui';
 import { shopAssetUrl } from '@/lib/supabase';
 import { useRemoveServiceImage, useUploadServiceImage } from '../api';
 import { imageFileError, type ServiceRow } from '../model';
@@ -23,6 +23,7 @@ export function ServiceImageCard({
   const upload = useUploadServiceImage(service);
   const remove = useRemoveServiceImage(service);
   const [error, setError] = useState<string | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const canUpload = canManage;
 
   const url = shopAssetUrl(service.image_path);
@@ -85,12 +86,7 @@ export function ServiceImageCard({
                 size="sm"
                 leadingIcon={<Trash2 />}
                 loading={remove.isPending}
-                onClick={() =>
-                  remove.mutate(undefined, {
-                    onSuccess: () => toast.success('Image removed'),
-                    onError: (err) => toast.error(err),
-                  })
-                }
+                onClick={() => setConfirmRemove(true)}
               >
                 Remove
               </Button>
@@ -105,6 +101,24 @@ export function ServiceImageCard({
           canUpload && <p className="text-muted text-xs">PNG, JPEG or WebP, up to 5 MB.</p>
         )}
       </div>
+      <ConfirmDialog
+        open={confirmRemove}
+        onClose={() => setConfirmRemove(false)}
+        title="Remove this image?"
+        description={`The image of ${service.name} is deleted and disappears from your booking page. This can’t be undone; upload it again to bring it back.`}
+        confirmLabel="Remove image"
+        tone="danger"
+        loading={remove.isPending}
+        onConfirm={async () => {
+          try {
+            await remove.mutateAsync();
+            toast.success('Image removed');
+            setConfirmRemove(false);
+          } catch (err) {
+            toast.error(err);
+          }
+        }}
+      />
     </SectionCard>
   );
 }

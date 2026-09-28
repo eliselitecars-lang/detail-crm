@@ -234,12 +234,15 @@ test.describe('shop billing', () => {
     const alert = banner(page);
     await expect(alert).toHaveAttribute('role', 'alert');
     await expect(alert).toContainText(
-      'This shop’s subscription is inactive, so new records can’t be created right now. You can still view everything.',
+      'This shop’s subscription is inactive, so new records can’t be created right now. Online booking, lead forms, online gift card and membership sales, and automatic reminders and follow-ups are paused. You can still view everything.',
     );
     await expect(alert.getByRole('button', { name: 'Dismiss for now' })).toHaveCount(0);
     await alert.getByRole('link', { name: 'Go to Billing' }).click();
     await expect(page.getByText('Inactive', { exact: true })).toBeVisible();
     await expect(page.getByText(/Creating new customers, jobs, quotes, invoices/)).toBeVisible();
+    await expect(
+      page.getByText(/appointment reminders, review requests and follow-ups/),
+    ).toBeVisible();
     await expect(page.getByRole('button', { name: /^Choose Crew/ })).toBeVisible();
   });
 

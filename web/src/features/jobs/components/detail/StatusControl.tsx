@@ -1,5 +1,5 @@
 import { Ban, Check, UserX } from 'lucide-react';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import {
   Button,
   ConfirmDialog,
@@ -11,7 +11,7 @@ import {
 } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { formatDateTime } from '@/lib/dates';
-import { toAppError } from '@/lib/errors';
+import { errorMessage, toAppError } from '@/lib/errors';
 import { EdgeFunctionError } from '@/features/quotes/shared/edge';
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
@@ -95,6 +95,15 @@ export function StatusControl({ job }: StatusControlProps) {
 
   const allowed = allowedTransitions(transitions.data ?? [], job.status, role);
   const steps = statusSteps(job.status, allowed);
+  /**
+   * Steps the role could take but that wait for a date and time. Said in
+   * visible text (a hover title never shows on touch and isn't reliably
+   * announced on a non-focusable element).
+   */
+  const scheduleHintId = useId();
+  const waitingForSchedule = job.scheduled_start
+    ? []
+    : steps.filter((s) => s.transition !== null && statusNeedsSchedule(s.status));
   const cancelEdge = allowed.find((t) => t.to_status === 'cancelled') ?? null;
   const noShowEdge = allowed.find((t) => t.to_status === 'no_show') ?? null;
 
@@ -179,7 +188,7 @@ export function StatusControl({ job }: StatusControlProps) {
           )}
         </div>
       )}
-      <nav aria-label="Job status">
+      <nav aria-label="Job status" aria-busy={transitions.isPending || undefined}>
         <ol className="flex flex-wrap gap-1.5">
           {steps.map((step, i) => {
             const needsSchedule = statusNeedsSchedule(step.status) && !job.scheduled_start;
@@ -219,7 +228,7 @@ export function StatusControl({ job }: StatusControlProps) {
                 ) : (
                   <span
                     aria-current={step.state === 'current' ? 'step' : undefined}
-                    title={step.transition && needsSchedule ? 'Schedule the job first' : undefined}
+                    aria-describedby={step.transition && needsSchedule ? scheduleHintId : undefined}
                     className={cn(
                       base,
                       step.state === 'current'
@@ -235,6 +244,33 @@ export function StatusControl({ job }: StatusControlProps) {
           })}
         </ol>
       </nav>
+      {waitingForSchedule.length > 0 && (
+        <p id={scheduleHintId} className="text-muted text-xs">
+          Schedule the job first: it needs a date and time before it can be marked{' '}
+          {waitingForSchedule.map((s) => statusLabel('job', s.status)).join(' or ')}.
+        </p>
+      )}
+      {transitions.isError && (
+        // Without the transitions no step (and no Cancel / No-show) can be
+        // offered: say so and offer a retry instead of a silently dead stepper.
+        <div
+          role="alert"
+          className="bg-danger-soft text-danger-ink rounded-control flex flex-wrap items-center gap-2 px-3 py-2 text-sm"
+        >
+          <p className="min-w-0 flex-1">
+            Couldn’t load the status steps, so the status can’t be changed right now.{' '}
+            {errorMessage(transitions.error)}
+          </p>
+          <Button
+            size="sm"
+            variant="secondary"
+            loading={transitions.isFetching}
+            onClick={() => void transitions.refetch()}
+          >
+            Try again
+          </Button>
+        </div>
+      )}
       {(cancelEdge || noShowEdge) && (
         <div className="flex flex-wrap gap-2">
           {cancelEdge && (

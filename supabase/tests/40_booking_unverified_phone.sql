@@ -56,11 +56,12 @@ select tests.eq((select count(*) from public.messages m join public.jobs j on j.
                 0::bigint,
                 'the real customer''s booking link must not be texted to the phone a stranger put on file');
 select tests.eq((select pg_temp.sms_to(r, '+12055550666') from b2), 0::bigint, 'nothing about her booking goes to that phone');
-select tests.eq((select pg_temp.sms_to(r, '+12055550777') from b2), 1::bigint,
-                'her booking-received text goes to the phone she entered');
+select tests.eq((select pg_temp.sms_to(r, '+12055550777') from b2), 0::bigint,
+                'her anonymous booking is not texted either: the phone she typed is unverified too (0104)');
 select tests.ok((select m.body like '%' || (select r->>'job_token' from b2) || '%'
                    from public.messages m join public.jobs j on j.id = m.job_id
-                  where j.public_token = (select (r->>'job_token')::uuid from b2) and m.channel = 'sms'),
+                  where j.public_token = (select (r->>'job_token')::uuid from b2) and m.channel = 'email'
+                    and m.to_address = 'vera@example.com'),
                 'with her own booking link');
 select tests.ok((select (pg_temp.cust(b1.r)).phone_unverified and (pg_temp.cust(b1.r)).phone = '+12055550666' from b1),
                 'the anonymously created customer''s phone is marked unverified');
@@ -187,8 +188,14 @@ select tests.as_superuser();
 select tests.fx_set('cust_olga', (select (pg_temp.cust(r)).id from o1));
 select tests.ok((select phone_unverified and sms_opt_in from public.customers where id = tests.fx('cust_olga')),
                 'setup: the stranger''s phone and opt-in are on file, unverified');
+select tests.eq((select count(*) from public.messages where customer_id = tests.fx('cust_olga') and to_address = '+12055550611'),
+                0::bigint, 'the anonymous booking itself is not texted to the unverified phone (0104)');
+-- a later text about the stranger's job (a reminder) is queued to that phone
+select tests.ok(public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_olga'), 'appointment_reminder', 'sms',
+                                                 (select (pg_temp.job(r)).id from o1)) is not null,
+                'setup: a reminder text about the stranger''s own job is queued to the unverified phone');
 select tests.eq((select count(*) from public.messages where customer_id = tests.fx('cust_olga') and to_address = '+12055550611'
-                   and status = 'queued'), 1::bigint, 'setup: the stranger''s own booking text is queued');
+                   and status = 'queued'), 1::bigint, 'setup: the stranger''s own text is queued');
 select tests.authenticate_as(tests.fx('u_olga'));
 create temp table o2 as select pg_temp.live_book(jsonb_build_object('first_name', 'Olga', 'email', 'olga@example.com',
                                                                     'phone', '+12055550612', 'sms_opt_in', false)) as r;

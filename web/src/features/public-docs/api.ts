@@ -7,7 +7,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { unwrap } from '@/lib/db';
-import { AppError, toAppError } from '@/lib/errors';
+import { AppError, isCheckoutOpenError, toAppError } from '@/lib/errors';
 import { publicKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { createCheckout, navigation } from './shared/checkout';
@@ -453,6 +453,21 @@ const redeemResponseSchema = invoiceDocumentSchema.extend({
 });
 
 /**
+ * public_redeem_gift_card's checkout_open refusal is worded for staff
+ * ("cancel the open payments first"); a customer can't do that, so say what
+ * they can: finish or close the card page, or wait until it expires.
+ */
+export function checkoutOpenForCustomer(error: unknown): AppError {
+  const until = /\(until ([^)]+)\)/.exec(toAppError(error).message)?.[1];
+  return new AppError(
+    `A card payment page for this invoice is still open. Finish paying there, or try the gift card again${
+      until ? ` after ${until}` : ' in about half an hour'
+    }, when that page expires.`,
+    { kind: 'conflict', code: '55000', cause: error },
+  );
+}
+
+/**
  * public_redeem_gift_card: pays the invoice from a gift card (or the
  * customer's store credit, by its code). A wrong or unusable code is an
  * answer (redeemed false + message), not an error; PT429 after too many.
@@ -461,13 +476,15 @@ export function useRedeemInvoiceGiftCard(token: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (input: { code: string; amountCents: number | null }) => {
-      const data = unwrap(
-        await supabase.rpc('public_redeem_gift_card', {
-          p_token: token,
-          p_code: input.code,
-          ...(input.amountCents !== null ? { p_amount_cents: input.amountCents } : {}),
-        }),
-      );
+      const result = await supabase.rpc('public_redeem_gift_card', {
+        p_token: token,
+        p_code: input.code,
+        ...(input.amountCents !== null ? { p_amount_cents: input.amountCents } : {}),
+      });
+      if (result.error && isCheckoutOpenError(result.error)) {
+        throw checkoutOpenForCustomer(result.error);
+      }
+      const data = unwrap(result);
       const { gift_card_result, ...doc } = parseDocument(redeemResponseSchema, data);
       queryClient.setQueryData(publicDocKeys.invoice(token), doc);
       return gift_card_result;

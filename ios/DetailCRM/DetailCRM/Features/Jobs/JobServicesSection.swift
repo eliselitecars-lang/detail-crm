@@ -34,11 +34,8 @@ struct JobServicesSection: View {
                     await onRetryRefresh()
                 }
             }
-            if let invoice, invoice.totalCents != job.totalCents {
-                InlineMessage(
-                    text: invoice.title + " was issued with a different total. Changes to these services don't update the invoice.",
-                    kind: .info
-                )
+            if let invoice {
+                InlineMessage(text: invoice.lockedText, kind: .info)
             }
             if lines.isEmpty {
                 JobEmptyLine(text: canEdit ? "No services yet. Tap Edit to add some." : "No services on this job.", systemImage: "list.bullet.rectangle")

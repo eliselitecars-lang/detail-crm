@@ -21,6 +21,7 @@ import {
   type MessageTemplate,
   type TemplateKey,
 } from '../api';
+import { LapsedAutomationsNotice } from '@/features/billing/components/LapsedNotice';
 import { FormActions } from '../components/FormActions';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
 import {
@@ -202,6 +203,7 @@ export default function FollowupsPage() {
   const templates = useMessageTemplates();
   return (
     <SettingsSectionLayout section="followups" readOnly={readOnly}>
+      <LapsedAutomationsNotice />
       <QueryView query={settings} label="follow-up settings">
         {(row) => (
           <QueryView query={templates} label="message templates">

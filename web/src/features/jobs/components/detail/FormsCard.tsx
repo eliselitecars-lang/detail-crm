@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   ConfirmDialog,
+  CopyLinkDialog,
   EmptyState,
   ErrorState,
   IconButton,
@@ -15,6 +16,7 @@ import {
 import { formatDateTime } from '@/lib/dates';
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
+import { copyText } from '@/features/quotes/shared/format';
 import type { JobDetail } from '../../api';
 import {
   fetchFormLinkToken,
@@ -40,6 +42,8 @@ export function FormsCard({ job }: { job: JobDetail }) {
   const [templateId, setTemplateId] = useState('');
   const [signing, setSigning] = useState<FormSubmission | null>(null);
   const [deleting, setDeleting] = useState<FormSubmission | null>(null);
+  /** A link the browser refused to copy, shown until closed. */
+  const [manualLink, setManualLink] = useState<string | null>(null);
   const voided = job.status === 'cancelled' || job.status === 'no_show';
 
   const rows = forms.data ?? [];
@@ -55,12 +59,10 @@ export function FormsCard({ job }: { job: JobDetail }) {
       toast.error(error);
       return;
     }
-    try {
-      await navigator.clipboard.writeText(link);
-      toast.success('Form link copied', link);
-    } catch {
-      toast.info('Copy this link', link);
-    }
+    // The token is fetched first, so Safari may refuse the write (no longer
+    // in the click's user activation): then the link stays on screen.
+    if (await copyText(link)) toast.success('Form link copied', link);
+    else setManualLink(link);
   };
 
   const onAttach = async () => {
@@ -197,6 +199,12 @@ export function FormsCard({ job }: { job: JobDetail }) {
             toast.error(error);
           }
         }}
+      />
+      <CopyLinkDialog
+        link={manualLink}
+        onClose={() => setManualLink(null)}
+        label="Form link"
+        description="Your browser didn’t let us copy it automatically. Copy it here and send it to the customer."
       />
     </SectionCard>
   );

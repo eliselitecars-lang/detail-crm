@@ -332,6 +332,89 @@ describe('booking questions and availability', () => {
     });
   }, 20_000);
 
+  it('offers the questions again when they failed to load, instead of dead-ending', async () => {
+    const gateCode = {
+      key: 'gate_code',
+      label: 'Gate code',
+      type: 'text',
+      options: [],
+      help_text: null,
+      required: true,
+      location_scope: null,
+    };
+    let questionCalls = 0;
+    let bookings = 0;
+    const { user, calls } = setup('/book/glacier', {
+      public_booking_questions: () =>
+        ++questionCalls === 1
+          ? pgError('42501', 'permission denied for function public_booking_questions')
+          : { data: [gateCode] },
+      create_online_booking: () =>
+        ++bookings === 1 ? pgError('22023', 'Gate code is required') : created,
+    });
+    await vehicle(user);
+    await screen.findByRole('heading', { name: 'Choose your services' });
+    await user.click(screen.getByRole('checkbox', { name: /Full detail/ }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await pickTime(user);
+    await details(user);
+    // The details step says the questions are missing and can load them again.
+    expect(screen.getByText('We couldn’t load this shop’s booking questions.')).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Gate code/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Review and book' });
+    await user.click(await screen.findByRole('button', { name: 'Request appointment' }));
+
+    // The server names the unanswered question: back to details, where the
+    // questions are fetched again and the field can be answered.
+    await screen.findByRole('heading', { name: 'Your details' });
+    expect(screen.getAllByText(/Gate code is required/)[0]).toBeInTheDocument();
+    await user.type(await screen.findByLabelText(/^Gate code/), '#4521');
+    expect(
+      screen.queryByText('We couldn’t load this shop’s booking questions.'),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Review and book' });
+    await user.click(await screen.findByRole('button', { name: 'Request appointment' }));
+    await screen.findByRole('heading', { name: 'Request received' });
+    const sent = calls.filter((c) => c.fn === 'create_online_booking');
+    expect(sent).toHaveLength(2);
+    expect(sent[1]?.args.p_payload).toMatchObject({ answers: { gate_code: '#4521' } });
+  }, 20_000);
+
+  it('loads failed questions again with Try again on the details step', async () => {
+    let questionCalls = 0;
+    const { user } = setup('/book/glacier', {
+      public_booking_questions: () =>
+        ++questionCalls === 1
+          ? pgError('42501', 'permission denied for function public_booking_questions')
+          : {
+              data: [
+                {
+                  key: 'pets',
+                  label: 'Pets in the car?',
+                  type: 'text',
+                  options: [],
+                  help_text: null,
+                  required: false,
+                  location_scope: null,
+                },
+              ],
+            },
+    });
+    await vehicle(user);
+    await screen.findByRole('heading', { name: 'Choose your services' });
+    await user.click(screen.getByRole('checkbox', { name: /Full detail/ }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await pickTime(user);
+    await screen.findByRole('heading', { name: 'Your details' });
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByLabelText(/^Pets in the car/)).toBeInTheDocument();
+    expect(
+      screen.queryByText('We couldn’t load this shop’s booking questions.'),
+    ).not.toBeInTheDocument();
+  }, 20_000);
+
   it('says which days a category can be booked online', async () => {
     const catalog = catalogFixture();
     catalog.service_categories = [{ id: 'sc-1', name: 'Detailing', bookable_weekdays: [1, 3] }];

@@ -347,21 +347,55 @@ function EventForm({
               />
             </FormField>
             {kind !== 'closed' && (
-              <FormField
-                label="Team member"
-                required={kind === 'time_off'}
-                error={errors.memberId}
-                help={kind === 'time_off' ? undefined : 'Leave empty for the whole shop.'}
-              >
-                <Select
-                  value={form.memberId}
-                  onChange={(e) => set({ memberId: e.target.value })}
-                  options={[
-                    { value: '', label: kind === 'time_off' ? 'Choose…' : 'Whole shop' },
-                    ...members.map((m) => ({ value: m.memberId, label: m.name })),
-                  ]}
-                />
-              </FormField>
+              <div className="flex flex-col gap-1.5">
+                <FormField
+                  label="Team member"
+                  required={kind === 'time_off'}
+                  error={
+                    errors.memberId && team.isError
+                      ? 'The team list didn’t load, so no one can be chosen yet. Try again.'
+                      : errors.memberId
+                  }
+                  help={kind === 'time_off' ? undefined : 'Leave empty for the whole shop.'}
+                >
+                  <Select
+                    value={form.memberId}
+                    onChange={(e) => set({ memberId: e.target.value })}
+                    options={[
+                      {
+                        value: '',
+                        label:
+                          kind !== 'time_off'
+                            ? 'Whole shop'
+                            : team.isPending
+                              ? 'Loading the team…'
+                              : 'Choose…',
+                      },
+                      ...members.map((m) => ({ value: m.memberId, label: m.name })),
+                      // Editing while the team is unavailable: keep the saved member selectable.
+                      ...(form.memberId && !members.some((m) => m.memberId === form.memberId)
+                        ? [{ value: form.memberId, label: 'Current team member' }]
+                        : []),
+                    ]}
+                  />
+                </FormField>
+                {team.isError && (
+                  <div
+                    role="alert"
+                    className="text-danger-ink flex flex-wrap items-center gap-2 text-xs"
+                  >
+                    <span>Couldn’t load the team list.</span>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      loading={team.isRefetching}
+                      onClick={() => void team.refetch()}
+                    >
+                      Try again
+                    </Button>
+                  </div>
+                )}
+              </div>
             )}
             {WITH_CUSTOMER.includes(kind) && (
               <FormField label="Customer" help="Optional. Only managers see who it is.">

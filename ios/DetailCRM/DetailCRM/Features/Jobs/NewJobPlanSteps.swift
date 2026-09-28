@@ -58,15 +58,35 @@ struct NewJobServicesStep: View {
         }
     }
 
+    /// On for a repeating job (every visit gets the member discount);
+    /// otherwise the manager's choice.
+    private var memberDiscountBinding: Binding<Bool> {
+        Binding(
+            get: { model.appliesMemberDiscount },
+            set: { newValue in
+                if model.memberDiscountIsOptional {
+                    model.applyMemberDiscount = newValue
+                }
+            }
+        )
+    }
+
     private var footer: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             if model.suggestedDiscountBps > 0 {
-                Toggle(isOn: $model.applyMemberDiscount) {
+                Toggle(isOn: memberDiscountBinding) {
                     Text("Apply member discount (\(JobsFormatting.percent(bps: model.suggestedDiscountBps)))")
                         .font(Theme.Typography.subheadline)
                         .foregroundStyle(Theme.textPrimary)
                 }
                 .tint(Theme.glacier)
+                .disabled(!model.memberDiscountIsOptional)
+                if !model.memberDiscountIsOptional {
+                    Text(MemberDiscountChoice.repeatingNote)
+                        .font(Theme.Typography.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Button {
                 model.continueFromServices()
@@ -428,9 +448,15 @@ struct NewJobReviewStep: View {
                 JobSectionStateView(model.reviewPricing, loadingLabel: "Getting prices…", retry: { await model.loadReviewPricing() }) { pricing in
                     NewJobPricingPreview(
                         pricing: pricing,
-                        applyDiscount: model.applyMemberDiscount,
+                        applyDiscount: model.appliesMemberDiscount,
                         currencyCode: appState.currencyCode
                     )
+                    if model.createsSeries && model.suggestedDiscountBps > 0 {
+                        Text(MemberDiscountChoice.repeatingNote)
+                            .font(Theme.Typography.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         }

@@ -66,8 +66,10 @@ fi
 "$DENO_BIN" check "${ts_files[@]}"
 
 step "deno test"
-# --allow-read=.. lets config_test.ts read supabase/config.toml; --allow-env
-# covers Env's Deno.env source. No --allow-net: all HTTP goes through fakes.
-"$DENO_BIN" test --allow-env --allow-read=.. --no-prompt
+# --allow-read=.. lets config_test.ts read supabase/config.toml and
+# cron_setup_test.ts read supabase/setup/cron.sql; ../../docs/DEPLOY.md lets
+# the latter check the runbook's job count. --allow-env covers Env's
+# Deno.env source. No --allow-net: all HTTP goes through fakes.
+"$DENO_BIN" test --allow-env --allow-read=..,../../docs/DEPLOY.md --no-prompt
 
 step "all edge function checks passed"

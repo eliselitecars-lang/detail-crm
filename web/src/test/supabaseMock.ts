@@ -148,6 +148,11 @@ const channel = {
   subscribe: vi.fn(() => channel),
 };
 
+interface AuthMockResult {
+  data: unknown;
+  error: unknown;
+}
+
 export const supabase = {
   auth: {
     onAuthStateChange: vi.fn(() => ({ data: { subscription: { unsubscribe: vi.fn() } } })),
@@ -157,6 +162,13 @@ export const supabase = {
     resetPasswordForEmail: vi.fn(() => Promise.resolve({ data: {}, error: null })),
     updateUser: vi.fn(() => Promise.resolve({ data: {}, error: null })),
     getSession: vi.fn(() => Promise.resolve({ data: { session: null }, error: null })),
+    getUser: vi.fn((_jwt?: string): Promise<{ data: { user: unknown }; error: unknown }> =>
+      Promise.resolve({ data: { user: null }, error: null }),
+    ),
+    setSession: vi.fn(
+      (_tokens: { access_token: string; refresh_token: string }): Promise<AuthMockResult> =>
+        Promise.resolve({ data: {}, error: null }),
+    ),
     initialize: vi.fn(() => Promise.resolve({ error: null })),
   },
   from: vi.fn((table: string) => {

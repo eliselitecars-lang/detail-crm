@@ -27,7 +27,7 @@ import {
 import { useRealtime } from '@/lib/useRealtime';
 import { useCan } from '@/features/shop/useCan';
 import { useShop } from '@/features/shop/shopContext';
-import { useDeleteEntry, useTimeEntries, useTimesheetMembers } from './api';
+import { TIME_ENTRIES_LIMIT, useDeleteEntry, useTimeEntries, useTimesheetMembers } from './api';
 import { ClockCard } from './components/ClockCard';
 import { EntryDialog } from './components/EntryDialog';
 import { GeoLinks } from './components/GeoLinks';
@@ -305,7 +305,8 @@ export default function TimesheetsPage() {
         <SectionCard title="Entries" flush>
           {entries.data?.truncated && (
             <p className="text-muted px-4 pt-3 text-xs sm:px-5">
-              Showing the 2,000 most recent entries — narrow the range to see all.
+              Showing the {TIME_ENTRIES_LIMIT.toLocaleString('en-US')} most recent entries, and the
+              totals above count only those — narrow the range to see all.
             </p>
           )}
           <Table caption="Time entries" columns={entryColumns} rows={rows} getRowId={(e) => e.id} />

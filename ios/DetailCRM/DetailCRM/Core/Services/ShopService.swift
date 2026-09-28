@@ -92,6 +92,36 @@ enum ShopService {
             .value
     }
 
+    // MARK: - Delete shop (owner only)
+
+    /// Deletes a shop the caller owns through `payments` → `delete_shop`:
+    /// the server first ends the shop's own subscription, cancels every
+    /// membership's Stripe subscription, settles or expires open card
+    /// payments and pay links (409 `payment_in_progress` while one is still
+    /// processing — nothing is deleted), then deletes the shop and every
+    /// record in it. `confirmName` must be the shop's name (422
+    /// `name_mismatch`). The shop's Stripe account and payouts are kept.
+    /// Afterwards the caller re-reads the memberships.
+    @discardableResult
+    static func deleteShop(shopID: UUID, confirmName: String) async throws -> ShopDeletionResult {
+        do {
+            return try await EdgeFunctions.invoke(
+                "payments",
+                body: ShopDeletionBody(shop_id: shopID.uuidString.lowercased(), confirm_name: confirmName)
+            )
+        } catch let error as EdgeFunctionError {
+            throw ShopDeletionError(error)
+        }
+    }
+
+    /// Whether `typed` confirms deleting a shop named `name` (the server
+    /// compares trimmed and case-insensitive).
+    static func deletionNameMatches(_ typed: String, name: String) -> Bool {
+        let a = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let b = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !a.isEmpty && a.compare(b, options: [.caseInsensitive]) == .orderedSame
+    }
+
     // MARK: - Invites
 
     /// Extracts an invite token from a pasted link (`…/invite/<uuid>`) or a
@@ -127,5 +157,55 @@ enum ShopService {
             .rpc("accept_invite", params: ["p_token": token.uuidString])
             .execute()
             .value
+    }
+}
+
+/// `payments` / `delete_shop` (strict schema: exactly these keys).
+private struct ShopDeletionBody: Encodable {
+    var action = "delete_shop"
+    let shop_id: String
+    let confirm_name: String
+}
+
+/// `payments` → `delete_shop`: what deleting the shop closed.
+struct ShopDeletionResult: Decodable, Hashable, Sendable {
+    var deleted: Bool
+    var membershipsCancelled: Int
+    var sessionsExpired: Int
+
+    private enum Keys: String, CodingKey {
+        case deleted
+        case membershipsCancelled = "memberships_cancelled"
+        case sessionsExpired = "sessions_expired"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        deleted = try c.decodeIfPresent(Bool.self, forKey: .deleted) ?? false
+        membershipsCancelled = try c.decodeIfPresent(Int.self, forKey: .membershipsCancelled) ?? 0
+        sessionsExpired = try c.decodeIfPresent(Int.self, forKey: .sessionsExpired) ?? 0
+    }
+}
+
+/// A `delete_shop` refusal in words the owner can act on (same wording as
+/// the web's Settings > Delete shop).
+struct ShopDeletionError: LocalizedError, Equatable {
+    let underlying: EdgeFunctionError
+
+    init(_ underlying: EdgeFunctionError) {
+        self.underlying = underlying
+    }
+
+    var errorDescription: String? {
+        switch underlying.reason {
+        case "payment_in_progress":
+            return "A card payment for this shop is still being processed. Wait a few minutes for it to finish, then try again. Nothing was deleted."
+        case "name_mismatch":
+            return "The name you typed doesn't match this shop's name. Nothing was deleted."
+        case "platform_subscription_cancel_failed":
+            return "We couldn't cancel the shop's subscription, so nothing was deleted. Try again."
+        default:
+            return underlying.errorDescription
+        }
     }
 }

@@ -81,7 +81,9 @@ describe('FormPage', () => {
     const { user } = render();
     await user.click(await screen.findByRole('button', { name: 'Sign form' }));
     expect(screen.getByText('Type your full name.')).toBeInTheDocument();
-    expect(screen.getByText('Draw your signature in the box.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Sign in the box: draw your signature, or choose Type and type it.'),
+    ).toBeInTheDocument();
     expect(supabase.storage.from('signatures').upload).not.toHaveBeenCalled();
 
     await user.type(screen.getByLabelText(/^Your full name/), 'Ana Diaz');

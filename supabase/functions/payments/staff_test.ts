@@ -393,8 +393,15 @@ Deno.test("setup_card_link: Checkout in setup mode that can be texted", async ()
   assertEquals(session?.form.get("currency"), "usd");
   assertEquals(session?.form.get("customer"), "cus_1New");
   assertEquals(session?.form.get("setup_intent_data[metadata][customer_id]"), CUSTOMER);
-  assertEquals(session?.form.get("success_url"), "https://app.example.com/portal?card=saved");
-  assertEquals(session?.form.get("cancel_url"), "https://app.example.com/portal?card=canceled");
+  // A public page: the customer who got the text has no account (never /portal).
+  assertEquals(
+    session?.form.get("success_url"),
+    "https://app.example.com/done/shine-co?card=saved",
+  );
+  assertEquals(
+    session?.form.get("cancel_url"),
+    "https://app.example.com/done/shine-co?card=canceled",
+  );
 });
 
 // ---------------------------------------------------------------------------

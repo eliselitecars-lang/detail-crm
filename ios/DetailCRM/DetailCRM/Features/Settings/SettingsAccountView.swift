@@ -5,8 +5,9 @@
 //  The signed-in user's own details: profile name and mobile number
 //  (shared across shops) and the name teammates see in this shop, the
 //  personal calendar subscription (P-19), the Privacy Policy and Terms of Service (web pages), and deleting the
-//  account (every role; App Store guideline 5.1.1(v)). Signing out lives in
-//  the More tab.
+//  account (every role; App Store guideline 5.1.1(v)) on AccountDeletionView,
+//  where an owner can also delete the shop or see how to hand it over first.
+//  Signing out lives in the More tab.
 //
 
 import SwiftUI
@@ -21,8 +22,6 @@ struct SettingsAccountView: View {
     @State private var loaded = false
     @State private var showErrors = false
     @State private var errorMessage: String?
-    @State private var deleteError: String?
-    @State private var confirmation: ConfirmationRequest?
 
     private var phoneProblem: String? {
         guard let text = phone.trimmedNonEmpty else { return nil }
@@ -85,23 +84,19 @@ struct SettingsAccountView: View {
             SettingsLegalSection()
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 SectionHeader(title: "Delete account")
-                Text("Permanently deletes your sign-in and profile and removes you from every shop. The shops' customers, jobs and payments stay with the shops. A shop owner must first transfer ownership or delete the shop.")
+                Text("Permanently deletes your sign-in and profile and removes you from every shop. The shops' customers, jobs and payments stay with the shops. If you own a shop, you can delete it or make someone else the owner first.")
                     .font(Theme.Typography.footnote)
                     .foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if let deleteError {
-                    InlineMessage(text: deleteError, kind: .error)
-                }
-                Button(role: .destructive) {
-                    confirmDelete()
+                NavigationLink {
+                    AccountDeletionView()
                 } label: {
-                    Text("Delete account")
+                    Text("Delete account…")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.themeDestructive)
             }
         }
-        .confirmation($confirmation)
         .navigationTitle("Your account")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
@@ -111,29 +106,6 @@ struct SettingsAccountView: View {
             displayName = appState.member?.displayName ?? ""
             loaded = true
         }
-    }
-
-    private func confirmDelete() {
-        deleteError = nil
-        confirmation = ConfirmationRequest(
-            title: "Delete your account?",
-            message: "This can't be undone. You'll be signed out on this device and can't sign in again with \(appState.userEmail ?? "this email").",
-            confirmTitle: "Delete account",
-            isDestructive: true
-        ) {
-            await deleteAccount()
-        }
-    }
-
-    private func deleteAccount() async {
-        do {
-            try await AccountService.deleteAccount()
-        } catch {
-            deleteError = ErrorText.message(for: error)
-            return
-        }
-        toasts.show("Your account was deleted.")
-        await appState.signOut()
     }
 
     private func save() async {

@@ -298,9 +298,16 @@ function BookingWizardLoader({
       catalog={catalog}
       link={linkToken ? (link.data ?? null) : null}
       linkToken={linkToken}
-      // A failed questions request never blocks booking: the server still
-      // checks required answers and names what is missing.
+      // A failed questions request never blocks booking (the shop may have
+      // none, and the server still checks required answers), but the details
+      // step says so and offers Try again, so a required question can be
+      // loaded and answered instead of dead-ending on "<label> is required".
       questions={questions.data ?? []}
+      questionsProblem={
+        questions.isError
+          ? { retrying: questions.isFetching, onRetry: () => void questions.refetch() }
+          : null
+      }
       prefill={prefill}
       tracking={tracking}
     />
@@ -319,6 +326,7 @@ function BookingWizard({
   link,
   linkToken,
   questions,
+  questionsProblem,
   prefill,
   tracking,
 }: {
@@ -328,6 +336,8 @@ function BookingWizard({
   link: BookingLink | null;
   linkToken: string | null;
   questions: readonly BookingQuestion[];
+  /** Set when the questions failed to load (see DetailsStep). */
+  questionsProblem: { retrying: boolean; onRetry: () => void } | null;
   prefill: BookingPrefill;
   tracking: boolean;
 }) {
@@ -350,6 +360,8 @@ function BookingWizard({
   const location = locationFor(state.details, profile.business_type);
   const shownQuestions = visibleQuestions(questions, location);
   const labels = shownQuestions.map((q) => q.label);
+  const classify = (error: unknown) =>
+    classifyBookingError(error, labels, { questionsLoaded: questionsProblem === null });
 
   /**
    * A referral / promo code from the link is checked when the details step
@@ -442,7 +454,7 @@ function BookingWizard({
           scrollToTop();
         },
         onError: (error) => {
-          const classified = classifyBookingError(error, labels);
+          const classified = classify(error);
           if (classified.kind === 'closed') {
             setClosed(true);
             return;
@@ -454,6 +466,8 @@ function BookingWizard({
             goTo(classified.step);
             setNotice({ step: classified.step, message: classified.message });
             create.reset();
+            // Probably an unanswered question we never showed: load them again.
+            if (classified.step === 'details' && questionsProblem) questionsProblem.onRetry();
           }
         },
       },
@@ -464,7 +478,7 @@ function BookingWizard({
   const reviewError =
     create.isError && step === 'review' ? (
       <Banner tone="danger" title="We couldn’t book this appointment">
-        {classifyBookingError(create.error, labels).message}
+        {classify(create.error).message}
       </Banner>
     ) : null;
 
@@ -556,6 +570,7 @@ function BookingWizard({
             couponPrefill={state.couponPrefill}
             couponChecking={prefillCoupon.isPending}
             notice={stepNotice('details')}
+            questionsProblem={questionsProblem}
             onBack={back}
             onContinue={() => goTo('review')}
           />

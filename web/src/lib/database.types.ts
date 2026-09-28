@@ -2016,6 +2016,45 @@ export type Database = {
           },
         ]
       }
+      invoice_checkout_holds: {
+        Row: {
+          created_at: string
+          expires_at: string
+          invoice_id: string
+          shop_id: string
+          stripe_checkout_session_id: string
+        }
+        Insert: {
+          created_at?: string
+          expires_at: string
+          invoice_id: string
+          shop_id: string
+          stripe_checkout_session_id: string
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string
+          invoice_id?: string
+          shop_id?: string
+          stripe_checkout_session_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "invoice_checkout_holds_invoice_fk"
+            columns: ["shop_id", "invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "invoice_checkout_holds_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       invoice_jobs: {
         Row: {
           created_at: string
@@ -2213,6 +2252,7 @@ export type Database = {
           updated_at: string
           void_reason: string | null
           voided_at: string | null
+          money_refuse_open_checkout: undefined | null
         }
         Insert: {
           amount_paid_cents?: number
@@ -2489,6 +2529,45 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "checklist_templates"
             referencedColumns: ["shop_id", "id"]
+          },
+        ]
+      }
+      job_checkout_holds: {
+        Row: {
+          created_at: string
+          expires_at: string
+          job_id: string
+          shop_id: string
+          stripe_checkout_session_id: string
+        }
+        Insert: {
+          created_at?: string
+          expires_at: string
+          job_id: string
+          shop_id: string
+          stripe_checkout_session_id: string
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string
+          job_id?: string
+          shop_id?: string
+          stripe_checkout_session_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "job_checkout_holds_job_fk"
+            columns: ["shop_id", "job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "job_checkout_holds_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -3895,6 +3974,38 @@ export type Database = {
           },
           {
             foreignKeyName: "notifications_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      online_booking_log: {
+        Row: {
+          client_ip: unknown
+          created_at: string
+          id: string
+          shop_id: string
+          user_id: string | null
+        }
+        Insert: {
+          client_ip?: unknown
+          created_at?: string
+          id?: string
+          shop_id: string
+          user_id?: string | null
+        }
+        Update: {
+          client_ip?: unknown
+          created_at?: string
+          id?: string
+          shop_id?: string
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "online_booking_log_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
             referencedRelation: "shops"
@@ -6581,6 +6692,7 @@ export type Database = {
           url: string
         }[]
       }
+      client_ip_scope: { Args: { p_ip: unknown }; Returns: unknown }
       client_request_claim: {
         Args: {
           p_fingerprint: string
@@ -7837,6 +7949,10 @@ export type Database = {
         Args: { p_now?: string; p_payload: Json; p_slug: string }
         Returns: Json
       }
+      gift_card_order_prepare_core: {
+        Args: { p_now?: string; p_payload: Json; p_slug: string }
+        Returns: Json
+      }
       gift_card_order_refunded: {
         Args: { p_payment_intent_id: string; p_refunded_total_cents: number }
         Returns: Json
@@ -8016,6 +8132,10 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      invoice_bills_only_cancelled_jobs: {
+        Args: { p_invoice_id: string }
+        Returns: boolean
+      }
       invoice_link_token: { Args: { p_invoice_id: string }; Returns: string }
       is_api_request: { Args: Record<PropertyKey, never>; Returns: boolean }
       is_assigned_to_job: { Args: { p_job_id: string }; Returns: boolean }
@@ -8073,6 +8193,10 @@ export type Database = {
       job_gate_state: {
         Args: { p_job_id: string; p_shop_id: string }
         Returns: Json
+      }
+      job_live_invoice_number: {
+        Args: { p_job_id: string; p_shop_id: string }
+        Returns: number
       }
       job_payment_summary: {
         Args: { p_job_id: string }
@@ -8577,7 +8701,25 @@ export type Database = {
         }
         Returns: string
       }
+      membership_grants_at: {
+        Args: {
+          p_at: string
+          p_cancel_at_period_end: boolean
+          p_current_period_end: string
+          p_status: Database["public"]["Enums"]["membership_status"]
+        }
+        Returns: boolean
+      }
       membership_join_prepare: {
+        Args: {
+          p_now?: string
+          p_payload: Json
+          p_plan_id: string
+          p_slug: string
+        }
+        Returns: Json
+      }
+      membership_join_prepare_core: {
         Args: {
           p_now?: string
           p_payload: Json
@@ -8625,6 +8767,7 @@ export type Database = {
         Args: { p_source_id: string; p_target_id: string }
         Returns: Json
       }
+      money_billed_job_message: { Args: { p_number: number }; Returns: string }
       money_public_invoice_json: {
         Args: { p_invoice_id: string }
         Returns: Json
@@ -8636,6 +8779,10 @@ export type Database = {
         Returns: Json
       }
       money_raise_invalid: { Args: { p_message: string }; Returns: Json }
+      money_refuse_open_checkout: {
+        Args: { p_inv: Database["public"]["Tables"]["invoices"]["Row"] }
+        Returns: undefined
+      }
       money_vehicle_label: {
         Args: { p_shop_id: string; p_vehicle_id: string }
         Returns: string
@@ -8748,6 +8895,37 @@ export type Database = {
       payment_refund_status: {
         Args: { p_amount: number; p_refunded: number; p_tip: number }
         Returns: Database["public"]["Enums"]["payment_status"]
+      }
+      payments_hold_invoice_checkout: {
+        Args: {
+          p_amount_cents?: number
+          p_expires_at: string
+          p_invoice_id: string
+          p_session_id: string
+          p_shop_id: string
+        }
+        Returns: undefined
+      }
+      payments_hold_job_checkout: {
+        Args: {
+          p_expires_at: string
+          p_job_id: string
+          p_session_id: string
+          p_shop_id: string
+        }
+        Returns: undefined
+      }
+      payments_release_invoice_checkouts: {
+        Args: {
+          p_invoice_id: string
+          p_session_ids?: string[]
+          p_shop_id: string
+        }
+        Returns: number
+      }
+      payments_release_job_checkouts: {
+        Args: { p_job_id: string; p_session_ids?: string[]; p_shop_id: string }
+        Returns: number
       }
       platform_setting: { Args: { p_key: string }; Returns: string }
       portal_claim_customers: {

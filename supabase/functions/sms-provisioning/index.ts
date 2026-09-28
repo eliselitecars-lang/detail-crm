@@ -18,6 +18,25 @@
  *   submit_10dlc                  {shop_id, business, campaign}      owner/admin
  *   release_number                {shop_id}                          owner
  *   refresh_status                {}                                 pg_cron
+ *   release_worklist              {}                                 pg_cron / operator
+ *
+ * The platform pays Twilio for every number bought here, so buying one
+ * (purchase_number) and registering 10DLC (submit_10dlc, carrier fees) need a
+ * shop in good standing (shop_billing_standing, 0101): subscribed or comped
+ * while billing is on (a lapsed shop gets 402 payment_required, a trialing or
+ * past-due one 422 subscription_required; billing off: any shop). A shop that
+ * gave back MAX_RECENT_RELEASES numbers in the last RELEASE_WINDOW_DAYS days
+ * (sms_number_releases, 0093) cannot buy another until the oldest of them is
+ * that old (429 number_churn_limit), so buy / release cannot loop.
+ *
+ * release_worklist works through sms_number_releases (numbers unbound from
+ * their shop: a release, a deleted shop, support moving a number). It asks
+ * Twilio whether the platform still rents each one: a number bought here for
+ * a shop that no longer exists is released; one no longer on the account (or
+ * bound to a shop again) is done, and its entry is removed once its shop is
+ * gone or it is older than the release window; everything else is still
+ * rented and unbound and is returned as `pending` for the operator
+ * (supabase/setup/twilio.md) and logged as sms_numbers_awaiting_release.
  *
  * A number bought here gets the platform's inbound webhook
  * (messaging?action=twilio_inbound&shop_id=<shop>) - the binding the
@@ -30,7 +49,7 @@ import { createActionRouter, jsonAction } from "../_shared/actions.ts";
 import { requireCronSecret, requireShopRole, requireUser, ROLES } from "../_shared/auth.ts";
 import { sha256Hex } from "../_shared/crypto.ts";
 import type { Env } from "../_shared/env.ts";
-import { HttpError } from "../_shared/errors.ts";
+import { HttpError, SUBSCRIPTION_INACTIVE_MESSAGE } from "../_shared/errors.ts";
 import { createHandler } from "../_shared/http.ts";
 import type { Logger } from "../_shared/log.ts";
 import { e164, email, requestNonce, uuid } from "../_shared/schemas.ts";
@@ -50,10 +69,11 @@ import {
   type FormValue,
   type Json,
   MESSAGING_API,
+  releasePlatformNumber,
   str,
   type TwilioClient,
   twilioClient,
-} from "./twilio_api.ts";
+} from "../_shared/twilio_api.ts";
 
 export interface Deps {
   env?: Env;
@@ -70,6 +90,15 @@ export type VerificationStatus = "not_started" | "pending" | "in_review" | "appr
 const TOLL_FREE_AREA_CODES = new Set(["800", "833", "844", "855", "866", "877", "888"]);
 const SUPPORTED_COUNTRIES = new Set(["US", "CA"]);
 const REFRESH_BATCH = 50;
+
+/** Standing (0101 billing_state) in which a shop may buy numbers and register 10DLC. */
+const PAID_STATES = new Set(["active", "comped"]);
+/** A shop may give back at most this many numbers per window before buying again. */
+export const MAX_RECENT_RELEASES = 2;
+export const RELEASE_WINDOW_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** sms_number_releases entries release_worklist looks at per run (oldest first). */
+export const WORKLIST_BATCH = 200;
 
 // ---------------------------------------------------------------------------
 // Inputs
@@ -164,6 +193,7 @@ export const a2pInput = z.object({
   campaign: a2pCampaignSchema,
 }).strict();
 export const refreshInput = z.object({}).strict();
+export const worklistInput = z.object({}).strict();
 
 // ---------------------------------------------------------------------------
 // Database helpers
@@ -283,6 +313,60 @@ function requireEnabled(env: Env): void {
       { details: { reason: "provisioning_disabled" } },
     );
   }
+}
+
+/**
+ * The platform pays for what comes next (a number's rent, 10DLC fees): only a
+ * shop in good standing may start it. Billing off: shop_billing_standing
+ * reads `active` for every shop.
+ */
+async function requirePaidStanding(admin: SupabaseClient, shopId: string): Promise<void> {
+  const { data, error } = await admin.rpc("shop_billing_standing", { p_shop_id: shopId });
+  if (error) throw dbFailure("shop_billing_standing", error);
+  const row = (Array.isArray(data) ? data[0] : data) as { state?: unknown } | null;
+  const state = typeof row?.state === "string" ? row.state : "lapsed";
+  if (PAID_STATES.has(state)) return;
+  if (state === "lapsed") {
+    throw new HttpError("payment_required", SUBSCRIPTION_INACTIVE_MESSAGE, {
+      details: { reason: "subscription_inactive" },
+    });
+  }
+  throw new HttpError(
+    "unprocessable",
+    state === "past_due"
+      ? "The shop's last subscription payment did not go through. Update the payment method in Settings > Billing, then try again."
+      : "Self-serve text numbers are available once the shop's subscription is paid. Contact support to connect a number during the trial.",
+    { details: { reason: "subscription_required", state } },
+  );
+}
+
+/**
+ * Buy / release / buy again must not loop: each purchase is a number the
+ * platform pays for. At most MAX_RECENT_RELEASES give-backs (logged in
+ * sms_number_releases by 0093) within RELEASE_WINDOW_DAYS days.
+ */
+async function requireNoRecentChurn(
+  admin: SupabaseClient,
+  shopId: string,
+  now: Date,
+): Promise<void> {
+  const since = new Date(now.getTime() - RELEASE_WINDOW_DAYS * DAY_MS).toISOString();
+  const { data, error } = await admin.from("sms_number_releases").select("released_at")
+    .eq("shop_id", shopId).gte("released_at", since)
+    .order("released_at", { ascending: true }).limit(MAX_RECENT_RELEASES);
+  if (error) throw dbFailure("sms_number_releases", error);
+  const recent = (data ?? []) as { released_at: string }[];
+  if (recent.length < MAX_RECENT_RELEASES) return;
+  const oldest = Date.parse(recent[0]?.released_at ?? "");
+  const retryAt = Number.isNaN(oldest)
+    ? null
+    : new Date(oldest + RELEASE_WINDOW_DAYS * DAY_MS).toISOString();
+  throw new HttpError(
+    "rate_limited",
+    `This shop gave back ${MAX_RECENT_RELEASES} text numbers in the last ${RELEASE_WINDOW_DAYS} days. ` +
+      "Contact support to get another number sooner.",
+    { details: { reason: "number_churn_limit", retry_at: retryAt } },
+  );
 }
 
 export function numberKind(phone: string): NumberKind {
@@ -444,6 +528,8 @@ async function purchaseNumber(
   let numberSid = existing?.twilio_number_sid ?? null;
 
   if (!existing) {
+    // A new number is rented by the platform: only for a shop that pays.
+    await requirePaidStanding(s.admin, input.shop_id);
     // Idempotent on the nonce: a retry finds the number it already bought.
     const friendlyName = `dcrm-${input.shop_id}-${
       (await sha256Hex(input.request_nonce)).slice(0, 16)
@@ -461,6 +547,7 @@ async function purchaseNumber(
     if (owned) {
       numberSid = str(owned.sid);
     } else {
+      await requireNoRecentChurn(s.admin, input.shop_id, deps.now?.() ?? new Date());
       try {
         const bought = await twilio.request("POST", twilio.account("IncomingPhoneNumbers.json"), {
           PhoneNumber: input.phone_e164,
@@ -672,6 +759,8 @@ async function submitA2p(
     );
   }
   const primaryProfileSid = s.env.twilioPrimaryCustomerProfileSid();
+  // Brand and campaign registration carry carrier fees the platform pays.
+  await requirePaidStanding(s.admin, input.shop_id);
   const row = requireNumber(await provisioned(s.admin, input.shop_id));
   if (row.kind !== "local" || !row.messaging_service_sid) {
     throw new HttpError("unprocessable", "10DLC registration is only for local numbers.", {
@@ -737,22 +826,12 @@ async function submitA2p(
 async function releaseNumber(deps: Deps, s: StaffContext, shopId: string): Promise<Json> {
   const row = await provisioned(s.admin, shopId);
   if (!row) return { released: false, number: await numberStatus(s.admin, shopId) };
-  const twilio = client(deps, s.env);
-  await twilio.requestOrNull(
-    "DELETE",
-    twilio.account(`IncomingPhoneNumbers/${row.twilio_number_sid}.json`),
+  // The number is gone first; an empty service costs nothing (logged only).
+  await releasePlatformNumber(
+    client(deps, s.env),
+    row,
+    (err) => s.log.warn("sms_service_delete_failed", { shop_id: shopId, error: err }),
   );
-  if (row.messaging_service_sid) {
-    try {
-      await twilio.requestOrNull(
-        "DELETE",
-        `${MESSAGING_API}/Services/${row.messaging_service_sid}`,
-      );
-    } catch (err) {
-      // The number is gone; an empty service costs nothing. Log and carry on.
-      s.log.warn("sms_service_delete_failed", { shop_id: shopId, error: err });
-    }
-  }
   const { error } = await s.admin.rpc("release_sms_number", { p_shop_id: shopId });
   if (error) throw dbFailure("release_sms_number", error);
   s.log.info("sms_number_released", { shop_id: shopId });
@@ -828,6 +907,140 @@ async function refreshStatuses(deps: Deps, env: Env, log: Logger): Promise<Refre
   return summary;
 }
 
+/** One sms_number_releases entry (0093; service role only). */
+interface ReleaseEntry {
+  id: string;
+  phone_number: string;
+  shop_id: string;
+  shop_name: string | null;
+  released_at: string;
+}
+
+/** A number the platform still rents although no shop uses it. */
+export interface PendingRelease {
+  phone_number: string;
+  twilio_number_sid: string | null;
+  shop_id: string;
+  shop_name: string | null;
+  shop_deleted: boolean;
+  released_at: string;
+}
+
+export interface WorklistSummary {
+  /** Entries looked at. */
+  checked: number;
+  /** Still rented and unbound: release (or re-assign) them in Twilio. */
+  pending: PendingRelease[];
+  /** Numbers of deleted shops this run gave back to Twilio. */
+  released: number;
+  /** Entries removed (done, and their shop is gone or the window has passed). */
+  pruned: number;
+  failed: number;
+}
+
+async function releaseWorklist(deps: Deps, env: Env, log: Logger): Promise<WorklistSummary> {
+  const summary: WorklistSummary = { checked: 0, pending: [], released: 0, pruned: 0, failed: 0 };
+  const admin = adminClient({ env: deps.env, fetch: deps.fetch });
+  const { data, error } = await admin.from("sms_number_releases")
+    .select("id, phone_number, shop_id, shop_name, released_at")
+    .order("released_at", { ascending: true }).limit(WORKLIST_BATCH);
+  if (error) throw dbFailure("sms_number_releases", error);
+  const entries = (data ?? []) as unknown as ReleaseEntry[];
+  if (entries.length === 0) return summary;
+
+  const byPhone = new Map<string, ReleaseEntry[]>();
+  for (const entry of entries) {
+    byPhone.set(entry.phone_number, [...(byPhone.get(entry.phone_number) ?? []), entry]);
+  }
+  const bound = await admin.from("shop_sms_numbers").select("phone_number")
+    .in("phone_number", [...byPhone.keys()]);
+  if (bound.error) throw dbFailure("shop_sms_numbers", bound.error);
+  const boundPhones = new Set(
+    ((bound.data ?? []) as { phone_number: string }[]).map((r) => r.phone_number),
+  );
+  const shops = await admin.from("shops").select("id")
+    .in("id", [...new Set(entries.map((e) => e.shop_id))]);
+  if (shops.error) throw dbFailure("shops", shops.error);
+  const liveShops = new Set(((shops.data ?? []) as { id: string }[]).map((r) => r.id));
+
+  const now = (deps.now?.() ?? new Date()).getTime();
+  const windowStart = now - RELEASE_WINDOW_DAYS * DAY_MS;
+  // Kept while it still counts toward its (existing) shop's release limit.
+  const prunable = (e: ReleaseEntry) =>
+    !liveShops.has(e.shop_id) || Date.parse(e.released_at) < windowStart;
+  const prune: string[] = [];
+  const twilio = client(deps, env);
+
+  for (const [phone, list] of byPhone) {
+    summary.checked += list.length;
+    const latest = list[list.length - 1] as ReleaseEntry;
+    try {
+      let done = boundPhones.has(phone); // in use by a shop again
+      if (!done) {
+        const found = await twilio.request(
+          "GET",
+          `${twilio.account("IncomingPhoneNumbers.json")}?${new URLSearchParams({
+            PhoneNumber: phone,
+            PageSize: "20",
+          })}`,
+        );
+        const owned = (Array.isArray(found.incoming_phone_numbers)
+          ? found.incoming_phone_numbers as Json[]
+          : []).find((n) =>
+            str(n.phone_number) === phone
+          );
+        const numberSid = owned ? str(owned.sid) : null;
+        const shopGone = !liveShops.has(latest.shop_id);
+        if (!owned) {
+          done = true; // no longer rented by the platform
+        } else if (
+          numberSid && shopGone &&
+          (str(owned.friendly_name) ?? "").startsWith(`dcrm-${latest.shop_id}-`)
+        ) {
+          // Bought by purchase_number for a shop that no longer exists.
+          await twilio.requestOrNull(
+            "DELETE",
+            twilio.account(`IncomingPhoneNumbers/${numberSid}.json`),
+          );
+          summary.released += 1;
+          log.info("sms_number_released", { shop_id: latest.shop_id, source: "worklist" });
+          done = true;
+        } else {
+          summary.pending.push({
+            phone_number: phone,
+            twilio_number_sid: numberSid,
+            shop_id: latest.shop_id,
+            shop_name: latest.shop_name,
+            shop_deleted: shopGone,
+            released_at: latest.released_at,
+          });
+        }
+      }
+      if (done) prune.push(...list.filter(prunable).map((e) => e.id));
+    } catch (err) {
+      summary.failed += 1;
+      log.warn("sms_release_check_failed", { shop_id: latest.shop_id, error: err });
+    }
+  }
+
+  if (prune.length > 0) {
+    const removed = await admin.from("sms_number_releases").delete().in("id", prune);
+    if (removed.error) throw dbFailure("sms_number_releases delete", removed.error);
+    summary.pruned = prune.length;
+  }
+  if (summary.pending.length > 0) {
+    log.warn("sms_numbers_awaiting_release", { count: summary.pending.length });
+  }
+  log.info("sms_release_worklist", {
+    checked: summary.checked,
+    pending: summary.pending.length,
+    released: summary.released,
+    pruned: summary.pruned,
+    failed: summary.failed,
+  });
+  return summary;
+}
+
 export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response> {
   const router = createActionRouter({
     status: jsonAction(shopInput, async (input, ctx) => {
@@ -862,6 +1075,10 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     refresh_status: jsonAction(refreshInput, async (_input, ctx) => {
       requireCronSecret(ctx.req, ctx.env.cronSecret());
       return await refreshStatuses(deps, ctx.env, ctx.log);
+    }),
+    release_worklist: jsonAction(worklistInput, async (_input, ctx) => {
+      requireCronSecret(ctx.req, ctx.env.cronSecret());
+      return await releaseWorklist(deps, ctx.env, ctx.log);
     }),
   });
   return createHandler(

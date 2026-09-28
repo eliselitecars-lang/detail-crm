@@ -286,6 +286,31 @@ select tests.as_superuser();
 select set_config('request.headers', '', true);
 select tests.as_anon();
 select tests.lives($$select public.public_redeem_gift_card((select t from toks limit 1), 'ANY')$$, 'another address is not blocked');
+-- 0105: an IPv6 client is one address per /64 (it picks its own interface id)
+select tests.as_superuser();
+select tests.authenticate_as(tests.fx('u_manager_a'));
+create temp table toks6_ids as
+  select (public.mark_invoice_sent((public.create_invoice(tests.fx('cust_a2'), '[{"name":"X","unit_price_cents":100}]')).id)).id as i
+    from generate_series(1, 6);
+create temp table toks6 as select row_number() over () as n, public.invoice_link_token(i) as t from toks6_ids;
+grant select on toks6 to anon;
+select tests.as_anon();
+do $$ begin
+  for g in 0 .. 19 loop
+    perform set_config('request.headers', jsonb_build_object('x-forwarded-for', '2001:db8:77::' || to_hex(g + 1))::text, true);
+    perform public.public_redeem_gift_card((select t from toks6 where n = g / 4 + 1), 'BAD6-' || g);
+  end loop;
+end $$;
+select tests.as_superuser();
+select tests.eq((select count(*) from public.gift_card_attempts where attempt_key = 'ip:2001:db8:77::/64'), 20::bigint,
+                'misses from one /64 are logged under that /64');
+select tests.as_anon();
+select set_config('request.headers', '{"x-forwarded-for": "2001:db8:77:0:1234:5678:9abc:def0"}', true);
+select tests.throws($$select public.public_redeem_gift_card((select t from toks6 where n = 6), 'ANY')$$, 'PT429',
+                    '20 misses from one /64: a fresh interface id is blocked too');
+select set_config('request.headers', '{"x-forwarded-for": "2001:db8:78::1"}', true);
+select tests.lives($$select public.public_redeem_gift_card((select t from toks6 where n = 6), 'ANY')$$, 'another /64 is not blocked');
+select set_config('request.headers', '', true);
 
 -- ============================================================ online orders
 select tests.as_anon();

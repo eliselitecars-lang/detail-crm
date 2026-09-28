@@ -15,6 +15,7 @@ import {
   Badge,
   Button,
   ConfirmDialog,
+  CopyLinkDialog,
   DropdownMenu,
   ErrorState,
   FormField,
@@ -121,6 +122,8 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
     queryClient.invalidateQueries({ queryKey: invoiceKeys.all(shopId) }),
   );
   const [pending, setPending] = useState<Pending>(null);
+  /** A link the browser refused to copy, shown until closed (not a vanishing toast). */
+  const [manualLink, setManualLink] = useState<string | null>(null);
   const [voidReason, setVoidReason] = useState('');
   /** The server refused a change because a card payment is in flight. */
   const [heldByPayment, setHeldByPayment] = useState(false);
@@ -191,7 +194,7 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   const copyLink = async () => {
     if (!link) return;
     if (await copyText(link)) toast.success('Pay link copied');
-    else toast.error('Couldn’t copy the link', link);
+    else setManualLink(link);
   };
 
   const menu: DropdownMenuEntry[] = [
@@ -540,6 +543,12 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
             toast.error(error);
           }
         }}
+      />
+      <CopyLinkDialog
+        link={manualLink}
+        onClose={() => setManualLink(null)}
+        label="Pay link"
+        description="Your browser didn’t let us copy it automatically. Copy it here and send it to the customer."
       />
     </>
   );

@@ -12,6 +12,7 @@ import {
   useToast,
 } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { LapsedFeatureNotice } from '@/features/billing/components/LapsedNotice';
 import { toAppError } from '@/lib/errors';
 import { bpsToPercentInput } from '@/lib/money';
 import { useBookingSettings, useUpdateBookingSettings, type BookingSettings } from '../api';
@@ -38,6 +39,7 @@ export default function BookingSettingsPage() {
   const query = useBookingSettings();
   return (
     <SettingsSectionLayout section="booking" readOnly={readOnly}>
+      <LapsedFeatureNotice subject="Online booking" plural={false} />
       <QueryView query={query} label="booking settings">
         {(settings) => (
           <>

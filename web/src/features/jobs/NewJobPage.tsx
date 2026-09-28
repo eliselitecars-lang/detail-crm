@@ -6,6 +6,7 @@ import {
   buttonClasses,
   Checkbox,
   DateInput,
+  ErrorState,
   FormField,
   Input,
   MoneyInput,
@@ -580,7 +581,17 @@ export default function NewJobPage() {
                 </FormField>
                 <fieldset className="flex flex-col gap-2">
                   <legend className="text-ink mb-1 text-sm font-medium">Assign to</legend>
-                  {activeTeam.length === 0 ? (
+                  {team.isError && !team.data ? (
+                    // Not "no team members": the list didn't load, so say so
+                    // (a job saved now would silently go out unassigned).
+                    <ErrorState
+                      compact
+                      title="Couldn’t load the team"
+                      error={team.error}
+                      onRetry={() => void team.refetch()}
+                      retrying={team.isRefetching}
+                    />
+                  ) : activeTeam.length === 0 ? (
                     <p className="text-muted text-sm">
                       {team.isPending ? 'Loading team…' : 'No team members yet.'}
                     </p>

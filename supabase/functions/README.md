@@ -305,7 +305,7 @@ Invoice state errors (`assertPayable`), used by the invoice actions:
 
 ### `payments`
 
-`verify_jwt = false`: five actions are public (link token or shop slug),
+`verify_jwt = false`: six actions are public (link token or shop slug),
 two take a signed-in client's JWT, one is cron; the rest verify the staff
 JWT themselves. Payment rows are written server-side; `stripe-webhook` is
 the source of truth for final states, so after a checkout/sheet/reader
@@ -353,6 +353,11 @@ invoice). Stripe returns the customer to `/i/<token>?paid=1` or
 `/i/<token>?canceled=1`. A card is saved for off-session use. After
 `?paid=1` an ACH payment shows as processing on the invoice for a few days.
 
+A single-job invoice's link is **held** for its job before the URL is
+returned (below, "Open payment pages"); a closed job's invoice (completed,
+cancelled, no-show) stays payable without a hold, and a grouped invoice's
+link is not held.
+
 Errors: `404 not_found` (unknown token or a draft invoice), `409 conflict`
 reasons `void`, `paid`, `payment_in_progress` (also when processing
 payments already cover the balance), `checkout_superseded` (links keep
@@ -372,7 +377,9 @@ them.
 
 200: `{url, expires_at, amount_cents, tip_cents: 0, currency}`. Returns to
 `/booking/<token>?paid=1` or `?canceled=1`. A new deposit link expires the
-job's open deposit and invoice pay links.
+job's open deposit and invoice pay links. The session is held for the job
+before the URL is returned; when the job closed while it was being created
+the session is expired and the answer is `409 booking_closed`.
 
 Errors: `404 not_found` (unknown token), `409 conflict` reasons
 `booking_closed` (job cancelled / no-show / completed), `deposit_not_due`,
@@ -400,6 +407,45 @@ staff). The job is offered only while it still belongs to the quote's
 customer (as `money_public_quote_json` hands it out): once staff move it to
 another customer, the old quote link gets `409 booking_closed`, never a
 Checkout on the new customer's Stripe customer.
+
+#### Open payment pages (migration 0106)
+
+Every Checkout Session opened for a job (a booking or quote deposit link, a
+single-job invoice's pay link) is recorded with
+`payments_hold_job_checkout(shop, job, session, expires_at)` **before** its
+URL is handed out. While a hold is live, `public_cancel_booking` refuses
+with `55000` HINT `checkout_open`, so a deposit cannot be paid on a booking
+the customer cancelled in another tab. A hold ends when Stripe expires the
+session, when its payment row turns processing / received (a trigger), or
+when this function expires the session and calls
+`payments_release_job_checkouts`: the customer's `booking_cancel` and staff
+`cancel_open_payments` (both paths) do.
+
+#### `booking_cancel` (PUBLIC, booking token)
+
+Body `{token, reason?}` (`token` = `jobs.public_token`; `reason` is the
+optional note for the shop, at most 1,000 characters in the database). The
+customer's own cancel, for `/booking/<token>` and the portal — call it
+instead of `public_cancel_booking`. When the cancel can go ahead
+(`cancellation.allowed` and no payment going through), every page that can
+still pay toward the booking is expired first: the current customer's
+deposit and invoice pay links of the job and every live hold of the job
+(also a page opened for an earlier customer). The holds are released, then
+`public_cancel_booking` runs **as the caller** (their JWT, or the anon key),
+so its rules apply unchanged: status, cancel deadline, `payment_in_progress`,
+`checkout_open` (a page opened meanwhile) and the technician rule. A
+technician of the shop who is not the booking's own customer is refused
+before any page is touched. When the cancel would be refused anyway, no
+page is expired (a customer past the deadline keeps their deposit page).
+
+200: the booking document (`public_get_booking`'s shape, cancelled).
+
+Errors: `404 not_found` (unknown token), `403 forbidden` (a technician of
+the shop), `409 conflict` reasons `payment_in_progress` (a page was just
+paid, or a payment is going through) and `checkout_open` (a payment page
+was opened meanwhile: try again in a few minutes), with the database's
+sentence as the message, `422 unprocessable` (no longer cancellable online:
+status or deadline, or the reason is too long; the database's sentence).
 
 #### `gift_card_checkout` (PUBLIC, shop slug)
 
@@ -592,12 +638,16 @@ intents are released alike.
 
 - `invoice_id` releases the invoice: cancels its unconfirmed PaymentSheet
   and reader intents, records any that already succeeded, and expires its
-  open Checkout pay links and the deposit links of the jobs it bills. Call it when a sheet is dismissed
+  open Checkout pay links and the deposit links of the jobs it bills (their
+  holds are released). Call it when a sheet is dismissed
   and **before voiding or editing** an invoice.
 - `job_id` releases the job: every unsettled card attempt of the job (its
   deposits and its invoice's payments), the deposit links opened for the
   job's **current** customer and, when the job has a live invoice (single or
-  grouped), that invoice's pay links. Call it **before cancelling a job / marking it
+  grouped), that invoice's pay links, plus every page still held for the
+  job (0106, also one opened for an earlier customer); what it expired is
+  released, so a job staff reopen is not left blocked for the customer's
+  online cancel. Call it **before cancelling a job / marking it
   no-show and before changing a job's customer**. Technicians may call it
   only for a job assigned to them, when the shop lets them collect.
 
@@ -675,9 +725,11 @@ Errors: `404 not_found` (customer), `422 unprocessable` reasons
 
 Body `{shop_id, customer_id, request_nonce?}`. A Stripe Checkout link in
 setup mode, to text or email to the customer so they can save a card.
-200: `{url, expires_at}`. Stripe returns the customer to
-`APP_BASE_URL/portal?card=saved` or `?card=canceled`. Errors are the same as
-`setup_card`.
+200: `{url, expires_at}`. Stripe returns the customer to the public page
+`APP_BASE_URL/done/<shop slug>?card=saved` or `?card=canceled` (no sign-in:
+the customer usually has no account; the web route `/done/:slug`,
+`web/src/features/portal/CheckoutDonePage.tsx`, shows the shop and the
+outcome). Errors are the same as `setup_card`.
 
 #### `refund` (owner/admin)
 
@@ -713,8 +765,9 @@ Stripe Product/Price is created on the shop's account when needed. A new link
 expires the membership's older links.
 
 200: `{url, expires_at, amount_cents, interval, interval_count, currency}`.
-Stripe returns the customer to `APP_BASE_URL/portal?membership=active` or
-`?membership=canceled`. The webhook activates the membership.
+Stripe returns the customer to the public page
+`APP_BASE_URL/done/<shop slug>?membership=active` or `?membership=canceled`
+(no sign-in, like `setup_card_link`). The webhook activates the membership.
 
 Errors: `404 not_found` (membership or plan), `409 conflict` reasons
 `membership_not_incomplete`, `membership_checkout_completed` (an earlier link
@@ -770,11 +823,18 @@ owner typed it (compared trimmed and case-insensitively). In order:
    subscription is cancelled on the connected account (and any subscription
    a completed link started), then it is recorded `cancelled`;
 5. the shop is deleted. The database cascades to every tenant row, queues
-   the shop's stored files for `storage-purge` and logs its SMS number in
-   `sms_number_releases` (the operator releases it in Twilio);
+   the shop's stored files for `storage-purge` and logs its SMS numbers in
+   `sms_number_releases`;
 6. only then are the platform subscriptions from step 2 cancelled **now**.
    A Stripe failure here is logged (`platform_subscription_cancel_failed`,
-   error level) and the deletion stands: step 2 already stopped renewals.
+   error level) and the deletion stands: step 2 already stopped renewals;
+7. every number the platform bought for the shop through `sms-provisioning`
+   (read before step 5) is released in Twilio with its Messaging Service, so
+   the platform stops paying for it, and its `sms_number_releases` entry is
+   removed. A Twilio failure is logged (`sms_number_release_failed`) and the
+   entry stays: `sms-provisioning` `release_worklist` retries it daily.
+   Numbers support bound by hand stay on that worklist for the operator
+   (`supabase/setup/twilio.md`).
 
 When step 3, 4 or 5 fails (the `409` / `5xx` below) the shop still exists,
 so step 2 is undone: renewal is switched back on for each subscription step
@@ -1155,6 +1215,20 @@ only (`422` reason `unsupported_country`).
 | `submit_10dlc` | owner/admin | `{shop_id, business, campaign}` | `{number}` |
 | `release_number` | owner | `{shop_id}` | `{released, number}` |
 | `refresh_status` | pg_cron (`x-cron-secret`) | `{}` | `{enabled, checked, updated, failed}` |
+| `release_worklist` | pg_cron / operator (`x-cron-secret`) | `{}` | `{checked, pending: [{phone_number, twilio_number_sid, shop_id, shop_name, shop_deleted, released_at}], released, pruned, failed}` |
+
+The platform pays Twilio for every number: `purchase_number` (a new number)
+and `submit_10dlc` (carrier registration fees) need a shop in good standing
+(`shop_billing_standing`, 0101). While billing is on, a lapsed shop gets
+`402 payment_required` reason `subscription_inactive` (the standard
+sentence) and a trialing or past-due one `422 unprocessable` reason
+`subscription_required` (`details.state`; support can still bind a number by
+hand). Billing off: every shop may. A shop that gave back 2 numbers in the
+last 30 days (`sms_number_releases`) cannot buy another yet: `429
+rate_limited` reason `number_churn_limit`, `details.retry_at` (ISO) when the
+older one leaves the window. Resuming an interrupted purchase (the number is
+already recorded) and a retry that finds the number it already bought are
+not refused.
 
 - `purchase_number` buys the number with the platform's inbound webhook
   (`messaging?action=twilio_inbound&shop_id=<shop>#rc=3&rp=all`, the binding
@@ -1228,6 +1302,20 @@ only (`422` reason `unsupported_country`).
   (every 30 minutes); `set_sms_verification` notifies owners/admins of each
   status change. Returns `{enabled: false, ...}` without calling Twilio while
   the flag is off.
+- `release_worklist` (daily, and whenever the operator wants the list) works
+  through the oldest 200 entries of `sms_number_releases` (0093: a number
+  stopped being bound to its shop — `release_number`, a deleted shop, support
+  moving it). Per number it asks Twilio (`IncomingPhoneNumbers?PhoneNumber=`)
+  whether the platform still rents it: not on the account any more, or bound
+  to a shop again → done; still rented, its shop deleted and bought by
+  `purchase_number` for that shop (friendly name `dcrm-<shop_id>-...`) →
+  released now (`released`); anything else → `pending` (release or
+  re-assign it in Twilio, supabase/setup/twilio.md), logged as
+  `sms_numbers_awaiting_release` (warn, with the count). Done entries are
+  removed (`pruned`) once their shop is gone or they are older than 30 days
+  (until then they count toward the shop's release limit). Needs the Twilio
+  secrets only when there are entries. Runs whether or not
+  `SMS_PROVISIONING_ENABLED` is on (hand-bound numbers land here too).
 
 ### `webhooks` (pg_cron only; `verify_jwt = false`)
 
@@ -1326,9 +1414,9 @@ Connect). Plans, prices, limits and the trial length come from the operator's
 Stripe Products/Prices and `set_billing_config`; nothing is hard-coded.
 Subscription state is written only by `billing-webhook`.
 
-`verify_jwt = false` because pg_cron and the deploy call `sync_plans` without
-a Supabase JWT; `plans`, `checkout` and `portal` verify the session in the
-function, so a missing or invalid session is this function's own
+`verify_jwt = false` because pg_cron and the deploy call `sync_plans` and
+`sync_customers` without a Supabase JWT; `plans`, `checkout`, `portal` and
+`sync_customer` verify the session in the function, so a missing or invalid session is this function's own
 `401 unauthorized` envelope. The iPhone app never calls this function (no
 purchase UI in the app: App Store 3.1.1 / 3.1.3); it reads the
 `shop_entitlement` RPC only.
@@ -1338,7 +1426,9 @@ purchase UI in the app: App Store 3.1.1 / 3.1.3); it reads the
 | `plans` | any signed-in user | `{}` | `{billing_enabled, plans: [{id, name, description, amount_cents, currency, interval, interval_count, max_members, features}]}` |
 | `checkout` | **owner** of `shop_id` | `{shop_id, plan_id, request_nonce?}` | `{url}` (redirect the browser to Stripe Checkout) |
 | `portal` | **owner** of `shop_id` | `{shop_id}` | `{url}` (redirect to the Stripe Customer Portal) |
+| `sync_customer` | **owner or admin** of `shop_id` | `{shop_id}` | `{synced}` (true when Stripe was updated) |
 | `sync_plans` | pg_cron / the deploy (`x-cron-secret`) | `{}` | `{upserted, deactivated, skipped: [{product_id, price_id, reason}], warnings: [{product_id, key, reason}]}` |
+| `sync_customers` | pg_cron (`x-cron-secret`) | `{}` | `{checked, updated, failed}` |
 
 - **`plans`**: `public_billing_plans()` ordered by `sort`, then amount. Never
   returns Stripe ids. While billing is off: `{billing_enabled: false, plans: []}`.
@@ -1349,8 +1439,10 @@ purchase UI in the app: App Store 3.1.1 / 3.1.3); it reads the
 - **`checkout`**: checks run in this order: session (`401`), owner of the shop
   (`403 forbidden` for admin/manager/technician, non-members and former
   owners), billing on, no live subscription, active plan. The shop's
-  platform Stripe customer is reused, or created (email = owner's email,
-  name = shop name, `metadata.shop_id`; idempotency key per shop) and linked
+  platform Stripe customer is reused (readdressed first when the owner
+  changed, see below), or created (email = owner's email, name = shop name,
+  `metadata.shop_id` and `metadata.owner_user_id`; idempotency key per shop)
+  and linked
   (`billing_link_customer`) before the session exists. Checkout Session:
   `mode: subscription`, one line item (the plan's Stripe price, quantity 1),
   `client_reference_id` and `metadata.shop_id` = the shop,
@@ -1383,6 +1475,25 @@ purchase UI in the app: App Store 3.1.1 / 3.1.3); it reads the
 - **`sync_plans`**: see [Stripe platform billing webhook](#stripe-platform-billing-webhook)
   for the plan rules. Deactivation runs only after the whole Stripe listing
   succeeded.
+- **The platform customer follows the owner.** Stripe sends the shop's
+  receipts, renewal notices and failed-payment emails (with the hosted
+  invoice / update-card links, docs/BILLING.md) to the customer's email, so
+  after `transfer_ownership` it must be the NEW owner's. The customer
+  carries the owner's email and `metadata.owner_user_id`; `checkout` and
+  `portal` update both when they differ from the current owner (a Stripe
+  failure there is logged as `billing_customer_contact_sync_failed` and
+  never blocks the owner). **`sync_customer`**: both clients call it right
+  after a successful transfer, best effort (web `useTransferOwnership`,
+  iOS `TeamService.transferOwnership`; the former owner is an admin by then;
+  owner or admin, `403` otherwise); `{synced: false}` when there is no billing
+  account yet or nothing changed. **`sync_customers`** (pg_cron, daily
+  06:20 UTC) lists the platform account's customers tagged with a shop and
+  readdresses each one whose `owner_user_id` is not the shop's current
+  owner, when it is the customer the shop is linked to (untagged customers,
+  unlinked leftovers and deleted shops are left alone). An owner who changes
+  their own sign-in email is picked up at their next `checkout` / `portal` /
+  `sync_customer`. Invoices Stripe already finalized keep the address they
+  were finalized with.
 
 Errors (plus the common ones):
 
@@ -1396,7 +1507,8 @@ Errors (plus the common ones):
 | `checkout` | 409 `conflict` | `customer_conflict` | `billing_link_customer` 23505: the Stripe customer belongs to another shop (support case) |
 | `portal` | 409 `conflict` | `no_billing_account` | no platform customer yet: choose a plan first |
 | `portal` | 503 `service_unavailable` | `portal_not_configured` | the operator has not saved the Customer Portal settings in Stripe |
-| `sync_plans` | 401 `unauthorized` | | missing / wrong `x-cron-secret` |
+| `sync_customer` | 403 `forbidden` | | not the shop's owner or admin |
+| `sync_plans`, `sync_customers` | 401 `unauthorized` | | missing / wrong `x-cron-secret` |
 
 ### `billing-webhook` (Stripe only, platform account; `verify_jwt = false`)
 
@@ -1579,9 +1691,10 @@ automates steps 1-3 for a hosted project):
    5 min: reminders, follow-ups, document follow-ups, task reminders), quote
    expiry (daily), `sweep_payment_sheets` (every 10 min), `storage-purge`
    (every 15 min), `push` (every minute), `webhooks` (every minute),
-   `sms-provisioning` `refresh_status` (every 30 min),
-   `generate_series_jobs()` (daily 07:15 UTC) and `billing` `sync_plans`
-   (daily 06:35 UTC). cron.sql is https-only on purpose: local
+   `sms-provisioning` `refresh_status` (every 30 min) and `release_worklist`
+   (daily 06:50 UTC), `generate_series_jobs()` (daily 07:15 UTC), `billing`
+   `sync_plans` (daily 06:35 UTC) and `billing` `sync_customers` (daily
+   06:20 UTC). cron.sql is https-only on purpose: local
    stacks use `scripts/stack/sql/setup_local.sql` instead, and
    `scripts/stack/verify_stack.mjs` exercises the scheduled actions there.
 3. **Stripe:** the Connect endpoint (`stripe-webhook`, "Events on Connected
@@ -1596,9 +1709,14 @@ automates steps 1-3 for a hosted project):
 4. **Twilio:** each shop number's "A message comes in" webhook points at
    `messaging?action=twilio_inbound&shop_id=<SHOP UUID>#rc=3&rp=all`
    ([Twilio webhooks](#twilio-webhooks), `supabase/setup/twilio.md`); the
-   status callback is sent with every SMS. After a shop is deleted, release
-   the numbers listed in `public.sms_number_releases` (service role).
-   Numbers bought through `sms-provisioning` are configured automatically.
+   status callback is sent with every SMS. Numbers bought through
+   `sms-provisioning` are configured automatically, and released
+   automatically when their shop is deleted. Numbers that stop being bound
+   to a shop are logged in `public.sms_number_releases`; the daily
+   `release_worklist` job reports the ones the platform still rents (log
+   `sms_numbers_awaiting_release`, or call the action with the cron secret:
+   supabase/setup/twilio.md "Numbers no shop uses") — release those in
+   Twilio.
 5. **Storage:** job videos go up to 200 MB (`job-media` bucket). Raise the
    hosted project's upload limit (Dashboard -> Storage -> Settings) to at
    least 200 MB; `config.toml` sets it for local stacks.

@@ -30,6 +30,8 @@ import { formatBps, formatCents } from '@/lib/money';
 import { useCan } from '@/features/shop/useCan';
 import { useShop } from '@/features/shop/shopContext';
 import { customerName, vehicleLabel } from '@/features/quotes/shared/format';
+import { useShopLapsed } from '@/features/billing/api';
+import { LapsedNotice } from '@/features/billing/components/LapsedNotice';
 import {
   billingLabel,
   MEMBERSHIP_STATUSES,
@@ -52,6 +54,9 @@ type Tab = 'subscribers' | 'plans';
 
 export default function MembershipsPage() {
   const canManage = useCan('memberships.manage');
+  const { shopId } = useShop();
+  // A lapsed shop sells no memberships, online or by staff (0103).
+  const lapsed = useShopLapsed(shopId);
   const [params, setParams] = useSearchParams();
   const tab: Tab = params.get('tab') === 'plans' ? 'plans' : 'subscribers';
   const [newOpen, setNewOpen] = useState(false);
@@ -82,6 +87,7 @@ export default function MembershipsPage() {
               <Button
                 leadingIcon={<Plus className="size-4" aria-hidden="true" />}
                 onClick={() => setNewOpen(true)}
+                disabled={lapsed}
               >
                 New membership
               </Button>
@@ -89,6 +95,13 @@ export default function MembershipsPage() {
           ) : undefined
         }
       />
+      {lapsed && (
+        <LapsedNotice>
+          Selling memberships is paused while this shop’s subscription is inactive: the online join
+          page lists no plans, and new memberships can’t be created. Existing memberships keep
+          billing as usual.
+        </LapsedNotice>
+      )}
       <Tabs
         label="Memberships sections"
         className="mb-4"
@@ -98,13 +111,19 @@ export default function MembershipsPage() {
           {
             value: 'subscribers',
             label: 'Subscribers',
-            content: <SubscribersTab onCheckout={setCheckout} onNew={() => setNewOpen(true)} />,
+            content: (
+              <SubscribersTab
+                onCheckout={setCheckout}
+                onNew={lapsed ? undefined : () => setNewOpen(true)}
+              />
+            ),
           },
           {
             value: 'plans',
             label: 'Plans',
             content: (
               <PlansTab
+                lapsed={lapsed}
                 onEdit={(plan) => setPlanDialog({ plan })}
                 onNew={() => setPlanDialog({ plan: null })}
               />
@@ -136,7 +155,8 @@ function SubscribersTab({
   onNew,
 }: {
   onCheckout: (target: CheckoutTarget) => void;
-  onNew: () => void;
+  /** Missing while the shop can't sell memberships (lapsed). */
+  onNew?: () => void;
 }) {
   const { timezone, currency } = useShop();
   const canManage = useCan('memberships.manage');
@@ -310,7 +330,7 @@ function SubscribersTab({
               : 'Try another status.'
           }
           action={
-            status === 'all' && canManage ? (
+            status === 'all' && canManage && onNew ? (
               <Button onClick={onNew}>New membership</Button>
             ) : undefined
           }
@@ -337,7 +357,16 @@ function SubscribersTab({
   );
 }
 
-function PlansTab({ onEdit, onNew }: { onEdit: (plan: PlanRow) => void; onNew: () => void }) {
+function PlansTab({
+  lapsed,
+  onEdit,
+  onNew,
+}: {
+  /** The shop is lapsed: public_membership_plans lists nothing, whatever the plan says. */
+  lapsed: boolean;
+  onEdit: (plan: PlanRow) => void;
+  onNew: () => void;
+}) {
   const { currency } = useShop();
   const canManage = useCan('memberships.manage');
   const toast = useToast();
@@ -412,7 +441,14 @@ function PlansTab({ onEdit, onNew }: { onEdit: (plan: PlanRow) => void; onNew: (
           ) : (
             <Badge tone="neutral">Hidden</Badge>
           )}
-          {p.online_joinable && p.active && !p.archived_at && <Badge tone="info">Online</Badge>}
+          {p.online_joinable &&
+            p.active &&
+            !p.archived_at &&
+            (lapsed ? (
+              <Badge tone="warning">Online paused</Badge>
+            ) : (
+              <Badge tone="info">Online</Badge>
+            ))}
         </span>
       ),
     },
@@ -450,7 +486,7 @@ function PlansTab({ onEdit, onNew }: { onEdit: (plan: PlanRow) => void; onNew: (
 
   return (
     <div className="flex flex-col gap-4">
-      {sellsOnline && <JoinPageCard />}
+      {sellsOnline && !lapsed && <JoinPageCard />}
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3 p-4">
           <Switch

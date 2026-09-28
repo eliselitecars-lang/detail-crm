@@ -486,3 +486,21 @@ export async function edgeFunctionError(error: unknown): Promise<AppError> {
   }
   return toAppError(error);
 }
+
+/**
+ * record_manual_payment / redeem_gift_card / redeem_customer_credit and
+ * public_redeem_gift_card refuse with 55000 HINT checkout_open while a card
+ * payment page (Stripe Checkout) for the invoice, or a job it bills, is still
+ * open: money taken now could be paid twice. Staff can release it with
+ * payments.cancel_open_payments and retry; a customer waits until the time
+ * the message names.
+ */
+export function isCheckoutOpenError(error: unknown): boolean {
+  const appError = toAppError(error);
+  if (appError.code !== '55000') return false;
+  const hint = (appError.cause as { hint?: unknown } | undefined)?.hint;
+  return (
+    hint === 'checkout_open' ||
+    /payment page for this invoice is still open/i.test(appError.message)
+  );
+}
