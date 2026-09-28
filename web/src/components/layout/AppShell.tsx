@@ -2,6 +2,8 @@ import { Menu } from 'lucide-react';
 import { useState } from 'react';
 import { Link, Outlet, useNavigation } from 'react-router';
 import { Drawer, IconButton } from '@/components/ui';
+import { BillingBanner } from '@/features/billing/BillingBanner';
+import { useBillingErrorToasts } from '@/features/billing/useBillingErrorToasts';
 import { useShop } from '@/features/shop/shopContext';
 import { GlobalSearch } from './GlobalSearch';
 import { Logo } from './Logo';
@@ -14,10 +16,13 @@ import { UserMenu } from './UserMenu';
 /**
  * Staff layout: grouped sidebar (drawer below lg), top bar with shop
  * switcher, global search, notifications and user menu. Feature pages render
- * in <Outlet/> and own their PageHeader.
+ * in <Outlet/> and own their PageHeader. The shop's subscription banner
+ * (features/billing) sits above the page; subscription refusals in error
+ * toasts get the owner's "Go to Billing" action.
  */
 export function AppShell() {
-  const { permissions } = useShop();
+  const { permissions, role } = useShop();
+  useBillingErrorToasts(role);
   const groups = visibleNav(permissions);
   const [mobileOpen, setMobileOpen] = useState(false);
   const navigation = useNavigation();
@@ -83,6 +88,7 @@ export function AppShell() {
           className="min-w-0 flex-1 px-4 py-5 outline-none sm:px-6 sm:py-6 lg:px-8"
         >
           <div className="mx-auto w-full max-w-7xl">
+            <BillingBanner />
             <Outlet />
           </div>
         </main>

@@ -11,6 +11,8 @@ export interface SettingsSection {
   description: string;
   view: Capability;
   group: SettingsGroup;
+  /** Listed only while platform billing is on (shop_entitlement.billing_enabled). */
+  requiresBilling?: boolean;
 }
 
 export const SETTINGS_GROUPS = [
@@ -181,6 +183,14 @@ export const SETTINGS_SECTIONS = [
     description: 'See your jobs in Google Calendar, Apple Calendar or Outlook.',
     view: 'calendarFeed.own',
     group: 'Data & integrations',
+  },
+  {
+    path: 'billing',
+    label: 'Billing',
+    description: 'This shop’s Detail CRM subscription: plan, trial and payments.',
+    view: 'billing.view',
+    group: 'Account',
+    requiresBilling: true,
   },
   {
     path: 'delete-shop',

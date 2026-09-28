@@ -1,10 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_KINDS, isMuted, MEMBER_KINDS, nextPushKinds, pushableKinds } from './pushPrefs';
+import {
+  ALL_KINDS,
+  isMuted,
+  MEMBER_KINDS,
+  nextPushKinds,
+  OWNER_KINDS,
+  pushableKinds,
+} from './pushPrefs';
 
 describe('push preferences', () => {
-  it('lists every kind for managers and only member kinds for technicians', () => {
+  it('lists every kind for owners, all but owner-only kinds for managers, member kinds for technicians', () => {
     expect(pushableKinds('technician')).toEqual([...MEMBER_KINDS]);
-    expect(new Set(pushableKinds('manager'))).toEqual(new Set(ALL_KINDS));
+    expect(new Set(pushableKinds('owner'))).toEqual(new Set(ALL_KINDS));
+    expect(new Set(pushableKinds('manager'))).toEqual(
+      new Set(ALL_KINDS.filter((k) => !OWNER_KINDS.includes(k))),
+    );
+    expect(pushableKinds('admin')).not.toContain('billing_payment_failed');
   });
 
   it('keeps hidden kinds as saved (or on, when never saved)', () => {

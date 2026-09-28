@@ -326,6 +326,9 @@ describe('PortalPage', () => {
           data: [
             {
               shop_name: 'Glacier Detailing',
+              shop_slug: 'glacier',
+              timezone: 'America/Chicago',
+              currency: 'usd',
               job_number: 1040,
               completed_at: '2026-09-18T20:00:00Z',
               published_at: '2026-09-18T21:00:00Z',
@@ -338,6 +341,9 @@ describe('PortalPage', () => {
             {
               id: 'doc-9',
               shop_name: 'Glacier Detailing',
+              shop_slug: 'glacier',
+              timezone: 'America/Chicago',
+              currency: 'usd',
               file_name: 'Warranty.pdf',
               content_type: 'application/pdf',
               size_bytes: 1024,
@@ -350,6 +356,9 @@ describe('PortalPage', () => {
           data: [
             {
               shop_name: 'Glacier Detailing',
+              shop_slug: 'glacier',
+              timezone: 'America/Chicago',
+              currency: 'usd',
               code: 'ANA-4K7Q',
               share_url: 'https://app.example.com/book/glacier?coupon=ANA-4K7Q',
               credits_earned_cents: 2500,
@@ -368,6 +377,52 @@ describe('PortalPage', () => {
       expect(within(docs).getByText('Warranty.pdf')).toBeInTheDocument();
       expect(await screen.findByLabelText('Your code')).toHaveTextContent('ANA-4K7Q');
       expect(screen.getByText(/Earned so far: \$25\.00/)).toBeInTheDocument();
+    });
+
+    it('dates and prices each row with its own shop’s timezone and currency (0095)', async () => {
+      // The shop was renamed since the overview was read: rows are matched by
+      // their own shop fields, never by name.
+      const rowShop = {
+        shop_name: 'Glacier Auto Spa',
+        shop_slug: 'glacier',
+        timezone: 'Asia/Tokyo',
+        currency: 'eur',
+      };
+      mockRpc({
+        portal_claim_customers: { data: 1 },
+        portal_overview: { data: overview() },
+        portal_memberships: { data: [] },
+        portal_job_reports: { data: [] },
+        portal_documents: {
+          data: [
+            {
+              id: 'doc-9',
+              ...rowShop,
+              file_name: 'Warranty.pdf',
+              content_type: 'application/pdf',
+              size_bytes: 1024,
+              job_number: null,
+              // Sep 19 in Tokyo; Sep 18 in the browser (Honolulu) and in Chicago
+              created_at: '2026-09-19T04:30:00Z',
+            },
+          ],
+        },
+        portal_referrals: {
+          data: [
+            {
+              ...rowShop,
+              code: 'ANA-4K7Q',
+              share_url: null,
+              credits_earned_cents: 2500,
+              credit_balance_cents: 1000,
+            },
+          ],
+        },
+      });
+      render();
+      const docs = await screen.findByRole('list', { name: 'Documents' });
+      expect(within(docs).getByText(/Sep 19, 2026/)).toBeInTheDocument();
+      expect(await screen.findByText(/Earned so far: €25\.00/)).toBeInTheDocument();
     });
   });
 });

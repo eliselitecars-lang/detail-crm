@@ -256,6 +256,9 @@ describe('useDeleteShop', () => {
     expect(deleteShopErrorMessage(await refusal(422, 'name_mismatch'))).toBe(
       'The name you typed doesn’t match this shop’s name. Nothing was deleted.',
     );
+    expect(deleteShopErrorMessage(await refusal(502, 'platform_subscription_cancel_failed'))).toBe(
+      'We could not cancel the shop’s subscription, so nothing was deleted. Try again.',
+    );
     expect(deleteShopErrorMessage(await refusal(422, 'other'))).toBe('server text');
   });
 });

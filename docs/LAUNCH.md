@@ -237,7 +237,22 @@ requests, the governing law of your terms and (optionally) a postal address
 6. [ ] **Twilio numbers** for the first shop (1.3, `twilio.md`).
 7. [ ] **Billing** (optional, later): [BILLING.md](BILLING.md) section 5.
        Until `BILLING_ENABLED` is `true` every shop can use everything for
-       free.
+       free. In short, in this order:
+       1. In your **platform** Stripe account, one Product per plan with the
+          metadata `detailcrm_plan` = `true` (plus optional `max_members`,
+          `features`, `sort`) and a monthly and/or yearly recurring Price
+          each; save the Customer Portal settings (test and live mode).
+       2. Comp pilot shops (`billing_set_comp`, BILLING.md section 7).
+       3. Set `BILLING_TRIAL_DAYS`, then `BILLING_ENABLED` = `true`, and run
+          *deploy-backend* with *stripe_webhooks*. It creates the platform
+          webhook endpoint for `billing-webhook` (checkout, subscription,
+          invoice paid / payment failed, product and price events) and
+          stores its secret, applies the switch and trial with
+          `set_billing_config(p_enabled, p_trial_days)`, and syncs the plans
+          through the `billing` function (`sync_plans`).
+       4. Check: `<APP_BASE_URL>/pricing` lists the plans; Settings -> Billing
+          shows the trial and the plan cards to the owner (section 5 step 12).
+       The iPhone app shows neutral status text only (section 6).
 
 ---
 
@@ -289,7 +304,12 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       what this code does (wording in `web/src/features/legal/content.tsx`),
       but they are not legal advice and the legal choices in them (liability
       cap, governing law, notice of changes, the shop's responsibility for
-      refunds, disputes and negative balances) are yours to confirm. Set the
+      refunds, disputes and negative balances, and the shop subscription
+      terms: automatic renewal, cancellation at the end of the paid period in
+      the Customer Portal, no refunds except as stated at checkout or
+      required by law, what a lapsed shop can still do) are yours to confirm.
+      The privacy policy says your platform Stripe account receives the
+      shop's billing details for the subscription. Set the
       `LEGAL_*` / `SUPPORT_EMAIL` variables
       ([DEPLOY.md section 2](DEPLOY.md#2-settings-reference)) so the pages name you;
       without them they say "the operator of this service". When the product
@@ -372,11 +392,14 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       accordingly if asked.
 - [ ] **Shop subscriptions** (when billing is on): the iPhone app has no
       purchase screen, no prices, no plan names and no links or buttons
-      towards buying; it only shows a neutral status line ("This shop's
-      subscription is inactive. ..."). Shops, as businesses, subscribe to
-      the service on the web (Settings -> Billing). If App Review asks,
+      towards buying; it only shows a neutral status line, and a refused
+      action shows the server's neutral sentence ("This shop's subscription
+      is inactive, so new records can't be created right now."). Shops, as
+      businesses, subscribe to the service on the web (Settings -> Billing;
+      the public `/pricing` page lists the plans). If App Review asks,
       explain exactly that (guidelines 3.1.1 and 3.1.3); do not add a link
-      to the web billing page in the app.
+      to the web billing or pricing page in the app. The web's owner-only
+      "Go to Billing" links and banners exist only on the web.
 - [ ] Sign in with Apple is not required: the app has no third-party sign-in
       (email and password only).
 - [ ] Support URL, screenshots, description, age rating in App Store Connect

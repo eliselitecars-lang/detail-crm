@@ -55,4 +55,15 @@ describe('notificationLink', () => {
     expect(notificationLink(n('form_signed', { job_id: 'j2' }))?.href).toBe('/app/jobs/j2');
     expect(notificationLink(n('general'))).toBeNull();
   });
+
+  it('sends owners to Billing for a subscription payment problem, others to the list', () => {
+    expect(notificationLink(n('billing_payment_failed'), 'owner')).toEqual({
+      href: '/app/settings/billing',
+      label: 'Open billing',
+    });
+    for (const role of ['admin', 'manager', 'technician'] as const) {
+      expect(notificationLink(n('billing_payment_failed'), role)?.href).toBe('/app/notifications');
+    }
+    expect(notificationLink(n('billing_payment_failed'))?.href).toBe('/app/notifications');
+  });
 });

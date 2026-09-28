@@ -13,6 +13,7 @@ import {
 } from '@/components/ui';
 import { formatDate } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
+import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
 import { EdgeFunctionError } from '@/features/quotes/shared/edge';
 import { newRequestNonce } from '@/features/quotes/shared/format';
 import { useCan } from '@/features/shop/useCan';
@@ -296,7 +297,10 @@ export function Composer({ customer, timeZone, defaultChannel }: ComposerProps) 
 
       {send.error && !jobRequired && (
         <div className="text-danger-ink text-sm" role="alert">
-          <p>{errorMessage(send.error)}</p>
+          <p>
+            {errorMessage(send.error)}
+            <BillingErrorLink error={send.error} />
+          </p>
           {needsReviewLink &&
             (canEditSettings ? (
               <Link

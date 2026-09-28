@@ -24,6 +24,7 @@ function report(signedBy: string | null) {
       phone: '+12055550100',
       email: null,
       review_url: null,
+      timezone: 'America/Chicago',
     },
     job: {
       number: 1042,
@@ -139,6 +140,8 @@ test('a customer reviews the report and signs the inspection remotely', async ({
   await form.getByRole('button', { name: 'Sign inspection' }).click();
 
   await expect(page.getByText('Signed by Jane Doe')).toBeVisible();
+  // 10:00Z in the shop's timezone (America/Chicago), not the browser's.
+  await expect(page.getByText('Signed online on Mon, Sep 21, 2026 · 5:00 AM')).toBeVisible();
   await expect(page.getByRole('form', { name: 'Review and sign' })).toHaveCount(0);
   expect(uploads[0]).toMatch(new RegExp(`/object/signatures/${SHOP}/reports/${TOKEN}/signature-`));
   expect(acks[0]).toMatchObject({

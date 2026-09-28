@@ -216,6 +216,9 @@ test('J2: invited technician works only their assigned job and is denied owner d
       .getByRole('dialog')
       .getByRole('button', { name: /^(Mark as|Complete|Confirm)/ });
     if (await confirm.isVisible().catch(() => false)) await confirm.click();
+    // The step button turns into plain text while the move is pending, so
+    // wait for the server's answer (the toast), not only for the button.
+    await expect(tech.getByText(`Job marked ${label.toLowerCase()}`)).toBeVisible();
     await expect(tech.getByRole('button', { name: `Mark as ${label}` })).toHaveCount(0);
   }
   const done = await rest<Array<Record<string, unknown>>>(
@@ -244,14 +247,18 @@ test('J2: invited technician works only their assigned job and is denied owner d
   );
   expect(still.json[0]?.status).toBe('completed');
 
-  // --- 6. No settings / money in the UI
+  // --- 6. No shop settings / money in the UI. Settings holds only the
+  // technician's own calendar feed (calendarFeed.own).
   const nav = tech.getByRole('navigation').first();
-  await expect(nav.getByRole('link', { name: 'Settings' })).toHaveCount(0);
   await expect(nav.getByRole('link', { name: 'Invoices' })).toHaveCount(0);
   await expect(nav.getByRole('link', { name: 'Payments' })).toHaveCount(0);
   for (const path of ['/app/settings/booking', '/app/invoices', '/app/payments', '/app/team']) {
     await tech.goto(path);
     await expect(tech.getByText('You don’t have access to this page')).toBeVisible();
+    if (path.startsWith('/app/settings/')) {
+      const settingsNav = tech.getByRole('navigation', { name: 'Settings' });
+      await expect(settingsNav.getByRole('link')).toHaveText(['Calendar feed']);
+    }
   }
   await tech.goto('/app/reports');
   await expect(tech.getByRole('heading', { name: 'My numbers' })).toBeVisible();

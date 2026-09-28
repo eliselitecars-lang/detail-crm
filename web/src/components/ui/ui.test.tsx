@@ -388,3 +388,42 @@ describe('Toast timers', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('Toast error actions', () => {
+  it('adds the registered action to recognised errors only, until it is removed', async () => {
+    const api: { current: ToastApi | null } = { current: null };
+    function Capture() {
+      api.current = useToast();
+      return null;
+    }
+    render(
+      <ToastProvider>
+        <Capture />
+      </ToastProvider>,
+    );
+    const toast = () => {
+      if (!api.current) throw new Error('toast api not captured');
+      return api.current;
+    };
+    const onClick = vi.fn();
+    const refused = { code: 'PT402', message: 'Paused.' };
+    let remove: () => void = () => undefined;
+    act(() => {
+      remove = toast().setErrorAction((error) =>
+        error === refused ? { label: 'Go somewhere', onClick } : undefined,
+      );
+      toast().error(refused);
+      toast().error(new Error('other'));
+      toast().error('A plain message');
+    });
+    const action = screen.getByRole('button', { name: 'Go somewhere' });
+    expect(screen.getAllByRole('button', { name: 'Go somewhere' })).toHaveLength(1);
+    await userEvent.click(action);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    act(() => {
+      remove();
+      toast().error(refused);
+    });
+    expect(screen.queryByRole('button', { name: 'Go somewhere' })).not.toBeInTheDocument();
+  });
+});

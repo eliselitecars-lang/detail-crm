@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { AppError, edgeFunctionError, type AppErrorOptions } from '@/lib/errors';
 import { supabase } from '@/lib/supabase';
 
-export type EdgeFunctionName = 'payments' | 'messaging' | 'account' | 'pdf';
+export type EdgeFunctionName = 'payments' | 'messaging' | 'account' | 'pdf' | 'billing';
 
 export class EdgeFunctionError extends AppError {
   /** Stable edge error code (`payment_failed`, `unprocessable`, `conflict`…). */

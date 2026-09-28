@@ -36,6 +36,10 @@ The service role is used only for platform or operator plumbing that the local s
 - `connectStripe` (`support/journey.ts`): stripe-mock is stateless, and every account it returns has `charges_enabled=false`. After `stripe-connect` creates the account, the harness sets the flags the way a finished onboarding would. `shop_stripe_accounts` can only be written by the service role.
 - `provisionSmsNumber`: the operator binds a Twilio number to the shop in `shop_sms_numbers`, which only the service role can write, and registers it with the Twilio mock.
 - `tour.spec.ts` inserts the technician's membership directly. The invite flow is J2.
+  It opens each screen in a fresh tab of the signed-in context: one tab
+  reloading the whole Vite dev-server module graph dozens of times ran the
+  browser out of resources (`net::ERR_INSUFFICIENT_RESOURCES`, a blank page)
+  once the parity screens were added.
 
 stripe-mock limits the journeys can't work around:
 

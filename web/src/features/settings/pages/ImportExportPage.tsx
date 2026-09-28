@@ -60,6 +60,7 @@ import {
   type LocalRowError,
   type ParsedCsv,
 } from '../importing';
+import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
 
 const KIND_LABELS: Record<ImportKind, string> = {
   customers: 'Customers & vehicles',
@@ -604,7 +605,10 @@ function ImportInterrupted({
       <p className="font-medium">
         The import stopped after {fmt(savedRows)} of {fmt(totalRows)} rows.
       </p>
-      <p>{interruption.message}</p>
+      <p>
+        {interruption.message}
+        <BillingErrorLink error={interruption.reason} />
+      </p>
       <p>
         The first {fmt(savedRows)} row{savedRows === 1 ? ' is' : 's are'} saved. Import the
         remaining {fmt(remaining)} to finish — saved rows aren’t sent again.
@@ -638,9 +642,17 @@ function ImportDone({
   result: ImportRunResult;
   onAgain: () => void;
 }) {
+  const replayed = result.replayedRows;
   return (
     <div className="flex flex-col gap-3">
       <ImportSummary result={result} localErrors={[]} fileName="import" />
+      {replayed > 0 && (
+        <p role="note" className="text-muted text-sm">
+          {replayed.toLocaleString('en-US')} row{replayed === 1 ? ' was' : 's were'} already saved
+          by an earlier attempt whose reply was lost, so {replayed === 1 ? 'it was' : 'they were'}{' '}
+          not imported twice.
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
         <Link
           className="text-primary text-sm underline"

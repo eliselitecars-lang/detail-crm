@@ -6,6 +6,7 @@
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { unwrap, unwrapRequired, type Row } from '@/lib/db';
+import { useRequestNonces, type RequestNonces } from '@/lib/requestNonce';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
@@ -43,20 +44,43 @@ export function useShopFees(enabled = true) {
 
 export type FeeDocumentKind = 'quote' | 'invoice';
 
-/** add_fee_line → the new line's id. `onSettled` refreshes the document. */
+/**
+ * add_fee_line → the new line's id. `onSettled` refreshes the document. Each
+ * "add this fee" carries a request nonce (0095), reused when the same fee is
+ * added again after a network failure, so a retry never adds it twice.
+ */
 export function useAddFeeLine(kind: FeeDocumentKind, documentId: string, onSettled: () => unknown) {
+  const nonces = useRequestNonces();
   return useMutation({
-    mutationFn: async (feeId: string): Promise<string> =>
-      unwrapRequired(
-        await supabase.rpc('add_fee_line', {
-          p_doc_kind: kind,
-          p_doc_id: documentId,
-          p_fee_id: feeId,
-        }),
-        'line',
-      ),
+    mutationFn: (feeId: string): Promise<string> => addFeeLine(nonces, kind, documentId, feeId),
     onSettled,
   });
+}
+
+/** add_fee_line for a job, quote or invoice with the action's request nonce. */
+export async function addFeeLine(
+  nonces: RequestNonces,
+  kind: FeeDocumentKind | 'job',
+  documentId: string,
+  feeId: string,
+): Promise<string> {
+  const key = `${kind}:${documentId}:fee:${feeId}`;
+  try {
+    const lineId = unwrapRequired(
+      await supabase.rpc('add_fee_line', {
+        p_doc_kind: kind,
+        p_doc_id: documentId,
+        p_fee_id: feeId,
+        p_request_nonce: nonces.take(key),
+      }),
+      'line',
+    );
+    nonces.settle(key);
+    return lineId;
+  } catch (error) {
+    nonces.settle(key, error);
+    throw error;
+  }
 }
 
 /** Moves a line into a proposal option (fee lines are added as shared lines). */

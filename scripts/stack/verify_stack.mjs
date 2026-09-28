@@ -142,10 +142,13 @@ await check('db: app extensions live in schema extensions', () => {
   assert(got === 'btree_gist,citext,pg_trgm,pgcrypto', got);
   return got;
 });
-await check('db: supabase_realtime publication carries the 0044 tables', () => {
+// 0044_integration_realtime.sql adds jobs, messages, notifications, payments
+// and time_entries; 0081_comms_schema.sql adds tasks. Exactly the tables the
+// web subscribes to (useRealtime callers; web/README.md "Realtime").
+await check('db: supabase_realtime publication carries exactly the 0044 + 0081 tables', () => {
   const got = sql(`select string_agg(tablename, ',' order by tablename) from pg_publication_tables
                     where pubname = 'supabase_realtime' and schemaname = 'public'`);
-  assert(got === 'jobs,messages,notifications,payments,time_entries', got);
+  assert(got === 'jobs,messages,notifications,payments,tasks,time_entries', got);
   return got;
 });
 await check('db: storage buckets from migration 0025 exist with limits', () => {
@@ -186,21 +189,25 @@ for (const [fn, args] of [
   ['public_get_form', { p_token: randomUUID() }],
   ['public_get_invite', { p_token: randomUUID() }],
   ['public_unsubscribe', { p_token: randomUUID() }],
+  // /pricing (anon): [] while billing is off
+  ['public_billing_plans', {}],
 ]) {
   await check(`rest: anon can call rpc ${fn} (exposed + granted)`, async () => {
     const r = await http('POST', `${API}/rest/v1/rpc/${fn}`, { headers: anonH, body: args });
     // Exposed and executable: anything but "function not found" (PGRST202)
     // or "permission denied" (42501). An unknown token/slug may answer null,
-    // {} or raise P0002 (the function ran), all fine here.
+    // {} or raise PT404 (HTTP 404: the function ran), all fine here; never 5xx.
     assert(r.json?.code !== '42501' && r.json?.code !== 'PGRST202', show(r));
-    assert(r.status < 500 || r.json?.code === 'P0002', show(r));
+    assert(r.status < 500, show(r));
     return `HTTP ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}`;
   });
 }
-await known('rest: a not-found public RPC answers 4xx, not HTTP 500 (P0002 -> 500 in PostgREST)', async () => {
+// Public RPCs raise PT404 for an unknown token/slug (PostgREST: HTTP 404);
+// P0002 would be HTTP 500 (only P0001 is 400, PT4xx sets the status).
+await check('rest: a not-found public RPC answers HTTP 404 PT404 (not P0002 -> 500)', async () => {
   const r = await http('POST', `${API}/rest/v1/rpc/public_get_quote`, { headers: anonH, body: { p_token: randomUUID() } });
-  assert(r.status < 500, `${show(r)} — PostgREST maps SQLSTATE P0002 to HTTP 500; raise PT404 (or return null) for not-found`);
-  return `HTTP ${r.status}`;
+  assert(r.status === 404 && r.json?.code === 'PT404', `${show(r)} — expected 404 PT404; PostgREST maps SQLSTATE P0002 to HTTP 500`);
+  return `HTTP ${r.status} ${r.json.code}`;
 });
 await check('rest: anon can call get_available_slots with an unknown shop', async () => {
   const r = await http('POST', `${API}/rest/v1/rpc/get_available_slots`, {
@@ -208,7 +215,7 @@ await check('rest: anon can call get_available_slots with an unknown shop', asyn
     body: { p_shop_slug: `no-such-shop-${SFX}`, p_service_ids: [randomUUID()], p_vehicle_category_id: null, p_from: '2030-01-01', p_to: '2030-01-02' },
   });
   assert(r.json?.code !== '42501' && r.json?.code !== 'PGRST202', show(r));
-  assert(r.status < 500 || r.json?.code === 'P0002', show(r));
+  assert(r.status < 500, show(r));
   return `HTTP ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}`;
 });
 await check('rest: anon is denied portal_overview and create_shop', async () => {

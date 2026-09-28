@@ -244,7 +244,7 @@
 | `preview_template_message` | p_job_id, p_key, p_channel? | authenticated · DEFINER | `TABLE(enabled boolean, to_address text, subject text, body text)` | 0033_comms_messages.sql | web, iOS |
 | `price_services` | p_shop, p_customer_id, p_service_ids, p_vehicle_category_id?, p_vehicle_id? | authenticated · DEFINER | `jsonb` | 0040_integration_helpers_pricing.sql | web, iOS |
 | `public_ack_inspection` | p_token, p_inspection_id, p_signer_name, p_signature_path | anon, authenticated · DEFINER | `jsonb` | 0072_ops_job_reports.sql | web |
-| `public_billing_plans` | — | anon, authenticated · DEFINER | `jsonb` | 0101_billing_rpcs.sql | edge:billing |
+| `public_billing_plans` | — | anon, authenticated · DEFINER | `jsonb` | 0101_billing_rpcs.sql | web, edge:billing |
 | `public_booking_catalog` | p_slug | anon, authenticated · DEFINER | `jsonb` | 0042_integration_public_booking.sql | web |
 | `public_booking_documents` | p_token | anon, authenticated · DEFINER | `jsonb` | 0075_ops_documents.sql | web |
 | `public_booking_link` | p_token | anon, authenticated · DEFINER | `jsonb` | 0053_sched_slots_links.sql | web |
@@ -314,7 +314,7 @@
 | `set_job_status` | p_job_id, p_status, p_force?, p_reason? | authenticated · DEFINER | `jobs` | 0073_ops_completion_gates.sql | web, iOS |
 | `set_notification_prefs` | p_shop_id, p_push_kinds, p_muted_until? | authenticated · DEFINER | `member_notification_prefs` | 0082_comms_push.sql | web, iOS |
 | `set_route_order` | p_shop_id, p_job_ids | authenticated · DEFINER | `integer` | 0057_sched_routes.sql | web, iOS |
-| `shop_entitlement` | p_shop_id | authenticated · DEFINER | `jsonb` | 0101_billing_rpcs.sql | iOS |
+| `shop_entitlement` | p_shop_id | authenticated · DEFINER | `jsonb` | 0101_billing_rpcs.sql | web, iOS |
 | `shop_role_of` | p_shop_id | authenticated · DEFINER | `shop_role` | 0002_foundation_tenancy.sql | 13 SQL fns |
 | `shop_team` | p_shop_id | authenticated · DEFINER | `TABLE(member_id uuid, user_id uuid, role shop_role, display_name text, calendar_color tex…` | 0002_foundation_tenancy.sql | web, iOS |
 | `sign_form_submission` | p_submission_id, p_signer_name, p_signature_path? | authenticated · DEFINER | `form_submissions` | 0023_field_ops_forms.sql | web, iOS |
@@ -429,7 +429,7 @@
 | `gift_card_log_attempt` | p_shop_id, p_key, p_succeeded | `void` | 0066_money_gift_cards.sql | 3 SQL fns |
 | `gift_card_match_customer` | p_shop_id, p_email, p_name, p_source | `uuid` | 0066_money_gift_cards.sql | 2 SQL fns |
 | `gift_card_normalize_code` | p_code | `text` | 0066_money_gift_cards.sql | 2 SQL fns |
-| `gift_card_order_expired` | p_session_id | `jsonb` | 0095_integration_parity_fixes.sql | — |
+| `gift_card_order_expired` | p_session_id | `jsonb` | 0095_integration_parity_fixes.sql | edge:stripe-webhook |
 | `gift_card_order_paid` | p_order_id, p_payment_intent_id, p_amount_received_cents | `jsonb` | 0066_money_gift_cards.sql | edge:stripe-webhook |
 | `gift_card_order_prepare` | p_slug, p_payload, p_now? | `jsonb` | 0066_money_gift_cards.sql | edge:payments |
 | `gift_card_order_refunded` | p_payment_intent_id, p_refunded_total_cents | `jsonb` | 0066_money_gift_cards.sql | edge:stripe-webhook |
@@ -5170,7 +5170,7 @@ file `0061_money_schema.sql` · RLS on · realtime: no
 - **DEFINER** · plpgsql · volatile · exec: authenticated, service_role · search_path="" · file `0068_money_fees.sql`, `0095_integration_parity_fixes.sql`
 - (COMMENT ON) Adds a preset fee as a line on a job, quote or invoice (managers+; each document's edit rules apply). Returns the line id. p_request_nonce (0095): a retry returns the same line.
 - Called by:
-  - web: `web/src/features/jobs/api.ts`, `web/src/features/quotes/shared/fees.ts`
+  - web: `web/src/features/quotes/shared/fees.ts`
   - iOS: `ios/DetailCRM/DetailCRM/Core/Services/JobService.swift`
 
 #### `adjust_gift_card`
@@ -7310,7 +7310,8 @@ file `0093_integration_money.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: service_role · search_path="" · file `0095_integration_parity_fixes.sql`
 - (COMMENT ON) service_role (stripe-webhook checkout.session.expired): the pending gift card order of the session becomes expired. Idempotent. {order_id, status, changed}.
-- Called by: no caller in this repo (service-role API / manual operations only)
+- Called by:
+  - edge:stripe-webhook: `supabase/functions/stripe-webhook/handlers.ts`
 
 #### `inbox_threads`
 
@@ -7606,6 +7607,7 @@ file `0100_billing_schema.sql` · RLS on · realtime: no
 - **DEFINER** · sql · stable · exec: anon, authenticated, service_role · search_path="" · file `0101_billing_rpcs.sql`
 - public_billing_plans() — anon + authenticated: [] while billing is off, else the active plans ordered by sort, amount: [{id, name, description, amount_cents, currency, interval, interval_count, max_members, features}]. Never Stripe ids.
 - Called by:
+  - web: `web/src/features/billing/api.ts`
   - edge:billing: `supabase/functions/billing/index.ts`
 
 #### `set_billing_config`
@@ -7641,6 +7643,7 @@ file `0100_billing_schema.sql` · RLS on · realtime: no
 - **DEFINER** · plpgsql · stable · exec: authenticated, service_role · search_path="" · file `0101_billing_rpcs.sql`
 - shop_entitlement(p_shop_id) — the caller's view of the shop's standing. Any ACTIVE member; anyone else (and an unknown shop) P0002. {billing_enabled, state, reason, plan_name, trial_ends_at, current_period_end, cancel_at_period_end, max_members, members_used, can_write, is_owner}. Billing details (plan_name, trial_ends_at, current_period_end, cancel_at_period_end, max_members, members_used) are for owners, admins and managers: technicians get null (false) there and only the standing they need to explain a refusal. Never prices or Stripe ids.
 - Called by:
+  - web: `web/src/features/billing/api.ts`
   - iOS: `ios/DetailCRM/DetailCRM/Core/Services/BillingService.swift`
 
 ## Other (0102)

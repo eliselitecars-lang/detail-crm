@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import { PageHeader } from '@/components/ui';
+import { useShopEntitlement } from '@/features/billing/api';
 import { can } from '@/features/shop/permissions';
 import { useShop } from '@/features/shop/shopContext';
 import { cn } from '@/lib/cn';
@@ -9,11 +10,18 @@ import { SETTINGS_GROUPS, SETTINGS_SECTIONS } from './sections';
 /**
  * /app/settings layout: page header, the settings sub-nav (vertical list on
  * large screens, a horizontally scrolling tab row on phones) and the active
- * section in <Outlet/>. Sections the role cannot use are not listed.
+ * section in <Outlet/>. Sections the role cannot use are not listed, nor
+ * Billing while platform billing is off.
  */
 export default function SettingsPage() {
-  const { permissions } = useShop();
-  const sections = SETTINGS_SECTIONS.filter((section) => can(permissions, section.view));
+  const { permissions, shopId } = useShop();
+  // Billing is listed only while the operator has billing switched on.
+  const billingEnabled = useShopEntitlement(shopId).data?.billing_enabled === true;
+  const sections = SETTINGS_SECTIONS.filter(
+    (section) =>
+      can(permissions, section.view) &&
+      (!('requiresBilling' in section) || !section.requiresBilling || billingEnabled),
+  );
   const groups = SETTINGS_GROUPS.map((group) => ({
     group,
     items: sections.filter((section) => section.group === group),

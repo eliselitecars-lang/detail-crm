@@ -91,11 +91,15 @@ Records every provider call (Authorization stripped) to memory and
 
 ## What `verify_stack.mjs` proves
 
-About 60 checks (60 PASS + 2 KNOWN on the current tree), each printed with evidence (`--json out.json` saves them):
+63 checks (62 PASS + 1 KNOWN on the current tree: the Kong CORS platform
+difference below), each printed with evidence (`--json out.json` saves them):
 extensions (pg_cron, pg_net, vault; app extensions in `extensions`), the
-realtime publication, buckets, RLS on every table, no anon table grants;
-PostgREST exposure + grants of every `public_*` RPC for anon and denial of
-staff/service RPCs; GoTrue signup (auto-confirmed), password login, refresh
+realtime publication (exactly the 0044 + 0081 tables: jobs, messages,
+notifications, payments, tasks, time_entries — the tables the web subscribes
+to), buckets, RLS on every table, no anon table grants;
+PostgREST exposure + grants of every `public_*` RPC for anon (including
+`public_billing_plans`, the /pricing page) and denial of staff/service RPCs,
+a not-found public RPC answering HTTP 404 `PT404` (never a 5xx); GoTrue signup (auto-confirmed), password login, refresh
 rotation, profile trigger, account deletion through the GoTrue admin API
 (FK `SET NULL` cascades run as `supabase_auth_admin`; owners are refused); owner shop creation, RLS inserts and tenant
 isolation; Storage uploads/downloads/denials under the `job-photos` and
@@ -108,7 +112,7 @@ Resend mock, and pg_net → Kong → functions (the pg_cron job path).
 
 `known(...)` checks document platform differences / open defects (below):
 they print `KNOWN` and do not fail the run unless `STACK_STRICT=1`; they print
-`FIXED` once the problem is gone.
+`FIXED` once the problem is gone (then turn them into normal checks).
 
 ## SQL suite on the real database (`test_db_stack.sh`)
 
@@ -145,52 +149,30 @@ plus `sql/test_helpers_stack.sql`, then runs every `supabase/tests/*.sql` in
 
 ## Known issues / platform differences
 
-Open **product defects** found on the real stack. Each is kept executable so
-it is noticed when fixed: `verify_stack.mjs` `known(...)` checks print
-`KNOWN` / `FIXED`, and Playwright `test.fail(...)` specs are reported as
-expected failures while the defect reproduces and FAIL the run ("expected to
-fail, but passed") once it is fixed — then remove the marker. Nothing is
+Open **product defects** found on the real stack are kept executable so they
+are noticed when fixed: `verify_stack.mjs` `known(...)` checks print `KNOWN` /
+`FIXED`, and Playwright `test.fail(...)` specs are reported as expected
+failures while the defect reproduces and FAIL the run ("expected to fail, but
+passed") once it is fixed — then remove the marker. Nothing is
 `test.skip`/`test.fixme`.
 
-* **P0002 → HTTP 500** (`verify_stack.mjs`: "rest: a not-found public RPC
-  answers 4xx"). The RPCs raise `P0002` for an unknown token/slug/id:
-  `public_get_quote` / `public_respond_quote`
-  (`supabase/migrations/0014_money_public_rpcs.sql:191,230`),
-  `public_get_invoice` (0014:282), `public_get_form` (0023:423),
-  `get_available_slots` (0007:142), `public_shop_profile` /
-  `public_booking_catalog` / `public_get_booking`
-  (`0042_integration_public_booking.sql:204,256,1034`), plus many staff RPCs
-  (`grep -n "errcode = 'P0002'" supabase/migrations/*.sql`).
-  PostgREST 12+ answers `P0002` with **HTTP 500** (only `P0001` is 400;
-  `PT4xx` sets the status). Evidence (`postgrest/16.3`):
-  `POST /rest/v1/rpc/public_get_quote {"p_token":"<random uuid>"}` →
-  `HTTP/1.1 500`, `Proxy-Status: PostgREST; error=P0002`,
-  `{"code":"P0002","message":"quote not found"}`. Clients branch on `code`, so
-  the pages render "not found", but every stale link is a 5xx in logs/alerts
-  and client retry logic may retry it. Fix: `using errcode = 'PT404'` (or
-  return null) for not-found. The web e2e mocks do not reproduce the 500.
-* **Due-on-receipt invoices are overdue at once** (`web/e2e-stack/j3-money.spec.ts`
-  J3b, `test.fail`). `invoices_maintain`
-  (`supabase/migrations/0012_money_invoices_payments.sql:404-406`) sets
-  `due_at = issued_at + shops.invoice_due_days` and the default is 0
-  (`0002_foundation_tenancy.sql:69`), so `due_at` = the issue instant;
-  `isInvoiceOverdue()` (`web/src/features/invoices/api.ts:65`) and
-  `dashboard_summary.overdue_invoices` (`0046_reports_dashboard.sql`, `due_at < p_now`)
-  flag a freshly issued invoice **Overdue**. Evidence: J3b fails at
-  `expect(page.getByText('Overdue', { exact: true })).toHaveCount(0)` —
-  `Expected: 0, Received: 1`. Repro:
-  `cd web && npx playwright test -c playwright.stack.config.ts -g J3b` (reported as
-  an expected failure; the error is in the report / `--reporter=json`).
-* **Staff-sent invoice/quote messages keep empty placeholder lines**
-  (J3c, `test.fail`). The send dialog renders the template in the browser with
-  the `render_template` RPC (`web/src/features/quotes/shared/api.ts:339`,
-  `SendDocumentDialog.tsx:118`) and sends the text as a free-form body, so
-  the "omit a line whose value is unavailable" rule
-  (`0032_comms_templates.sql:37-48`, implemented for queued messages in
-  `0033_comms_messages.sql`) never applies. Evidence: for a shop without a
-  phone number the Resend mock receives
-  `"text":"…View and pay online: http://127.0.0.1:5173/i/<token>\n\nQuestions? Call us at .\n\n<shop>"`.
-  Repro: `npx playwright test -c playwright.stack.config.ts -g J3c`.
+**There are no open product defects.** The three found earlier are fixed and
+kept as regular checks:
+
+* **P0002 -> HTTP 500 for unknown public links**: every `public_*` / booking
+  RPC now raises `PT404` (PostgREST: HTTP 404) for an unknown token, slug or
+  id; `verify_stack.mjs` checks `public_get_quote` answers 404 `PT404` and that
+  no anon-callable public RPC answers 5xx. (Staff RPCs still use `P0002` for a
+  record id that no longer exists, e.g. a stale link inside the app; the web
+  maps the code to "not found", PostgREST logs it as a 500.)
+* **Due-on-receipt invoices overdue at once**: `invoices_maintain`
+  (`0012_money_invoices_payments.sql`) sets `due_at` to the END of the local
+  due date (23:59:59 shop time), so a freshly issued invoice is not overdue;
+  regression `web/e2e-stack/j3-money.spec.ts` J3b.
+* **Empty placeholder lines in staff-sent messages**: quote / invoice sends are
+  rendered by the server (`preview_document_message`, `messaging.send` with
+  `quote_id` / `invoice_id`), which omits lines whose value is unavailable;
+  regression J3c.
 
 Platform differences (not product defects):
 * **Local Kong masks function CORS.** The CLI's Kong has a global CORS plugin

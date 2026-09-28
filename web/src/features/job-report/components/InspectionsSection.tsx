@@ -9,6 +9,7 @@ import {
   SignaturePad,
   type SignaturePadHandle,
 } from '@/components/ui';
+import { formatDateTime } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
 import { VehicleDiagram } from '@/features/jobs/components/detail/VehicleDiagram';
 import { DAMAGE_LABELS, VIEW_LABELS } from '@/features/jobs/model';
@@ -40,6 +41,7 @@ export function InspectionsSection({
           token={token}
           inspection={inspection}
           uploadPrefix={report.signature_upload_prefix}
+          timezone={report.shop.timezone}
           urls={urls}
         />
       ))}
@@ -51,11 +53,14 @@ function InspectionCard({
   token,
   inspection,
   uploadPrefix,
+  timezone,
   urls,
 }: {
   token: string;
   inspection: ReportInspection;
   uploadPrefix: string | null;
+  /** The shop's IANA zone: the sign-off time reads in shop time, never the browser's. */
+  timezone: string;
   urls: ReadonlyMap<string, string>;
 }) {
   const groups = marksByView(inspection.marks);
@@ -77,6 +82,14 @@ function InspectionCard({
       }
     >
       <div className="flex flex-col gap-4">
+        {inspection.signed_at && (
+          <p className="text-muted text-sm">
+            {inspection.signed_remotely ? 'Signed online on ' : 'Signed on '}
+            <time dateTime={inspection.signed_at}>
+              {formatDateTime(inspection.signed_at, timezone)}
+            </time>
+          </p>
+        )}
         {groups.length === 0 ? (
           <p className="text-muted text-sm">No damage was marked.</p>
         ) : (

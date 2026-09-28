@@ -3,7 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { cn } from '@/lib/cn';
 import { errorMessage } from '@/lib/errors';
 import { IconButton } from './IconButton';
-import { ToastContext, type ToastApi, type ToastInput, type ToastTone } from './toastContext';
+import {
+  ToastContext,
+  type ToastApi,
+  type ToastErrorAction,
+  type ToastInput,
+  type ToastTone,
+} from './toastContext';
 
 interface ToastItem extends ToastInput {
   id: number;
@@ -24,6 +30,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const timers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   /** Ids on screen, oldest first (mirrors `toasts`, readable outside a state updater). */
   const visible = useRef<number[]>([]);
+  /** Adds an action to recognised errors (see ToastApi.setErrorAction). */
+  const errorAction = useRef<ToastErrorAction | null>(null);
 
   const clearTimer = useCallback((id: number) => {
     const timer = timers.current.get(id);
@@ -81,12 +89,22 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         show({ title, tone: 'success', ...(description !== undefined ? { description } : {}) }),
       info: (title, description) =>
         show({ title, tone: 'info', ...(description !== undefined ? { description } : {}) }),
-      error: (titleOrError, description) =>
-        show({
+      error: (titleOrError, description) => {
+        const action =
+          typeof titleOrError === 'string' ? undefined : errorAction.current?.(titleOrError);
+        return show({
           title: typeof titleOrError === 'string' ? titleOrError : errorMessage(titleOrError),
           tone: 'error',
           ...(description !== undefined ? { description } : {}),
-        }),
+          ...(action ? { action } : {}),
+        });
+      },
+      setErrorAction: (action) => {
+        errorAction.current = action;
+        return () => {
+          if (errorAction.current === action) errorAction.current = null;
+        };
+      },
     }),
     [show, dismiss],
   );

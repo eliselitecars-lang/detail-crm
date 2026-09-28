@@ -143,9 +143,41 @@ describe('QuoteDetailPage — fees, follow-ups, PDF, self-scheduling', () => {
         p_doc_kind: 'quote',
         p_doc_id: 'quote-1',
         p_fee_id: 'fee-1',
+        p_request_nonce: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/) as unknown,
       }),
     );
     expect(await screen.findByText('Travel added')).toBeInTheDocument();
+  });
+
+  it('retries a fee with the same request nonce after a network failure, never twice', async () => {
+    setTableResult('shop_fees', {
+      data: [
+        { id: 'fee-1', name: 'Travel', amount_cents: 2500, taxable: false, auto_apply: 'none' },
+      ],
+    });
+    let attempt = 0;
+    const calls = mockRpc({
+      add_fee_line: () => {
+        attempt += 1;
+        return attempt === 1
+          ? { data: null, error: new TypeError('Failed to fetch') }
+          : { data: 'line-9' };
+      },
+    });
+    const { user } = setup();
+    const addFee = async () => {
+      await user.click(await screen.findByRole('button', { name: 'Add fee' }));
+      await user.click(screen.getByRole('menuitem', { name: 'Travel · $25.00' }));
+    };
+    await addFee();
+    expect(await screen.findByText(/Can’t reach the server|Can't reach the server/)).toBeVisible();
+    await addFee();
+    expect(await screen.findByText('Travel added')).toBeInTheDocument();
+    const nonces = calls
+      .filter((c) => c.fn === 'add_fee_line')
+      .map((c) => c.args.p_request_nonce as string);
+    expect(nonces).toHaveLength(2);
+    expect(nonces[1]).toBe(nonces[0]);
   });
 
   it('shows the next automatic reminder and pauses them', async () => {

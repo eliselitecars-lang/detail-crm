@@ -2,6 +2,12 @@
  * CSV import / export (P-5): import_customers / import_services (dry run and
  * commit, in chunks), import_batches history, and exports (customers and
  * vehicles through paged selects, jobs through export_jobs). Managers and up.
+ *
+ * Every committed chunk carries a request nonce (0095): a chunk sent again
+ * after an uncertain failure (a lost response, a timeout) — by resuming or by
+ * starting the same import again — reuses its nonce, and the server answers
+ * with the first attempt's result (`"replayed": true`) instead of importing
+ * those rows twice.
  */
 import type { PostgrestError } from '@supabase/supabase-js';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -11,6 +17,7 @@ import type { Json } from '@/lib/database.types';
 import { unwrap, type Row } from '@/lib/db';
 import { errorMessage } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
+import { payloadFingerprint, useRequestNonces } from '@/lib/requestNonce';
 import { supabase } from '@/lib/supabase';
 import { settingsKeys } from '../api';
 import { chunk, IMPORT_CHUNK_SIZE, type BuiltRow, type ImportKind } from '../importing';
@@ -69,6 +76,8 @@ const resultSchema = z.object({
     errors: z.number().int(),
   }),
   rows: z.array(resultRowSchema),
+  /** A committed chunk retried with its nonce: the first call's result, nothing imported again. */
+  replayed: z.boolean().optional(),
 });
 
 export interface ImportRowResult {
@@ -84,6 +93,11 @@ export interface ImportRunResult {
   batchId: string | null;
   counts: { created: number; updated: number; skipped: number; errors: number };
   rows: ImportRowResult[];
+  /**
+   * Rows of chunks an earlier attempt had already saved (the server replayed
+   * that attempt's result): counted once, not imported again.
+   */
+  replayedRows: number;
 }
 
 export interface ImportRunInput {
@@ -181,6 +195,7 @@ async function interruption(
 export function useRunImport() {
   const { shopId } = useShop();
   const queryClient = useQueryClient();
+  const nonces = useRequestNonces();
   return useMutation({
     mutationFn: async ({ kind, rows, dryRun, fileName, onProgress, resume }: ImportRunInput) => {
       const fn = kind === 'customers' ? 'import_customers' : 'import_services';
@@ -192,30 +207,43 @@ export function useRunImport() {
               batchId: resume.batchId,
               counts: { ...resume.previous.counts },
               rows: [...resume.previous.rows],
+              replayedRows: resume.previous.replayedRows,
             }
           : {
               dryRun,
               batchId: null,
               counts: { created: 0, updated: 0, skipped: 0, errors: 0 },
               rows: [],
+              replayedRows: 0,
             };
       const parts = chunk(rows.slice(from), IMPORT_CHUNK_SIZE);
       let done = from;
       onProgress?.(done, rows.length);
       for (const part of parts) {
         let result: z.infer<typeof resultSchema>;
+        const payload = part.map((r) => r.payload);
+        const file = fileName.slice(0, 255);
+        // What this chunk IS (the server fingerprints the same: rows, batch,
+        // file name): the same chunk sent again reuses its nonce.
+        const nonceKey = [fn, file, total.batchId ?? '-', done, payloadFingerprint(payload)].join(
+          '|',
+        );
         try {
           const raw = unwrap(
             await supabase.rpc(fn, {
               p_shop_id: shopId,
-              p_rows: part.map((r) => r.payload) as Json,
+              p_rows: payload as Json,
               p_dry_run: dryRun,
-              p_file_name: fileName.slice(0, 255),
+              p_file_name: file,
               ...(total.batchId ? { p_batch_id: total.batchId } : {}),
+              // dry runs write nothing: no nonce needed
+              ...(dryRun ? {} : { p_request_nonce: nonces.take(nonceKey) }),
             }),
           );
           result = resultSchema.parse(raw);
+          if (!dryRun) nonces.settle(nonceKey);
         } catch (error) {
+          if (!dryRun) nonces.settle(nonceKey, error);
           if (dryRun || !total.batchId) throw error;
           throw await interruption(
             shopId,
@@ -230,6 +258,7 @@ export function useRunImport() {
         total.counts.updated += result.counts.updated;
         total.counts.skipped += result.counts.skipped;
         total.counts.errors += result.counts.errors;
+        if (result.replayed === true) total.replayedRows += part.length;
         for (const r of result.rows) {
           total.rows.push({
             line: part[r.row - 1]?.line ?? r.row,

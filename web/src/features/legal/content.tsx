@@ -183,6 +183,12 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               Cash, check and other payments are recorded by staff.
             </li>
             <li>
+              <Term>Shop subscriptions:</Term> when the Service charges shops a subscription, we
+              keep each shop’s subscription status, plan, trial and billing-period dates, and
+              Stripe’s reference IDs for the shop’s billing customer and subscription. The owner
+              enters the card on Stripe’s checkout page; the Service never receives or stores it.
+            </li>
+            <li>
               <Term>Time tracking:</Term> when staff clock in and out, the job the time belongs to,
               and notes. When a team member clocks in or out in the iPhone app and has allowed
               location access, the location of the device at that moment (and its accuracy) is
@@ -250,6 +256,10 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
                 invoices, receipts, follow-ups and campaigns).
               </li>
               <li>
+                To bill shops for their subscription to the Service, where it charges one, and to
+                tell the shop owner about a problem with a subscription payment.
+              </li>
+              <li>
                 To keep the Service secure, prevent abuse and fraud, and find and fix problems.
               </li>
               <li>To meet legal obligations and enforce our terms.</li>
@@ -286,7 +296,11 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
                 account, and payments are made on that account. When a customer pays by card, saves
                 a card or starts a membership, the customer’s name, email address and phone number
                 may be shared with Stripe to create the customer on the shop’s Stripe account.
-                Stripe may also collect device information to prevent fraud.
+                Stripe may also collect device information to prevent fraud. Shop subscriptions are
+                separate: they are billed on our own Stripe account, which receives the shop’s
+                billing details — the shop’s name and the owner’s email address, used to create the
+                shop’s billing customer, and the card and any billing address the owner enters on
+                Stripe’s checkout and billing pages.
               </li>
               <li>
                 <Term>Twilio</Term> sends and receives text messages: phone numbers and message
@@ -437,19 +451,21 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
             </p>
             <LegalSubheading>Deleting a shop</LegalSubheading>
             <p>
-              A shop owner can delete the shop in the web app’s settings. Open card payment links
-              are expired and running membership subscriptions are cancelled first; then the shop
-              and everything recorded in it — customers, vehicles, jobs, documents, payment records,
-              messages and team memberships — are deleted, and the shop’s stored files (photos,
-              videos, uploaded documents, signatures, logo and service images) are removed from file
-              storage by an automatic clean-up job. The shop’s Stripe account belongs to the shop
-              and is not closed. Photos, videos, documents and signatures of a deleted job,
-              customer, inspection or form are removed the same way.
+              A shop owner can delete the shop in the web app’s settings. The shop’s own
+              subscription to the Service ends, open card payment links are expired and running
+              membership subscriptions are cancelled first; then the shop and everything recorded in
+              it — customers, vehicles, jobs, documents, payment records, messages and team
+              memberships — are deleted, and the shop’s stored files (photos, videos, uploaded
+              documents, signatures, logo and service images) are removed from file storage by an
+              automatic clean-up job. The shop’s Stripe account belongs to the shop and is not
+              closed. Photos, videos, documents and signatures of a deleted job, customer,
+              inspection or form are removed the same way.
             </p>
             <p>
               Copies held by our providers — for example messages already delivered through Twilio
-              or Resend, payment records in the shop’s Stripe account, and database backups kept by
-              our hosting provider for a limited time — follow those providers’ own retention rules.
+              or Resend, payment records in the shop’s Stripe account, subscription billing records
+              in our Stripe account, and database backups kept by our hosting provider for a limited
+              time — follow those providers’ own retention rules.
             </p>
           </>
         ),
@@ -576,8 +592,8 @@ export function termsOfService(operator: LegalOperator): LegalText {
               errors.
             </p>
             <p>
-              Any fees for using the Service are agreed separately between you and us; these terms
-              do not set prices.
+              Where we charge shops for using the Service, we do so through the shop subscriptions
+              described below; these terms do not set prices.
             </p>
           </>
         ),
@@ -691,6 +707,77 @@ export function termsOfService(operator: LegalOperator): LegalText {
               move that money.
             </li>
           </LegalList>
+        ),
+      },
+      {
+        id: 'subscriptions',
+        title: 'Shop subscriptions',
+        body: (
+          <>
+            <p>
+              When we charge for the Service, each shop needs a subscription to keep creating new
+              work. The subscription is between the shop and us, and is separate from the payments
+              the shop’s customers make to the shop.
+            </p>
+            <LegalList>
+              <li>
+                <Term>Plans and prices:</Term> the plans, their prices, billing periods, any limit
+                on team size and any free trial are shown on our pricing page and in the web app
+                (Settings → Billing) before you subscribe. The amount you pay, including any taxes,
+                is shown on Stripe’s checkout page before you confirm.
+              </li>
+              <li>
+                <Term>Who manages it:</Term> only the shop owner can subscribe, change plans, update
+                the payment method or cancel, in the web app, which opens Stripe’s secure pages.
+                Subscription payments are processed by Stripe on our Stripe account; card details go
+                directly to Stripe.
+              </li>
+              <li>
+                <Term>Trial:</Term> a shop may start with a free trial of the length shown in the
+                app, without entering a card. A shop gets one trial. If the owner subscribes with at
+                least two days of the trial left, the first payment is due when the trial ends;
+                otherwise it is due when the subscription starts.
+              </li>
+              <li>
+                <Term>Renewal:</Term> a subscription renews automatically at the end of each billing
+                period, and the payment method on file is charged for the next period, until the
+                subscription is cancelled.
+              </li>
+              <li>
+                <Term>Cancelling:</Term> the owner can cancel at any time in the billing portal
+                (Settings → Billing → Manage billing). The cancellation takes effect at the end of
+                the billing period already paid, and the shop keeps full use of the Service until
+                then. Fees already paid are not refunded, except as stated at checkout or where the
+                law requires it. Deleting the shop ends its subscription immediately.
+              </li>
+              <li>
+                <Term>Failed payments:</Term> if a renewal payment fails, Stripe tries again and the
+                shop keeps working in the meantime; the owner is notified. If the payment still
+                cannot be collected, the shop keeps full use until the end of the current billing
+                period, and then the pause described under “When a subscription ends” applies.
+              </li>
+              <li>
+                <Term>Team size:</Term> on a plan with a team limit, active team members and pending
+                invitations count toward it, the owner included. Accepting an invitation that was
+                already sent always works.
+              </li>
+              <li>
+                <Term>When a subscription ends:</Term> when a trial ends without a subscription, or
+                a subscription ends, nothing is deleted. The shop’s team can still sign in, view and
+                export everything, finish existing jobs and collect payments on existing invoices
+                and deposits. Until the shop subscribes again, creating new customers, jobs,
+                repeating jobs, quotes, invoices and campaigns, sending new messages to customers,
+                online booking, and scheduled automatic messages (such as reminders, review requests
+                and follow-ups) and campaign sends are paused. Messages about existing work, such as
+                job updates and receipts, still go out.
+              </li>
+              <li>
+                <Term>Free access:</Term> we may give a shop free use of the Service for a period;
+                when it ends, the shop needs a subscription (or a trial still running) to keep
+                creating new work.
+              </li>
+            </LegalList>
+          </>
         ),
       },
       {

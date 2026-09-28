@@ -58,6 +58,10 @@ Rules that keep them apart:
   Owners subscribe on the web.
 - Stripe is the source of truth. Every subscription change reaches the app
   through the platform webhook; nothing in the apps can mark a shop as paid.
+- The web app has a public **pricing page** at `<APP_BASE_URL>/pricing`
+  listing your plans (from the same plan list; section 6.1). While billing is
+  off, or before any plan is synced, it says pricing is coming soon and shows
+  no numbers.
 
 States a shop can be in:
 
@@ -246,6 +250,19 @@ Turning it on, in order:
    refuses `BILLING_ENABLED=true` without it.
 5. Check it end to end (section 10).
 
+What each part does, if you need to check or do it by hand:
+
+| Part | What runs | By hand |
+|---|---|---|
+| The switch and the trial | `public.set_billing_config(p_enabled, p_trial_days)` (service role only) writes `platform_config` `billing_enabled` / `billing_trial_days`; switching on starts the trial of every shop that never subscribed | Supabase SQL editor: `select public.set_billing_config(true, <trial days>);` then set the same values in the GitHub variables, or the next deploy stops (Safety, below) |
+| The plan list | the `billing` function's `sync_plans` (with the `x-cron-secret` header) copies every active recurring Price of a Product with `detailcrm_plan=true` into the app's plan list and retires the rest | the `curl` in section 3.4 |
+| Subscription changes | Stripe's **platform** webhook ("Events on your account") -> `<project URL>/functions/v1/billing-webhook`, signed with `STRIPE_BILLING_WEBHOOK_SECRET`, events `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `product.created`, `product.updated`, `product.deleted`, `price.created`, `price.updated`, `price.deleted` | Stripe Dashboard -> Developers -> Webhooks -> Add endpoint (not a Connect endpoint), then the secret in GitHub |
+| Web and iPhone | read the standing with `shop_entitlement`; nothing to deploy | - |
+
+The iPhone app shows a neutral status only (section 2); it never offers a
+plan, a price or a way to buy, so it needs no change and no App Review note
+beyond the one in [LAUNCH.md](LAUNCH.md) section 6.
+
 Safety: a deploy where `BILLING_ENABLED` (or `BILLING_TRIAL_DAYS`) is **not
 set** never changes a project where billing is already on (or has a trial):
 it stops and asks you to set the value explicitly. So a local run without the
@@ -266,6 +283,29 @@ app) -> back to Settings -> Billing, which shows the result once Stripe has
 confirmed it (usually a few seconds). From then on **Manage billing** opens
 the Customer Portal (switch plan, update the card, cancel, invoices). A shop
 with a live subscription cannot start a second one.
+
+### 6.1 What the web app shows
+
+Everything below is read from the server at run time
+(`shop_entitlement`, `public_billing_plans()`, the `billing` function);
+the web never has a plan, price, trial length or limit of its own.
+
+| Where | Who | What |
+|---|---|---|
+| Settings -> **Billing** (`/app/settings/billing`) | owner | status (trial days left in the shop's time zone, plan, renewal or end date, team members used of the plan's limit), the plan cards with **Choose plan** (Checkout) while there is no live subscription, **Manage billing** (Customer Portal) once the shop has had one |
+| | admin, manager | the same status, read-only ("Only the shop owner can choose a plan ...") |
+| | technician | not listed; the page says "You don't have access" |
+| | everyone, billing off | the section is not listed; opened directly it says billing isn't enabled and offers nothing to buy |
+| Back from Checkout (`?checkout=success`) | owner | "Confirming your subscription with Stripe..." while it re-reads the status every 2 seconds, then "Thanks! Stripe confirmed your subscription." If the webhook has not arrived after 60 seconds it stops and says so, with **Check again** (section 11: the webhook). `?checkout=cancelled`: "Checkout was cancelled. No subscription was started." |
+| Banner above every staff page | owner | the in-app trial ends within 7 days ("Choose a plan to keep creating new work"), a payment problem (`past_due`); both dismissible for the browser session, with **Go to Billing** |
+| | everyone | the shop is lapsed: "This shop's subscription is inactive, so new records can't be created right now. You can still view everything." Owner: **Go to Billing**; others: "Ask the shop owner to renew it." Not dismissible, never blocks reading |
+| A refused action (section 8) | everyone | the server's sentence as it is |
+| | owner | plus a **Go to Billing** link (forms and dialogs) or action (error pop-ups) |
+| Notifications | owner | "Subscription payment problem" opens Settings -> Billing |
+| `/pricing` (public) | anyone | the plans with price, period, team size and feature keys, and **Create your shop** (sign-up); "Pricing coming soon" without plans |
+
+Nothing appears while billing is off, while a shop is `active` or `comped`,
+or while its standing cannot be read.
 
 ---
 
@@ -316,13 +356,17 @@ Paused:
 - automations and campaign sends (reminders, follow-ups, document
   follow-ups).
 
-People trying a paused action see "This shop's subscription has ended. The
-shop owner can renew it in Settings > Billing."
+People trying a paused action see the server's neutral sentence: "This
+shop's subscription is inactive, so new records can't be created right
+now." (the database raises SQLSTATE `PT402`, which PostgREST answers with
+HTTP 402; the server functions answer `402 payment_required` with the same
+sentence). It is worded for the iPhone app too, so it never mentions prices
+or buying; on the web the owner also gets a **Go to Billing** link.
 
-Team size: on a plan with `max_members`, inviting or adding a member beyond
-the limit is refused with "Your plan allows N team members." (active members
-and pending invites count, the owner included). Accepting an invite that was
-already sent always works.
+Team size: on a plan with `max_members`, inviting or adding (or
+re-activating) a member beyond the limit is refused with "This shop's plan
+allows N team members." (active members and pending invites count, the owner
+included). Accepting an invite that was already sent always works.
 
 ---
 
@@ -377,4 +421,6 @@ On a staging project with Stripe test keys:
 | Paid, but the page still shows the trial / no subscription | the platform webhook did not arrive: Stripe -> Webhooks -> the billing endpoint's deliveries. 400 answers = wrong `STRIPE_BILLING_WEBHOOK_SECRET`: re-run the deploy with *stripe_webhooks* and `STRIPE_BILLING_WEBHOOK_RECREATE=1` |
 | Deploy stops: "BILLING_ENABLED is not set, but billing is ON" | set the variable explicitly (section 5, Safety) |
 | Deploy stops: an endpoint at `.../billing-webhook` "was not created by this script" | an endpoint made by hand: delete it, or set `STRIPE_BILLING_WEBHOOK_ADOPT=<we_...>` if it is the platform endpoint whose secret is `STRIPE_BILLING_WEBHOOK_SECRET` |
-| A shop was deleted but Stripe still bills it | deleting a shop does not cancel its platform subscription: cancel it in Stripe (Customers -> the shop's billing customer; its metadata `shop_id` is the deleted shop's id) |
+| The owner cannot delete the shop: "We could not cancel the shop's subscription, so nothing was deleted." | deleting a shop first cancels its platform subscription immediately; Stripe refused or was unreachable (the deletion stops before anything changes). Try again; check the subscription in Stripe (Customers -> the shop's billing customer, metadata `shop_id`) |
+| The owner's checkout says "This shop's billing account was just set up by another request. Refresh and try again." | two checkouts raced to create the shop's Stripe customer; the next try uses the one that won |
+| "Confirming your subscription with Stripe..." ends with "Stripe hasn't confirmed the subscription yet" | the platform webhook has not delivered (see the "Paid, but ..." row) |

@@ -24,7 +24,8 @@ function section(path: SettingsSectionPath, loader: PageLoader): RouteObject {
 
 /**
  * Settings routes (see web/README.md → Routing). /app/settings/<section>;
- * Stripe Connect onboarding returns to /app/settings/payments?stripe=return|refresh.
+ * Stripe Connect onboarding returns to /app/settings/payments?stripe=return|refresh;
+ * subscription Checkout returns to /app/settings/billing?checkout=success|cancelled.
  * Every section has its own guard: most are for managers and up, the
  * calendar feed is for every member (technicians see only that section).
  */
@@ -57,6 +58,7 @@ export const routes: FeatureRoutes = {
         section('import-export', () => import('./pages/ImportExportPage')),
         section('webhooks', () => import('./pages/WebhooksPage')),
         section('calendar-feed', () => import('./pages/CalendarFeedPage')),
+        section('billing', () => import('@/features/billing/BillingPage')),
         section('delete-shop', () => import('./pages/DeleteShopPage')),
         { path: '*', element: <SettingsIndexRedirect /> },
       ],

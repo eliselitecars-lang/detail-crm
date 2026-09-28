@@ -140,6 +140,12 @@ export const CAPABILITIES = {
 
   // Notifications
   'notifications.view': ALL,
+
+  // Shop subscription (platform billing, SPEC §3 / §4.10): managers+ see the
+  // status; only the owner chooses a plan, checks out and opens the billing
+  // portal. Technicians only get the standing (banners, refusals).
+  'billing.view': MANAGERS,
+  'billing.manage': ['owner'],
 } as const satisfies Record<string, Rule>;
 
 export type Capability = keyof typeof CAPABILITIES;

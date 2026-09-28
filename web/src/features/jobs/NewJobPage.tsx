@@ -19,6 +19,7 @@ import {
 } from '@/components/ui';
 import { isLocalDate, shopToday, utcToShopLocal } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
+import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
 import { useShop } from '@/features/shop/shopContext';
 import {
   useCatalog,
@@ -127,6 +128,8 @@ export default function NewJobPage() {
   // from (the form is locked): later stages can't drift from the saved job.
   const [committed, setCommitted] = useState<CreateJobInput | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  /** The error behind formError (the owner's billing link on a subscription refusal). */
+  const [formErrorCause, setFormErrorCause] = useState<unknown>(null);
 
   const catalog = useCatalog();
   const categories = useVehicleCategories();
@@ -316,11 +319,13 @@ export default function NewJobPage() {
       await navigate(result.first_job_id ? `/app/jobs/${result.first_job_id}` : '/app/calendar');
     } catch (error) {
       setFormError(errorMessage(error));
+      setFormErrorCause(error);
     }
   };
 
   const submit = async () => {
     setFormError(null);
+    setFormErrorCause(null);
     if (repeating && !committed) {
       await submitSeries();
       return;
@@ -341,6 +346,7 @@ export default function NewJobPage() {
         if (error.progress.jobId) setCommitted(input);
       }
       setFormError(errorMessage(error));
+      setFormErrorCause(error);
     }
   };
 
@@ -643,7 +649,10 @@ export default function NewJobPage() {
               >
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
                 <div className="flex flex-col gap-1">
-                  <p>{formError}</p>
+                  <p>
+                    {formError}
+                    <BillingErrorLink error={formErrorCause} />
+                  </p>
                   {partial && (
                     <p id="new-job-locked">
                       The job is saved, so this form is locked. Retrying saves only the remaining

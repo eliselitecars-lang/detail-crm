@@ -2,6 +2,7 @@ import { Info, Trash2 } from 'lucide-react';
 import { useId, useRef, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { Button, Dialog, FormField, Input, SectionCard, useToast } from '@/components/ui';
+import { useShopEntitlement } from '@/features/billing/api';
 import { useShop } from '@/features/shop/shopContext';
 import { deleteShopErrorMessage, useBillingMembershipCount, useDeleteShop } from '../api';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
@@ -9,8 +10,9 @@ import { confirmationMatches } from '../deleteShop';
 
 /**
  * Owner only (route guard + nav: shop.delete; the payments function checks
- * the owner again). The server cancels billing in Stripe, expires open pay
- * links and then deletes the shop; every tenant row cascades.
+ * the owner again). The server cancels the shop's own subscription (while
+ * platform billing is on) and its customers' memberships in Stripe, expires
+ * open pay links and then deletes the shop; every tenant row cascades.
  */
 export default function DeleteShopPage() {
   const query = useBillingMembershipCount(true);
@@ -24,8 +26,10 @@ export default function DeleteShopPage() {
 }
 
 function DeleteShopCard({ billingMemberships }: { billingMemberships: number }) {
-  const { shop } = useShop();
+  const { shop, shopId } = useShop();
   const [open, setOpen] = useState(false);
+  // While platform billing is on, deleting also ends the shop's subscription.
+  const billingOn = useShopEntitlement(shopId).data?.billing_enabled === true;
   return (
     <SectionCard
       title="Delete this shop"
@@ -44,6 +48,12 @@ function DeleteShopCard({ billingMemberships }: { billingMemberships: number }) 
             Your Stripe account is not closed: money already collected stays in Stripe, and you
             manage or close the account at stripe.com.
           </li>
+          {billingOn && (
+            <li>
+              This shop’s Detail CRM subscription is cancelled right away, so it isn’t charged
+              again.
+            </li>
+          )}
         </ul>
         {billingMemberships > 0 && (
           <p
@@ -66,7 +76,12 @@ function DeleteShopCard({ billingMemberships }: { billingMemberships: number }) 
           </Button>
         </div>
       </div>
-      <DeleteShopDialog open={open} onClose={() => setOpen(false)} shopName={shop.name} />
+      <DeleteShopDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        shopName={shop.name}
+        billingOn={billingOn}
+      />
     </SectionCard>
   );
 }
@@ -75,10 +90,12 @@ function DeleteShopDialog({
   open,
   onClose,
   shopName,
+  billingOn,
 }: {
   open: boolean;
   onClose: () => void;
   shopName: string;
+  billingOn: boolean;
 }) {
   const toast = useToast();
   const navigate = useNavigate();
@@ -99,8 +116,11 @@ function DeleteShopDialog({
     event.preventDefault();
     if (!matches || remove.isPending) return;
     try {
-      await remove.mutateAsync(typed.trim());
-      toast.success(`${shopName} was deleted`);
+      const result = await remove.mutateAsync(typed.trim());
+      toast.success(
+        `${shopName} was deleted`,
+        result.platform_subscription_cancelled ? 'Its subscription was cancelled.' : undefined,
+      );
       await navigate('/app', { replace: true });
     } catch {
       // Shown inline below (remove.error).
@@ -114,7 +134,11 @@ function DeleteShopDialog({
       role="alertdialog"
       size="sm"
       title={`Delete ${shopName}?`}
-      description="Everything in this shop is permanently deleted. This cannot be undone."
+      description={
+        billingOn
+          ? 'Everything in this shop is permanently deleted and its subscription is cancelled. This cannot be undone.'
+          : 'Everything in this shop is permanently deleted. This cannot be undone.'
+      }
       dismissible={!remove.isPending}
       initialFocus={inputRef}
       footer={

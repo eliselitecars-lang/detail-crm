@@ -14,6 +14,7 @@ import {
 } from './api';
 import { EdgeFunctionError } from './edge';
 import { copyText, newRequestNonce } from './format';
+import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
 
 export type SendChoice = MessageChannel | 'none';
 
@@ -232,7 +233,10 @@ function SendDocumentForm({
               ? `${documentLabel} is marked as sent, but the message wasn’t sent.`
               : 'The message wasn’t sent.'}
           </p>
-          <p className="mt-0.5">{errorMessage(failure)}</p>
+          <p className="mt-0.5">
+            {errorMessage(failure)}
+            <BillingErrorLink error={failure} />
+          </p>
         </div>
       )}
 

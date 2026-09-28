@@ -138,7 +138,7 @@ Route map: `/login`, `/signup`, `/forgot-password`, `/reset-password`,
 `/gift/:slug/done` (gift card shop), `/u/:token` (email unsubscribe),
 `/portal`, `/account` (every signed-in role: delete account), `/privacy`,
 `/terms` (public; linked under the auth pages, in the public page footer and
-on `/account`), `/app` (dashboard), `/app/{calendar,jobs,customers,quotes,
+on `/account`), `/pricing` (public: the platform's plans), `/app` (dashboard), `/app/{calendar,jobs,customers,quotes,
 invoices,payments,memberships,gift-cards,messages,campaigns,reports,team,
 timesheets,tasks,inventory,catalog,settings,notifications}`,
 `/app/settings/<section>` (see Settings), `/app/onboarding`.
@@ -182,6 +182,14 @@ server narrows rows" (e.g. technicians see only assigned jobs).
   states show friendly text (`errorMessage(err)`); RLS denials never leak
   policy names, and `RAISE EXCEPTION` messages from our SQL are shown as-is.
   Public RPCs raise `PT404` (HTTP 404) for unknown links: kind `not_found`.
+  A shop subscription refusal — `PT402` from PostgREST (HTTP 402) or an edge
+  function's `402 payment_required` envelope (never `402 payment_failed`, a
+  card decline) — is kind `subscription` with the server's neutral sentence
+  verbatim (`isSubscriptionError`, `subscriptionRefusalReason` →
+  `subscription_inactive` | `seat_limit`). Owners get "Go to Billing": in
+  error toasts automatically (the shell registers `toast.setErrorAction`),
+  next to inline form errors with `<BillingErrorLink error={…} />`
+  (`@/features/billing/BillingErrorLink`).
   Edge functions: `invokeEdge(fn, action, params, schema)` from
   `@/features/quotes/shared/edge` throws `EdgeFunctionError` (`reason` /
   `details` from the `{ error, code, details }` envelope). A body that is not
@@ -191,6 +199,13 @@ server narrows rows" (e.g. technicians see only assigned jobs).
 - Messages that may be retried carry a `request_nonce` (one per compose,
   `newRequestNonce()`), reused on a retry after a network error and renewed
   after a send or a definitive refusal, so the server never sends twice.
+  `@/lib/requestNonce` generalises it: `useRequestNonces()` keeps one nonce
+  per action key until the action settles (kept after network / server /
+  unknown errors, renewed after success or a refusal). Used by
+  `add_fee_line` (key: document + fee) and each committed import chunk
+  (key: file, batch, first row and a fingerprint of the rows; a replayed
+  chunk answers `"replayed": true` and is counted once), and by the billing
+  checkout.
 - Validate untyped results (RPC `jsonb`, embedded selects) with zod at the boundary.
 
 ### Query keys
@@ -399,6 +414,30 @@ template also refreshes the quote / invoice follow-up status cards
   dry run then commit in chunks (`import_customers` / `import_services`,
   resumable through `import_batches`); exports of customers (with their
   custom fields), vehicles and jobs (`export_jobs`) as formula-safe CSV.
+
+## Shop subscription billing (`features/billing`)
+
+The platform's own subscription for shops (SPEC §4.10, docs/BILLING.md).
+Nothing about a plan, price, trial or limit is written in the web: all of it
+comes from `shop_entitlement(p_shop_id)`, `public_billing_plans()` and the
+`billing` edge function.
+
+- **Settings → Billing** (`/app/settings/billing`, section `billing` in
+  `settings/sections.ts`, capability `billing.view` = owner/admin/manager;
+  `billing.manage` = owner): status from `shop_entitlement` + the
+  `shop_billing` status (explicit non-Stripe columns), plan cards from
+  `public_billing_plans()`, **Choose plan** → `billing` `checkout` →
+  `redirectTo` (Stripe URLs only), **Manage billing** → `portal`. Listed only
+  while `billing_enabled`; opened while off it says billing isn't enabled.
+  Checkout returns with `?checkout=success` (the status is polled every 2 s
+  for at most 60 s, then "Check again") or `?checkout=cancelled`.
+- **Banner** (`BillingBanner` in the app shell): owner — trial ending within
+  7 days, payment problem (dismissible per session); everyone — lapsed (not
+  dismissible). Hidden on the billing page itself.
+- **Refusals**: see Data access (kind `subscription`).
+- **`/pricing`** (public): the plans, or "Pricing coming soon" without any.
+- The notification kind `billing_payment_failed` opens Billing for owners
+  (`notifications/links.ts`) and is pushable for owners only.
 
 ## Testing
 

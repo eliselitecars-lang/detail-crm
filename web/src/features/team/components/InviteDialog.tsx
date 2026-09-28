@@ -9,6 +9,7 @@ import { useShop } from '@/features/shop/shopContext';
 import { useSendInvite } from '../api';
 import { announceInvite } from '../inviteNotice';
 import { ROLE_DESCRIPTIONS } from '../model';
+import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
 
 const inviteSchema = z.object({
   email: zEmail,
@@ -82,6 +83,7 @@ export function InviteDialog({ open, onClose }: InviteDialogProps) {
         {send.error && (
           <p role="alert" className="text-danger-ink text-sm">
             {errorMessage(send.error)}
+            <BillingErrorLink error={send.error} />
           </p>
         )}
         <FormField label="Email" error={errors.email?.message} required>

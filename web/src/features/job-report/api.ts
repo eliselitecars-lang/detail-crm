@@ -83,6 +83,8 @@ export const jobReportSchema = z.object({
     phone: zText,
     email: zText,
     review_url: zText,
+    /** IANA zone (0095): the report's times display in the shop's timezone. */
+    timezone: z.string(),
   }),
   job: z.object({
     number: z.number().int(),

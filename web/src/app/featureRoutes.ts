@@ -5,6 +5,7 @@
  */
 import type { RouteObject } from 'react-router';
 import { routes as auth } from '@/features/auth/routes';
+import { routes as billing } from '@/features/billing/routes';
 import { routes as booking } from '@/features/booking/routes';
 import { routes as calendar } from '@/features/calendar/routes';
 import { routes as campaigns } from '@/features/campaigns/routes';
@@ -35,6 +36,7 @@ import { RouteErrorBoundary } from './RouteErrorBoundary';
 
 export const FEATURES: Readonly<Record<string, FeatureRoutes>> = {
   auth,
+  billing,
   booking,
   calendar,
   campaigns,

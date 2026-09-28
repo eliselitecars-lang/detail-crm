@@ -20,7 +20,7 @@ import {
 /** Top-bar bell: unread count, latest notifications, realtime updates. */
 export function NotificationsBell() {
   const { user } = useAuth();
-  const { shopId } = useShop();
+  const { shopId, role } = useShop();
   const userId = user?.id ?? '';
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -51,7 +51,7 @@ export function NotificationsBell() {
   const openItem = (item: NotificationItem) => {
     if (!item.read_at) markRead.mutate(item.id);
     setOpen(false);
-    const link = notificationLink({ ...item, kind: item.kind as NotificationKind });
+    const link = notificationLink({ ...item, kind: item.kind as NotificationKind }, role);
     if (link) void navigate(link.href);
   };
 

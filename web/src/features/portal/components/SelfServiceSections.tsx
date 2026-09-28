@@ -29,12 +29,12 @@ import {
   type PortalShop,
 } from '../api';
 
-type ShopLookup = (nameOrSlug: string) => PortalShop | undefined;
+type ShopLookup = (slug: string) => PortalShop | undefined;
 
+/** The overview's shop by slug (rows name their shop by slug; names are not unique). */
 function lookup(data: PortalOverview): ShopLookup {
   const bySlug = new Map(data.shops.map((s) => [s.slug, s]));
-  const byName = new Map(data.shops.map((s) => [s.name, s]));
-  return (key) => bySlug.get(key) ?? byName.get(key);
+  return (slug) => bySlug.get(slug);
 }
 
 function RowIcon({ children }: { children: ReactNode }) {
@@ -194,7 +194,6 @@ export function MembershipsSection({ userId, data }: { userId: string; data: Por
 
 export function DocumentsSection({ userId, data }: { userId: string; data: PortalOverview }) {
   const documents = usePortalDocuments(userId, true);
-  const shopOf = lookup(data);
   const multiShop = data.shops.length > 1;
   const [opening, setOpening] = useState<string | null>(null);
   const [openError, setOpenError] = useState<unknown>(null);
@@ -243,7 +242,6 @@ export function DocumentsSection({ userId, data }: { userId: string; data: Porta
       )}
       <ul aria-label="Documents" className="divide-line divide-y px-4 sm:px-5">
         {documents.data.map((doc) => {
-          const shop = shopOf(doc.shop_name);
           return (
             <li key={doc.id} className="flex items-center gap-3 py-3">
               <RowIcon>
@@ -257,7 +255,7 @@ export function DocumentsSection({ userId, data }: { userId: string; data: Porta
                     doc.job_number !== null ? `Appointment #${doc.job_number}` : null,
                     documentTypeLabel(doc.content_type),
                     doc.size_bytes !== null ? formatBytes(doc.size_bytes) : null,
-                    shop ? formatDate(doc.created_at, shop.timezone) : null,
+                    formatDate(doc.created_at, doc.timezone),
                   ]
                     .filter(Boolean)
                     .join(' · ')}
@@ -283,7 +281,6 @@ export function DocumentsSection({ userId, data }: { userId: string; data: Porta
 
 export function JobReportsSection({ userId, data }: { userId: string; data: PortalOverview }) {
   const reports = usePortalReports(userId, true);
-  const shopOf = lookup(data);
   const multiShop = data.shops.length > 1;
   if (reports.isPending) return null;
   if (reports.isError) {
@@ -308,7 +305,6 @@ export function JobReportsSection({ userId, data }: { userId: string; data: Port
     >
       <ul aria-label="Job reports" className="divide-line divide-y px-4 sm:px-5">
         {reports.data.map((r) => {
-          const shop = shopOf(r.shop_name);
           const when = r.completed_at ?? r.published_at;
           return (
             <li key={r.report_path}>
@@ -322,10 +318,7 @@ export function JobReportsSection({ userId, data }: { userId: string; data: Port
                 <div className="min-w-0 flex-1">
                   <p className="text-ink text-sm font-semibold">Appointment #{r.job_number}</p>
                   <p className="text-muted text-xs">
-                    {[
-                      multiShop ? r.shop_name : null,
-                      when && shop ? formatDate(when, shop.timezone) : null,
-                    ]
+                    {[multiShop ? r.shop_name : null, when ? formatDate(when, r.timezone) : null]
                       .filter(Boolean)
                       .join(' · ') || 'View the report'}
                   </p>
@@ -344,7 +337,7 @@ export function JobReportsSection({ userId, data }: { userId: string; data: Port
 /** The client's referral code per shop (portal_referrals creates it on first view). */
 export function ReferralsSection({ userId, data }: { userId: string; data: PortalOverview }) {
   const referrals = usePortalReferrals(userId, true);
-  const shopOf = lookup(data);
+  const multiShop = data.shops.length > 1;
   if (referrals.isPending) return null;
   if (referrals.isError) {
     return (
@@ -367,10 +360,10 @@ export function ReferralsSection({ userId, data }: { userId: string; data: Porta
     >
       <div className="flex flex-col gap-5">
         {referrals.data.map((r) => {
-          const currency = shopOf(r.shop_name)?.currency ?? 'usd';
+          const { currency } = r;
           return (
-            <div key={`${r.shop_name}-${r.code}`} className="flex flex-col gap-3">
-              {referrals.data.length > 1 && (
+            <div key={`${r.shop_slug}-${r.code}`} className="flex flex-col gap-3">
+              {(multiShop || referrals.data.length > 1) && (
                 <p className="text-ink flex items-center gap-2 text-sm font-semibold">
                   <Gift className="text-muted size-4" aria-hidden="true" />
                   {r.shop_name}

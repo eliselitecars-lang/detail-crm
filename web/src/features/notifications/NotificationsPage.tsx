@@ -1,4 +1,5 @@
 import {
+  BadgeInfo,
   BellOff,
   CalendarClock,
   CalendarPlus,
@@ -73,6 +74,8 @@ const KIND_ICONS: Record<NotificationKind, ReactNode> = {
   task_due: <ListTodo aria-hidden="true" />,
   sms_number_status: <MessageSquareWarning aria-hidden="true" />,
   webhook_failing: <Webhook aria-hidden="true" />,
+  // neutral: the server's own text says what happened
+  billing_payment_failed: <BadgeInfo aria-hidden="true" />,
 };
 
 export default function NotificationsPage() {
@@ -252,11 +255,13 @@ function NotificationItem({
   shopId: string;
   userId: string;
 }) {
-  const { timezone } = useShop();
+  const { timezone, role } = useShop();
   const toast = useToast();
   const markRead = useMarkNotificationRead(shopId, userId);
   const dismiss = useDismissNotification(shopId, userId);
-  const link = notificationLink(n);
+  const target = notificationLink(n, role);
+  // Already on the list: a link back to it is no link.
+  const link = target?.href === '/app/notifications' ? null : target;
   const unread = n.read_at === null;
 
   const onDismiss = async () => {

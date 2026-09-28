@@ -5,7 +5,10 @@ import {
   errorMessage,
   GENERIC_ERROR_MESSAGE,
   isNonRetryable,
+  isSubscriptionError,
   sentenceCase,
+  subscriptionRefusalReason,
+  SUBSCRIPTION_INACTIVE_MESSAGE,
   toAppError,
 } from './errors';
 
@@ -226,5 +229,62 @@ describe('PT404 (public RPC not found)', () => {
     expect(e.kind).toBe('not_found');
     expect(e.message).toBe('Quote not found.');
     expect(isNonRetryable(e)).toBe(true);
+  });
+});
+
+describe('shop subscription refusals (PT402 / HTTP 402)', () => {
+  const edge402 = (body: unknown) => ({
+    name: 'FunctionsHttpError',
+    context: new Response(JSON.stringify(body), { status: 402 }),
+  });
+
+  it('shows the PostgREST PT402 message verbatim as kind subscription', () => {
+    const e = toAppError(pg('PT402', SUBSCRIPTION_INACTIVE_MESSAGE));
+    expect(e.kind).toBe('subscription');
+    expect(e.code).toBe('PT402');
+    expect(e.message).toBe(SUBSCRIPTION_INACTIVE_MESSAGE);
+    expect(isSubscriptionError(e)).toBe(true);
+    expect(subscriptionRefusalReason(e)).toBe('subscription_inactive');
+    expect(isNonRetryable(e)).toBe(true);
+  });
+
+  it('recognises the seat limit and falls back to the neutral sentence without text', () => {
+    const seats = toAppError(pg('PT402', "This shop's plan allows 3 team members."));
+    expect(seats.message).toBe("This shop's plan allows 3 team members.");
+    expect(subscriptionRefusalReason(seats)).toBe('seat_limit');
+    expect(subscriptionRefusalReason(pg('PT402', "This shop's plan allows 1 team member."))).toBe(
+      'seat_limit',
+    );
+    expect(toAppError(pg('PT402', '')).message).toBe(SUBSCRIPTION_INACTIVE_MESSAGE);
+  });
+
+  it('maps an edge 402 payment_required envelope, but not a card decline', async () => {
+    const refused = await edgeFunctionError(
+      edge402({
+        error: "This shop's plan allows 2 team members.",
+        code: 'payment_required',
+        details: { reason: 'seat_limit' },
+      }),
+    );
+    expect(refused.kind).toBe('subscription');
+    expect(refused.status).toBe(402);
+    expect(refused.message).toBe("This shop's plan allows 2 team members.");
+    expect(subscriptionRefusalReason(refused)).toBe('seat_limit');
+
+    const empty = await edgeFunctionError(edge402({ code: 'payment_required' }));
+    expect(empty.message).toBe(SUBSCRIPTION_INACTIVE_MESSAGE);
+
+    const declined = await edgeFunctionError(
+      edge402({ error: 'Your card was declined.', code: 'payment_failed' }),
+    );
+    expect(declined.kind).toBe('validation');
+    expect(isSubscriptionError(declined)).toBe(false);
+    expect(subscriptionRefusalReason(declined)).toBeNull();
+  });
+
+  it('leaves other errors alone', () => {
+    expect(isSubscriptionError(pg('22023', 'slug is taken'))).toBe(false);
+    expect(isSubscriptionError(new Error('boom'))).toBe(false);
+    expect(subscriptionRefusalReason(null)).toBeNull();
   });
 });

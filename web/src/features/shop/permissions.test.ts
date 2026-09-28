@@ -77,6 +77,8 @@ const MATRIX: Record<Capability, [boolean, boolean, boolean, boolean]> = {
   'timeclock.viewAll': [true, true, true, false],
   'timeclock.editAll': [true, true, true, false],
   'notifications.view': [true, true, true, true],
+  'billing.view': [true, true, true, false],
+  'billing.manage': [true, false, false, false],
 };
 
 describe('capability matrix (SPEC §3)', () => {

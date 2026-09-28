@@ -100,6 +100,7 @@ function report(overrides: Partial<Record<keyof JobReport, unknown>> = {}) {
       phone: '+12055550100',
       email: null,
       review_url: 'https://g.page/r/review',
+      timezone: 'America/Chicago',
     },
     job: {
       number: 1042,
@@ -261,6 +262,13 @@ describe('JobReportPage', () => {
       p_signature_path: path,
     });
     expect(await screen.findByText('Signed by Ana Lee')).toBeInTheDocument();
+    // 10:00Z in the shop's zone (Chicago, CDT), never the browser's (Honolulu)
+    expect(
+      screen.getByText(
+        (_, el) =>
+          el?.tagName === 'P' && el.textContent === 'Signed online on Mon, Sep 21, 2026 · 5:00 AM',
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByRole('form', { name: 'Review and sign' })).not.toBeInTheDocument();
   });
 

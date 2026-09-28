@@ -443,6 +443,7 @@ describe('files, fees, job fields, follow-ups and sold by', () => {
         p_doc_kind: 'job',
         p_doc_id: 'job-1',
         p_fee_id: 'fee-1',
+        p_request_nonce: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/) as unknown,
       }),
     );
   });

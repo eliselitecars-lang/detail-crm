@@ -115,6 +115,17 @@ this service" instead of a name, and name no address, email or country; the
 workflow prints a warning. They are read at build time, so re-run deploy-web
 after changing them.
 
+Shop subscription billing needs **no web setting**: the web reads everything
+at run time from the backend (`shop_entitlement`, `public_billing_plans()`,
+the `billing` function). While `BILLING_ENABLED` is off, Settings -> Billing
+is not listed, the page says billing isn't enabled, no banner shows, and the
+public `<APP_BASE_URL>/pricing` page says pricing is coming soon (it never
+shows a made-up price). Once billing is on and plans are synced, `/pricing`
+and Settings -> Billing list the plans from Stripe. The privacy policy and
+terms (`/privacy`, `/terms`) already describe subscriptions (billed on your
+platform Stripe account; renewal, cancellation in the Customer Portal, what a
+lapsed shop can still do); have them reviewed before you turn billing on.
+
 ### iPhone (ios-testflight)
 
 | Name | Kind | Required | Where to get it |
@@ -416,8 +427,12 @@ frame-ancestors 'none'
   attribution; the browser never geocodes (points come from the iPhone app),
   and the multi-stop "Open route in Google Maps" hand-off is a navigation.
 - Google Fonts (Inter) from `index.html`.
-- Stripe Checkout / Connect onboarding and Google Maps links are top-level
-  navigations, which CSP does not restrict.
+- Stripe Checkout / Connect onboarding, the shop subscription's Checkout
+  and Customer Portal (Settings -> Billing: `checkout.stripe.com`,
+  `billing.stripe.com`, reached with `window.location.assign` after the
+  `billing` function returns the URL; no form post, so `form-action 'self'`
+  is unaffected) and Google Maps links are top-level navigations, which CSP
+  does not restrict. Billing needs no header change.
 - A unit test fails when `web/src` starts referencing a new external origin;
   add it to `KNOWN_EXTERNAL` and `buildCsp` in `web_headers.mjs`.
 
@@ -431,7 +446,8 @@ Builds `web/` into the given directory (never `web/dist`), generates the
 headers, serves the build with Cloudflare Pages semantics
 (`scripts/deploy/lib/static_server.mjs`, mirroring the Pages `_headers`
 engine: rules in file order, repeated headers joined with `, `, `! Name`
-detaches) and opens login, public booking, dashboard, calendar and reports in
+detaches) and opens login, public booking, dashboard, calendar, reports, the
+public `/pricing` page and Settings -> Billing (owner, with plans) in
 Chromium against a mocked Supabase. It asserts the CSP header is served, zero
 `securitypolicyviolation` events, no CSP console errors, no page errors, no
 request to an unknown origin; negative controls prove a forbidden fetch,

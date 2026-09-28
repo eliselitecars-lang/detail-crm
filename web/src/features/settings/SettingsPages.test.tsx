@@ -634,6 +634,53 @@ describe('DeleteShopPage', () => {
     expect(router.state.location.pathname).toBe('/app/settings/delete-shop');
   });
 
+  it('says the subscription is cancelled too while billing is on, and why nothing was deleted', async () => {
+    setTableResult('memberships', { data: null, count: 0 });
+    supabase.rpc.mockImplementation(((fn: string) =>
+      createBuilder(
+        fn === 'shop_entitlement'
+          ? {
+              data: {
+                billing_enabled: true,
+                state: 'active',
+                reason: 'subscribed',
+                plan_name: 'Plan A',
+                trial_ends_at: null,
+                current_period_end: '2099-01-01T00:00:00Z',
+                cancel_at_period_end: false,
+                max_members: null,
+                members_used: 1,
+                can_write: true,
+                is_owner: true,
+              },
+            }
+          : { data: null },
+      )) as never);
+    const { user } = renderSettings('/app/settings/delete-shop');
+    expect(
+      await screen.findByText(/subscription is cancelled right away, so it isn’t charged again/),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /Delete shop/ }));
+    const dialog = await screen.findByRole('alertdialog', {
+      description: /and its subscription is cancelled/,
+    });
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: edgeHttpError(502, {
+        error: "The shop's subscription could not be cancelled, so the shop was not deleted.",
+        code: 'upstream_error',
+        details: { reason: 'platform_subscription_cancel_failed' },
+      }),
+    });
+    await user.type(within(dialog).getByLabelText(/Type the shop name/), 'Glacier Detailing');
+    await user.keyboard('{Enter}');
+    expect(
+      await within(dialog).findByText(
+        'We could not cancel the shop’s subscription, so nothing was deleted. Try again.',
+      ),
+    ).toBeVisible();
+  });
+
   it('shows a retryable error when the membership check fails', async () => {
     setTableResult('memberships', { data: null, error: { message: 'boom', code: '500' } });
     renderSettings('/app/settings/delete-shop');

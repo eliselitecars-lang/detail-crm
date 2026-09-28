@@ -173,6 +173,34 @@ const RPC = {
   },
   calendar_events: [],
   shop_team: [],
+  // Shop subscription billing (test data only): billing on, a shop in its
+  // trial, one plan for the /pricing and Settings > Billing scenarios.
+  shop_entitlement: {
+    billing_enabled: true,
+    state: 'trialing',
+    reason: 'trial',
+    plan_name: null,
+    trial_ends_at: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    current_period_end: null,
+    cancel_at_period_end: false,
+    max_members: null,
+    members_used: 1,
+    can_write: true,
+    is_owner: true,
+  },
+  public_billing_plans: [
+    {
+      id: '30000000-0000-4000-8000-000000000001',
+      name: 'Proof Plan',
+      description: null,
+      amount_cents: 1000,
+      currency: 'usd',
+      interval: 'month',
+      interval_count: 1,
+      max_members: null,
+      features: ['proof_feature'],
+    },
+  ],
   report_revenue: ({ body }) => {
     const rows = [];
     for (let d = new Date(`${body.p_from}T00:00:00Z`); d <= new Date(`${body.p_to}T00:00:00Z`); d = new Date(d.getTime() + 86_400_000)) {
@@ -197,6 +225,7 @@ const RPC = {
 const TABLES = {
   shop_members: [MEMBER],
   notifications: [],
+  shop_billing: [{ plan_id: null, status: 'none', trial_ends_at: RPC.shop_entitlement.trial_ends_at, current_period_end: null, cancel_at_period_end: false }],
   business_hours: [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, opens_at: '08:00:00', closes_at: '18:00:00' })),
   resources: [],
 };
@@ -377,6 +406,19 @@ await (
   await scenario('reports (Recharts SVG)', '/app/reports', {
     user: OWNER,
     ready: async (page) => page.locator('.recharts-surface').first().waitFor({ state: 'visible', timeout: 15_000 }),
+  })
+)?.context.close();
+// Shop subscription billing: the public plan list and the owner's billing page
+// (Stripe Checkout / the Customer Portal are top-level navigations, not loads).
+await (
+  await scenario('public pricing page', '/pricing', {
+    ready: async (page) => page.getByRole('article', { name: 'Proof Plan' }).waitFor({ state: 'visible', timeout: 15_000 }),
+  })
+)?.context.close();
+await (
+  await scenario('settings: billing (owner, plans)', '/app/settings/billing', {
+    user: OWNER,
+    ready: async (page) => page.getByRole('button', { name: /^Choose Proof Plan/ }).waitFor({ state: 'visible', timeout: 15_000 }),
   })
 )?.context.close();
 

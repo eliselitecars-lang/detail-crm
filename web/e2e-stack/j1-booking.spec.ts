@@ -166,7 +166,8 @@ test('J1: owner sets up a shop, a customer books online, the owner approves and 
   const stripePages = await stubStripeHostedPages(book);
   const slotResponses: SlotRow[][] = [];
   book.on('response', (response) => {
-    if (response.url().includes('/rest/v1/rpc/get_available_slots') && response.ok()) {
+    // The booking page reads availability v2 (public_booking_slots, 0053).
+    if (response.url().includes('/rest/v1/rpc/public_booking_slots') && response.ok()) {
       void response
         .json()
         .then((rows: SlotRow[]) => slotResponses.push(rows))
@@ -187,7 +188,7 @@ test('J1: owner sets up a shop, a customer books online, the owner approves and 
   await book.getByRole('button', { name: 'Continue' }).click();
   await expect(book.getByRole('heading', { name: 'Pick a date and time' })).toBeVisible();
 
-  // Real slots from get_available_slots; weekends are closed, so move on a week if needed.
+  // Real slots from public_booking_slots; weekends are closed, so move on a week if needed.
   const slots = book.getByRole('button', { name: / on [A-Z][a-z]+day, / });
   await expect(slots.first().or(book.getByText('No open times this week'))).toBeVisible();
   if ((await slots.count()) === 0) {
@@ -325,7 +326,7 @@ test('J1: owner sets up a shop, a customer books online, the owner approves and 
     tax_cents: 2145,
     total_cents: 28145,
   });
-  // The booked start is one of the slots the real get_available_slots offered.
+  // The booked start is one of the slots the real public_booking_slots offered.
   const bookedAt = new Date(String(job.json[0]?.scheduled_start)).getTime();
   expect(lastSlots.map((s) => new Date(s.starts_at).getTime())).toContain(bookedAt);
   expect(apiFailures).toEqual([]);

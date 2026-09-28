@@ -8,6 +8,10 @@
  *   Postgres' own wording ("violates … constraint", "row-level security"…)
  *   is recognised and replaced with friendly text.
  * - RLS denials (42501 / "row-level security") never leak policy names.
+ * - Shop subscription refusals (SQLSTATE PT402 through PostgREST, or an edge
+ *   function's `402 payment_required` envelope) become kind `subscription`
+ *   with the server's neutral sentence verbatim; the web adds its own
+ *   owner-only "Go to Billing" link (features/billing).
  * - Constraint violations get friendly generic wording; callers can map a
  *   specific constraint to a field error via `AppError.constraint`.
  * - Unknown errors fall back to a generic sentence; the original error is kept
@@ -24,6 +28,8 @@ export type AppErrorKind =
   | 'network'
   | 'rate_limited'
   | 'server'
+  /** The shop's subscription is inactive, or its plan's seat limit is reached (PT402 / HTTP 402). */
+  | 'subscription'
   | 'unknown';
 
 export interface AppErrorOptions {
@@ -56,6 +62,29 @@ export const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.';
 export const SESSION_EXPIRED_MESSAGE = 'Your session has expired. Sign in again.';
 export const PERMISSION_MESSAGE = "You don't have permission to do that.";
 const RATE_LIMITED_MESSAGE = 'Too many attempts. Please wait a minute and try again.';
+
+/**
+ * SQLSTATE of a shop subscription refusal (0102): PostgREST answers it with
+ * HTTP 402. Edge functions answer `402 payment_required` with the same text.
+ */
+export const SUBSCRIPTION_SQLSTATE = 'PT402';
+/** The edge envelope `code` of a subscription refusal (never `payment_failed`, a card decline). */
+export const SUBSCRIPTION_EDGE_CODE = 'payment_required';
+/**
+ * The database's own neutral sentence (0102 billing_inactive_message), used
+ * only when a refusal arrives without text. Never a price or a call to buy.
+ */
+export const SUBSCRIPTION_INACTIVE_MESSAGE =
+  "This shop's subscription is inactive, so new records can't be created right now.";
+/** 0102 billing_seats_message: "This shop's plan allows N team member(s)." */
+const SEAT_LIMIT_MESSAGE_RE = /^This shop's plan allows \d+ team members?\.$/;
+
+export type SubscriptionRefusalReason = 'subscription_inactive' | 'seat_limit';
+
+function subscriptionError(message: string, options: Omit<AppErrorOptions, 'kind'>): AppError {
+  const text = message.replace(/\s+/g, ' ').trim();
+  return new AppError(text || SUBSCRIPTION_INACTIVE_MESSAGE, { ...options, kind: 'subscription' });
+}
 
 interface ErrorLike {
   message?: unknown;
@@ -206,6 +235,9 @@ function fromPostgres(code: string, message: string, details?: string): AppError
         return new AppError(GENERIC_ERROR_MESSAGE, { ...base, kind: 'unknown' });
     }
   }
+
+  // Shop subscription refusal: the database's neutral sentence, verbatim.
+  if (code === SUBSCRIPTION_SQLSTATE) return subscriptionError(message, base);
 
   // Our own RAISE EXCEPTION messages (any SQLSTATE) are written for humans.
   if (!isInternalMessage(message)) {
@@ -362,8 +394,25 @@ export function isNonRetryable(error: unknown): boolean {
     kind === 'not_found' ||
     kind === 'conflict' ||
     kind === 'auth' ||
-    kind === 'session_expired'
+    kind === 'session_expired' ||
+    kind === 'subscription'
   );
+}
+
+/**
+ * A shop subscription refusal (PT402 from PostgREST or an edge function's
+ * `402 payment_required`): new records are paused or the plan's seat limit
+ * is reached. Card declines (`402 payment_failed`) are not.
+ */
+export function isSubscriptionError(error: unknown): boolean {
+  return toAppError(error).kind === 'subscription';
+}
+
+/** Which subscription refusal it is (null for any other error). */
+export function subscriptionRefusalReason(error: unknown): SubscriptionRefusalReason | null {
+  const appError = toAppError(error);
+  if (appError.kind !== 'subscription') return null;
+  return SEAT_LIMIT_MESSAGE_RE.test(appError.message) ? 'seat_limit' : 'subscription_inactive';
 }
 
 function kindForStatus(status: number): AppErrorKind {
@@ -420,6 +469,15 @@ export async function edgeFunctionError(error: unknown): Promise<AppError> {
       const fields =
         typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
       const envelopeMessage = str(fields.error);
+      // 402 payment_required: the shop's subscription refusal (a card
+      // decline is 402 payment_failed and stays a validation error).
+      if (status === 402 && fields.code === SUBSCRIPTION_EDGE_CODE) {
+        return subscriptionError(envelopeMessage ?? '', {
+          status,
+          code: SUBSCRIPTION_SQLSTATE,
+          cause: error,
+        });
+      }
       if (envelopeMessage) {
         return new AppError(envelopeMessage, { kind: kindForStatus(status), status, cause: error });
       }

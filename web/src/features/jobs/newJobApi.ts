@@ -6,7 +6,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { unwrap, unwrapRequired, type InsertRow, type Row } from '@/lib/db';
-import { AppError } from '@/lib/errors';
+import { AppError, isSubscriptionError, toAppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { useShop } from '@/features/shop/shopContext';
@@ -189,7 +189,8 @@ export const EMPTY_PROGRESS: CreateJobProgress = {
 export class CreateJobError extends AppError {
   readonly progress: CreateJobProgress;
   constructor(message: string, progress: CreateJobProgress, cause: unknown) {
-    super(message, { cause });
+    // keeps the cause's kind (e.g. a subscription refusal, PT402)
+    super(message, { cause, kind: toAppError(cause).kind });
     this.name = 'CreateJobError';
     this.progress = progress;
   }
@@ -228,7 +229,10 @@ export async function createJobStaged(
       progress.jobId = id;
     } catch (error) {
       throw new CreateJobError(
-        `The job couldn’t be created: ${causeMessage(error)}`,
+        // a subscription refusal is shown as the server wrote it
+        isSubscriptionError(error)
+          ? toAppError(error).message
+          : `The job couldn’t be created: ${causeMessage(error)}`,
         progress,
         error,
       );

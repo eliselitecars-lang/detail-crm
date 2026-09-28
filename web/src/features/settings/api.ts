@@ -1026,6 +1026,8 @@ export const deleteShopResultSchema = z.object({
   deleted: z.literal(true),
   memberships_cancelled: z.number().int(),
   sessions_expired: z.number().int(),
+  /** The shop's live platform subscription was cancelled by this deletion. */
+  platform_subscription_cancelled: z.boolean().optional(),
 });
 export type DeleteShopResult = z.infer<typeof deleteShopResultSchema>;
 
@@ -1038,13 +1040,18 @@ export function deleteShopErrorMessage(error: unknown): string {
     if (error.reason === 'name_mismatch') {
       return 'The name you typed doesn’t match this shop’s name. Nothing was deleted.';
     }
+    if (error.reason === 'platform_subscription_cancel_failed') {
+      return 'We could not cancel the shop’s subscription, so nothing was deleted. Try again.';
+    }
   }
   return errorMessage(error);
 }
 
 /**
  * Deletes the current shop through payments → delete_shop (owner only):
- * the server first cancels every membership's Stripe subscription, settles
+ * the server first cancels the shop's own platform subscription (502
+ * platform_subscription_cancel_failed stops it before anything changes),
+ * then every membership's Stripe subscription, settles
  * or expires open card payments and pay links (409 payment_in_progress when
  * one is still processing — nothing is deleted), then deletes the shop (every
  * tenant row cascades; its SMS number is logged for release). `confirmName`

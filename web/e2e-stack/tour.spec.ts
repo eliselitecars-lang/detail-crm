@@ -52,21 +52,37 @@ const TECH_PAGES = [
   '/app/notifications',
 ];
 
-async function visitAll(page: Page, paths: string[], extra: string[] = []): Promise<string[]> {
+/**
+ * Opens every path in its own fresh tab of `page`'s context (the session is
+ * shared), as someone opening each screen from a link would. One tab
+ * reloading the whole dev-server module graph dozens of times exhausts the
+ * browser's resources (net::ERR_INSUFFICIENT_RESOURCES) long before a real
+ * user would; a tab per screen keeps each load independent. Every tab reports
+ * into the same failure lists.
+ */
+async function visitAll(
+  page: Page,
+  paths: string[],
+  extra: string[] = [],
+  track: (tab: Page) => void = () => undefined,
+): Promise<string[]> {
   const problems: string[] = [];
   for (const path of [...paths, ...extra]) {
-    await page.goto(path);
-    await page.waitForLoadState('networkidle');
-    await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
+    const tab = await page.context().newPage();
+    track(tab);
+    await tab.goto(path);
+    await tab.waitForLoadState('networkidle');
+    await expect(tab.getByRole('heading', { level: 1 }).first()).toBeVisible();
     // Every error-state wording the app uses for a failed read (web/src):
     // "Couldn’t load/count …", "Couldn’t reach …" and the error boundary's
     // "Something went wrong …".
-    const errorStates = await page
+    const errorStates = await tab
       .getByText(/^(Couldn’t (load|count|reach)|Something went wrong)/)
       .allTextContents();
     if (errorStates.length > 0) problems.push(`${path}: ${errorStates.join(' | ')}`);
-    const denied = await page.getByText('You don’t have access to this page').count();
+    const denied = await tab.getByText('You don’t have access to this page').count();
     if (denied > 0) problems.push(`${path}: access denied`);
+    await tab.close();
   }
   return problems;
 }
@@ -153,18 +169,33 @@ test('tour: every owner screen and every technician screen loads cleanly on the 
   expect(assign.status, assign.text).toBe(201);
 
   // --- Owner tour
-  const apiFailures = trackApiFailures(page);
-  const pageErrors = trackPageErrors(page);
+  const apiFailures: string[] = [];
+  const pageErrors: string[] = [];
+  const trackOwner = (tab: Page) => {
+    const api = trackApiFailures(tab);
+    const errors = trackPageErrors(tab);
+    tab.on('close', () => {
+      apiFailures.push(...api);
+      pageErrors.push(...errors);
+    });
+  };
+  trackOwner(page);
   await loginViaUi(page, owner);
-  const ownerProblems = await visitAll(page, OWNER_PAGES, [
-    `/app/jobs/${jobId}`,
-    `/app/customers/${customerId}`,
-    `/app/invoices/${invoice.id}`,
-    `/app/quotes/${quote.json[0]?.id ?? ''}`,
-    '/app/jobs/new',
-    '/app/quotes/new',
-    '/app/invoices/new',
-  ]);
+  const ownerProblems = await visitAll(
+    page,
+    OWNER_PAGES,
+    [
+      `/app/jobs/${jobId}`,
+      `/app/customers/${customerId}`,
+      `/app/invoices/${invoice.id}`,
+      `/app/quotes/${quote.json[0]?.id ?? ''}`,
+      '/app/jobs/new',
+      '/app/quotes/new',
+      '/app/invoices/new',
+    ],
+    trackOwner,
+  );
+  await page.close();
   expect(ownerProblems).toEqual([]);
   expect(apiFailures).toEqual([]);
   expect(pageErrors).toEqual([]);
@@ -172,10 +203,20 @@ test('tour: every owner screen and every technician screen loads cleanly on the 
   // --- Technician tour
   const techCtx = await browser.newContext();
   const techPage = await techCtx.newPage();
-  const techApi = trackApiFailures(techPage);
-  const techErrors = trackPageErrors(techPage);
+  const techApi: string[] = [];
+  const techErrors: string[] = [];
+  const trackTech = (tab: Page) => {
+    const api = trackApiFailures(tab);
+    const errors = trackPageErrors(tab);
+    tab.on('close', () => {
+      techApi.push(...api);
+      techErrors.push(...errors);
+    });
+  };
+  trackTech(techPage);
   await loginViaUi(techPage, tech);
-  const techProblems = await visitAll(techPage, TECH_PAGES, [`/app/jobs/${jobId}`]);
+  const techProblems = await visitAll(techPage, TECH_PAGES, [`/app/jobs/${jobId}`], trackTech);
+  await techPage.close();
   expect(techProblems).toEqual([]);
   expect(techApi).toEqual([]);
   expect(techErrors).toEqual([]);

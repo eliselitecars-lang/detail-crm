@@ -110,6 +110,15 @@ describe('PrivacyPage', () => {
     expect(text).toContain('Clocking in or out in the web app records no location');
   });
 
+  it('says the operator’s Stripe account receives the shop’s subscription billing details', () => {
+    renderPage('privacy', UNSET);
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('they are billed on our own Stripe account, which receives the shop’s');
+    expect(text).toContain('the shop’s name and the owner’s email address');
+    expect(text).toContain('The owner enters the card on Stripe’s checkout page');
+    expect(text).toContain('subscription billing records in our Stripe account');
+  });
+
   it('uses neutral wording when the operator details are not configured', () => {
     renderPage('privacy', UNSET);
     const text = document.body.textContent ?? '';
@@ -178,6 +187,26 @@ describe('TermsPage', () => {
     const text = document.body.textContent ?? '';
     expect(text).toContain('you are the merchant of record for every payment');
     expect(text).toContain('these terms do not set prices');
+  });
+
+  it('describes shop subscriptions as the server enforces them, without numbers', () => {
+    renderPage('terms', UNSET);
+    const section = screen.getByRole('region', { name: /Shop subscriptions/ });
+    const text = section.textContent ?? '';
+    for (const phrase of [
+      'renews automatically at the end of each billing period',
+      'cancel at any time in the billing portal',
+      'takes effect at the end of the billing period already paid',
+      'except as stated at checkout or where the law requires it',
+      'nothing is deleted',
+      'view and export everything, finish existing jobs and collect payments on existing invoices',
+      'online booking',
+      'Deleting the shop ends its subscription immediately',
+    ]) {
+      expect(text).toContain(phrase);
+    }
+    // No invented prices or trial lengths.
+    expect(text).not.toMatch(/[$€£]\s?\d|\d+\s?(day|month|year)s?\b(?! of)/i);
   });
 
   it('uses neutral wording and no governing-law country when unset', () => {

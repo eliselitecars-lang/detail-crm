@@ -438,7 +438,8 @@ describe('ImportExportPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Check the file' }));
     expect(await screen.findByText('Check results (nothing saved yet)')).toBeVisible();
-    expect(calls[0]?.args).toMatchObject({
+    const imports = calls.filter((c) => c.fn === 'import_customers');
+    expect(imports[0]?.args).toMatchObject({
       p_shop_id: 'shop-1',
       p_dry_run: true,
       p_file_name: 'clients.csv',
@@ -456,7 +457,9 @@ describe('ImportExportPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Import 1 row' }));
     expect(await screen.findByText('Import results')).toBeVisible();
-    expect(calls[1]?.args).toMatchObject({ p_dry_run: false });
+    expect(calls.filter((c) => c.fn === 'import_customers')[1]?.args).toMatchObject({
+      p_dry_run: false,
+    });
   });
   it('resumes an import that stopped part-way instead of sending the saved rows again', async () => {
     setTableResult('vehicle_categories', { data: [] });
@@ -521,6 +524,57 @@ describe('ImportExportPage', () => {
     expect(resumed).toHaveLength(100);
     expect(resumed[0]).toEqual({ first_name: 'Customer', last_name: '501' });
     expect(screen.getByText('600 new')).toBeVisible();
+    // One nonce per committed chunk; the resumed chunk (timed out, maybe
+    // applied) is sent again with ITS nonce. Dry runs carry none.
+    const nonces = commits.map((c) => c.args.p_request_nonce);
+    expect(nonces[0]).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
+    expect(nonces[1]).not.toBe(nonces[0]);
+    expect(nonces[2]).toBe(nonces[1]);
+    expect(calls.filter((c) => c.args.p_dry_run === true)[0]?.args).not.toHaveProperty(
+      'p_request_nonce',
+    );
+  });
+
+  it('retries a chunk whose reply was lost with the same nonce and counts the replay once', async () => {
+    setTableResult('import_batches', { data: [] });
+    setTableResult('vehicle_categories', { data: [] });
+    setTableResult('custom_fields', { data: [] });
+    let commits = 0;
+    const result = (dryRun: boolean, replayed?: boolean) => ({
+      data: {
+        batch_id: dryRun ? null : 'batch-1',
+        dry_run: dryRun,
+        counts: { created: 1, updated: 0, skipped: 0, errors: 0 },
+        rows: [{ row: 1, action: 'create', vehicle_action: 'none' }],
+        ...(replayed ? { replayed: true } : {}),
+      },
+    });
+    const calls = mockRpc({
+      import_customers: (args) => {
+        if (args.p_dry_run) return result(true);
+        commits += 1;
+        // the first commit is applied, but its reply never arrives
+        return commits === 1
+          ? { data: null, error: new TypeError('Failed to fetch') }
+          : result(false, true);
+      },
+    });
+    const { user } = renderSettings('/app/settings/import-export', { role: 'manager' });
+    await screen.findByText('Import from a spreadsheet');
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+    await user.upload(input!, new File(['Name\nJane Doe\n'], 'one.csv', { type: 'text/csv' }));
+    await user.click(await screen.findByRole('button', { name: 'Check the file' }));
+    await user.click(await screen.findByRole('button', { name: 'Import 1 row' }));
+    expect(await screen.findByText(/Can’t reach the server|Can't reach the server/)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Import 1 row' }));
+    expect(await screen.findByText('Import results')).toBeVisible();
+    expect(
+      screen.getByText(/1 row was already saved by an earlier attempt whose reply was lost/),
+    ).toBeVisible();
+    const sent = calls.filter((c) => c.args.p_dry_run === false);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]?.args.p_request_nonce).toBe(sent[0]?.args.p_request_nonce);
+    expect(screen.getByText('1 new')).toBeVisible();
   });
 });
 

@@ -14,9 +14,11 @@ import { unwrapList } from './db';
 import { AppError } from '@/lib/errors';
 import { readCustomData } from '@/lib/customFields';
 import { shopKey } from '@/lib/queryKeys';
+import { useRequestNonces } from '@/lib/requestNonce';
 import { supabase } from '@/lib/supabase';
 import { cancelOpenPaymentsResultSchema } from '@/features/invoices/api';
 import { invokeEdge } from '@/features/quotes/shared/edge';
+import { addFeeLine } from '@/features/quotes/shared/fees';
 import { useShop } from '@/features/shop/shopContext';
 import {
   JOB_STATUSES,
@@ -827,14 +829,17 @@ export function useMoveLineItem(jobId: string) {
   });
 }
 
-/** add_fee_line('job', …) (0068, manager+): the fee becomes an ordinary line. */
+/**
+ * add_fee_line('job', …) (0068, manager+): the fee becomes an ordinary line.
+ * A retry of the same fee after a network failure reuses its request nonce
+ * (0095), so the fee is never added twice.
+ */
 export function useAddFeeLine(jobId: string) {
   const invalidate = useInvalidateJobs();
+  const nonces = useRequestNonces();
   return useMutation({
     mutationFn: async (feeId: string) => {
-      unwrap(
-        await supabase.rpc('add_fee_line', { p_doc_kind: 'job', p_doc_id: jobId, p_fee_id: feeId }),
-      );
+      await addFeeLine(nonces, 'job', jobId, feeId);
     },
     onSettled: invalidate,
   });

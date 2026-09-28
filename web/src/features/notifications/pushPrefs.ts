@@ -19,10 +19,18 @@ export const MEMBER_KINDS: readonly NotificationKind[] = [
   'general',
 ];
 
+/** Kinds only the shop owner receives (billing_payment_failed, 0101). */
+export const OWNER_KINDS: readonly NotificationKind[] = ['billing_payment_failed'];
+
 /** The kinds this role can receive, in display order. */
 export function pushableKinds(role: ShopRole): NotificationKind[] {
   if (role === 'technician') return [...MEMBER_KINDS];
-  return [...MEMBER_KINDS, ...ALL_KINDS.filter((k) => !MEMBER_KINDS.includes(k))];
+  return [
+    ...MEMBER_KINDS,
+    ...ALL_KINDS.filter(
+      (k) => !MEMBER_KINDS.includes(k) && (role === 'owner' || !OWNER_KINDS.includes(k)),
+    ),
+  ];
 }
 
 /** What is switched on: a member without a saved row gets every kind. */

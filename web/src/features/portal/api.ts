@@ -269,9 +269,18 @@ export function useBillingPortal() {
 // Documents and job reports shared with the client (P-25, P-8)
 // ---------------------------------------------------------------------------
 
+/** The shop a portal row belongs to (0095: every row carries it; match by slug, never by name). */
+const rowShop = {
+  shop_name: z.string(),
+  shop_slug: z.string(),
+  /** IANA zone: the row's dates display in the shop's timezone. */
+  timezone: z.string(),
+  currency: z.string(),
+};
+
 export const portalDocumentSchema = z.object({
   id: z.string(),
-  shop_name: z.string(),
+  ...rowShop,
   file_name: z.string(),
   content_type: zText,
   size_bytes: z
@@ -298,7 +307,7 @@ export function usePortalDocuments(userId: string, enabled: boolean) {
 }
 
 export const portalReportSchema = z.object({
-  shop_name: z.string(),
+  ...rowShop,
   job_number: z.number().int(),
   completed_at: zText,
   published_at: zText,
@@ -324,7 +333,7 @@ export function usePortalReports(userId: string, enabled: boolean) {
 // ---------------------------------------------------------------------------
 
 export const portalReferralSchema = z.object({
-  shop_name: z.string(),
+  ...rowShop,
   code: z.string(),
   /** Null while the service has no public app URL configured. */
   share_url: zText,

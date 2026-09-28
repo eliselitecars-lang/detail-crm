@@ -100,12 +100,7 @@ export async function copyText(text: string): Promise<boolean> {
 }
 
 /** Url-safe idempotency nonce for edge-function money actions (8–64 chars). */
-export function newRequestNonce(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID().replace(/-/g, '');
-  }
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
-}
+export { newRequestNonce } from '@/lib/requestNonce';
 
 /** Escapes LIKE wildcards so user input matches literally. */
 export function escapeLike(text: string): string {

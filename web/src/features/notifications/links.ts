@@ -1,9 +1,11 @@
 /**
  * Where a notification leads. Notifications carry optional job_id,
  * customer_id, quote_id and invoice_id (0031_comms_notifications.sql); the
- * most specific record wins, else the kind's section.
+ * most specific record wins, else the kind's section. Title and body are the
+ * server's; only the destination is decided here.
  */
 import type { Row } from '@/lib/db';
+import type { ShopRole } from '@/features/shop/permissions';
 
 export type NotificationKind = Row<'notifications'>['kind'];
 
@@ -23,8 +25,27 @@ const customerLink = (id: string): NotificationLink => ({
   label: 'Open customer',
 });
 
-export function notificationLink(n: NotificationLinkInput): NotificationLink | null {
+/** The notifications list: where a kind the reader can't act on leads. */
+const NOTIFICATIONS_LINK: NotificationLink = {
+  href: '/app/notifications',
+  label: 'Open notifications',
+};
+
+/**
+ * `role` is the reader's role in the notification's shop: owner-only
+ * destinations (the subscription billing page) fall back to the
+ * notifications list for everyone else (e.g. a former owner after a
+ * transfer).
+ */
+export function notificationLink(
+  n: NotificationLinkInput,
+  role?: ShopRole | null,
+): NotificationLink | null {
   switch (n.kind) {
+    case 'billing_payment_failed':
+      return role === 'owner'
+        ? { href: '/app/settings/billing', label: 'Open billing' }
+        : NOTIFICATIONS_LINK;
     case 'inbound_message':
       return n.customer_id
         ? {
@@ -90,4 +111,5 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   task_due: 'Task due',
   sms_number_status: 'Text messaging',
   webhook_failing: 'Webhook failing',
+  billing_payment_failed: 'Subscription payment',
 };

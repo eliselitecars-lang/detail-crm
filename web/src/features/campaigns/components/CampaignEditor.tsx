@@ -20,6 +20,7 @@ import {
 } from '@/components/ui';
 import { formatDateTime, shopLocalToUtcIso, utcToShopLocal } from '@/lib/dates';
 import { errorMessage } from '@/lib/errors';
+import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
 import { useShop } from '@/features/shop/shopContext';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import {
@@ -68,6 +69,12 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
     campaign ? audienceToForm(campaign.audience) : { ...EMPTY_AUDIENCE_FORM },
   );
   const [submitError, setSubmitError] = useState<string | null>(null);
+  /** The error behind submitError (the owner's billing link on a subscription refusal). */
+  const [submitCause, setSubmitCause] = useState<unknown>(null);
+  const fail = (error: unknown) => {
+    setSubmitError(errorMessage(error));
+    setSubmitCause(error);
+  };
   const [confirmLaunch, setConfirmLaunch] = useState<{ id: string; sendAt: string | null } | null>(
     null,
   );
@@ -123,6 +130,7 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
 
   const persist = async (values: FormOutput) => {
     setSubmitError(null);
+    setSubmitCause(null);
     const id = await save.mutateAsync({
       ...(savedId ? { id: savedId } : {}),
       values: toInput(values),
@@ -137,20 +145,21 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
       toast.success('Draft saved');
       if (!campaign) await navigate(`/app/campaigns/${id}`, { replace: true });
     } catch (error) {
-      setSubmitError(errorMessage(error));
+      fail(error);
     }
   });
 
   const onReviewLaunch = handleSubmit(async (values) => {
     if (rangeError) {
       setSubmitError(rangeError);
+      setSubmitCause(null);
       return;
     }
     try {
       const id = await persist(values);
       setConfirmLaunch({ id, sendAt: toInput(values).scheduled_at });
     } catch (error) {
-      setSubmitError(errorMessage(error));
+      fail(error);
     }
   });
 
@@ -171,7 +180,7 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
       await leaveNewPage(id);
     } catch (error) {
       setConfirmLaunch(null);
-      setSubmitError(errorMessage(error));
+      fail(error);
     }
   };
 
@@ -216,6 +225,7 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
           className="border-danger/30 bg-danger-soft text-danger-ink rounded-control border px-3 py-2 text-sm"
         >
           {submitError}
+          <BillingErrorLink error={submitCause} />
         </p>
       )}
 
@@ -406,7 +416,7 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
               await navigate('/app/campaigns', { replace: true });
             } catch (error) {
               setConfirmDelete(false);
-              setSubmitError(errorMessage(error));
+              fail(error);
             }
           }}
         />

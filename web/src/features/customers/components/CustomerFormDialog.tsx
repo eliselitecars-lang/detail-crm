@@ -14,7 +14,8 @@ import {
 } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
 import { formatDate } from '@/lib/dates';
-import { toAppError } from '@/lib/errors';
+import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
+import { toAppError, type AppError } from '@/lib/errors';
 import { useCreateCustomer, useKnownTags, useUpdateCustomer } from '../api';
 import { LIFECYCLE_LABELS, LIFECYCLES, SOURCE_LABELS, SOURCES, type CustomerRow } from '../model';
 import {
@@ -44,7 +45,7 @@ export function CustomerFormDialog({ open, onClose, customer, onSaved }: Custome
   const create = useCreateCustomer(shopId);
   const update = useUpdateCustomer(shopId, customer?.id ?? '');
   const tags = useKnownTags(shopId, open);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<AppError | null>(null);
 
   const {
     register,
@@ -72,7 +73,7 @@ export function CustomerFormDialog({ open, onClose, customer, onSaved }: Custome
       const appError = toAppError(error);
       const field = appError.constraint ? CUSTOMER_CONSTRAINT_FIELDS[appError.constraint] : null;
       if (field) setError(field, { message: appError.message }, { shouldFocus: true });
-      else setFormError(appError.message);
+      else setFormError(appError);
     }
   });
 
@@ -108,7 +109,8 @@ export function CustomerFormDialog({ open, onClose, customer, onSaved }: Custome
             role="alert"
             className="bg-danger-soft text-danger-ink rounded-control px-3 py-2 text-sm"
           >
-            {formError}
+            {formError.message}
+            <BillingErrorLink error={formError} />
           </p>
         )}
 
