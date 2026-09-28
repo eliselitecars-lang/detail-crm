@@ -171,8 +171,16 @@ const EMAIL_FROM_RE = /^([^<>]+<[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+>|[^\s<>@]+@[^\s<>
  * validated exactly like _shared/env.ts so a bad value fails here, before it
  * reaches production). SUPABASE_URL / SUPABASE_ANON_KEY /
  * SUPABASE_SERVICE_ROLE_KEY are injected by Supabase and never set.
- * `required`: true | 'unless-stripe-webhooks' | 'billing-unless-stripe-webhooks'
- * (only while BILLING_ENABLED=true) | false.
+ * `required`:
+ *   true                              always an input;
+ *   'unless-stripe-webhooks'          the webhook signing secrets: an input, OR
+ *   'billing-unless-stripe-webhooks'  created and stored by --stripe-webhooks, OR
+ *                                     already stored in the project by an earlier
+ *                                     deploy (kept as it is); the billing one only
+ *                                     while BILLING_ENABLED=true;
+ *   false                             optional: unset = off / the default, and an
+ *                                     unset one is REMOVED from the project
+ *                                     (OPTIONAL_SECRET_NAMES, planSecrets).
  */
 export const SECRET_SPECS = [
   {
@@ -196,14 +204,15 @@ export const SECRET_SPECS = [
   {
     name: 'STRIPE_WEBHOOK_SECRET',
     required: 'unless-stripe-webhooks',
-    where: 'Signing secret of the Stripe Connect webhook endpoint (or run with --stripe-webhooks)',
+    where:
+      'Signing secret of the Stripe Connect webhook endpoint; not needed once the project holds it: run with --stripe-webhooks (workflow: stripe_webhooks) to create the endpoint and store it',
     validate: (v) => (/^whsec_[A-Za-z0-9+/=_-]+$/.test(v) ? null : 'expected whsec_ secret'),
   },
   {
     name: 'STRIPE_BILLING_WEBHOOK_SECRET',
     required: 'billing-unless-stripe-webhooks',
     where:
-      'Signing secret of the Stripe PLATFORM webhook endpoint for billing-webhook (shop subscriptions), or run with --stripe-webhooks; needed only while BILLING_ENABLED=true',
+      'Signing secret of the Stripe PLATFORM webhook endpoint for billing-webhook (shop subscriptions), needed while BILLING_ENABLED=true; not needed once the project holds it: run with --stripe-webhooks (workflow: stripe_webhooks) to create the endpoint and store it',
     validate: (v) => (/^whsec_[A-Za-z0-9+/=_-]+$/.test(v) ? null : 'expected whsec_ secret'),
   },
   {
@@ -360,6 +369,62 @@ export const SECRET_GROUPS = [
 /** Secrets the local real-stack harness uses; they must never exist in production. */
 export const HARNESS_ONLY_SECRETS = ['STRIPE_API_BASE', 'TWILIO_API_BASE', 'RESEND_API_BASE'];
 
+/**
+ * Optional function secrets ("unset = off / the default"). The deploy inputs
+ * are their desired state: one the inputs leave unset is removed from the
+ * project (planSecrets), so deleting a GitHub variable really switches the
+ * feature off (the platform fee, self-serve numbers, Stripe Tax, an extra
+ * CORS origin, APNs push) instead of leaving the old value in force.
+ */
+export const OPTIONAL_SECRET_NAMES = SECRET_SPECS.filter((spec) => spec.required === false).map((spec) => spec.name);
+
+/**
+ * One-shot knobs of --stripe-webhooks (deploy_api.mjs ensureEndpoint), per
+ * endpoint: RECREATE=1 deletes and recreates the tagged endpoint (a new
+ * signing secret is stored); ADOPT=<we_...> takes over an endpoint made by
+ * hand at the same URL. The deploy-backend workflow sets them from its
+ * stripe_webhook_recreate / stripe_webhook_adopt_* inputs.
+ */
+export const WEBHOOK_KNOBS = [
+  { name: 'STRIPE_WEBHOOK_RECREATE', endpoint: 'connect', kind: 'recreate', input: 'stripe_webhook_recreate = connect (or both)' },
+  { name: 'STRIPE_WEBHOOK_ADOPT', endpoint: 'connect', kind: 'adopt', input: 'stripe_webhook_adopt_connect' },
+  { name: 'STRIPE_BILLING_WEBHOOK_RECREATE', endpoint: 'billing', kind: 'recreate', input: 'stripe_webhook_recreate = billing (or both)' },
+  { name: 'STRIPE_BILLING_WEBHOOK_ADOPT', endpoint: 'billing', kind: 'adopt', input: 'stripe_webhook_adopt_billing' },
+];
+
+/** Problems with the --stripe-webhooks knobs: [{name, problem}] (values never included). */
+function webhookKnobProblems(env, { stripeWebhooks, billingOn }) {
+  const problems = [];
+  for (const knob of WEBHOOK_KNOBS) {
+    const raw = env[knob.name]?.trim() ?? '';
+    if (knob.kind === 'recreate') {
+      if (raw === '' || raw === '0') continue;
+      if (raw !== '1') {
+        problems.push({ name: knob.name, problem: 'must be 1 (or unset)' });
+        continue;
+      }
+    } else {
+      if (raw === '') continue;
+      if (!/^we_[A-Za-z0-9]+$/.test(raw)) {
+        problems.push({ name: knob.name, problem: 'must be a Stripe webhook endpoint id (we_...)' });
+        continue;
+      }
+    }
+    if (!stripeWebhooks) {
+      problems.push({
+        name: knob.name,
+        problem: 'acts only together with --stripe-webhooks (workflow: check stripe_webhooks); nothing would change without it',
+      });
+    } else if (knob.endpoint === 'billing' && !billingOn) {
+      problems.push({
+        name: knob.name,
+        problem: 'acts only while BILLING_ENABLED=true (the platform billing endpoint is managed only then); nothing would change',
+      });
+    }
+  }
+  return problems;
+}
+
 /** Deploy-script inputs that are not function secrets. */
 export const DEPLOY_INPUTS = [
   { name: 'SUPABASE_ACCESS_TOKEN', where: 'supabase.com -> Account -> Access Tokens (personal access token)' },
@@ -409,11 +474,19 @@ export function billingConfig(env) {
 /**
  * Validates the environment for a deploy. Returns the exact lists the
  * operator needs; values are never included in messages.
+ *
+ * A webhook signing secret that is not an input (and not coming from
+ * --stripe-webhooks) may already be stored in the project by an earlier
+ * deploy: `storedSecrets` (a Set of the project's secret names) settles it
+ * (stored = kept as it is; not stored = missing). Without `storedSecrets`
+ * (before the project is contacted) such names are returned in `deferred`
+ * for the caller to check against the project.
  */
-export function validateDeployEnv(env, { stripeWebhooks = false, requireLiveStripe = false } = {}) {
+export function validateDeployEnv(env, { stripeWebhooks = false, requireLiveStripe = false, storedSecrets } = {}) {
   const missing = [];
   const invalid = [];
   const warnings = [];
+  const deferred = [];
   const secrets = {};
   for (const input of DEPLOY_INPUTS) {
     if (!env[input.name]?.trim()) missing.push({ name: input.name, where: input.where });
@@ -429,12 +502,15 @@ export function validateDeployEnv(env, { stripeWebhooks = false, requireLiveStri
   const billingOn = env.BILLING_ENABLED?.trim().toLowerCase() === 'true';
   for (const spec of SECRET_SPECS) {
     const value = env[spec.name]?.trim();
-    const required =
-      spec.required === true ||
-      (spec.required === 'unless-stripe-webhooks' && !stripeWebhooks) ||
-      (spec.required === 'billing-unless-stripe-webhooks' && billingOn && !stripeWebhooks);
+    const webhookSecret =
+      (spec.required === 'unless-stripe-webhooks' || (spec.required === 'billing-unless-stripe-webhooks' && billingOn)) && !stripeWebhooks;
     if (!value) {
-      if (required) missing.push({ name: spec.name, where: spec.where });
+      if (spec.required === true) {
+        missing.push({ name: spec.name, where: spec.where });
+      } else if (webhookSecret) {
+        if (!storedSecrets) deferred.push({ name: spec.name, where: spec.where });
+        else if (!storedSecrets.has(spec.name)) missing.push({ name: spec.name, where: `not an input and not stored in the project yet. ${spec.where}` });
+      }
       continue;
     }
     const problem = spec.validate(value, env);
@@ -464,6 +540,7 @@ export function validateDeployEnv(env, { stripeWebhooks = false, requireLiveStri
   if (env.TWILIO_ISV_ENABLED?.trim().toLowerCase() === 'true' && env.SMS_PROVISIONING_ENABLED?.trim().toLowerCase() !== 'true') {
     warnings.push('TWILIO_ISV_ENABLED=true has no effect until SMS_PROVISIONING_ENABLED=true (self-serve numbers stay off)');
   }
+  invalid.push(...webhookKnobProblems(env, { stripeWebhooks, billingOn }));
   const mode = /^(sk|rk)_(test|live)_/.exec(env.STRIPE_SECRET_KEY ?? '')?.[2];
   if (mode === 'test') {
     (requireLiveStripe ? invalid : warnings).push(
@@ -475,7 +552,7 @@ export function validateDeployEnv(env, { stripeWebhooks = false, requireLiveStri
   for (const name of HARNESS_ONLY_SECRETS) {
     if (env[name]) warnings.push(`${name} is set in this environment; it is never sent to production (local harness only)`);
   }
-  return { missing, invalid, warnings, secrets };
+  return { missing, invalid, warnings, deferred, secrets };
 }
 
 export function sha256Hex(value) {
@@ -486,6 +563,11 @@ export function sha256Hex(value) {
  * What to send to POST /v1/projects/{ref}/secrets. The Management API lists
  * secrets as {name, value: <sha256 hex digest>}; unchanged values are
  * skipped (a digest in another format simply means "update").
+ * `unset`: optional secrets (OPTIONAL_SECRET_NAMES) the project has but the
+ * inputs leave unset, to remove ("unset = off" is the desired state).
+ * `harness`: local-harness overrides found in the project, to remove.
+ * Names the deploy does not manage (and the webhook signing secrets, which
+ * the project keeps when they are not inputs) are never removed.
  */
 export function planSecrets(desired, remoteList) {
   const remote = new Map((remoteList ?? []).map((s) => [s.name, s.value]));
@@ -495,8 +577,9 @@ export function planSecrets(desired, remoteList) {
     else if (remote.get(name) === sha256Hex(value)) plan.push({ name, action: 'unchanged', value });
     else plan.push({ name, action: 'update', value });
   }
+  const unset = OPTIONAL_SECRET_NAMES.filter((n) => remote.has(n) && !Object.hasOwn(desired, n));
   const harness = HARNESS_ONLY_SECRETS.filter((n) => remote.has(n));
-  return { plan, harness };
+  return { plan, unset, harness };
 }
 
 // ---------------------------------------------------------------- cron.sql

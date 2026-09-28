@@ -95,7 +95,10 @@ export async function startFakeLive({ ref, anon, service, token, app, faults = [
         if (['portal_overview', 'create_shop', 'set_app_base_url'].includes(fn) && key === anon) return send(401, { code: '42501', message: `permission denied for function ${fn}` });
         if (body.p_token === 'not-a-uuid') return send(400, { code: '22P02', message: 'invalid input syntax for type uuid' });
         if (['public_get_quote', 'public_get_invoice', 'public_get_booking', 'public_get_form', 'public_shop_profile', 'public_booking_catalog'].includes(fn)) {
-          return send(500, { code: 'P0002', message: 'not found' }, { 'proxy-status': 'PostgREST; error=P0002' });
+          // PT404 -> HTTP 404 (PostgREST maps PTxyz to status xyz); the fault
+          // is the old defect: P0002, which PostgREST answers with 500.
+          if (f.has('public-token-500')) return send(500, { code: 'P0002', message: 'not found' }, { 'proxy-status': 'PostgREST; error=P0002' });
+          return send(404, { code: 'PT404', message: 'not found' }, { 'proxy-status': 'PostgREST; error=PT404' });
         }
         return send(200, null);
       }

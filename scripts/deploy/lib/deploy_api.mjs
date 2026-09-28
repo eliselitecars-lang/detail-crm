@@ -9,9 +9,10 @@
 //
 // Usage: node scripts/deploy/lib/deploy_api.mjs <command> [--dry-run] [options]
 //   validate        [--stripe-webhooks]          env check: missing / invalid inputs (exit 2)
-//   preflight                                    project exists + token works
+//   preflight       [--stripe-webhooks]          project exists + token works + the webhook
+//                                                secrets that are not inputs are stored there
 //   functions-plan  --supabase-dir DIR           "<name> <verify_jwt>" lines for the shell
-//   secrets         [--dry-run] [--stripe-webhooks]
+//   secrets         [--dry-run] [--stripe-webhooks]  set / update, remove unset optional ones
 //   stripe-webhook  [--dry-run] --supabase-dir DIR
 //   auth            [--dry-run]
 //   platform-setup  [--dry-run] --cron-sql FILE
@@ -19,7 +20,8 @@
 //
 // Env: SUPABASE_ACCESS_TOKEN, SUPABASE_PROJECT_REF, the function secrets
 // (lib/config.mjs SECRET_SPECS), BILLING_ENABLED / BILLING_TRIAL_DAYS
-// (lib/config.mjs BILLING_INPUTS), optional AUTH_* knobs, and for tests
+// (lib/config.mjs BILLING_INPUTS), optional AUTH_* knobs, the one-shot
+// --stripe-webhooks knobs (lib/config.mjs WEBHOOK_KNOBS), and for tests
 // DEPLOY_SUPABASE_API_BASE / DEPLOY_STRIPE_API_BASE / DEPLOY_FUNCTIONS_API_BASE
 // (default: the real APIs and the project's functions URL).
 import { randomUUID } from 'node:crypto';
@@ -36,6 +38,7 @@ import {
   renderCronSql,
   SECRET_SPECS,
   validateDeployEnv,
+  WEBHOOK_KNOBS,
 } from './config.mjs';
 
 const env = process.env;
@@ -184,6 +187,7 @@ function cmdValidate() {
     return;
   }
   say(`inputs OK: ${Object.keys(result.secrets).length} function secrets validated${STRIPE_WEBHOOKS && !result.secrets.STRIPE_WEBHOOK_SECRET ? ' (STRIPE_WEBHOOK_SECRET will come from --stripe-webhooks)' : ''}`);
+  for (const d of result.deferred) say(`${d.name}: not an input; the project must already hold it (checked in the next step)`);
   const billing = billingConfig(env);
   say(
     billing.enabled
@@ -198,6 +202,21 @@ async function cmdPreflight() {
   const p = expectOk(res, 'Management API project lookup');
   say(`project ${p?.id ?? REF}: name="${p?.name ?? '?'}" region=${p?.region ?? '?'} status=${p?.status ?? '?'}`);
   if (p?.status && !/ACTIVE_HEALTHY/.test(p.status)) warn(`project status is ${p.status}; the deploy may fail until it is ACTIVE_HEALTHY`);
+  // Webhook signing secrets that are not inputs: an earlier deploy (with
+  // --stripe-webhooks, or by hand) must have stored them. Checked here,
+  // before anything in the project changes.
+  const { deferred } = validateDeployEnv(env, { stripeWebhooks: STRIPE_WEBHOOKS });
+  if (!deferred.length) return;
+  const stored = new Set((await listSecrets()).map((s) => s.name));
+  const absent = deferred.filter((d) => !stored.has(d.name));
+  for (const d of deferred.filter((x) => stored.has(x.name))) say(`${d.name}: kept as stored in the project (not an input)`);
+  if (absent.length) {
+    fail(
+      `${absent.map((d) => d.name).join(' and ')} ${absent.length === 1 ? 'is' : 'are'} neither an input nor stored in the project. ` +
+        'Run the deploy with --stripe-webhooks (workflow: check stripe_webhooks): it creates the endpoint and stores its signing secret. ' +
+        'Or set the endpoint\'s signing secret (Stripe Dashboard -> Developers -> Webhooks -> the endpoint -> Signing secret) as that input.',
+    );
+  }
 }
 
 function cmdFunctionsPlan() {
@@ -211,15 +230,26 @@ async function listSecrets() {
 
 async function cmdSecrets() {
   requireRef();
-  const { secrets, missing, invalid } = validateDeployEnv(env, { stripeWebhooks: STRIPE_WEBHOOKS });
-  if (missing.length || invalid.length) fail('inputs are missing or invalid: run the validate step first');
   const remote = await listSecrets();
-  const { plan, harness } = planSecrets(secrets, remote);
+  const { secrets, missing, invalid } = validateDeployEnv(env, {
+    stripeWebhooks: STRIPE_WEBHOOKS,
+    storedSecrets: new Set(remote.map((s) => s.name)),
+  });
+  if (missing.length || invalid.length) fail('inputs are missing or invalid: run the validate and preflight steps first');
+  const { plan, unset, harness } = planSecrets(secrets, remote);
   for (const p of plan) say(`  ${p.action.padEnd(9)} ${p.name}`);
+  for (const name of unset) say(`  remove    ${name} (unset in this deploy's inputs: off / the default)`);
   for (const name of harness) say(`  remove    ${name} (local-harness override: production must call the real provider)`);
   const changed = plan.filter((p) => p.action !== 'unchanged');
+  const removed = [...unset, ...harness];
+  if (unset.length) {
+    warn(
+      `${unset.join(', ')} ${unset.length === 1 ? 'is' : 'are'} set in the project but not in this deploy's inputs, so ${DRY ? 'the deploy would remove' : 'this deploy removes'} ` +
+        `${unset.length === 1 ? 'it' : 'them'} (unset = off). To keep a value, set it as a GitHub variable/secret (local run: export it).`,
+    );
+  }
   if (DRY) {
-    say(`dry run: would set ${changed.length} secret(s), remove ${harness.length}; ${plan.length - changed.length} unchanged`);
+    say(`dry run: would set ${changed.length} secret(s), remove ${removed.length}; ${plan.length - changed.length} unchanged`);
     return;
   }
   if (changed.length) {
@@ -229,14 +259,16 @@ async function cmdSecrets() {
     });
     expectOk(res, 'set function secrets');
   }
-  if (harness.length) {
-    expectOk(await mgmt('DELETE', `/v1/projects/${REF}/secrets`, { body: harness, label: 'delete secrets' }), 'remove harness-only secrets');
+  if (removed.length) {
+    expectOk(await mgmt('DELETE', `/v1/projects/${REF}/secrets`, { body: removed, label: 'delete secrets' }), 'remove function secrets');
   }
-  // Read back: every desired name must now exist.
+  // Read back: every desired name must now exist, every removed one be gone.
   const after = new Set((await listSecrets()).map((s) => s.name));
   const absent = Object.keys(secrets).filter((n) => !after.has(n));
   if (absent.length) fail(`secrets not present after update: ${absent.join(', ')}`);
-  say(`secrets: ${changed.length} set, ${harness.length} removed, ${plan.length - changed.length} unchanged`);
+  const left = removed.filter((n) => after.has(n));
+  if (left.length) fail(`secrets still present after removal: ${left.join(', ')}`);
+  say(`secrets: ${changed.length} set, ${removed.length} removed, ${plan.length - changed.length} unchanged`);
 }
 
 const WEBHOOK_ROLE_KEY = 'detail_crm_role';
@@ -271,6 +303,14 @@ const ENDPOINTS = {
     description: 'Detail CRM platform billing webhook (managed by scripts/deploy)',
   },
 };
+
+/** How to set one of the endpoint's knobs: the workflow input, or the local variable. */
+function knobHint(spec, kind) {
+  const name = kind === 'recreate' ? spec.recreateVar : spec.adoptVar;
+  const knob = WEBHOOK_KNOBS.find((k) => k.name === name);
+  const local = kind === 'recreate' ? `${name}=1` : `${name}=<we_id>`;
+  return `the deploy-backend workflow input ${knob?.input ?? name} with stripe_webhooks (local run: ${local} with --stripe-webhooks)`;
+}
 
 async function listWebhookEndpoints(apiVersion) {
   const all = [];
@@ -311,8 +351,8 @@ async function ensureEndpoint(spec, { events, apiVersion, endpoints, remoteSecre
     fail(
       `${foreign.length} Stripe endpoint(s) at ${url} were not created by this script (${foreign.map((e) => e.id).join(', ')}). ` +
         `Stripe does not report whether an endpoint is a Connect endpoint, so it is not touched. Either delete it in the Dashboard and re-run with ` +
-        `--stripe-webhooks, set ${spec.adoptVar}=<we_id> if it IS the ${spec.label} endpoint (${spec.kind}) whose secret is ${spec.secretName}, or manage it by hand ` +
-        '(run without --stripe-webhooks).',
+        `--stripe-webhooks; or, if it IS the ${spec.label} endpoint (${spec.kind}) whose secret is ${spec.secretName}, adopt it with ${knobHint(spec, 'adopt')}; ` +
+        'or manage it by hand (run without --stripe-webhooks).',
     );
   }
   const otherTagged = endpoints.filter((e) => e.metadata?.[WEBHOOK_ROLE_KEY] === spec.role && e.url !== url);
@@ -337,7 +377,12 @@ async function ensureEndpoint(spec, { events, apiVersion, endpoints, remoteSecre
       await mgmt('POST', `/v1/projects/${REF}/secrets`, { body: [{ name: spec.secretName, value: res.json.secret }], label: 'store webhook secret' }),
       `store ${spec.secretName}`,
     );
-    if (env[spec.secretName]) warn(`${spec.secretName} from the environment was replaced by the new endpoint's signing secret`);
+    if (env[spec.secretName]?.trim()) {
+      warn(
+        `${spec.secretName} from the inputs was replaced in the project by the new endpoint's signing secret. Delete the ${spec.secretName} ` +
+          'GitHub secret (local run: unset it) now: the next deploy would put the old value back, and the project keeps the new one without it.',
+      );
+    }
     say(`created ${res.json.id} and stored its signing secret as ${spec.secretName}`);
   }
 
@@ -350,7 +395,7 @@ async function ensureEndpoint(spec, { events, apiVersion, endpoints, remoteSecre
   const eventsDiffer = have.join(',') !== wanted.join(',');
   const versionDiffers = e.api_version && e.api_version !== apiVersion;
   if (versionDiffers && !recreate) {
-    warn(`endpoint ${e.id} uses api_version ${e.api_version} but the functions pin ${apiVersion}; Stripe cannot change it in place. Re-run with ${spec.recreateVar}=1 to replace it (a new signing secret is stored automatically).`);
+    warn(`endpoint ${e.id} uses api_version ${e.api_version} but the functions pin ${apiVersion}; Stripe cannot change it in place. Replace it with ${knobHint(spec, 'recreate')} (a new signing secret is stored automatically).`);
   }
   if (recreate) {
     if (DRY) return say(`dry run: would delete ${e.id} and create a new ${spec.label} endpoint (${spec.recreateVar}=1)`);
@@ -362,7 +407,7 @@ async function ensureEndpoint(spec, { events, apiVersion, endpoints, remoteSecre
   if (!remoteSecrets.has(spec.secretName)) {
     fail(
       `endpoint ${e.id} exists but ${spec.secretName} is not stored in the project. Stripe reveals a signing secret only when the endpoint is created: ` +
-        `copy it from Dashboard -> Developers -> Webhooks -> the endpoint -> Signing secret into ${spec.secretName}, or re-run with ${spec.recreateVar}=1.`,
+        `copy it from Dashboard -> Developers -> Webhooks -> the endpoint -> Signing secret into ${spec.secretName}, or replace the endpoint with ${knobHint(spec, 'recreate')}.`,
     );
   }
   const needsUpdate = eventsDiffer || e.status === 'disabled' || e.metadata?.[WEBHOOK_ROLE_KEY] !== spec.role;

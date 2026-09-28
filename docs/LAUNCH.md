@@ -10,8 +10,9 @@ each provider's own pricing page (linked) before you commit.
 
 **What you are launching**
 
-- **Backend**: a Supabase project (database, sign-in, file storage, and six
-  small server functions that talk to Stripe, Twilio and Resend).
+- **Backend**: a Supabase project (database, sign-in, file storage, and 15
+  small server functions in `supabase/functions/` that talk to Stripe,
+  Twilio, Resend and Apple's push service).
 - **Web app** at `app.yourdomain.com`: staff dashboard, public booking,
   quote/invoice/form pages and the customer portal (hosted on Cloudflare
   Pages).
@@ -68,11 +69,13 @@ hand: the deploy does it (email confirmations stay ON in production).
       of connected accounts in your Connect settings, and put it in your terms
       with shops ([Connect overview](https://docs.stripe.com/connect)).
 - [ ] Decide your platform fee, if any (a percentage of card payments, set as
-      `PLATFORM_FEE_BPS`; 100 = 1%). It is optional; unset means no fee.
+      `PLATFORM_FEE_BPS`; 100 = 1%). It is optional; unset means no fee, and
+      deleting the variable later removes the fee at the next backend deploy.
 - [ ] Copy the **live** API keys (Developers -> API keys): `sk_live_...` and
       `pk_live_...`. Use test keys only for a separate staging project.
 - [ ] Webhook: nothing to click. The first backend deploy with
-      `stripe_webhooks` creates the Connect webhook and stores its secret.
+      `stripe_webhooks` creates the Connect webhook and stores its secret in
+      the project; later deploys keep it (it never needs to be in GitHub).
 - [ ] **Shop subscriptions** (optional, whenever you are ready to charge
       shops; [BILLING.md](BILLING.md)): create your plan Products and Prices
       in this platform account (metadata `detailcrm_plan` = `true`), save the
@@ -100,6 +103,22 @@ accounts, so start early.
       exactly (it explains why shops must never share a campaign or service).
       Until a shop's campaign is approved, carriers block its texts.
 - [ ] Copy the **Account SID** (`AC...`) and **Auth Token**.
+- [ ] **Geo permissions** (Twilio Console -> Messaging -> Settings -> Geo
+      permissions): allow texts only to the countries your shops serve (for
+      example only the United States and Canada). Your one account pays for
+      every shop's texts, and staff can text any number saved on a customer;
+      limiting the countries caps the cost of a mistake and of SMS-pumping
+      fraud to premium-rate destinations. Recommended before the first shop
+      texts.
+
+Public **lead forms** (a shop can embed them on its website; anyone can
+submit them) cannot be used to text arbitrary numbers at your cost: the
+optional auto-reply is **emailed** to the address given, and **texted only
+to a phone number the shop has already verified on an existing customer**,
+never to the number a new lead typed in.
+It greets the person as "there" and never repeats what they typed, and each
+form accepts at most 10 submissions per IP address (3 per email or phone,
+200 in total) in any 24 hours (`public_submit_lead`, migration 0088).
 
 Self-serve numbers (a shop owner searches for, buys and verifies its own
 number in Settings -> SMS) are built but **ship dark**; while they are off,
@@ -113,7 +132,8 @@ the operator sets up each shop's number as above.
       `TWILIO_PRIMARY_CUSTOMER_PROFILE_SID` (the approved primary customer
       profile, `BU...`); the deploy refuses the flag without the profile.
 
-Unset means off. Both are listed in [DEPLOY.md](DEPLOY.md).
+Unset means off, and deleting a variable turns the feature off again at the
+next backend deploy. Both are listed in [DEPLOY.md](DEPLOY.md).
 
 ### 1.4 Resend (email)
 
@@ -223,10 +243,12 @@ requests, the governing law of your terms and (optionally) a postal address
        [DEPLOY.md section 2](DEPLOY.md#2-settings-reference). Each workflow
        starts by listing anything still missing.
 2. [ ] **Backend dry run**: Actions -> *deploy-backend* -> Run workflow with
-       *dry_run* checked. It changes nothing and prints the plan.
+       *dry_run* and *stripe_webhooks* checked. It changes nothing and
+       prints the plan.
 3. [ ] **Backend deploy**: run it again with *dry_run* unchecked and
-       *stripe_webhooks* checked (first time only). The last step must say
-       `0 failed`.
+       *stripe_webhooks* checked (first time only: it stores the webhook
+       secret in the project, and later deploys leave the box unchecked and
+       keep it). The last step must say `0 failed`.
 4. [ ] **Web deploy**: Actions -> *deploy-web* -> Run workflow. Then add the
        custom domain `app.yourdomain.com` to the Pages project and open it.
        (Set the variable `DEPLOY_WEB` = `true` if every change merged to `main`
@@ -377,8 +399,9 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       [Apple's page](https://developer.apple.com/support/offering-account-deletion-in-your-app/)).
       Built: More -> Your account -> Delete account in the iPhone app, and
       the Your account page on the web (the `account` function). Shop owners
-      must first transfer ownership or delete the shop. Mention the path in
-      App Review Information if asked.
+      must first transfer ownership or delete the shop (on the web; deleting
+      a shop also ends its subscription to you, [BILLING.md](BILLING.md)
+      section 8.1). Mention the path in App Review Information if asked.
 - [ ] **Privacy manifest**: the app stores its chosen shop in `UserDefaults`,
       a "required reason" API; `PrivacyInfo.xcprivacy` in the app target
       declares it (reason CA92.1) and no tracking
@@ -448,7 +471,9 @@ From SPEC section 9 (parity roadmap, 2026-09-27) and this launch review:
   a lead form on a shop's website needs `WEB_EMBED_PATHS=/book/*,/lead/*`
   on the web deploy, and shops' own Meta Pixel / GA4 tags load only with
   `WEB_TRACKING_PATHS=/book/*,/booking/*` (DEPLOY.md 4.3); without them
-  those pages refuse to be framed and the tags are blocked.
+  those pages refuse to be framed and the tags are blocked. Lead forms are
+  rate-limited, and their auto-reply is emailed and texted only to a phone
+  number the shop already verified (1.3).
 - **Not built** (partner agreements or compliance; SPEC section 9):
   QuickBooks sync, own payment processing, Carfax / SiriusXM, 3D
   visualizer, marketplace/store, voice calling, Android app, workflow

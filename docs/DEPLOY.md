@@ -21,11 +21,15 @@ First launch (each step can be re-run on its own later):
 
 1. Accounts, domains and DNS ready ([LAUNCH.md](LAUNCH.md) sections 1-3).
 2. GitHub settings filled in ([section 2](#2-settings-reference)).
-3. **deploy-backend** with `dry_run` = true. Read the plan: pending
-   migrations, which secrets would be created, the Auth changes, the cron jobs.
+3. **deploy-backend** with `dry_run` = true and `stripe_webhooks` = true
+   (a new project holds no webhook secret yet, so a run without it stops in
+   step 2). Read the plan: pending migrations, which secrets would be
+   created, the Stripe endpoint it would create, the Auth changes, the cron
+   jobs.
 4. **deploy-backend** with `dry_run` = false and `stripe_webhooks` = true
-   (creates the Stripe Connect endpoint and stores its signing secret). The
-   job ends with `verify_live.mjs`; it must print `0 failed`.
+   (creates the Stripe Connect endpoint and stores its signing secret in the
+   project; later deploys keep it). The job ends with `verify_live.mjs`; it
+   must print `0 failed`.
 5. **deploy-web** (manual dispatch). It checks, builds, generates the security
    headers, uploads to Cloudflare Pages and checks the served headers.
    Attach the custom domain (`app.yourdomain.com`) to the Pages project once.
@@ -38,7 +42,10 @@ First launch (each step can be re-run on its own later):
    with `stripe_webhooks`). Billing stays off until then.
 
 Later releases: backend and web deploys are independent. Deploy the backend
-first when a web/iOS change needs a new migration or function.
+first when a web/iOS change needs a new migration or function. A backend
+release is a plain run (`dry_run` first, then without it): `stripe_webhooks`
+is needed again only to create an endpoint (first launch, billing turned on)
+or together with the recreate / adopt inputs (3.3).
 
 ## 2. Settings reference
 
@@ -60,10 +67,10 @@ workflow's first step lists whatever is missing.
 | `CRON_SECRET` | secret | yes | generate once: `openssl rand -hex 32` (at least 24 characters, no quotes/spaces) |
 | `STRIPE_SECRET_KEY` | secret | yes | Stripe Dashboard -> Developers -> API keys, **platform** account (`sk_live_...`; `sk_test_...` for a staging project) |
 | `STRIPE_PUBLISHABLE_KEY` | variable | yes | same page (`pk_live_...`), same mode as the secret key |
-| `STRIPE_WEBHOOK_SECRET` | secret | unless `stripe_webhooks` | signing secret of the Connect endpoint; with `stripe_webhooks` the deploy creates the endpoint and stores it for you |
+| `STRIPE_WEBHOOK_SECRET` | secret | no (see the note below) | signing secret of the Connect endpoint. Leave it unset when the deploy manages the endpoint: the first deploy with `stripe_webhooks` creates it and stores the secret in the project, and later deploys keep that stored secret. Set it only for an endpoint you made by hand |
 | `BILLING_ENABLED` | variable | no | `true` turns on shop subscription billing ([BILLING.md](BILLING.md)); `false` or unset = off (every shop fully usable). A database setting, applied in step 9 |
 | `BILLING_TRIAL_DAYS` | variable | no | free trial for shops in whole days, `0`-`730`; unset = `0`. Applied with `BILLING_ENABLED` |
-| `STRIPE_BILLING_WEBHOOK_SECRET` | secret | with `BILLING_ENABLED=true`, unless `stripe_webhooks` | signing secret of the **platform** billing endpoint (`billing-webhook`); with `stripe_webhooks` the deploy creates the endpoint and stores it for you |
+| `STRIPE_BILLING_WEBHOOK_SECRET` | secret | no (see the note below) | signing secret of the **platform** billing endpoint (`billing-webhook`), used while `BILLING_ENABLED=true`. Like `STRIPE_WEBHOOK_SECRET`: the first deploy with billing on and `stripe_webhooks` creates the endpoint and stores it; set it only for an endpoint you made by hand |
 | `BILLING_AUTOMATIC_TAX` | variable | no | `true` = Stripe Tax on shop subscription Checkout, once Stripe Tax is set up on the platform account ([BILLING.md](BILLING.md) section 9); unset = off |
 | `PLATFORM_FEE_BPS` | variable | no | your platform fee on card payments in basis points (100 = 1%); unset = 0 |
 | `TWILIO_ACCOUNT_SID` | secret | yes | Twilio Console -> Account info (`AC...`) |
@@ -71,6 +78,7 @@ workflow's first step lists whatever is missing.
 | `RESEND_API_KEY` | secret | yes | Resend -> API Keys (`re_...`, sending access). Also used as the Auth SMTP password |
 | `EMAIL_FROM` | variable | yes | `Detail CRM <notifications@yourdomain.com>` on a domain verified in Resend |
 | `CORS_ALLOWED_ORIGINS` | variable | no | extra browser origins, comma-separated bare origins (a staging web app) |
+| `FUNCTIONS_PUBLIC_URL` | variable | no | leave unset. Only with a custom API domain: `https://<host>/functions/v1`; the Stripe webhook endpoints, pg_cron and the Twilio callback URLs then use it |
 | `APNS_KEY_ID` | variable | no (push) | developer.apple.com -> Certificates, Identifiers & Profiles -> Keys -> an **Apple Push Notifications service (APNs)** key: its 10-character Key ID. Set all four `APNS_*` values or none (the deploy preflight refuses a partial set, which would make every push run fail); without them the iPhone app gets no push notifications (the in-app list still works) |
 | `APNS_TEAM_ID` | variable | no (push) | developer.apple.com -> Account -> Membership details -> Team ID |
 | `APNS_PRIVATE_KEY` | secret | no (push) | the contents of the downloaded `AuthKey_<id>.p8` (downloadable once); line breaks may be written as `\n` |
@@ -90,6 +98,28 @@ Never set: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` as
 *function* secrets (Supabase injects them), and `STRIPE_API_BASE`,
 `TWILIO_API_BASE`, `RESEND_API_BASE` (local test harness only: the deploy
 removes them from the project if it finds them).
+
+**Optional values are the desired state, removal included.** Every deploy
+sends the optional values that are set and **removes** from the project each
+optional function secret that is not set: `PLATFORM_FEE_BPS`,
+`BILLING_AUTOMATIC_TAX`, `SMS_PROVISIONING_ENABLED`, `TWILIO_ISV_ENABLED`,
+`TWILIO_PRIMARY_CUSTOMER_PROFILE_SID`, `CORS_ALLOWED_ORIGINS`,
+`FUNCTIONS_PUBLIC_URL` and the four `APNS_*`. So deleting the GitHub
+variable switches the feature off at the next deploy ("unset = off", or no
+fee); `0` or `false` work too and are stored as values. The step prints each
+one as `remove <NAME>` with a `WARN` line, and the dry run shows it first. A
+**local** run must export every optional value you use, or it removes them:
+run it with `--dry-run` first.
+
+**Webhook signing secrets** are the exception: when `STRIPE_WEBHOOK_SECRET`
+(or, with billing on, `STRIPE_BILLING_WEBHOOK_SECRET`) is not an input, the
+project keeps the secret it holds. A deploy without `stripe_webhooks` checks
+in step 2 that the project holds it and stops, before anything changes, when
+it does not (a new project: run once with `stripe_webhooks`). After the
+deploy created or recreated an endpoint, do not keep an older value of that
+secret in GitHub: the next deploy would send the old value back and Stripe's
+deliveries would fail with 400 (the deploy warns when it replaces a value
+from the inputs).
 
 ### Web (deploy-web)
 
@@ -144,8 +174,8 @@ lapsed shop can still do); have them reviewed before you turn billing on.
 export SUPABASE_ACCESS_TOKEN=... SUPABASE_PROJECT_REF=... SUPABASE_DB_PASSWORD=...
 export APP_BASE_URL=https://app.yourdomain.com CRON_SECRET=... STRIPE_SECRET_KEY=... # etc. (section 2)
 scripts/deploy/deploy_backend.sh --dry-run                     # plan only
-scripts/deploy/deploy_backend.sh --stripe-webhooks            # first deploy
-scripts/deploy/deploy_backend.sh                              # later deploys
+scripts/deploy/deploy_backend.sh --stripe-webhooks            # first deploy (stores the webhook secrets)
+scripts/deploy/deploy_backend.sh                              # later deploys (keep them)
 node scripts/deploy/verify_live.mjs                           # smoke checks
 ```
 
@@ -163,8 +193,12 @@ The nine steps, in order:
    `EMAIL_FROM` shape, https `APP_BASE_URL`, `CRON_SECRET` length. Missing
    or invalid inputs stop the run before anything is contacted, with the list
    and where each value comes from. Test-mode Stripe keys only warn (unless
-   `REQUIRE_LIVE_STRIPE=1`).
-2. **Project and CLI** - Management API project lookup; a snapshot of
+   `REQUIRE_LIVE_STRIPE=1`). A webhook signing secret that is not an input
+   is left to step 2; the recreate / adopt knobs (3.3) are refused without
+   `--stripe-webhooks`.
+2. **Project and CLI** - Management API project lookup; a webhook signing
+   secret that is not an input must already be stored in the project (it is
+   kept as it is), else the run stops here with what to do; a snapshot of
    `supabase/config.toml`, `migrations/`, `functions/` (dot files excluded)
    and `setup/cron.sql` into a temporary directory that is deleted at exit, so
    a concurrent edit of the working tree cannot mix versions mid-deploy.
@@ -174,7 +208,9 @@ The nine steps, in order:
    real push. Skipped in a dry run.
 5. **Function secrets** - Management API `POST /v1/projects/{ref}/secrets`
    with only the names from `supabase/functions/README.md`. Unchanged values
-   (compared by SHA-256 digest) are not re-sent.
+   (compared by SHA-256 digest) are not re-sent; optional secrets the inputs
+   leave unset and the local-harness names are removed
+   (`DELETE /v1/projects/{ref}/secrets`, section 2); the result is read back.
 6. **Stripe webhook endpoints** (only with `--stripe-webhooks`): the Connect
    endpoint, and the platform billing endpoint when `BILLING_ENABLED=true` -
    see 3.3.
@@ -232,14 +268,24 @@ read at deploy time) and the API version `STRIPE_API_VERSION`
 - Existing tagged endpoint: events are updated and the endpoint re-enabled;
   the stored secret is kept. If `STRIPE_WEBHOOK_SECRET` is not stored, the run
   stops: Stripe cannot reveal an existing secret, so copy it from the
-  Dashboard or re-run with `STRIPE_WEBHOOK_RECREATE=1`.
+  Dashboard into `STRIPE_WEBHOOK_SECRET`, or recreate the endpoint (below).
 - An endpoint at the same URL that the deploy did not create (for example one
-  made by hand from the functions README) is never modified: delete it, or set
-  `STRIPE_WEBHOOK_ADOPT=we_...` if it is the Connect endpoint whose secret is
-  `STRIPE_WEBHOOK_SECRET`.
-- `STRIPE_WEBHOOK_RECREATE=1` deletes and recreates the endpoint (new signing
-  secret stored automatically). Needed after an SDK / `STRIPE_API_VERSION`
-  upgrade, because Stripe cannot change an endpoint's API version.
+  made by hand from the functions README) is never modified: delete it, or
+  adopt it (below) if it is the Connect endpoint. Its signing secret must be
+  stored or given as `STRIPE_WEBHOOK_SECRET` in that run (or recreate it in
+  the same run).
+- Recreate and adopt are one-shot choices of a single run, together with
+  `stripe_webhooks`. The deploy refuses them in step 1 without
+  `stripe_webhooks` (and the billing ones while billing is off) instead of
+  ignoring them:
+
+  | Workflow input (deploy-backend, with `stripe_webhooks`) | Local run (with `--stripe-webhooks`) | Effect |
+  |---|---|---|
+  | `stripe_webhook_recreate` = `connect`, `billing` or `both` | `STRIPE_WEBHOOK_RECREATE=1`, `STRIPE_BILLING_WEBHOOK_RECREATE=1` | deletes the tagged endpoint and creates a new one; its new signing secret is stored automatically. Needed after an SDK / `STRIPE_API_VERSION` upgrade (Stripe cannot change an endpoint's API version; the deploy warns when they differ) and when the stored secret is wrong or lost |
+  | `stripe_webhook_adopt_connect` = `we_...` | `STRIPE_WEBHOOK_ADOPT=we_...` | manages the hand-made endpoint at `.../stripe-webhook` from now on (tagged, events set) |
+  | `stripe_webhook_adopt_billing` = `we_...` | `STRIPE_BILLING_WEBHOOK_ADOPT=we_...` | the same for `.../billing-webhook` (with `BILLING_ENABLED=true`) |
+
+  Unset the local variables again afterwards.
 - **Platform billing endpoint** (only while `BILLING_ENABLED=true`): a second,
   **non-Connect** endpoint ("Events on your account") at
   `https://<ref>.supabase.co/functions/v1/billing-webhook` for shop
@@ -248,10 +294,11 @@ read at deploy time) and the API version `STRIPE_API_VERSION`
   of `supabase/functions/billing-webhook/handlers.ts` and the same API
   version. It works exactly like the Connect endpoint above, with its own
   secret and knobs: the signing secret is stored as
-  `STRIPE_BILLING_WEBHOOK_SECRET`, `STRIPE_BILLING_WEBHOOK_RECREATE=1`
-  replaces it, and `STRIPE_BILLING_WEBHOOK_ADOPT=we_...` adopts an endpoint
-  made by hand. With billing off the endpoint is neither created nor removed
-  (existing subscriptions keep syncing after billing is turned off).
+  `STRIPE_BILLING_WEBHOOK_SECRET`, `stripe_webhook_recreate` = `billing`
+  replaces it, and `stripe_webhook_adopt_billing` adopts an endpoint made by
+  hand. With billing off the endpoint is neither created nor removed, and its
+  stored secret is kept (existing subscriptions keep syncing after billing is
+  turned off).
 - The two endpoints never share a URL or a secret: `stripe-webhook` acts only
   on connected-account events (`event.account`; charges are direct charges on
   the shop's Express account) and `billing-webhook` only on the platform
@@ -262,7 +309,7 @@ read at deploy time) and the API version `STRIPE_API_VERSION`
 | Setting | Value |
 |---|---|
 | `site_url` | `APP_BASE_URL` |
-| redirect allow-list | `APP_BASE_URL/**`, `/reset-password`, `/invite/**`, `/portal`, `/app/**`, `/login` (+ `AUTH_ADDITIONAL_REDIRECT_URLS`). The iPhone app has no URL scheme: its password-reset links open the web app's `/reset-password` |
+| redirect allow-list | `APP_BASE_URL/**`, `/reset-password`, `/invite/**`, `/portal`, `/app/**`, `/login` (+ `AUTH_ADDITIONAL_REDIRECT_URLS`) |
 | email sign-up | on; phone and anonymous sign-in off |
 | email confirmations | **on** (`mailer_autoconfirm = false`): `portal_claim_customers()` links portal users by *confirmed* email |
 | secure email change, reauthentication for password change | on |
@@ -272,8 +319,23 @@ read at deploy time) and the API version `STRIPE_API_VERSION`
 | email rate limit | `AUTH_RATE_LIMIT_EMAIL_SENT` per hour (default 100) |
 | minimum interval between emails to one user | 60 s |
 
+Email links (both apps): the web app and the iPhone app both use Supabase
+Auth's **implicit flow**. A sign-up confirmation, password-reset or
+email-change link carries the session in the URL fragment, so it works in
+any browser on any device, whichever app sent it. The iPhone app has no URL
+scheme: its password-reset emails link to `APP_BASE_URL/reset-password` (the
+build's `WEB_APP_URL`, which ios-testflight takes from the same
+`APP_BASE_URL` variable) and its sign-up confirmations to the Site URL (the
+web app, which signs the person in). Both are on the allow-list above, so
+nothing is set by hand. Keep the web app and the iPhone build on the same
+`APP_BASE_URL`; a reset link to another origin needs that origin in
+`AUTH_ADDITIONAL_REDIRECT_URLS`, otherwise Supabase falls back to the Site
+URL, which signs the person in but shows no new-password form.
+
 Email templates are left at their current values (edit them in the Dashboard
-if you want your own wording).
+if you want your own wording). Keep their `{{ .ConfirmationURL }}` link:
+neither app verifies a `{{ .TokenHash }}` link, so a template rewritten that
+way breaks confirmation and reset links.
 
 ### 3.5 Platform setup (cron.sql)
 
@@ -318,8 +380,11 @@ An **unset** input never changes a project that has another value: when
 `BILLING_ENABLED` is unset but billing is on in the project, or
 `BILLING_TRIAL_DAYS` is unset but the project has a trial, the step stops
 before running anything and asks for the value (so a local run without the
-repository variables cannot switch billing off). A dry run prints the
-`set_billing_config` call it would make and sends nothing.
+repository variables cannot switch billing off). This differs on purpose
+from the optional function secrets (section 2), which follow their inputs:
+the billing switch and trial change every shop's access, so an omission
+never changes them. A dry run prints the `set_billing_config` call it would
+make and sends nothing.
 
 ### 3.6 Smoke checks: `verify_live.mjs`
 
@@ -351,9 +416,11 @@ values, `platform_config.app_base_url`, the cron jobs, and that the
 project's billing settings match `BILLING_ENABLED` / `BILLING_TRIAL_DAYS`
 when they are set.
 
-`KNOWN` lines are documented open defects (currently: an unknown public token
-answers HTTP 500 `P0002`, see `scripts/stack/README.md`); they do not fail the
-run unless `--strict`. Exit code 1 on any `FAIL`.
+It also checks that an unknown public link answers HTTP 404 `PT404` (never a
+5xx): the old HTTP 500 `P0002` defect is fixed (`scripts/stack/README.md`),
+so a regression is a `FAIL`. `KNOWN` lines would be documented open defects
+that do not fail the run unless `--strict`; there are none at present. Exit
+code 1 on any `FAIL`.
 
 ### 3.7 Tests of the deploy tooling
 
@@ -365,10 +432,15 @@ request that changes `scripts/deploy/`, `supabase/config.toml`,
 and a fake Management + Stripe API: command order, verify_jwt flags, dry run
 without mutations, missing/invalid inputs, no secret in output or argv,
 idempotent re-runs, `config push` never invoked, a foreign Stripe endpoint
-left alone, and billing (the platform endpoint with exactly the billing
-events and its own secret, `set_billing_config`, the plan sync after the
-functions deploy, the unset-input guard, a failed sync). It also covers `verify_live.mjs` against a fake project with each
-deploy mistake injected, and the header generator.
+left alone (and adopted on request), recreating an endpoint, later deploys
+that keep the stored webhook secrets, optional secrets removed when their
+input is unset, that the deploy-backend workflow passes every secret and
+knob to the script, and billing (the platform endpoint with exactly the
+billing events and its own secret, `set_billing_config`, the plan sync after
+the functions deploy, the unset-input guard, a failed sync). It also covers
+`verify_live.mjs` against a fake project with each deploy mistake injected
+(including a regression of unknown public links to HTTP 500), and the header
+generator.
 
 ## 4. Web: Cloudflare Pages
 
@@ -483,6 +555,17 @@ headers, the web app itself refuses to render any other route inside a frame
 embed mode (`?embed=1`) links that leave the booking page (manage booking,
 deposit payment) open in the top window.
 
+An embedded lead form is public (its token is in the shop's page source), so
+the database limits what it can do (`public_submit_lead`, migration 0088):
+at most 10 submissions per client IP per form, 3 per email or phone and 200
+per form in any 24 hours (then HTTP 429). The optional auto-reply never
+repeats what the visitor typed (it greets them as "there"); it is emailed
+to the address given and **texted only to a phone number the shop already
+verified** on an existing customer, never to the number a new lead typed
+in, so a form cannot be used to send texts, at the platform's cost, to
+arbitrary numbers. Restrict Twilio's Geo permissions to the countries your
+shops serve as well ([LAUNCH.md](LAUNCH.md) 1.3).
+
 Shops can add their own Meta Pixel / GA4 measurement id (Settings ->
 Online booking). The public booking page `/book/<slug>` loads those tags
 only when an id is set (never for private booking links); the customer's
@@ -559,10 +642,13 @@ SUPABASE_URL=... SUPABASE_ANON_KEY=... WEB_APP_URL=... bundle exec fastlane beta
 ## 6. Re-running
 
 Every step converges on the desired state: migrations only apply what is
-pending, unchanged secrets are skipped, the Stripe endpoint is found by its tag
-and updated, Auth is patched to the same values, `cron.sql` unschedules before
-scheduling. Functions are redeployed each time (a new version with the same
-code). A failed run can simply be run again after fixing the cause.
+pending, unchanged secrets are skipped, optional secrets whose input was
+removed are removed (section 2), the stored webhook signing secrets are kept,
+the Stripe endpoints are found by their tag and updated (with
+`stripe_webhooks`), Auth is patched to the same values, `cron.sql`
+unschedules before scheduling. Functions are redeployed each time (a new
+version with the same code). A failed run can simply be run again after
+fixing the cause.
 
 ## 7. Rollback
 
@@ -592,13 +678,16 @@ code). A failed run can simply be run again after fixing the cause.
 | `HTTP 401 (SUPABASE_ACCESS_TOKEN is invalid or expired)` | create a new personal access token |
 | `link` / `db push` fails on the password | `SUPABASE_DB_PASSWORD` is wrong; reset it in Project Settings -> Database |
 | `db push`: migrations "to be inserted before the last migration on remote" | an out-of-order migration (3.2), run with `include_all_migrations` |
+| `STRIPE_WEBHOOK_SECRET is neither an input nor stored in the project` (step 2) | a project that never had the endpoint: run once with `stripe_webhooks` (3.3), or set the secret of an endpoint you made by hand. The same for `STRIPE_BILLING_WEBHOOK_SECRET` once `BILLING_ENABLED=true` |
 | `endpoint ... exists but STRIPE_WEBHOOK_SECRET is not stored` | 3.3 |
+| `... acts only together with --stripe-webhooks` | a recreate / adopt input without `stripe_webhooks` (3.3): check it too |
+| `WARN ... set in the project but not in this deploy's inputs, so this deploy removes them` | an optional variable is missing (section 2): set it again if the feature should stay on |
 | `cron.sql: ... placeholder format changed` | 3.5 |
 | verify_live `server_misconfigured` | a function secret is missing or malformed; the function logs name the variable |
 | verify_live `deployed with verify_jwt=true` on a webhook function | redeploy it with `--no-verify-jwt` (the deploy does this from `config.toml`) |
 | Browser console: `Refused to ... Content Security Policy` | a new external origin in `web/src`: 4.1 |
-| Stripe Dashboard shows webhook failures with 400 | the endpoint's signing secret differs from `STRIPE_WEBHOOK_SECRET`: `STRIPE_WEBHOOK_RECREATE=1` |
+| Stripe Dashboard shows webhook failures with 400 | the endpoint's signing secret differs from the stored `STRIPE_WEBHOOK_SECRET` (often an old GitHub secret sent back after the deploy made a new one: delete it): run with `stripe_webhooks` and `stripe_webhook_recreate` = `connect` |
 | `BILLING_ENABLED is not set, but billing is ON in this project` | 3.5.1: set the variable explicitly |
 | `billing sync_plans: HTTP ...` | the plan sync failed after the functions deploy: the code names why (`unauthorized` = `CRON_SECRET` differs; `service_unavailable` = Stripe); [BILLING.md](BILLING.md) section 11 |
-| Stripe shows 400s on the `billing-webhook` endpoint | its signing secret differs from `STRIPE_BILLING_WEBHOOK_SECRET`: `STRIPE_BILLING_WEBHOOK_RECREATE=1` with `stripe_webhooks` |
+| Stripe shows 400s on the `billing-webhook` endpoint | its signing secret differs from the stored `STRIPE_BILLING_WEBHOOK_SECRET`: run with `stripe_webhooks` and `stripe_webhook_recreate` = `billing` |
 | fastlane: `Could not read TestFlight builds` | the App Store Connect app record for the bundle id is missing, or the key's role is too low |

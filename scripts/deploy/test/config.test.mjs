@@ -16,12 +16,14 @@ import {
   parseFunctionsConfig,
   parseHandledStripeEvents,
   parseStripeApiVersion,
+  OPTIONAL_SECRET_NAMES,
   planSecrets,
   renderCronSql,
   REPO_ROOT,
   sha256Hex,
   sqlLiteral,
   validateDeployEnv,
+  WEBHOOK_KNOBS,
 } from '../lib/config.mjs';
 
 const SUPA = join(REPO_ROOT, 'supabase');
@@ -126,12 +128,19 @@ describe('billing inputs', () => {
     assert.deepEqual(BILLING_INPUTS.map((i) => i.name), ['BILLING_ENABLED', 'BILLING_TRIAL_DAYS']);
   });
 
-  test('STRIPE_BILLING_WEBHOOK_SECRET: required only with BILLING_ENABLED=true and without --stripe-webhooks', () => {
+  test('STRIPE_BILLING_WEBHOOK_SECRET: needed only with BILLING_ENABLED=true, as an input, from --stripe-webhooks or already stored', () => {
     const names = (env, opts) => validateDeployEnv(env, opts).missing.map((m) => m.name);
+    const deferred = (env, opts) => validateDeployEnv(env, opts).deferred.map((m) => m.name);
     assert.ok(!names(GOOD).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    assert.ok(!deferred(GOOD).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
     assert.ok(!names({ ...GOOD, BILLING_ENABLED: 'false' }).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
-    assert.ok(names({ ...GOOD, BILLING_ENABLED: 'true' }).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    // billing on, not an input: the project must hold it (checked against the project)
+    assert.ok(!names({ ...GOOD, BILLING_ENABLED: 'true' }).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    assert.deepEqual(deferred({ ...GOOD, BILLING_ENABLED: 'true' }), ['STRIPE_BILLING_WEBHOOK_SECRET']);
+    assert.ok(names({ ...GOOD, BILLING_ENABLED: 'true' }, { storedSecrets: new Set(['STRIPE_WEBHOOK_SECRET']) }).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    assert.deepEqual(names({ ...GOOD, BILLING_ENABLED: 'true' }, { storedSecrets: new Set(['STRIPE_BILLING_WEBHOOK_SECRET']) }), []);
     assert.ok(!names({ ...GOOD, BILLING_ENABLED: 'true' }, { stripeWebhooks: true }).includes('STRIPE_BILLING_WEBHOOK_SECRET'));
+    assert.deepEqual(deferred({ ...GOOD, BILLING_ENABLED: 'true' }, { stripeWebhooks: true }), []);
     const set = validateDeployEnv({ ...GOOD, BILLING_ENABLED: 'true', STRIPE_BILLING_WEBHOOK_SECRET: 'whsec_billing123' });
     assert.deepEqual([set.missing, set.invalid], [[], []]);
     assert.equal(set.secrets.STRIPE_BILLING_WEBHOOK_SECRET, 'whsec_billing123');
@@ -164,12 +173,60 @@ describe('inputs', () => {
     assert.ok(!('SUPABASE_ACCESS_TOKEN' in r.secrets) && !('SUPABASE_DB_PASSWORD' in r.secrets));
   });
 
-  test('missing names are listed with where to get them; webhook secret optional with --stripe-webhooks', () => {
+  test('missing names are listed with where to get them; the webhook secret is checked against the project', () => {
     const { STRIPE_WEBHOOK_SECRET, CRON_SECRET, SUPABASE_DB_PASSWORD, ...rest } = GOOD;
     const r = validateDeployEnv(rest);
-    assert.deepEqual(r.missing.map((m) => m.name).sort(), ['CRON_SECRET', 'STRIPE_WEBHOOK_SECRET', 'SUPABASE_DB_PASSWORD']);
+    assert.deepEqual(r.missing.map((m) => m.name).sort(), ['CRON_SECRET', 'SUPABASE_DB_PASSWORD']);
     assert.ok(r.missing.every((m) => m.where.length > 10));
+    assert.deepEqual(r.deferred.map((m) => m.name), ['STRIPE_WEBHOOK_SECRET']);
     assert.deepEqual(validateDeployEnv(rest, { stripeWebhooks: true }).missing.map((m) => m.name).sort(), ['CRON_SECRET', 'SUPABASE_DB_PASSWORD']);
+    assert.deepEqual(validateDeployEnv(rest, { stripeWebhooks: true }).deferred, []);
+  });
+
+  test('a later deploy without --stripe-webhooks keeps the webhook secret the first deploy stored (review finding)', () => {
+    const { STRIPE_WEBHOOK_SECRET, ...later } = GOOD;
+    // the first deploy (with --stripe-webhooks) validates without it
+    assert.deepEqual(validateDeployEnv(later, { stripeWebhooks: true }).missing, []);
+    // a later one: nothing missing once the project holds it, and nothing to send
+    const kept = validateDeployEnv(later, { storedSecrets: new Set(['STRIPE_WEBHOOK_SECRET', 'CRON_SECRET']) });
+    assert.deepEqual([kept.missing, kept.invalid, kept.deferred], [[], [], []]);
+    assert.ok(!('STRIPE_WEBHOOK_SECRET' in kept.secrets));
+    // a project that never got it: missing, with how to fix it
+    const none = validateDeployEnv(later, { storedSecrets: new Set() });
+    assert.deepEqual(none.missing.map((m) => m.name), ['STRIPE_WEBHOOK_SECRET']);
+    assert.match(none.missing[0].where, /not stored in the project yet[\s\S]*--stripe-webhooks/);
+    // an input always wins (validated, sent)
+    assert.equal(validateDeployEnv(GOOD, { storedSecrets: new Set() }).secrets.STRIPE_WEBHOOK_SECRET, GOOD.STRIPE_WEBHOOK_SECRET);
+  });
+
+  test('--stripe-webhooks knobs: validated, and refused where they would change nothing', () => {
+    assert.deepEqual(WEBHOOK_KNOBS.map((k) => k.name), [
+      'STRIPE_WEBHOOK_RECREATE',
+      'STRIPE_WEBHOOK_ADOPT',
+      'STRIPE_BILLING_WEBHOOK_RECREATE',
+      'STRIPE_BILLING_WEBHOOK_ADOPT',
+    ]);
+    const invalid = (env, opts) => validateDeployEnv({ ...GOOD, ...env }, opts).invalid;
+    // unset / '0' / '' are no-ops everywhere
+    assert.deepEqual(invalid({ STRIPE_WEBHOOK_RECREATE: '0', STRIPE_WEBHOOK_ADOPT: '', STRIPE_BILLING_WEBHOOK_RECREATE: '' }), []);
+    // with --stripe-webhooks
+    assert.deepEqual(invalid({ STRIPE_WEBHOOK_RECREATE: '1', STRIPE_WEBHOOK_ADOPT: 'we_123abc' }, { stripeWebhooks: true }), []);
+    assert.deepEqual(
+      invalid({ BILLING_ENABLED: 'true', STRIPE_BILLING_WEBHOOK_RECREATE: '1', STRIPE_BILLING_WEBHOOK_ADOPT: 'we_456def' }, { stripeWebhooks: true }),
+      [],
+    );
+    // bad values
+    const bad = invalid({ STRIPE_WEBHOOK_RECREATE: 'yes', STRIPE_WEBHOOK_ADOPT: 'whsec_nope' }, { stripeWebhooks: true });
+    assert.deepEqual(bad.map((i) => i.name), ['STRIPE_WEBHOOK_RECREATE', 'STRIPE_WEBHOOK_ADOPT']);
+    assert.ok(!JSON.stringify(bad).includes('whsec_nope'), 'values are never echoed');
+    // without --stripe-webhooks they would do nothing: refused
+    const idle = invalid({ STRIPE_WEBHOOK_RECREATE: '1' });
+    assert.deepEqual(idle.map((i) => i.name), ['STRIPE_WEBHOOK_RECREATE']);
+    assert.match(idle[0].problem, /only together with --stripe-webhooks/);
+    // the billing endpoint's knobs need billing on
+    const off = invalid({ STRIPE_BILLING_WEBHOOK_ADOPT: 'we_456def' }, { stripeWebhooks: true });
+    assert.deepEqual(off.map((i) => i.name), ['STRIPE_BILLING_WEBHOOK_ADOPT']);
+    assert.match(off[0].problem, /only while BILLING_ENABLED=true/);
   });
 
   test('formats mirror supabase/functions/_shared/env.ts', () => {
@@ -289,7 +346,7 @@ describe('inputs', () => {
 
 describe('secrets plan', () => {
   test('unchanged values (sha256 digest) are skipped; harness-only names are flagged', () => {
-    const { plan, harness } = planSecrets(
+    const { plan, harness, unset } = planSecrets(
       { A: 'one', B: 'two', C: 'three' },
       [
         { name: 'A', value: sha256Hex('one') },
@@ -299,6 +356,59 @@ describe('secrets plan', () => {
     );
     assert.deepEqual(plan.map((p) => `${p.name}:${p.action}`), ['A:unchanged', 'B:update', 'C:create']);
     assert.deepEqual(harness, ['STRIPE_API_BASE']);
+    assert.deepEqual(unset, []);
+  });
+
+  test('the optional secrets are exactly the "unset = off / default" ones', () => {
+    assert.deepEqual([...OPTIONAL_SECRET_NAMES].sort(), [
+      'APNS_KEY_ID',
+      'APNS_PRIVATE_KEY',
+      'APNS_TEAM_ID',
+      'APNS_TOPIC',
+      'BILLING_AUTOMATIC_TAX',
+      'CORS_ALLOWED_ORIGINS',
+      'FUNCTIONS_PUBLIC_URL',
+      'PLATFORM_FEE_BPS',
+      'SMS_PROVISIONING_ENABLED',
+      'TWILIO_ISV_ENABLED',
+      'TWILIO_PRIMARY_CUSTOMER_PROFILE_SID',
+    ]);
+  });
+
+  test('an optional variable deleted from the inputs is removed from the project (review finding: unset = off)', () => {
+    // The project after a deploy with PLATFORM_FEE_BPS=250, SMS_PROVISIONING_ENABLED=true,
+    // Stripe Tax, an extra CORS origin and APNs; the operator deleted those variables.
+    const remote = [
+      'PLATFORM_FEE_BPS:250',
+      'SMS_PROVISIONING_ENABLED:true',
+      'BILLING_AUTOMATIC_TAX:true',
+      'CORS_ALLOWED_ORIGINS:https://staging.example.com',
+      'APNS_KEY_ID:ABC123DEFG',
+      'STRIPE_WEBHOOK_SECRET:whsec_stored',
+      'STRIPE_BILLING_WEBHOOK_SECRET:whsec_billing',
+      'SOMETHING_ELSE:by-hand',
+      'CRON_SECRET:x',
+    ].map((pair) => {
+      const [name, value] = pair.split(/:(.*)/s);
+      return { name, value: sha256Hex(value) };
+    });
+    const { STRIPE_WEBHOOK_SECRET, ...inputs } = GOOD;
+    const { secrets, missing, invalid } = validateDeployEnv(inputs, { storedSecrets: new Set(remote.map((r) => r.name)) });
+    assert.deepEqual([missing, invalid], [[], []]);
+    const { plan, unset, harness } = planSecrets(secrets, remote);
+    assert.deepEqual(unset.sort(), ['APNS_KEY_ID', 'BILLING_AUTOMATIC_TAX', 'CORS_ALLOWED_ORIGINS', 'PLATFORM_FEE_BPS', 'SMS_PROVISIONING_ENABLED']);
+    // never removed: the stored webhook secrets (kept as they are) and names the deploy does not manage
+    for (const name of ['STRIPE_WEBHOOK_SECRET', 'STRIPE_BILLING_WEBHOOK_SECRET', 'SOMETHING_ELSE', 'CRON_SECRET']) assert.ok(!unset.includes(name), name);
+    assert.ok(!plan.some((p) => p.name === 'STRIPE_WEBHOOK_SECRET'));
+    assert.deepEqual(harness, []);
+    // an explicit off value is kept (and sent), not removed
+    const explicit = validateDeployEnv({ ...inputs, PLATFORM_FEE_BPS: '0', SMS_PROVISIONING_ENABLED: 'false' }, { storedSecrets: new Set(remote.map((r) => r.name)) });
+    const again = planSecrets(explicit.secrets, remote);
+    assert.ok(!again.unset.includes('PLATFORM_FEE_BPS') && !again.unset.includes('SMS_PROVISIONING_ENABLED'));
+    assert.deepEqual(
+      again.plan.filter((p) => ['PLATFORM_FEE_BPS', 'SMS_PROVISIONING_ENABLED'].includes(p.name)).map((p) => `${p.name}:${p.action}`),
+      ['PLATFORM_FEE_BPS:update', 'SMS_PROVISIONING_ENABLED:update'],
+    );
   });
 });
 

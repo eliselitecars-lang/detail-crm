@@ -18,7 +18,9 @@
 //                            BILLING_ENABLED=true the billing webhook secret must be set
 //
 // Exit 1 when any check FAILs. KNOWN = a documented open defect
-// (scripts/stack/README.md "Known issues"): reported, not a failure unless --strict.
+// (scripts/stack/README.md "Known issues"): reported, not a failure unless
+// --strict. There is none at present: the defects found earlier are fixed and
+// checked as regular (failing) checks, e.g. an unknown public link is 404.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -92,6 +94,8 @@ async function run(kind, name, fn) {
   }
 }
 const check = (name, fn) => run('check', name, fn);
+// For a documented open defect (none at present): KNOWN while it reproduces,
+// FIXED once it no longer does; a FAIL only with --strict.
 const known = (name, fn) => run('known', name, fn);
 const skip = (why) => ({ skip: why });
 
@@ -175,14 +179,14 @@ for (const [fn, args] of [
   await check(`rest: public rpc ${fn} is exposed to anon`, async () => {
     const r = await http('POST', `${API}/rest/v1/rpc/${fn}`, { headers: anonH, body: args });
     assert(r.json?.code !== '42501' && r.json?.code !== 'PGRST202', `not callable by anon: ${show(r)}`);
-    assert(r.status < 500 || r.json?.code === 'P0002', show(r));
+    assert(r.status < 500, `${show(r)} — an unknown token, slug or id must be a 4xx (PT404), never a 5xx`);
     return `HTTP ${r.status}${r.json?.code ? ` ${r.json.code}` : ''}`;
   });
 }
-await known('rest: an unknown public token answers 4xx, not HTTP 500 (P0002 -> 500 in PostgREST)', async () => {
+await check('rest: an unknown public token answers HTTP 404 PT404, not a 5xx', async () => {
   const r = await http('POST', `${API}/rest/v1/rpc/public_get_quote`, { headers: anonH, body: { p_token: randomUUID() } });
-  assert(r.status >= 400 && r.status < 500, `${show(r)} — documented in scripts/stack/README.md (fix: errcode 'PT404')`);
-  return `HTTP ${r.status}`;
+  assert(r.status === 404 && r.json?.code === 'PT404', `${show(r)} — public RPCs raise PT404 for an unknown token (scripts/stack/README.md); a migration that is not applied, or a regression to P0002 (HTTP 500)`);
+  return `HTTP 404 ${r.json.code}`;
 });
 await check('rest: a malformed token is a 400, not a 5xx', async () => {
   const r = await http('POST', `${API}/rest/v1/rpc/public_get_invoice`, { headers: anonH, body: { p_token: 'not-a-uuid' } });

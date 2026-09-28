@@ -42,12 +42,14 @@ async function verify({ faults = [], args = [], management = true, service = tru
 }
 
 describe('verify_live.mjs', () => {
-  test('a correct deploy passes; the documented P0002 defect is KNOWN, not a failure', async () => {
+  test('a correct deploy passes with no KNOWN defect left (unknown public tokens are 404 PT404)', async () => {
     const r = await verify();
     assert.equal(r.code, 0, r.out);
-    assert.match(r.out, /0 failed/);
-    assert.match(r.out, /KNOWN rest: an unknown public token answers 4xx/);
+    assert.match(r.out, /0 failed, 0 known/);
+    assert.doesNotMatch(r.out, /^KNOWN /m);
     for (const name of [
+      'rest: an unknown public token answers HTTP 404 PT404',
+      'rest: public rpc public_get_quote is exposed to anon',
       'anon cannot read tenant tables',
       'verify_jwt=true',
       'CORS allows exactly',
@@ -68,9 +70,18 @@ describe('verify_live.mjs', () => {
     assert.ok(!r.out.includes(SERVICE) && !r.out.includes(TOKEN), 'keys must not be printed');
   });
 
-  test('--strict turns KNOWN into a failure', async () => {
+  test('--strict passes a correct deploy (no known defects remain)', async () => {
     const r = await verify({ args: ['--strict'] });
-    assert.equal(r.code, 1);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /0 failed/);
+  });
+
+  test('a regression to HTTP 500 P0002 for an unknown public token FAILs (not KNOWN), also without --strict', async () => {
+    const r = await verify({ faults: ['public-token-500'] });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /FAIL  rest: an unknown public token answers HTTP 404 PT404[\s\S]*HTTP 500 [^\n]*P0002/);
+    assert.match(r.out, /FAIL  rest: public rpc public_get_quote is exposed to anon[\s\S]*never a 5xx/);
+    assert.doesNotMatch(r.out, /^KNOWN /m);
   });
 
   test('anon-key only: site_url is inferred from GoTrue redirects; service/management checks skip', async () => {

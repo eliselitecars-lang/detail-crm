@@ -67,11 +67,19 @@ States a shop can be in:
 
 | State | Meaning | Can create new work? |
 |---|---|---|
-| `active` | billing is off, or the subscription is paid (also: cancelled, but the paid period has not ended) | yes |
+| `active` | billing is off, or the subscription is paid (also: the subscription ended, but the last period it was paid for has not) | yes |
 | `trialing` | inside the free trial | yes |
 | `past_due` | a renewal payment failed; Stripe is retrying | yes (until Stripe gives up) |
 | `comped` | you made the shop free (section 7) | yes |
-| `lapsed` | trial over without a subscription, or the subscription ended | no: see section 8 |
+| `lapsed` | trial over without a subscription, or the subscription ended and the last period it was paid for is over | no: see section 8 |
+
+The one date that decides how long an ended subscription keeps access is
+`shop_billing.paid_through`, the end of the last period the shop was in
+good standing for. While the subscription is active or in a trial it
+follows the period end; once a renewal fails (`past_due`, then `unpaid` or
+`paused`) it stays at that renewal date; cancelling leaves it as it is.
+Stripe's own `current_period_end` is not used for this: Stripe moves it on
+to the next period at renewal, before that period is paid.
 
 ---
 
@@ -186,10 +194,16 @@ Also in your Stripe settings:
 - **Failed payments** (Settings -> Billing -> Subscriptions and emails ->
   Manage failed payments): the retry schedule, and what happens when every
   retry fails (cancel the subscription, or mark it unpaid). A shop stays
-  usable (`past_due`) while Stripe retries; when Stripe cancels it or marks
-  it unpaid, the shop keeps access until the end of the period it paid for,
-  then lapses. The owner also gets an in-app notification on each failed
-  payment.
+  usable (`past_due`) while Stripe retries, and the owner gets an in-app
+  notification on each failed payment. A retry that succeeds changes
+  nothing for the shop. When every retry fails and Stripe cancels the
+  subscription or marks it unpaid, the shop **lapses at once**: it was paid
+  up to the renewal that failed (`paid_through`, section 2), so the unpaid
+  period is not given away, and the retry days were its grace period. After
+  a cancellation the owner can choose a plan again in Settings -> Billing.
+  A subscription marked unpaid still exists in Stripe, so a new checkout is
+  refused (section 6): the owner settles it through **Manage billing**, or
+  you cancel it in Stripe so the owner can choose a plan again.
 - **Customer emails** (same page): receipts, upcoming renewals, failed
   payments, as you prefer.
 - **Discounts**: Checkout accepts promotion codes. Create Coupons and
@@ -210,7 +224,7 @@ other inputs ([DEPLOY.md](DEPLOY.md) section 3).
 |---|---|---|
 | `BILLING_TRIAL_DAYS` | a whole number of days, `0` to `730` | free trial for shops; `0` = no trial. Unset = `0` |
 | `BILLING_ENABLED` | `true` or `false` | turns subscription billing on or off. Unset = off |
-| `BILLING_AUTOMATIC_TAX` | `true` or unset | Stripe Tax at Checkout (section 9). Unset = off |
+| `BILLING_AUTOMATIC_TAX` | `true` or unset | Stripe Tax at Checkout (section 9). Unset = off: deleting the variable turns it off at the next deploy |
 
 What the trial does:
 
@@ -233,9 +247,9 @@ Turning it on, in order:
    the same mode (test or live) as the project's Stripe keys.
 2. Pilot shops comped (section 7).
 3. Set `BILLING_TRIAL_DAYS`, then `BILLING_ENABLED` = `true`.
-4. Run **deploy-backend** with *dry_run* first, then without it and with
-   ***stripe_webhooks*** checked (at least the first time billing is on). The
-   deploy:
+4. Run **deploy-backend** with ***stripe_webhooks*** checked, with *dry_run*
+   first and then without it (the first time billing is on; later deploys
+   leave *stripe_webhooks* unchecked and keep the stored secret). The deploy:
    - creates the **platform** webhook endpoint for `billing-webhook` with
      exactly the billing events and stores its signing secret as
      `STRIPE_BILLING_WEBHOOK_SECRET` (never printed);
@@ -246,8 +260,10 @@ Turning it on, in order:
 
    Without *stripe_webhooks*, create the endpoint yourself
    ([functions README](../supabase/functions/README.md#stripe-platform-billing-webhook))
-   and set the secret `STRIPE_BILLING_WEBHOOK_SECRET` in GitHub; the deploy
-   refuses `BILLING_ENABLED=true` without it.
+   and set the secret `STRIPE_BILLING_WEBHOOK_SECRET` in GitHub. With
+   `BILLING_ENABLED=true` a deploy stops in its second step, before anything
+   changes, while that secret is neither an input nor already stored in the
+   project.
 5. Check it end to end (section 10).
 
 What each part does, if you need to check or do it by hand:
@@ -270,8 +286,9 @@ variables cannot switch billing off by accident.
 
 Turning it off later: set `BILLING_ENABLED` = `false` and deploy. Every shop
 is fully usable again. **Stripe keeps billing existing subscriptions**: cancel
-them in Stripe if you stop charging. The platform endpoint is left in place so
-subscription changes keep reaching the app.
+them in Stripe if you stop charging. The platform endpoint and its stored
+signing secret are left in place so subscription changes keep reaching the
+app.
 
 ---
 
@@ -281,8 +298,30 @@ Only the owner, on the web: **Settings -> Billing** -> choose a plan ->
 Stripe Checkout (card details are entered on Stripe's page, never in the
 app) -> back to Settings -> Billing, which shows the result once Stripe has
 confirmed it (usually a few seconds). From then on **Manage billing** opens
-the Customer Portal (switch plan, update the card, cancel, invoices). A shop
-with a live subscription cannot start a second one.
+the Customer Portal (switch plan, update the card, cancel, invoices).
+
+**One subscription per shop.** A shop is never meant to pay twice:
+
+- **Choose plan** is offered only while the shop has no live subscription,
+  and the server refuses a checkout (`409 already_subscribed`) whenever
+  Stripe already has a subscription for the shop's billing customer that
+  can still bill, even one the app has not heard of yet because its webhook
+  has not arrived. The owner sees "This shop already has a subscription. Use
+  Manage billing to change or cancel it." or, while a payment is still being
+  confirmed, "A payment for this shop's subscription is still being
+  confirmed. Refresh in a few minutes, or use Manage billing."
+- A checkout link stays payable for **about an hour** (60 to 70 minutes;
+  Stripe's own default would be 24 hours), and starting a new checkout
+  expires the shop's older open ones, so at most one payable link exists.
+- If two subscriptions start anyway (two links paid at almost the same
+  moment), the platform webhook keeps the **oldest** and automatically
+  **refunds and cancels the newer one** (every payment it took, refund
+  reason "duplicate"). The function log shows
+  `billing_duplicate_subscription_cancelled` with the amount refunded. A
+  second subscription you create yourself in the Stripe Dashboard (without
+  the checkout's `shop_id` metadata) is never touched: it is only logged
+  (`billing_event_ignored`, reason `duplicate_subscription`), and you refund
+  or cancel it in Stripe.
 
 ### 6.1 What the web app shows
 
@@ -368,6 +407,36 @@ re-activating) a member beyond the limit is refused with "This shop's plan
 allows N team members." (active members and pending invites count, the owner
 included). Accepting an invite that was already sent always works.
 
+### 8.1 Deleting a shop ends its subscription
+
+Only the owner can delete a shop (web: Settings -> Delete shop, typing the
+shop's name). The server (`payments` function, `delete_shop`) handles the
+shop's platform subscription in three steps, so a deleted shop is never
+billed again and a deletion that fails never costs a shop its plan:
+
+1. **Before anything else changes**, every platform subscription of the
+   shop that can still bill (the one the app tracks, and any other one
+   Stripe has for the shop's billing customer, such as a duplicate not yet
+   resolved) is set to end at its period end, so nothing renews. One still
+   `incomplete` (nothing paid) is cancelled outright. If Stripe refuses or
+   cannot be reached, nothing is deleted and the owner sees "We could not
+   cancel the shop's subscription, so nothing was deleted. Try again."
+2. If a later step of the deletion fails (for example a card payment is
+   still processing), the shop stays and renewal is switched back on for
+   every subscription step 1 changed. If even that fails it is logged as
+   `platform_subscription_resume_failed`, and the owner can resume renewal in
+   the Customer Portal.
+3. Once the shop is deleted, each of those subscriptions is **cancelled
+   immediately**. If Stripe fails at that moment the deletion stands and the
+   log shows `platform_subscription_cancel_failed`: the subscription still
+   ends at its period end (step 1), but cancel it in Stripe yourself if it
+   should end now (Customers -> the shop's billing customer, metadata
+   `shop_id`).
+
+Nothing is refunded automatically for the rest of the period; refund in
+Stripe if you choose to. The shop's own Stripe Connect account is not
+touched. This happens whether billing is currently on or off.
+
 ---
 
 ## 9. Taxes (Stripe Tax: optional, off by default)
@@ -418,9 +487,12 @@ On a staging project with Stripe test keys:
 | "Billing management is not set up yet." | the Customer Portal settings were never saved in this mode (section 4) |
 | A plan is missing on the billing page | the Product lacks `detailcrm_plan=true`, is archived, or its Price is weekly/usage-based/tiered/customer-chosen; the deploy log (or `sync_plans`) names each skipped Price and why |
 | A plan shows no team limit | `max_members` is missing or not a positive whole number (a warning in the deploy log) |
-| Paid, but the page still shows the trial / no subscription | the platform webhook did not arrive: Stripe -> Webhooks -> the billing endpoint's deliveries. 400 answers = wrong `STRIPE_BILLING_WEBHOOK_SECRET`: re-run the deploy with *stripe_webhooks* and `STRIPE_BILLING_WEBHOOK_RECREATE=1` |
+| Paid, but the page still shows the trial / no subscription | the platform webhook did not arrive: Stripe -> Webhooks -> the billing endpoint's deliveries. 400 answers = wrong `STRIPE_BILLING_WEBHOOK_SECRET` (often an old GitHub secret sent back after the deploy made a new one: delete it): run **deploy-backend** with *stripe_webhooks* and *stripe_webhook_recreate* = `billing` ([DEPLOY.md](DEPLOY.md) 3.3) |
 | Deploy stops: "BILLING_ENABLED is not set, but billing is ON" | set the variable explicitly (section 5, Safety) |
-| Deploy stops: an endpoint at `.../billing-webhook` "was not created by this script" | an endpoint made by hand: delete it, or set `STRIPE_BILLING_WEBHOOK_ADOPT=<we_...>` if it is the platform endpoint whose secret is `STRIPE_BILLING_WEBHOOK_SECRET` |
-| The owner cannot delete the shop: "We could not cancel the shop's subscription, so nothing was deleted." | deleting a shop first cancels its platform subscription immediately; Stripe refused or was unreachable (the deletion stops before anything changes). Try again; check the subscription in Stripe (Customers -> the shop's billing customer, metadata `shop_id`) |
+| Deploy stops: an endpoint at `.../billing-webhook` "was not created by this script" | an endpoint made by hand: delete it, or run with *stripe_webhooks* and *stripe_webhook_adopt_billing* = its `we_...` id if it is the platform endpoint whose secret is `STRIPE_BILLING_WEBHOOK_SECRET` ([DEPLOY.md](DEPLOY.md) 3.3) |
+| Deploy stops in step 2: "STRIPE_BILLING_WEBHOOK_SECRET is neither an input nor stored in the project" | billing is on but the platform endpoint was never created: run once with *stripe_webhooks* (section 5) |
+| The owner cannot delete the shop: "We could not cancel the shop's subscription, so nothing was deleted." | the first step of the deletion (stop renewal, section 8.1) failed in Stripe (refused or unreachable), so nothing changed. Try again; check the subscription in Stripe (Customers -> the shop's billing customer, metadata `shop_id`) |
+| "This shop already has a subscription. Use Manage billing ..." when choosing a plan | Stripe has a subscription for the shop that can still bill (section 6), possibly one whose webhook has not arrived yet, or one marked unpaid: use Manage billing, or check the customer in Stripe |
+| A shop was charged twice | two checkouts were paid at almost the same moment: the webhook refunds and cancels the newer subscription by itself (log `billing_duplicate_subscription_cancelled`). A second subscription made in the Stripe Dashboard is only logged (`duplicate_subscription`): refund and cancel it in Stripe |
 | The owner's checkout says "This shop's billing account was just set up by another request. Refresh and try again." | two checkouts raced to create the shop's Stripe customer; the next try uses the one that won |
 | "Confirming your subscription with Stripe..." ends with "Stripe hasn't confirmed the subscription yet" | the platform webhook has not delivered (see the "Paid, but ..." row) |

@@ -10,7 +10,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { parseHandledStripeEvents, parseStripeApiVersion, REPO_ROOT } from '../lib/config.mjs';
+import { parseHandledStripeEvents, parseStripeApiVersion, REPO_ROOT, SECRET_SPECS, WEBHOOK_KNOBS } from '../lib/config.mjs';
 import { startFakeApi } from './fakes/fake_api.mjs';
 
 const SCRIPT = join(REPO_ROOT, 'scripts', 'deploy', 'deploy_backend.sh');
@@ -109,9 +109,11 @@ describe('deploy_backend.sh', () => {
     await freshApi();
     const r = await run([], { omit: ['STRIPE_SECRET_KEY', 'TWILIO_AUTH_TOKEN', 'CRON_SECRET', 'SUPABASE_DB_PASSWORD', 'STRIPE_WEBHOOK_SECRET'] });
     assert.equal(r.code, 1, r.out);
-    for (const name of ['STRIPE_SECRET_KEY', 'TWILIO_AUTH_TOKEN', 'CRON_SECRET', 'SUPABASE_DB_PASSWORD', 'STRIPE_WEBHOOK_SECRET']) {
+    for (const name of ['STRIPE_SECRET_KEY', 'TWILIO_AUTH_TOKEN', 'CRON_SECRET', 'SUPABASE_DB_PASSWORD']) {
       assert.match(r.out, new RegExp(`- ${name}: `), `missing ${name} not listed:\n${r.out}`);
     }
+    // not an input: checked against the project once the inputs are valid
+    assert.doesNotMatch(r.out, /- STRIPE_WEBHOOK_SECRET: /);
     assert.equal(r.requests.length, 0, 'no API request before inputs are valid');
     assert.deepEqual(cliLog(), [], 'no CLI call before inputs are valid');
     assertNoSecretLeak(r.out, 'output');
@@ -122,6 +124,16 @@ describe('deploy_backend.sh', () => {
     const r = await run(['--dry-run', '--stripe-webhooks'], { omit: ['STRIPE_WEBHOOK_SECRET'] });
     assert.equal(r.code, 0, r.out);
     assert.doesNotMatch(r.out, /- STRIPE_WEBHOOK_SECRET:/);
+  });
+
+  test('no STRIPE_WEBHOOK_SECRET, no --stripe-webhooks, a project that does not hold it: stops in step 2, nothing changed', async () => {
+    await freshApi();
+    const r = await run(['--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'] });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /STRIPE_WEBHOOK_SECRET: not an input; the project must already hold it/);
+    assert.match(r.out, /STRIPE_WEBHOOK_SECRET is neither an input nor stored in the project\. Run the deploy with --stripe-webhooks/);
+    assert.deepEqual(mutations(r.requests), []);
+    assert.deepEqual(cliLog(), [], 'stopped before link / migrations');
   });
 
   test('invalid inputs: the problem is named, the value never printed', async () => {
@@ -263,6 +275,50 @@ describe('deploy_backend.sh', () => {
     assertNoSecretLeak(r.out, 'output');
   });
 
+  test('a later deploy without --stripe-webhooks and without STRIPE_WEBHOOK_SECRET keeps the stored secret (review finding)', async () => {
+    const stored = api.state.secrets.get('STRIPE_WEBHOOK_SECRET');
+    assert.ok(stored?.startsWith('whsec_fake'), 'the first deploy stored the endpoint secret');
+    const r = await run(['--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'] });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /STRIPE_WEBHOOK_SECRET: kept as stored in the project \(not an input\)/);
+    assert.match(r.out, /secrets: 0 set, 0 removed/);
+    assert.equal(api.state.secrets.get('STRIPE_WEBHOOK_SECRET'), stored);
+    assert.ok(!r.requests.some((q) => q.path.startsWith('/v1/webhook_endpoints')), 'Stripe is not contacted without --stripe-webhooks');
+    assert.deepEqual(r.requests.filter((q) => q.method === 'DELETE'), []);
+    assertNoSecretLeak(r.out, 'output');
+  });
+
+  test('optional secrets follow the inputs: an unset one is removed (unset = off), an explicit value is kept (review finding)', async () => {
+    const fee = await run(['--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { PLATFORM_FEE_BPS: '250', SMS_PROVISIONING_ENABLED: 'true', CORS_ALLOWED_ORIGINS: 'https://staging.example.com' } });
+    assert.equal(fee.code, 0, fee.out);
+    assert.equal(api.state.secrets.get('PLATFORM_FEE_BPS'), '250');
+    assert.equal(api.state.secrets.get('SMS_PROVISIONING_ENABLED'), 'true');
+
+    // the operator deletes the variables: the dry run shows the removal and changes nothing
+    const dry = await run(['--dry-run', '--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'] });
+    assert.equal(dry.code, 0, dry.out);
+    assert.match(dry.out, /remove {4}PLATFORM_FEE_BPS \(unset in this deploy's inputs: off \/ the default\)/);
+    assert.match(dry.out, /dry run: would set 0 secret\(s\), remove 3/);
+    assert.match(dry.out, /the deploy would remove them \(unset = off\)/);
+    assert.deepEqual(mutations(dry.requests), []);
+    assert.equal(api.state.secrets.get('PLATFORM_FEE_BPS'), '250');
+
+    const off = await run(['--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'] });
+    assert.equal(off.code, 0, off.out);
+    const del = off.requests.find((q) => q.method === 'DELETE' && q.path.endsWith('/secrets'));
+    assert.deepEqual(JSON.parse(del.raw).sort(), ['CORS_ALLOWED_ORIGINS', 'PLATFORM_FEE_BPS', 'SMS_PROVISIONING_ENABLED']);
+    for (const name of ['PLATFORM_FEE_BPS', 'SMS_PROVISIONING_ENABLED', 'CORS_ALLOWED_ORIGINS']) assert.ok(!api.state.secrets.has(name), name);
+    assert.match(off.out, /secrets: 0 set, 3 removed/);
+    // the stored webhook secret and the required ones stay
+    assert.ok(api.state.secrets.has('STRIPE_WEBHOOK_SECRET') && api.state.secrets.has('CRON_SECRET'));
+
+    // an explicit off value is a value: stored, not removed
+    const zero = await run(['--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { PLATFORM_FEE_BPS: '0' } });
+    assert.equal(zero.code, 0, zero.out);
+    assert.equal(api.state.secrets.get('PLATFORM_FEE_BPS'), '0');
+    assert.match(zero.out, /secrets: 1 set, 0 removed/);
+  });
+
   test('a harness-only secret in the project is removed', async () => {
     api.state.secrets.set('STRIPE_API_BASE', 'http://host.docker.internal:12111');
     const r = await run(['--allow-dirty']);
@@ -285,17 +341,63 @@ describe('deploy_backend.sh', () => {
     const r = await run(['--stripe-webhooks', '--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'] });
     assert.equal(r.code, 1, r.out);
     assert.match(r.out, /not created by this script \(we_handmade\)/);
-    assert.match(r.out, /STRIPE_WEBHOOK_ADOPT/);
+    assert.match(r.out, /workflow input stripe_webhook_adopt_connect with stripe_webhooks \(local run: STRIPE_WEBHOOK_ADOPT=<we_id>/);
     assert.equal(api.state.endpointCreates, 0);
     assert.deepEqual(api.state.endpoints.get('we_handmade').enabled_events, ['*']);
+
+    // adopting it (its secret given as the input): tagged and brought to the handled events
+    const adopt = await run(['--stripe-webhooks', '--allow-dirty'], { extra: { STRIPE_WEBHOOK_ADOPT: 'we_handmade' } });
+    assert.equal(adopt.code, 0, adopt.out);
+    assert.match(adopt.out, /adopting we_handmade as the Connect endpoint/);
+    const ep = api.state.endpoints.get('we_handmade');
+    assert.equal(ep.metadata.detail_crm_role, 'connect');
+    assert.deepEqual([...ep.enabled_events].sort(), [...EVENTS].sort());
+    assert.equal(api.state.endpointCreates, 0);
+  });
+
+  test('STRIPE_*_WEBHOOK_RECREATE replaces the endpoint and stores the new secret; refused without --stripe-webhooks', async () => {
+    await freshApi();
+    const first = await run(['--stripe-webhooks', '--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'] });
+    assert.equal(first.code, 0, first.out);
+    const [oldId, oldEp] = [...api.state.endpoints.entries()][0];
+
+    const idle = await run(['--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { STRIPE_WEBHOOK_RECREATE: '1' } });
+    assert.equal(idle.code, 1, idle.out);
+    assert.match(idle.out, /STRIPE_WEBHOOK_RECREATE: acts only together with --stripe-webhooks/);
+    assert.equal(idle.requests.length, 0);
+
+    const again = await run(['--stripe-webhooks', '--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { STRIPE_WEBHOOK_RECREATE: '1' } });
+    assert.equal(again.code, 0, again.out);
+    assert.match(again.out, new RegExp(`deleted ${oldId} \\(STRIPE_WEBHOOK_RECREATE=1\\)`));
+    assert.ok(!api.state.endpoints.has(oldId));
+    const [, ep] = [...api.state.endpoints.entries()][0];
+    assert.notEqual(ep.secret, oldEp.secret);
+    assert.equal(api.state.secrets.get('STRIPE_WEBHOOK_SECRET'), ep.secret);
+    assertNoSecretLeak(again.out, 'output');
+  });
+
+  test('the deploy-backend workflow passes every function secret and every --stripe-webhooks knob to the script (review finding)', () => {
+    const wf = readFileSync(join(REPO_ROOT, '.github', 'workflows', 'deploy-backend.yml'), 'utf8');
+    for (const spec of SECRET_SPECS) {
+      assert.match(wf, new RegExp(`^ {6}${spec.name}: \\$\\{\\{ (vars|secrets)\\.${spec.name}`, 'm'), `${spec.name} is not in the workflow env (an unset optional one would be removed at every deploy)`);
+    }
+    for (const knob of WEBHOOK_KNOBS) {
+      assert.match(wf, new RegExp(`^ {6}${knob.name}: \\$\\{\\{ [^\\n]*inputs\\.stripe_webhook_`, 'm'), `${knob.name} is not set from the workflow inputs`);
+    }
+    for (const input of ['stripe_webhook_recreate', 'stripe_webhook_adopt_connect', 'stripe_webhook_adopt_billing']) {
+      assert.match(wf, new RegExp(`^ {6}${input}:$`, 'm'), `workflow_dispatch input ${input} missing`);
+    }
+    // the webhook secrets are no longer demanded before the project is checked
+    assert.doesNotMatch(wf, /need STRIPE_(BILLING_)?WEBHOOK_SECRET/);
   });
 
   test('billing inputs: the billing webhook secret is required only with billing on and without --stripe-webhooks; bad values are named', async () => {
     await freshApi();
     const on = await run([], { omit: ['STRIPE_BILLING_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'true' } });
     assert.equal(on.code, 1, on.out);
-    assert.match(on.out, /- STRIPE_BILLING_WEBHOOK_SECRET: /);
-    assert.equal(on.requests.length, 0);
+    assert.match(on.out, /STRIPE_BILLING_WEBHOOK_SECRET is neither an input nor stored in the project/);
+    assert.deepEqual(mutations(on.requests), []);
+    assert.deepEqual(cliLog(), []);
 
     const off = await run(['--dry-run'], { extra: { BILLING_ENABLED: 'false' } });
     assert.equal(off.code, 0, off.out);
@@ -360,13 +462,22 @@ describe('deploy_backend.sh', () => {
     assert.deepEqual(s.billingConfigCalls.at(-1), { enabled: true, trialDays: 14 });
     assert.equal(s.syncCalls.length, 2);
 
+    // a later deploy without --stripe-webhooks: both stored secrets are kept
+    const stored = [s.secrets.get('STRIPE_WEBHOOK_SECRET'), s.secrets.get('STRIPE_BILLING_WEBHOOK_SECRET')];
+    const later = await run(['--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'true', BILLING_TRIAL_DAYS: '14' } });
+    assert.equal(later.code, 0, later.out);
+    assert.match(later.out, /STRIPE_BILLING_WEBHOOK_SECRET: kept as stored in the project/);
+    assert.deepEqual([s.secrets.get('STRIPE_WEBHOOK_SECRET'), s.secrets.get('STRIPE_BILLING_WEBHOOK_SECRET')], stored);
+
     // billing turned off later: the endpoint is left for existing subscriptions, no sync
     const off = await run(['--stripe-webhooks', '--allow-dirty'], { omit: ['STRIPE_WEBHOOK_SECRET'], extra: { BILLING_ENABLED: 'false', BILLING_TRIAL_DAYS: '14' } });
     assert.equal(off.code, 0, off.out);
     assert.match(off.out, /Platform billing endpoint: we_fake[0-9a-f]+ left as it is/);
     assert.equal(s.endpoints.size, 2);
     assert.deepEqual(s.billingConfigCalls.at(-1), { enabled: false, trialDays: 14 });
-    assert.equal(s.syncCalls.length, 2);
+    assert.equal(s.syncCalls.length, 3);
+    // the billing secret stays for existing subscriptions (never removed as "unset")
+    assert.equal(s.secrets.get('STRIPE_BILLING_WEBHOOK_SECRET'), stored[1]);
   });
 
   test('an unset BILLING_ENABLED / BILLING_TRIAL_DAYS never silently changes a project that has billing set up', async () => {

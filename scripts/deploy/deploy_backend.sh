@@ -11,7 +11,8 @@
 #   --dry-run          validate inputs, link, list pending migrations and print
 #                      what every other step would change; changes nothing
 #   --stripe-webhooks  create/update the Stripe webhook endpoints (Connect; the
-#                      platform billing one too when BILLING_ENABLED=true)
+#                      platform billing one too when BILLING_ENABLED=true);
+#                      without it the stored signing secrets are kept
 #   --include-all      pass --include-all to `supabase db push` (a migration
 #                      numbered below one already applied; see docs/DEPLOY.md)
 #   --allow-dirty      deploy although supabase/ has uncommitted changes
@@ -19,7 +20,9 @@
 # Inputs come from the environment only (never argv, never a file in the
 # repo); values are never printed. Required: SUPABASE_ACCESS_TOKEN,
 # SUPABASE_PROJECT_REF, SUPABASE_DB_PASSWORD and the function secrets listed
-# in docs/DEPLOY.md (scripts/deploy/lib/config.mjs SECRET_SPECS).
+# in docs/DEPLOY.md (scripts/deploy/lib/config.mjs SECRET_SPECS). The inputs
+# are the desired state: an optional secret they leave unset is removed from
+# the project (unset = off).
 #
 # NEVER runs `supabase config push` (or anything else that syncs
 # supabase/config.toml to the hosted project): config.toml is tuned for local
@@ -133,7 +136,9 @@ fi
 
 # ------------------------------------------------------------------ 2
 step 2 "Project and CLI"
-node "$API" preflight
+# Also checks that the webhook signing secrets that are not inputs are
+# already stored in the project (kept as they are), before anything changes.
+node "$API" preflight ${secret_flags[@]+"${secret_flags[@]}"}
 info "supabase CLI: $("${SB[@]}" --version 2>/dev/null | tail -1) (pinned ${SUPABASE_CLI_VERSION})"
 # Snapshot what is deployed, so a concurrent edit of the working tree cannot
 # mix versions mid-deploy. Dot files (.env*, local CA bundles) are excluded.
@@ -171,7 +176,7 @@ step 6 "Stripe webhook endpoints (Connect; platform billing when enabled)"
 if [ "$STRIPE_WEBHOOKS" = 1 ]; then
   node "$API" stripe-webhook ${api_flags[@]+"${api_flags[@]}"} --supabase-dir "$WORK/supabase"
 else
-  info "skipped (pass --stripe-webhooks to manage them; STRIPE_WEBHOOK_SECRET / STRIPE_BILLING_WEBHOOK_SECRET are used as given)"
+  info "skipped (pass --stripe-webhooks to manage them; STRIPE_WEBHOOK_SECRET / STRIPE_BILLING_WEBHOOK_SECRET are used as given, or kept as stored in the project)"
 fi
 
 # ------------------------------------------------------------------ 7

@@ -3,8 +3,9 @@
 # through the Management API (config.toml is never pushed), the platform setup
 # of supabase/setup/cron.sql with the billing settings (docs/BILLING.md),
 # optionally the Stripe webhook endpoints (Connect, and the platform billing
-# endpoint when BILLING_ENABLED is true); then read-only smoke checks against
-# the live project. Manual only; the dry run (default) changes nothing.
+# endpoint when BILLING_ENABLED is true; recreate / adopt through the inputs);
+# then read-only smoke checks against the live project. Manual only; the dry
+# run (default) changes nothing.
 name: deploy-backend
 
 on:
@@ -15,9 +16,26 @@ on:
         type: boolean
         default: true
       stripe_webhooks:
-        description: "Create/update the Stripe webhook endpoints (Connect; platform billing when BILLING_ENABLED) and store their signing secrets"
+        description: "Create/update the Stripe webhook endpoints (Connect; platform billing when BILLING_ENABLED) and store their signing secrets. Needed the first time (and when billing is first turned on); later deploys keep the stored secrets"
         type: boolean
         default: false
+      stripe_webhook_recreate:
+        description: "With stripe_webhooks: delete and recreate a managed endpoint, storing its new signing secret (after a STRIPE_API_VERSION upgrade, or when its secret is lost or wrong)"
+        type: choice
+        options:
+          - none
+          - connect
+          - billing
+          - both
+        default: none
+      stripe_webhook_adopt_connect:
+        description: "With stripe_webhooks: id (we_...) of a Connect endpoint made by hand at .../functions/v1/stripe-webhook to manage from now on"
+        type: string
+        default: ""
+      stripe_webhook_adopt_billing:
+        description: "With stripe_webhooks and BILLING_ENABLED: id (we_...) of a platform endpoint made by hand at .../functions/v1/billing-webhook to manage from now on"
+        type: string
+        default: ""
       include_all_migrations:
         description: "Pass --include-all to supabase db push (a migration numbered below one already applied)"
         type: boolean
@@ -52,9 +70,17 @@ jobs:
       CRON_SECRET: ${{ secrets.CRON_SECRET }}
       STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
       STRIPE_PUBLISHABLE_KEY: ${{ vars.STRIPE_PUBLISHABLE_KEY || secrets.STRIPE_PUBLISHABLE_KEY }}
+      # Optional once the project holds it (a deploy with stripe_webhooks
+      # stores it); don't keep an old value here after the deploy made a new one
       STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+      # One-shot knobs of stripe_webhooks (docs/DEPLOY.md 3.3), from the inputs
+      STRIPE_WEBHOOK_RECREATE: ${{ (inputs.stripe_webhook_recreate == 'connect' || inputs.stripe_webhook_recreate == 'both') && '1' || '' }}
+      STRIPE_BILLING_WEBHOOK_RECREATE: ${{ (inputs.stripe_webhook_recreate == 'billing' || inputs.stripe_webhook_recreate == 'both') && '1' || '' }}
+      STRIPE_WEBHOOK_ADOPT: ${{ inputs.stripe_webhook_adopt_connect }}
+      STRIPE_BILLING_WEBHOOK_ADOPT: ${{ inputs.stripe_webhook_adopt_billing }}
       # Shop subscription billing (docs/BILLING.md): database settings + the
-      # platform billing webhook's signing secret (only while billing is on)
+      # platform billing webhook's signing secret (only while billing is on;
+      # optional once the project holds it, like STRIPE_WEBHOOK_SECRET)
       BILLING_ENABLED: ${{ vars.BILLING_ENABLED }}
       BILLING_TRIAL_DAYS: ${{ vars.BILLING_TRIAL_DAYS }}
       BILLING_AUTOMATIC_TAX: ${{ vars.BILLING_AUTOMATIC_TAX }}
@@ -65,12 +91,16 @@ jobs:
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       EMAIL_FROM: ${{ vars.EMAIL_FROM }}
       CORS_ALLOWED_ORIGINS: ${{ vars.CORS_ALLOWED_ORIGINS }}
+      # Leave unset (only for a custom API domain: https://<host>/functions/v1)
+      FUNCTIONS_PUBLIC_URL: ${{ vars.FUNCTIONS_PUBLIC_URL }}
       # Optional: APNs push for the iPhone app (all four, or none = no pushes)
       APNS_KEY_ID: ${{ vars.APNS_KEY_ID }}
       APNS_TEAM_ID: ${{ vars.APNS_TEAM_ID }}
       APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
       APNS_TOPIC: ${{ vars.APNS_TOPIC }}
-      # Optional feature flags (unset = off; docs/DEPLOY.md)
+      # Optional feature flags (unset = off; docs/DEPLOY.md). Every optional
+      # value is the desired state: deleting its variable removes the
+      # function secret from the project at the next deploy
       SMS_PROVISIONING_ENABLED: ${{ vars.SMS_PROVISIONING_ENABLED }}
       TWILIO_ISV_ENABLED: ${{ vars.TWILIO_ISV_ENABLED }}
       TWILIO_PRIMARY_CUSTOMER_PROFILE_SID: ${{ vars.TWILIO_PRIMARY_CUSTOMER_PROFILE_SID }}
@@ -100,12 +130,9 @@ jobs:
           need TWILIO_AUTH_TOKEN "secret"
           need RESEND_API_KEY "secret"
           need EMAIL_FROM "variable"
-          if [ "$STRIPE_WEBHOOKS" != "true" ]; then
-            need STRIPE_WEBHOOK_SECRET "secret, or run with stripe_webhooks"
-            if [ "$(printf '%s' "${BILLING_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-              need STRIPE_BILLING_WEBHOOK_SECRET "secret while BILLING_ENABLED is true, or run with stripe_webhooks"
-            fi
-          fi
+          # STRIPE_WEBHOOK_SECRET / STRIPE_BILLING_WEBHOOK_SECRET are not
+          # required here: without stripe_webhooks the deploy (step 2) checks
+          # that the project already holds them.
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing repository/environment settings: ${missing[*]}"
             echo "Add them under Settings -> Secrets and variables -> Actions (the 'production'"
