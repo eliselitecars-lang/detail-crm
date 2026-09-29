@@ -6,15 +6,23 @@ import { toAppError } from '@/lib/errors';
 import { shopAssetUrl } from '@/lib/supabase';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useUnsubscribe, useUnsubscribeInfo, type UnsubscribeInfo } from './api';
-import { isUnsubscribeToken } from './model';
+import { isUnsubscribeToken, UNSUBSCRIBE_STILL_SENT, unsubscribedText } from './model';
 
 /**
  * Public /u/:token — the unsubscribe link in every campaign and follow-up
  * email (and where the messaging function's List-Unsubscribe GET redirects).
  * Nothing happens until the visitor presses the button: link scanners and
- * prefetchers open links, and must not unsubscribe anyone. The opt-out stops
- * every email to the address, transactional included, and nobody can clear
- * it (customers_comms_guard), so the page never promises a way back.
+ * prefetchers open links, and must not unsubscribe anyone.
+ *
+ * Since 0126 the button is a marketing-only opt-out (public_unsubscribe,
+ * scope 'marketing'): campaigns and marketing follow-ups stop; booking
+ * confirmations, reminders, quotes, invoices and receipts keep coming, and
+ * the page says so before and after the click. An address already opted out
+ * of every email (scope 'all': an unsubscribe from before 0126, or an
+ * opt-out the shop recorded) is told exactly that. The shop cannot opt an
+ * address back in (customers_comms_guard), and this page offers no way back
+ * (the database's public_resubscribe / public_unsubscribe_all have no UI
+ * yet), so it promises none.
  */
 export default function UnsubscribePage() {
   const { token } = useParams();
@@ -50,13 +58,21 @@ function UnsubscribeFlow({ token }: { token: string }) {
   return <UnsubscribeForm token={token} info={info.data} />;
 }
 
-function Unsubscribed({ shopName, focus }: { shopName: string; focus: boolean }) {
+function Unsubscribed({
+  shopName,
+  scope,
+  focus,
+}: {
+  shopName: string;
+  scope: UnsubscribeInfo['scope'];
+  focus: boolean;
+}) {
   return (
     <Outcome
       icon={<MailCheck aria-hidden="true" />}
       tone="success"
       title="You’re unsubscribed"
-      body={`You won’t get any more emails from ${shopName} at this address — including receipts, invoices and appointment reminders. This can’t be undone for this address; if you want emails from ${shopName} again, give them a different email address.`}
+      body={unsubscribedText(shopName, scope)}
       focus={focus}
     />
   );
@@ -68,13 +84,17 @@ function UnsubscribeForm({ token, info }: { token: string; info: UnsubscribeInfo
 
   if (unsubscribe.isSuccess) {
     return unsubscribe.data ? (
-      <Unsubscribed shopName={info.shop_name} focus />
+      <Unsubscribed shopName={info.shop_name} scope={info.scope ?? 'marketing'} focus />
     ) : (
       <InvalidLink focus />
     );
   }
-  // Already opted out (an earlier visit, or a reply of STOP / a complaint).
-  if (info.unsubscribed) return <Unsubscribed shopName={info.shop_name} focus={false} />;
+  // Already opted out: an earlier visit ('marketing'), or an opt-out of every
+  // email ('all': before 0126, or recorded by the shop). Unknown scope: 'all'
+  // (never claim that emails still arrive when they may not).
+  if (info.unsubscribed) {
+    return <Unsubscribed shopName={info.shop_name} scope={info.scope ?? 'all'} focus={false} />;
+  }
 
   if (unsubscribe.isError) {
     return (
@@ -99,16 +119,16 @@ function UnsubscribeForm({ token, info }: { token: string; info: UnsubscribeInfo
       )}
       <div>
         <h1 className="text-ink text-lg font-semibold tracking-tight">
-          Unsubscribe from {info.shop_name} emails
+          Unsubscribe from {info.shop_name} marketing emails
         </h1>
         <p className="text-muted mt-1 text-sm">
-          Stop receiving emails from {info.shop_name} at the address this email was sent to.
+          Stop marketing emails from {info.shop_name} — campaigns, promotions and service follow-ups
+          — to the address this email was sent to.
         </p>
-        {/* 0033: an email opt-out blocks every email to the address, and no
-            one — the shop included — can clear it, so say so before the click. */}
+        {/* 0126: the link is a marketing-only opt-out; say what still arrives
+            before the click. */}
         <p className="text-muted mt-2 text-sm">
-          This stops all of their emails, including receipts, invoices and appointment reminders,
-          and can’t be undone for this address.
+          You’ll still get {UNSUBSCRIBE_STILL_SENT} from {info.shop_name}.
         </p>
       </div>
       <Button

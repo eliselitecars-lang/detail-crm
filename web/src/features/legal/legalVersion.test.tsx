@@ -26,10 +26,12 @@ const PUBLISHED_VERSIONS: readonly { date: string; fingerprint: string }[] = [
   // person (hashed-email trial record); coupon-code checks on the booking
   // page (IP address and hashed code, kept two days). Same day, before it
   // was deployed: "Deleting a shop's customer" (erase_customer: delete, or
-  // anonymise when the shop's records reference the customer).
+  // anonymise when the shop's records reference the customer); the
+  // unsubscribe link stops marketing email only (0126: confirmations,
+  // reminders, quotes, invoices and receipts still arrive).
   {
     date: '2026-09-29',
-    fingerprint: '68a2547cde8d2c55be65d3da5215037255cac3a8979b216e1640909966d41331',
+    fingerprint: '3c47bf93dcf619079d67bc084f49f68140d5694b333c0805a12ca5bfc3da48e1',
   },
 ];
 

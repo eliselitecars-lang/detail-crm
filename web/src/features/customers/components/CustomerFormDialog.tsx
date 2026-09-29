@@ -15,7 +15,7 @@ import {
 import { useShop } from '@/features/shop/shopContext';
 import { formatDate } from '@/lib/dates';
 import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
-import { toAppError, type AppError } from '@/lib/errors';
+import { AppError, toAppError } from '@/lib/errors';
 import { useCreateCustomer, useKnownTags, useUpdateCustomer } from '../api';
 import { LIFECYCLE_LABELS, LIFECYCLES, SOURCE_LABELS, SOURCES, type CustomerRow } from '../model';
 import {
@@ -28,6 +28,18 @@ import {
   type CustomerFormValues,
 } from '../schemas';
 import { TagsEditor } from './TagsEditor';
+
+/**
+ * 0126: marketing email consent for an address that unsubscribed comes back
+ * only from the customer (customers_comms_guard, 42501). The server's
+ * sentence names ways back the web doesn't offer, so say what staff can do.
+ */
+const EMAIL_RESUBSCRIBE_REFUSED_MESSAGE =
+  'This email address unsubscribed from your marketing emails, so your team can’t turn marketing email back on for it. Turn off Email opt-in to save your other changes.';
+
+function isEmailResubscribeRefusal(error: AppError): boolean {
+  return error.kind === 'permission' && /only the customer can opt back in/i.test(error.message);
+}
 
 export interface CustomerFormDialogProps {
   open: boolean;
@@ -73,7 +85,11 @@ export function CustomerFormDialog({ open, onClose, customer, onSaved }: Custome
       const appError = toAppError(error);
       const field = appError.constraint ? CUSTOMER_CONSTRAINT_FIELDS[appError.constraint] : null;
       if (field) setError(field, { message: appError.message }, { shouldFocus: true });
-      else setFormError(appError);
+      else if (isEmailResubscribeRefusal(appError)) {
+        setFormError(
+          new AppError(EMAIL_RESUBSCRIBE_REFUSED_MESSAGE, { kind: 'permission', cause: error }),
+        );
+      } else setFormError(appError);
     }
   });
 
@@ -179,8 +195,8 @@ export function CustomerFormDialog({ open, onClose, customer, onSaved }: Custome
                 label="Email opt-in"
                 description={
                   customer?.email_opted_out_at
-                    ? `Unsubscribed on ${formatDate(customer.email_opted_out_at, timezone)} — no email can be sent to this address, including invoices, receipts and reminders. The unsubscribe can’t be undone; to email this customer again, use a different address they give you.`
-                    : 'Customer agreed to receive emails.'
+                    ? `Opted out of all email on ${formatDate(customer.email_opted_out_at, timezone)} — nothing can be emailed to this address, including invoices, receipts and reminders. Your team can’t undo this; to email this customer, use a different address they give you.`
+                    : 'Customer agreed to receive marketing emails (campaigns and follow-ups). Appointment, quote and invoice emails don’t depend on this.'
                 }
               />
             )}

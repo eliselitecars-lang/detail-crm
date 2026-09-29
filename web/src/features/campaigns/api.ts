@@ -279,21 +279,31 @@ export function useCampaignPreview(input: CampaignPreviewInput) {
 /**
  * Records the email opt-out behind a marketing email's unsubscribe link
  * (public_unsubscribe, granted to anon; the token is that email's random
- * unsubscribe token, never its message id). Resolves true when done
- * (idempotent), false for an unknown link.
+ * unsubscribe token, never its message id). Since 0126 it is a
+ * marketing-only opt-out (scope 'marketing'): campaigns and marketing
+ * follow-ups stop, while confirmations, reminders, quotes, invoices and
+ * receipts still go to the address. Resolves true when done (idempotent),
+ * false for an unknown link.
  */
 export const unsubscribeInfoSchema = z.object({
   shop_name: z.string(),
   shop_logo_path: z.string().nullable(),
-  /** The address is already opted out of this shop's email. */
+  /** The address is already opted out of this shop's email (any scope). */
   unsubscribed: z.boolean(),
+  /**
+   * 0126: 'marketing' — marketing email only (the unsubscribe link); 'all' —
+   * every email (an older unsubscribe, or an opt-out the shop recorded).
+   * Null when not unsubscribed.
+   */
+  scope: z.enum(['marketing', 'all']).nullish(),
 });
 export type UnsubscribeInfo = z.infer<typeof unsubscribeInfoSchema>;
 
 /**
  * What the unsubscribe link is for (public_unsubscribe_info, anon): the
- * shop's name and logo and whether the address is already unsubscribed.
- * Never the address itself. An unknown link is PT404 (kind not_found).
+ * shop's name and logo and whether (and from what) the address is already
+ * unsubscribed. Never the address itself. An unknown link is PT404 (kind
+ * not_found).
  */
 export function useUnsubscribeInfo(token: string) {
   return useQuery({
@@ -315,8 +325,9 @@ export function useUnsubscribe() {
     },
     onSuccess: (done, token) => {
       if (!done) return;
+      // A marketing opt-out; an address already opted out of everything stays so.
       queryClient.setQueryData<UnsubscribeInfo>(['public', 'unsubscribe', token], (info) =>
-        info ? { ...info, unsubscribed: true } : info,
+        info ? { ...info, unsubscribed: true, scope: info.scope ?? 'marketing' } : info,
       );
     },
   });

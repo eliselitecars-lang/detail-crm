@@ -98,6 +98,18 @@ describe('PrivacyPage', () => {
     expect(text).toContain('We do not sell personal information');
   });
 
+  it('describes the unsubscribe link as marketing-only (0126) and customer erasure (0125)', () => {
+    renderPage('privacy', UNSET);
+    const text = (document.body.textContent ?? '').replace(/\s+/g, ' ');
+    expect(text).toContain('Unsubscribing stops that shop’s marketing emails to your address');
+    expect(text).toContain(
+      'booking confirmations, appointment reminders, quotes, invoices and receipts from the shop still arrive',
+    );
+    expect(text).not.toMatch(/stops all emails/i);
+    expect(text).toContain('Deleting a shop’s customer');
+    expect(text).toContain('the customer’s record is anonymised instead');
+  });
+
   it('says what a shop’s own Meta Pixel / Google Analytics tag receives, and where it runs', () => {
     renderPage('privacy', UNSET);
     const text = document.body.textContent ?? '';

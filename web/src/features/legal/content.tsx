@@ -444,8 +444,10 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
             <li>
               Marketing texts and emails (campaigns and follow-ups) go only to customers who agreed
               to receive them from the shop. Marketing texts end with instructions to opt out, and
-              marketing emails contain an unsubscribe link. Unsubscribing stops all emails from that
-              shop to your address.
+              marketing emails contain an unsubscribe link. Unsubscribing stops that shop’s
+              marketing emails to your address; booking confirmations, appointment reminders,
+              quotes, invoices and receipts from the shop still arrive. After you unsubscribe, the
+              shop cannot turn its marketing emails back on for your address.
             </li>
             <li>
               Messages about your appointments and documents — such as booking confirmations,
@@ -688,7 +690,8 @@ export function termsOfService(operator: LegalOperator): LegalText {
                 <Term>Consent for texts and emails:</Term> getting and keeping any consent the law
                 requires before you text or email customers, especially for marketing, and marking
                 that consent accurately in the Service. The Service stops texts to a number that
-                replied STOP and emails to an address that unsubscribed, and sends marketing only to
+                replied STOP and marketing emails to an address that unsubscribed (messages about
+                appointments, quotes and invoices still go to it), and sends marketing only to
                 customers marked as opted in.
               </li>
               <li>

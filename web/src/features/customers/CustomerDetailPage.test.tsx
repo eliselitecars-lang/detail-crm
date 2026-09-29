@@ -192,6 +192,61 @@ describe('CustomerDetailPage', () => {
     );
   });
 
+  describe('email consent wording (0126: the unsubscribe link is marketing-only)', () => {
+    it('explains the marketing opt-in, and a full email opt-out staff cannot undo', async () => {
+      const { user } = setup('owner');
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      await user.click(screen.getByRole('button', { name: 'Edit' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Edit customer' });
+      expect(
+        within(dialog).getByRole('switch', { name: 'Email opt-in' }),
+      ).toHaveAccessibleDescription(
+        'Customer agreed to receive marketing emails (campaigns and follow-ups). Appointment, quote and invoice emails don’t depend on this.',
+      );
+    });
+
+    it('describes a full email opt-out without promising it can never change', async () => {
+      setTableResult('customers', {
+        data: { ...customer, email_opt_in: false, email_opted_out_at: '2026-02-01T15:00:00Z' },
+      });
+      const { user } = renderRoute(<CustomerDetailPage />, {
+        path: '/app/customers/c-1',
+        routePath: '/app/customers/:customerId',
+        auth: signedInAuth(),
+        shop: shopValue({ membership: membership({ role: 'owner' }) }),
+      });
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      await user.click(screen.getByRole('button', { name: 'Edit' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Edit customer' });
+      const description = within(dialog).getByText(/^Opted out of all email on /);
+      expect(description).toHaveTextContent(
+        /nothing can be emailed to this address, including invoices, receipts and reminders\. Your team can’t undo this/,
+      );
+      expect(dialog).not.toHaveTextContent(/can’t be undone/);
+    });
+
+    it('turns the server’s “only the customer can opt back in” refusal into what staff can do', async () => {
+      const { user } = setup('owner');
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      await user.click(screen.getByRole('button', { name: 'Edit' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Edit customer' });
+      setTableResult(
+        'customers',
+        pgError(
+          '42501',
+          'this address unsubscribed; only the customer can opt back in (their unsubscribe link or the client portal)',
+        ),
+      );
+      await user.click(within(dialog).getByRole('switch', { name: 'Email opt-in' }));
+      await user.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+      const alert = await within(dialog).findByRole('alert');
+      expect(alert).toHaveTextContent(
+        'This email address unsubscribed from your marketing emails, so your team can’t turn marketing email back on for it. Turn off Email opt-in to save your other changes.',
+      );
+      expect(alert).not.toHaveTextContent(/client portal/);
+    });
+  });
+
   describe('deletion request (payments → erase_customer)', () => {
     const preview = (overrides: Record<string, unknown> = {}) => ({
       data: {

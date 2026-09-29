@@ -194,7 +194,8 @@ export function channelAvailability(
     return { available: true, reason: null };
   }
   if (!customer.email) return { available: false, reason: 'No email address on file.' };
-  if (customer.email_opted_out_at) return { available: false, reason: 'Unsubscribed from email.' };
+  if (customer.email_opted_out_at)
+    return { available: false, reason: 'Opted out of all email from your shop.' };
   return { available: true, reason: null };
 }
 

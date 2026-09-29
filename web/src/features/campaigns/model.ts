@@ -214,3 +214,27 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export function isUnsubscribeToken(value: string | undefined): value is string {
   return typeof value === 'string' && UUID_RE.test(value);
 }
+
+/**
+ * What still arrives after the unsubscribe link (0126: a marketing-only
+ * opt-out — only campaigns and the follow_up / service_followup templates
+ * are marketing; everything else is transactional).
+ */
+export const UNSUBSCRIBE_STILL_SENT =
+  'booking confirmations, appointment reminders, quotes, invoices and receipts';
+
+/**
+ * The /u/:token page's "You're unsubscribed" text for the address's opt-out
+ * scope (public_unsubscribe_info.scope): 'marketing' from the link, 'all'
+ * for an opt-out of every email (from before 0126, or recorded by the shop).
+ * The page offers no way back, so the text promises none beyond giving the
+ * shop another address.
+ */
+export function unsubscribedText(
+  shopName: string,
+  scope: 'marketing' | 'all' | null | undefined,
+): string {
+  return scope === 'all'
+    ? `This address is opted out of all emails from ${shopName}, including ${UNSUBSCRIBE_STILL_SENT}. If you want emails from ${shopName} again, give them a different email address.`
+    : `${shopName} won’t send marketing emails — campaigns, promotions and service follow-ups — to this address any more. You’ll still get ${UNSUBSCRIBE_STILL_SENT} from them.`;
+}

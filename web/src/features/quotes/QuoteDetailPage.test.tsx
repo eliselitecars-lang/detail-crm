@@ -24,10 +24,10 @@ function rpcByName(results: Record<string, unknown>) {
   });
 }
 
-function setup(quote = quoteRow(), lines = [quoteLineRow()]) {
+function setup(quote = quoteRow(), lines = [quoteLineRow()], customer = customerRow()) {
   setTableResult('quotes', { data: quote });
   setTableResult('quote_line_items', { data: lines });
-  setTableResult('customers', { data: customerRow() });
+  setTableResult('customers', { data: customer });
   setTableResult('vehicles', { data: [] });
   setTableResult('shops', {
     data: {
@@ -172,6 +172,27 @@ describe('QuoteDetailPage', () => {
     expect(nonces[0]).toBe(nonces[1]);
     // mark_quote_sent is not repeated on the retry
     expect(calls.filter((c) => c.fn === 'mark_quote_sent')).toHaveLength(1);
+  });
+
+  it('blocks email to an address opted out of all email, and says what still works', async () => {
+    mockRpc({
+      preview_document_message: {
+        data: [{ enabled: true, to_address: '+12055550123', subject: null, body: 'Hi Jane' }],
+      },
+    });
+    const { user } = setup(
+      quoteRow(),
+      [quoteLineRow()],
+      customerRow({ email_opted_out_at: '2026-01-01T00:00:00Z' }),
+    );
+    await user.click(await screen.findByRole('button', { name: 'Send quote' }));
+    const dialog = await screen.findByRole('dialog', { name: /Send quote #1001/ });
+    expect(
+      within(dialog).getByText(
+        'This customer opted out of all email from your shop, so nothing can be emailed to this address. Text it or share the link instead.',
+      ),
+    ).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/unsubscribed from email/);
   });
 
   it('offers the link instead when the template is turned off', async () => {

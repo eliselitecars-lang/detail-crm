@@ -16,7 +16,13 @@ vi.mock('@/lib/supabase', () => import('@/test/supabaseMock'));
 
 const TOKEN = '40000000-0000-4000-8000-0000000000aa';
 
-const INFO = { shop_name: 'Glacier Detailing', shop_logo_path: null, unsubscribed: false };
+const INFO = {
+  shop_name: 'Glacier Detailing',
+  shop_logo_path: null,
+  unsubscribed: false,
+  scope: null,
+  can_resubscribe: true,
+};
 
 function renderAt(path: string) {
   // No shop: anonymous visitors reach this page from an email.
@@ -36,19 +42,25 @@ describe('UnsubscribePage', () => {
     expect(routes.public?.map((r) => r.path)).toContain('/u/:token');
   });
 
-  it('names the shop, asks first, then unsubscribes through public_unsubscribe', async () => {
+  it('names the shop, asks first, then unsubscribes from marketing email only', async () => {
     const calls = serve({ public_unsubscribe: { data: true } });
     const { user } = renderAt(`/u/${TOKEN}`);
     expect(
       await screen.findByRole('heading', {
-        name: 'Unsubscribe from Glacier Detailing emails',
+        name: 'Unsubscribe from Glacier Detailing marketing emails',
         level: 1,
       }),
     ).toBeInTheDocument();
-    // Before the click: it stops every email, receipts included, for good.
+    // Before the click (0126): marketing stops, transactional email keeps coming.
     expect(
-      screen.getByText(/stops all of their emails, including receipts, invoices/),
+      screen.getByText(/Stop marketing emails from Glacier Detailing — campaigns, promotions/),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'You’ll still get booking confirmations, appointment reminders, quotes, invoices and receipts from Glacier Detailing.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/all of their emails|can’t be undone/)).not.toBeInTheDocument();
     // Opening the link alone never unsubscribes (link scanners follow GETs).
     expect(calls.map((c) => c.fn)).toEqual(['public_unsubscribe_info']);
     expect(calls[0]?.args).toEqual({ p_token: TOKEN });
@@ -56,11 +68,15 @@ describe('UnsubscribePage', () => {
     await user.click(screen.getByRole('button', { name: 'Unsubscribe' }));
     const done = await screen.findByRole('heading', { name: 'You’re unsubscribed' });
     expect(done).toHaveFocus();
-    expect(screen.getByText(/any more emails from Glacier Detailing/)).toBeInTheDocument();
-    // No promise of a remedy nobody can perform (the shop cannot clear an
-    // email opt-out: customers_comms_guard, 0033).
-    expect(screen.queryByText(/ask to be added back/)).not.toBeInTheDocument();
-    expect(screen.getByText(/receipts, invoices and appointment reminders/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Glacier Detailing won’t send marketing emails — campaigns, promotions and service follow-ups — to this address any more. You’ll still get booking confirmations, appointment reminders, quotes, invoices and receipts from them.',
+      ),
+    ).toBeInTheDocument();
+    // No promise of a way back the page doesn't offer (the shop cannot opt the
+    // address back in: customers_comms_guard, 0126).
+    expect(screen.queryByText(/resubscribe|opt back in|ask to be added back/i)).toBeNull();
+    expect(screen.queryByRole('button')).toBeNull();
     expect(supabase.rpc).toHaveBeenCalledWith('public_unsubscribe', { p_token: TOKEN });
   });
 
@@ -73,12 +89,39 @@ describe('UnsubscribePage', () => {
     );
   });
 
-  it('shows the done state straight away when the address is already unsubscribed', async () => {
-    const calls = serve({ public_unsubscribe_info: { data: { ...INFO, unsubscribed: true } } });
+  it('shows the done state straight away when the address already unsubscribed from marketing', async () => {
+    const calls = serve({
+      public_unsubscribe_info: { data: { ...INFO, unsubscribed: true, scope: 'marketing' } },
+    });
     renderAt(`/u/${TOKEN}`);
     expect(await screen.findByRole('heading', { name: 'You’re unsubscribed' })).toBeInTheDocument();
+    expect(screen.getByText(/won’t send marketing emails/)).toBeInTheDocument();
+    expect(screen.getByText(/You’ll still get booking confirmations/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Unsubscribe' })).not.toBeInTheDocument();
     expect(calls.map((c) => c.fn)).toEqual(['public_unsubscribe_info']);
+  });
+
+  it('tells an address opted out of every email that nothing is sent to it', async () => {
+    serve({ public_unsubscribe_info: { data: { ...INFO, unsubscribed: true, scope: 'all' } } });
+    renderAt(`/u/${TOKEN}`);
+    expect(await screen.findByRole('heading', { name: 'You’re unsubscribed' })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /opted out of all emails from Glacier Detailing, including booking confirmations, appointment reminders, quotes, invoices and receipts/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/You’ll still get/)).toBeNull();
+  });
+
+  it('never claims email still arrives when the scope is unknown', async () => {
+    // An older server without `scope`: assume the full opt-out.
+    serve({
+      public_unsubscribe_info: {
+        data: { shop_name: 'Glacier Detailing', shop_logo_path: null, unsubscribed: true },
+      },
+    });
+    renderAt(`/u/${TOKEN}`);
+    expect(await screen.findByText(/opted out of all emails/)).toBeInTheDocument();
   });
 
   it('says the link is invalid when the server does not know it (PT404)', async () => {

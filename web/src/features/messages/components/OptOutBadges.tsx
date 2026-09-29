@@ -22,7 +22,7 @@ export function OptOutBadges({
       )}
       {customer.email_opted_out_at && (
         <Badge tone="danger">
-          Email unsubscribed {formatDate(customer.email_opted_out_at, timeZone)}
+          Opted out of all email {formatDate(customer.email_opted_out_at, timeZone)}
         </Badge>
       )}
       {!customer.sms_opted_out_at && customer.sms_opt_in && (

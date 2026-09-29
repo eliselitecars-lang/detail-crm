@@ -134,9 +134,8 @@ describe('channelAvailability', () => {
     ).toMatch(/STOP/);
     expect(channelAvailability(customer({ email: null }), 'email').available).toBe(false);
     expect(
-      channelAvailability(customer({ email_opted_out_at: '2026-01-01T00:00:00Z' }), 'email')
-        .available,
-    ).toBe(false);
+      channelAvailability(customer({ email_opted_out_at: '2026-01-01T00:00:00Z' }), 'email'),
+    ).toEqual({ available: false, reason: 'Opted out of all email from your shop.' });
   });
 
   it('does not require marketing opt-in for one-to-one messages', () => {

@@ -109,6 +109,12 @@ test.describe('legal pages', () => {
       'For privacy questions and requests, contact the operator of this service.',
     );
     await expect(page.locator('a[href^="mailto:"]')).toHaveCount(0);
+    // 0126: the unsubscribe link ends marketing email only.
+    const choices = page.getByRole('region', { name: /Texts, emails and your choices/ });
+    await expect(choices).toContainText(
+      'Unsubscribing stops that shop’s marketing emails to your address; booking confirmations, appointment reminders, quotes, invoices and receipts from the shop still arrive.',
+    );
+    await expect(page.getByText(/stops all emails/i)).toHaveCount(0);
     await noHorizontalOverflow(page);
 
     // The table of contents jumps to its section.
