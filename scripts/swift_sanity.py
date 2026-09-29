@@ -604,6 +604,23 @@ def check_edge_calls(path: Path, code: str, source: str, report: Report, functio
         report.error(path, line, "edge function name chosen at run time — pass a string literal so it can be checked")
 
 
+CG_GEOMETRY = re.compile(r"\bCG(?:Size|Point|Rect|Vector|AffineTransform)\b")
+CG_IMPORT = re.compile(r"^\s*(?:@_exported\s+)?import\s+(?:CoreGraphics|SwiftUI|UIKit)\b", re.M)
+
+
+def check_coregraphics_import(path: Path, code: str, report: Report) -> None:
+    """On Apple platforms `import Foundation` exposes the bare CGSize/CGPoint/CGRect
+    structs but not the CoreGraphics overlay (`.zero`, `CGRect(x:y:width:height:)`),
+    so such a file fails in Xcode while the Linux harness (whose Foundation defines
+    them) passes. Require CoreGraphics (or SwiftUI/UIKit, which re-export it)."""
+    match = CG_GEOMETRY.search(code)
+    if match and not CG_IMPORT.search(code):
+        line = code.count("\n", 0, match.start()) + 1
+        report.error(path, line, f"{match.group(0)} used without `import CoreGraphics` (wrap it in "
+                     "`#if canImport(CoreGraphics)` for DetailCore) — Foundation alone lacks .zero and "
+                     "the CGRect(x:y:width:height:) initialisers on macOS/iOS")
+
+
 def check_swift_file(path: Path, report: Report, is_app: bool, functions_dir: Path | None = None) -> None:
     report.swift_files += 1
     source = path.read_text(encoding="utf-8")
@@ -618,6 +635,7 @@ def check_swift_file(path: Path, report: Report, is_app: bool, functions_dir: Pa
     code_lines = code.split("\n")
     source_lines = source.split("\n")
     check_structure(path, source_lines, code_lines, report, is_app)
+    check_coregraphics_import(path, code, report)
     if is_app:
         check_forbidden(path, code_lines, source, report)
         check_sign_out(path, code_lines, report)
@@ -1081,6 +1099,12 @@ def self_test() -> int:
     expect("sign-out after account deletion allowed", not run_swift(
         "func f() async { await appState.signOut() }\n", filename="AccountDeletionView.swift").errors)
     expect("confirmed sign-out passes", not run_swift("let b = Button(\"x\") { confirmation = .signOut(appState) }\n").errors)
+    expect("CGSize without CoreGraphics detected", any("CoreGraphics" in e for e in run_swift(
+        "import Foundation\nfunc f() -> CGSize { .zero }\n", app=False).errors))
+    expect("CGRect with canImport(CoreGraphics) passes", not run_swift(
+        "import Foundation\n#if canImport(CoreGraphics)\nimport CoreGraphics\n#endif\nlet r = CGRect(x: 0, y: 0, width: 1, height: 1)\n", app=False).errors)
+    expect("CGPoint under SwiftUI passes", not run_swift("import SwiftUI\nlet p = CGPoint.zero\n").errors)
+    expect("CGFloat alone needs no CoreGraphics", not run_swift("import Foundation\nlet w: CGFloat = 2\n", app=False).errors)
     expect("AsyncImage detected", any("AsyncImage" in e for e in run_swift(
         "var body: some View { AsyncImage(url: item.url) { image in image } placeholder: { ProgressView() } }\n").errors))
     expect("AsyncImage in a comment ignored", not run_swift("// AsyncImage(url:) never fails for nil\nlet x = 1\n").errors)
