@@ -13,7 +13,9 @@ import { LEGAL_LAST_UPDATED, readLegalOperator, type LegalOperator } from './ope
  * rendered wording of both pages. When the wording changes, this test fails:
  * APPEND an entry with today's date and the fingerprint the failure prints,
  * and set LEGAL_LAST_UPDATED (operator.ts) to that date. Never edit an
- * existing entry; dates only move forward.
+ * existing entry; dates only move forward. (Dates are unique: a second
+ * change on a day whose entry has not been deployed yet updates that day's
+ * fingerprint instead of adding an entry.)
  */
 const PUBLISHED_VERSIONS: readonly { date: string; fingerprint: string }[] = [
   {
@@ -22,10 +24,12 @@ const PUBLISHED_VERSIONS: readonly { date: string; fingerprint: string }[] = [
   },
   // Membership sign-up IP records (kept seven days); one free trial per
   // person (hashed-email trial record); coupon-code checks on the booking
-  // page (IP address and hashed code, kept two days).
+  // page (IP address and hashed code, kept two days). Same day, before it
+  // was deployed: "Deleting a shop's customer" (erase_customer: delete, or
+  // anonymise when the shop's records reference the customer).
   {
     date: '2026-09-29',
-    fingerprint: '23685fa23c217d90cae47436a904723ab4ee2ae62f063d98b444b4167356e695',
+    fingerprint: '68a2547cde8d2c55be65d3da5215037255cac3a8979b216e1640909966d41331',
   },
 ];
 

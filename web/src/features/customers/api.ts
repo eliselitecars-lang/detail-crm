@@ -13,6 +13,7 @@ import {
 import { z } from 'zod';
 import { pageRange, type SortState } from '@/components/ui';
 import { unwrap, unwrapRequired } from '@/lib/db';
+import { invokeEdge as invokeEdgeAction } from '@/features/quotes/shared/edge';
 import { AppError, edgeFunctionError, toAppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
@@ -22,6 +23,7 @@ import {
   type CustomerLifecycle,
   type CustomerRow,
 } from './model';
+import { erasePreviewSchema, eraseResultSchema, type EraseResult } from './erase';
 import type { CustomerWrite, VehicleWrite } from './schemas';
 import { searchPatterns, searchTerms } from './search';
 
@@ -235,56 +237,63 @@ export function useSetCustomerArchived(shopId: string) {
   });
 }
 
-/** 23503 on delete: jobs / invoices / payments / memberships restrict it (0006, 0011, 0012, 0050). */
-export const CUSTOMER_IN_USE_MESSAGE =
-  'This customer has jobs, invoices, payments or a membership on file. Those are kept for your records, so the customer can’t be deleted — archive them instead.';
-export const CUSTOMER_HAS_CARDS_MESSAGE =
-  'Remove this customer’s saved cards first (Saved cards tab), so they’re removed from Stripe too.';
+// ---------------------------------------------------------------- deletion requests
 
 /**
- * Deletes a customer for good (managers+, RLS customers_delete) — e.g. for a
- * customer's deletion request. Their vehicles, quotes, messages and files go
- * with them (ON DELETE CASCADE; files are queued for storage-purge). The
- * database refuses (23503) while jobs, invoices, payments or a membership
- * point at them. Saved cards must be removed first so they are detached in
- * Stripe too (deleting the rows alone would leave them on the shop's Stripe
- * customer).
+ * The erase_customer dry run, keyed outside `customerKeys.all` so refreshes
+ * of the customer lists (realtime, edits) don't re-run it; it is fetched
+ * fresh each time the delete dialog opens.
+ */
+export const eraseKeys = {
+  preview: (shopId: string, customerId: string) => shopKey(shopId, 'customer-erase', customerId),
+};
+
+/**
+ * payments → erase_customer without `confirm` (owner / admin): what would
+ * happen to the customer — `mode` 'deleted' or 'anonymised' — and what is in
+ * the way. Changes nothing and does not call Stripe.
+ */
+export function useCustomerErasePreview(shopId: string, customerId: string) {
+  return useQuery({
+    queryKey: eraseKeys.preview(shopId, customerId),
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+    queryFn: () =>
+      invokeEdgeAction(
+        'payments',
+        'erase_customer',
+        { shop_id: shopId, customer_id: customerId },
+        erasePreviewSchema,
+      ),
+  });
+}
+
+/**
+ * A customer's deletion request: payments → erase_customer with
+ * `confirm: true` (owner / admin; clients have no DELETE on customers,
+ * 0125 / 0132). The server cancels unfinished card attempts, closes open pay
+ * pages, removes saved cards and the Stripe customer, then deletes the
+ * record — or anonymises it when jobs, invoices, payments or a membership
+ * reference it — together with every duplicate merged into it. Refusals are
+ * 409 with `details.reason` (erase.ts → eraseErrorMessage).
  */
 export function useDeleteCustomer(shopId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (id: string) => {
-      const cards = await supabase
-        .from('customer_payment_methods')
-        .select('id', { count: 'exact', head: true })
-        .eq('shop_id', shopId)
-        .eq('customer_id', id);
-      if (cards.error) throw toAppError(cards.error);
-      if ((cards.count ?? 0) > 0) {
-        throw new AppError(CUSTOMER_HAS_CARDS_MESSAGE, { kind: 'conflict' });
-      }
-      const result = await supabase
-        .from('customers')
-        .delete()
-        .eq('shop_id', shopId)
-        .eq('id', id)
-        .select('id');
-      if (result.error) {
-        const error = toAppError(result.error);
-        if (error.code === '23503') {
-          throw new AppError(CUSTOMER_IN_USE_MESSAGE, { kind: 'conflict', code: error.code });
-        }
-        throw error;
-      }
-      // RLS hides the row from a caller who may not delete it: nothing deleted.
-      if ((result.data ?? []).length === 0) {
-        throw new AppError('This customer couldn’t be deleted. Refresh and try again.', {
-          kind: 'not_found',
-        });
-      }
-    },
+    mutationFn: (id: string): Promise<EraseResult> =>
+      invokeEdgeAction(
+        'payments',
+        'erase_customer',
+        { shop_id: shopId, customer_id: id, confirm: true },
+        eraseResultSchema,
+      ),
     onSuccess: (_data, id) => {
       queryClient.removeQueries({ queryKey: customerKeys.detail(shopId, id) });
+      queryClient.removeQueries({ queryKey: customerKeys.summary(shopId, id) });
+      // Jobs, quotes, invoices, messages, notifications… showed the person's
+      // details: everything of the shop is stale (refetched when next shown).
+      void queryClient.invalidateQueries({ queryKey: ['shop', shopId], refetchType: 'none' });
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: customerKeys.all(shopId) }),
   });

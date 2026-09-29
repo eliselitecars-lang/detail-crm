@@ -56,7 +56,10 @@ const customer = {
   email_opted_out_at: null,
 };
 
-function setup(role: 'owner' | 'manager' | 'technician' = 'owner', path = '/app/customers/c-1') {
+function setup(
+  role: 'owner' | 'admin' | 'manager' | 'technician' = 'owner',
+  path = '/app/customers/c-1',
+) {
   setTableResult('customers', { data: customer });
   return renderRoute(<CustomerDetailPage />, {
     path,
@@ -189,53 +192,185 @@ describe('CustomerDetailPage', () => {
     );
   });
 
-  it('deletes the customer after a danger confirmation and returns to the list', async () => {
-    setTableResult('customer_payment_methods', { data: null, count: 0 });
-    const { user, router } = setup('manager');
-    await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
-    // The delete returns the deleted row's id (RLS would hide a refused one).
-    setTableResult('customers', { data: [{ id: 'c-1' }] });
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
-    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
-    expect(dialog).toHaveTextContent(/can’t be undone/);
-    expect(dialog).toHaveTextContent(/archive them instead/);
-    await user.click(within(dialog).getByRole('button', { name: 'Delete customer' }));
-    await waitFor(() => expect(router.state.location.pathname).toBe('/app/customers'));
-    const deleted = builders.customers?.find((b) => b.delete.mock.calls.length > 0);
-    expect(deleted?.eq).toHaveBeenCalledWith('shop_id', 'shop-1');
-    expect(deleted?.eq).toHaveBeenCalledWith('id', 'c-1');
-    expect(await screen.findByText('Jane Doe deleted')).toBeInTheDocument();
-  });
+  describe('deletion request (payments → erase_customer)', () => {
+    const preview = (overrides: Record<string, unknown> = {}) => ({
+      data: {
+        dry_run: true,
+        mode: 'deleted',
+        erased: false,
+        membership_active: false,
+        payments_in_progress: 0,
+        open_checkouts: 0,
+        saved_cards: 0,
+        ...overrides,
+      },
+      error: null,
+    });
+    const erased = (mode: 'deleted' | 'anonymised', overrides: Record<string, unknown> = {}) => ({
+      data: {
+        erased: true,
+        mode,
+        payments_cancelled: 0,
+        sessions_expired: 0,
+        cards_removed: 0,
+        stripe_customers_deleted: 0,
+        ...overrides,
+      },
+      error: null,
+    });
+    const directDeletes = () =>
+      (builders.customers ?? []).filter((b) => b.delete.mock.calls.length > 0).length;
 
-  it('explains why a customer with jobs or invoices can’t be deleted (23503)', async () => {
-    setTableResult('customer_payment_methods', { data: null, count: 0 });
-    const { user, router } = setup();
-    await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
-    setTableResult(
-      'customers',
-      pgError(
-        '23503',
-        'update or delete on table "customers" violates foreign key constraint "jobs_customer_fk" on table "jobs"',
-      ),
-    );
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
-    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
-    await user.click(within(dialog).getByRole('button', { name: 'Delete customer' }));
-    expect(
-      await screen.findByText(/has jobs, invoices, payments or a membership on file/),
-    ).toBeInTheDocument();
-    expect(router.state.location.pathname).toBe('/app/customers/c-1');
-  });
+    it('previews, then deletes a customer without records and returns to the list', async () => {
+      invoke.mockResolvedValueOnce(preview()).mockResolvedValueOnce(erased('deleted'));
+      const { user, router } = setup('owner');
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      await user.click(screen.getByRole('button', { name: 'Delete' }));
+      const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
+      expect(await within(dialog).findByText(/deleted for good/)).toBeInTheDocument();
+      expect(dialog).toHaveTextContent(/can’t be undone/);
+      expect(invoke).toHaveBeenNthCalledWith(1, 'payments', {
+        body: { action: 'erase_customer', shop_id: 'shop-1', customer_id: 'c-1' },
+      });
+      await user.click(within(dialog).getByRole('button', { name: 'Delete customer' }));
+      await waitFor(() => expect(router.state.location.pathname).toBe('/app/customers'));
+      expect(invoke).toHaveBeenNthCalledWith(2, 'payments', {
+        body: { action: 'erase_customer', shop_id: 'shop-1', customer_id: 'c-1', confirm: true },
+      });
+      expect(await screen.findByText('Jane Doe deleted')).toBeInTheDocument();
+      expect(directDeletes()).toBe(0);
+    });
 
-  it('asks for saved cards to be removed first (so Stripe drops them too)', async () => {
-    setTableResult('customer_payment_methods', { data: null, count: 1 });
-    const { user } = setup();
-    await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
-    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
-    await user.click(within(dialog).getByRole('button', { name: 'Delete customer' }));
-    expect(await screen.findByText(/Remove this customer’s saved cards first/)).toBeInTheDocument();
-    expect(builders.customers?.some((b) => b.delete.mock.calls.length > 0)).toBe(false);
+    it('anonymises a customer with records, saying what is kept and what the server clears first', async () => {
+      invoke
+        .mockResolvedValueOnce(
+          preview({
+            mode: 'anonymised',
+            saved_cards: 2,
+            open_checkouts: 1,
+            payments_in_progress: 1,
+          }),
+        )
+        .mockResolvedValueOnce(erased('anonymised', { cards_removed: 2, sessions_expired: 1 }));
+      const { user, router } = setup('admin');
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      await user.click(screen.getByRole('button', { name: 'Delete' }));
+      const dialog = await screen.findByRole('alertdialog', { name: 'Anonymise Jane Doe?' });
+      expect(dialog).toHaveTextContent(/kept for your books without their personal details/);
+      expect(dialog).toHaveTextContent(/under “Deleted customer”/);
+      expect(dialog).toHaveTextContent('2 saved cards are removed from your Stripe account.');
+      expect(dialog).toHaveTextContent(/1 payment page \(a pay or deposit link\) is still open/);
+      expect(dialog).toHaveTextContent(/1 payment from this customer is still in progress/);
+      expect(within(dialog).queryByRole('button', { name: 'Delete customer' })).toBeNull();
+      await user.click(within(dialog).getByRole('button', { name: 'Anonymise customer' }));
+      await waitFor(() => expect(router.state.location.pathname).toBe('/app/customers'));
+      expect(await screen.findByText('Jane Doe anonymised')).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          'Their invoices, payments and job history are kept without their personal details.',
+        ),
+      ).toBeInTheDocument();
+      expect(directDeletes()).toBe(0);
+    });
+
+    it('blocks the request while a membership is active (the shop cancels it first)', async () => {
+      invoke.mockResolvedValueOnce(preview({ mode: 'anonymised', membership_active: true }));
+      const { user } = setup('owner');
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      await user.click(screen.getByRole('button', { name: 'Delete' }));
+      const dialog = await screen.findByRole('alertdialog', { name: 'Anonymise Jane Doe?' });
+      expect(within(dialog).getByRole('alert')).toHaveTextContent(
+        /Cancel it on the Memberships tab first/,
+      );
+      expect(within(dialog).getByRole('button', { name: 'Anonymise customer' })).toBeDisabled();
+      expect(invoke).toHaveBeenCalledTimes(1);
+    });
+
+    it('explains a refusal in plain words and stays on the customer', async () => {
+      invoke.mockResolvedValueOnce(preview()).mockResolvedValueOnce({
+        data: null,
+        error: edgeHttpError(409, {
+          error: 'A payment from this customer is still going through.',
+          code: 'conflict',
+          details: { reason: 'payment_in_progress' },
+        }),
+      });
+      invoke.mockResolvedValueOnce(preview({ payments_in_progress: 1 }));
+      const { user, router } = setup('owner');
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      await user.click(screen.getByRole('button', { name: 'Delete' }));
+      const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
+      await within(dialog).findByText(/deleted for good/);
+      await user.click(within(dialog).getByRole('button', { name: 'Delete customer' }));
+      expect(
+        await within(dialog).findByText(
+          /still going through \(for example a bank debit that is clearing, or a payment page that was just paid\)/,
+        ),
+      ).toBeInTheDocument();
+      expect(dialog).toHaveTextContent(/The customer’s record wasn’t changed/);
+      // the preview is asked again, so the dialog shows what is in the way now
+      expect(
+        await within(dialog).findByText(/1 payment from this customer is still in progress/),
+      ).toBeInTheDocument();
+      expect(router.state.location.pathname).toBe('/app/customers/c-1');
+      expect(directDeletes()).toBe(0);
+    });
+
+    it('shows a preview failure with a retry and keeps the confirm button off', async () => {
+      invoke
+        .mockResolvedValueOnce({
+          data: null,
+          error: edgeHttpError(403, { error: 'Forbidden', code: 'forbidden' }),
+        })
+        .mockResolvedValueOnce(preview());
+      const { user } = setup('owner');
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      await user.click(screen.getByRole('button', { name: 'Delete' }));
+      const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
+      expect(
+        await within(dialog).findByText('Only the shop’s owner or an admin can delete customers.'),
+      ).toBeInTheDocument();
+      expect(within(dialog).getByRole('button', { name: 'Delete customer' })).toBeDisabled();
+      await user.click(within(dialog).getByRole('button', { name: /try again/i }));
+      expect(await within(dialog).findByText(/deleted for good/)).toBeInTheDocument();
+      expect(within(dialog).getByRole('button', { name: 'Delete customer' })).toBeEnabled();
+    });
+
+    it('is not offered to managers', async () => {
+      setup('manager');
+      await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+      expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+      expect(invoke).not.toHaveBeenCalledWith('payments', expect.anything());
+    });
+
+    it('shows an anonymised customer as such, with nothing left to edit', async () => {
+      setTableResult('customers', {
+        data: {
+          ...customer,
+          first_name: 'Deleted',
+          last_name: 'customer',
+          email: null,
+          phone: null,
+          archived_at: '2026-09-01T00:00:00Z',
+          erased_at: '2026-09-01T00:00:00Z',
+        },
+      });
+      renderRoute(<CustomerDetailPage />, {
+        path: '/app/customers/c-1',
+        routePath: '/app/customers/:customerId',
+        auth: signedInAuth(),
+        shop: shopValue({ membership: membership({ role: 'owner' }) }),
+      });
+      await screen.findByRole('heading', { name: 'Deleted customer', level: 1 });
+      expect(screen.getByText('Anonymised')).toBeInTheDocument();
+      expect(
+        screen.getByText(/personal details were removed at their request/),
+      ).toBeInTheDocument();
+      for (const name of ['Edit', 'Restore', 'Archive', 'Merge into…', 'Delete']) {
+        expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+      }
+    });
   });
 
   it('adds a vehicle using VIN decode', async () => {

@@ -111,11 +111,10 @@ select tests.throws($$select public.erase_customer(tests.fx('shop_a'), tests.fx(
 
 -- ============================================================ no client DELETE
 select tests.authenticate_as(tests.fx('u_owner_a'));
-select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_a3')$$), 0::bigint,
-                'owners cannot delete a customer directly (no DELETE policy)');
+select tests.throws($$delete from public.customers where id = tests.fx('cust_a3')$$, '42501',
+                    'owners cannot delete a customer directly (no DELETE policy; no DELETE privilege since 0132)');
 select tests.authenticate_as(tests.fx('u_manager_a'));
-select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_a3')$$), 0::bigint,
-                'nor managers');
+select tests.throws($$delete from public.customers where id = tests.fx('cust_a3')$$, '42501', 'nor managers');
 select tests.ok(not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'customers' and cmd = 'DELETE'),
                 'customers has no DELETE policy');
 select tests.throws($$update public.customers set erased_at = now() where id = tests.fx('cust_a3')$$, '42501',

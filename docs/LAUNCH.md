@@ -443,6 +443,29 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       owner who signed up on the phone therefore deletes the shop and then
       the account without leaving the app. Mention the path in App Review
       Information if asked.
+- [ ] **Customer deletion requests** (not an App Store item: privacy laws
+      such as the GDPR or CCPA let a shop's customers ask the shop to delete
+      their details). Built on the web only: the customer's page -> Delete,
+      shown to owners and admins (managers and technicians don't see it; no
+      client can delete a `customers` row directly, 0125 / 0132). The dialog
+      first shows the server's dry run (`payments` -> `erase_customer`
+      without `confirm`, nothing changes): the customer is **deleted** when
+      no job, invoice, payment or membership references them, otherwise
+      **anonymised** in place — shown as "Deleted customer", with contact
+      details, addresses, notes, vehicle VIN / plate, messages, files, form
+      answers and signatures removed, while jobs, quotes, invoices, payments
+      and memberships keep their amounts, numbers and dates (revenue and tax
+      reports don't change). Duplicates merged into the customer are handled
+      the same way. An active membership must be cancelled first; the action
+      itself cancels unfinished card attempts, closes open pay / deposit
+      pages and removes saved cards and the customer's Stripe customer on
+      the shop's account; money still moving (a bank debit clearing, a page
+      just paid) refuses until it settles. Opt-out lists stay (keyed by
+      address), and `customer_erasures` records who erased which record and
+      when (no personal data). The privacy policy describes this under
+      "Deleting a shop's customer". Try it once on a staging project: a
+      customer with a paid invoice comes back anonymised, one with no
+      history is deleted.
 - [ ] **Privacy manifest**: the app stores its chosen shop in `UserDefaults`,
       a "required reason" API; `PrivacyInfo.xcprivacy` in the app target
       declares it (reason CA92.1) and no tracking
@@ -541,6 +564,13 @@ From SPEC section 9 (parity roadmap, 2026-09-27) and this launch review:
   visualizer, marketplace/store, voice calling, Android app, workflow
   builder, route optimization engine, Reserve with Google, card
   surcharging.
+- **Bot challenge on public forms: not built.** Lead forms and the online
+  booking page (embedded or not) are limited in the database per
+  connection, per contact and per form (per shop for bookings) in any 24
+  hours, and never text a phone number the shop has not verified; a bot
+  challenge such as Cloudflare Turnstile is optional future hardening that
+  would need a server-side verification path for its token, which does not
+  exist yet.
 - **Defects found by the real-stack checks** (`scripts/stack/README.md`)
   are fixed and kept as regression checks: unknown public link tokens answer
   404 (`PT404`), a due-on-receipt invoice is due at the end of its issue day

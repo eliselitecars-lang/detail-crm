@@ -988,7 +988,9 @@ Body `{shop_id, customer_id, confirm?}`. A customer's deletion request
 no job, invoice, payment or membership references it, otherwise anonymised in
 place (money rows keep their amounts, numbers and dates), together with every
 duplicate merged into it. Clients cannot delete customers directly any more
-(no DELETE policy): the web and iPhone "Delete customer" call this.
+(no DELETE policy, 0125; no DELETE privilege, 0132: a direct delete is 42501):
+the web's customer page -> Delete calls this, preview first, then `confirm`
+(the iPhone app has no customer delete).
 
 Without `confirm` (or `false`) it is the preview: the RPC's dry run, nothing
 changes and Stripe is not called. 200: `{dry_run: true, mode: "deleted" |

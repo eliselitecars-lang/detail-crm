@@ -35,6 +35,7 @@ const MATRIX: Record<Capability, [boolean, boolean, boolean, boolean]> = {
   'customers.viewAssigned': [true, true, true, true],
   'customers.manage': [true, true, true, false],
   'customers.merge': [true, true, false, false],
+  'customers.erase': [true, true, false, false],
   'import.run': [true, true, true, false],
   'catalog.view': [true, true, true, true],
   'catalog.manage': [true, true, true, false],

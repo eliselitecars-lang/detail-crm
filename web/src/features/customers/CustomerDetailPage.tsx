@@ -13,7 +13,7 @@ import {
   UserX,
 } from 'lucide-react';
 import { useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
+import { Link, useParams, useSearchParams } from 'react-router';
 import {
   Badge,
   Button,
@@ -32,8 +32,9 @@ import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import { toAppError } from '@/lib/errors';
 import { phoneHref } from '@/lib/phone';
-import { useCustomer, useDeleteCustomer, useSetCustomerArchived } from './api';
+import { useCustomer, useSetCustomerArchived } from './api';
 import { CustomerFormDialog } from './components/CustomerFormDialog';
+import { DeleteCustomerDialog } from './components/DeleteCustomerDialog';
 import { DocumentsTab } from './components/DocumentsTab';
 import { InvoicesTab, JobsTab, MembershipsTab, QuotesTab } from './components/HistoryTabs';
 import { MergeCustomerDialog } from './components/MergeCustomerDialog';
@@ -90,17 +91,19 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
   const canMemberships = useCan('memberships.view');
   const canCards = useCan('cards.view');
   const canMerge = useCan('customers.merge');
+  const canErase = useCan('customers.erase');
   const [editing, setEditing] = useState(false);
   const [merging, setMerging] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const setArchived = useSetCustomerArchived(shopId);
-  const deleteCustomer = useDeleteCustomer(shopId);
-  const navigate = useNavigate();
 
   const name = customerName(customer);
   const archived = customer.archived_at !== null;
   const merged = Boolean(customer.merged_into_id);
+  // Anonymised at their request (erase_customer): the record can't be
+  // edited, archived, merged or linked again (55000 customer_erased).
+  const erased = Boolean(customer.erased_at);
   const tel = phoneHref(customer.phone);
   const sms = phoneHref(customer.phone, 'sms');
 
@@ -157,21 +160,11 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
     }
   };
 
-  const remove = async () => {
-    try {
-      await deleteCustomer.mutateAsync(customer.id);
-      toast.success(`${name} deleted`);
-      setConfirmDelete(false);
-      void navigate('/app/customers', { replace: true });
-    } catch (error) {
-      toast.error(toAppError(error).message);
-      setConfirmDelete(false);
-    }
-  };
-
-  // Deleting a customer (e.g. on their request) — a merged-away duplicate too,
-  // which still holds the old name and contact details.
-  const deleteButton = (
+  // A customer's deletion request (owner / admin: payments erase_customer) —
+  // a merged-away duplicate too, which still holds the old name and contact
+  // details. The server deletes the record, or anonymises it when money rows
+  // reference it.
+  const deleteButton = canErase ? (
     <Button
       variant="secondary"
       size="sm"
@@ -180,7 +173,7 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
     >
       Delete
     </Button>
-  );
+  ) : null;
 
   const linkClass = buttonClasses({ variant: 'secondary', size: 'sm' });
 
@@ -197,12 +190,14 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
             <Badge tone={customer.lifecycle === 'lead' ? 'warning' : 'neutral'}>
               {LIFECYCLE_LABELS[customer.lifecycle]}
             </Badge>
-            {archived && !merged && <Badge>Archived</Badge>}
-            {merged && <Badge>Merged</Badge>}
+            {archived && !merged && !erased && <Badge>Archived</Badge>}
+            {merged && !erased && <Badge>Merged</Badge>}
+            {erased && <Badge>Anonymised</Badge>}
           </>
         }
         actions={
           canManage &&
+          !erased &&
           (merged ? (
             deleteButton
           ) : (
@@ -251,7 +246,20 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
         }
       />
 
-      {customer.merged_into_id && <MergedBanner targetId={customer.merged_into_id} />}
+      {erased ? (
+        <p
+          role="status"
+          className="bg-surface-2 text-muted rounded-card mb-5 flex flex-wrap items-center gap-2 px-4 py-3 text-sm"
+        >
+          <UserX className="size-4 shrink-0" aria-hidden="true" />
+          <span>
+            This customer’s personal details were removed at their request. Their jobs, invoices and
+            payments are kept for your records.
+          </span>
+        </p>
+      ) : (
+        customer.merged_into_id && <MergedBanner targetId={customer.merged_into_id} />
+      )}
 
       <nav aria-label="Quick actions" className="mb-5 flex flex-wrap gap-2">
         {tel && (
@@ -321,16 +329,12 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
         description="Archived customers are hidden from lists and pickers. Their jobs, invoices and history are kept, and you can restore them anytime."
         confirmLabel="Archive customer"
       />
-      <ConfirmDialog
-        open={confirmDelete}
-        onClose={() => setConfirmDelete(false)}
-        onConfirm={remove}
-        loading={deleteCustomer.isPending}
-        tone="danger"
-        title={`Delete ${name}?`}
-        description="The customer is deleted for good, with their vehicles, quotes, messages and files. This can’t be undone. A customer with jobs, invoices, payments or a membership can’t be deleted — those records are kept for your books; archive them instead."
-        confirmLabel="Delete customer"
-      />
+      {canErase && confirmDelete && (
+        <DeleteCustomerDialog
+          customer={{ id: customer.id, name }}
+          onClose={() => setConfirmDelete(false)}
+        />
+      )}
     </>
   );
 }

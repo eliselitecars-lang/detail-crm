@@ -26,8 +26,8 @@ select tests.throws($$insert into public.customers (shop_id, first_name) values 
                     'manager of A cannot create customers in B');
 select tests.eq(tests.row_count($$update public.customers set notes = 'x' where shop_id = tests.fx('shop_b')$$), 0::bigint,
                 'manager of A cannot update B''s customers');
-select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_b')$$), 0::bigint,
-                'manager of A cannot delete B''s customers');
+select tests.throws($$delete from public.customers where id = tests.fx('cust_b')$$, '42501',
+                    'manager of A cannot delete B''s customers (no client DELETE at all, 0132)');
 select tests.eq(tests.row_count($$select * from public.customers where id = tests.fx('cust_b')$$), 0::bigint,
                 'manager of A cannot read B''s customers');
 -- search haystack & citext
@@ -48,9 +48,9 @@ select tests.lives($$update public.customers set notes = 'Prefers mornings', arc
                    'staff edits and archives');
 select tests.throws($$update public.customers set shop_id = tests.fx('shop_b') where id = tests.fx('cust_a3')$$, '42501',
                     'customers cannot move shops');
--- 0125: no client DELETE (erase_customer, through the payments edge, only)
-select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_a3')$$), 0::bigint,
-                'staff cannot delete customers directly');
+-- 0125 / 0132: no client DELETE (erase_customer, through the payments edge, only)
+select tests.throws($$delete from public.customers where id = tests.fx('cust_a3')$$, '42501',
+                    'staff cannot delete customers directly');
 select tests.as_service();
 select tests.throws($$delete from public.customers where id = tests.fx('cust_a')$$, '23503', 'customers with jobs cannot be hard-deleted');
 select tests.lives($$delete from public.customers where id = tests.fx('cust_a3')$$, 'customer without jobs can be deleted (service role)');

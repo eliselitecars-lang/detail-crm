@@ -54,6 +54,7 @@ transaction never commits); force them with `set constraints <name> immediate`.
 | `110_` | later hardening (0110–0119): join / gift card abuse limits and consent until paid, membership paid_through (past_due reprices), coupon redemption backfill, cancelled-job notifications for assigned members, custom fields in the customer CSV import, skipped occurrences of repeating calendar events, job edits vs open deposit pages, lapsed shops' series, marketing postal address |
 | `120_` | later hardening (0120–0129): one free trial per person, applied payments vs open pay pages, once-per-customer coupons after a cancellation, coupon service-list edits vs open deposit pages, public coupon attempt limits (no shop-wide lockout, 0123), Gmail aliases in the trial key, re-applying a job's own coupon, staff invite and invite email limits (0124) |
 | `125_`–`131_` | round 11 (numbered by migration, 0125–0131): customer erasure / anonymisation (`125_`), marketing-only unsubscribe, resubscribe and consent events (`126_`), preview postal footer (`127_`), `{{portal_link}}` (`128_`), follow-ups held back for a missing postal address (`129_`), refreshing a job's own coupon (`130_`), the public billing offer with the first shop's trial length (`131_`) |
+| `132_` | numbered by migration (0132): no client DELETE privilege on customers — a direct delete is 42501; `erase_customer` (service role) still deletes / anonymises (`132_`) |
 
 ## Helpers (schema `tests`, defined in `supabase/shim/30_test_helpers.sql`)
 

@@ -77,6 +77,9 @@ export const CAPABILITIES = {
   'customers.viewAssigned': ALL, // technicians: only customers on their assigned jobs
   'customers.manage': MANAGERS,
   'customers.merge': OWNER_ADMIN,
+  // A customer's deletion request: delete, or anonymise when money rows
+  // reference them (payments erase_customer; the edge checks owner/admin)
+  'customers.erase': OWNER_ADMIN,
   // CSV import of customers / vehicles / services (exports follow the list permissions)
   'import.run': MANAGERS,
 

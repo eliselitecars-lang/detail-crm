@@ -2,10 +2,11 @@
  * Wording of /privacy and /terms. Every statement describes what this code
  * base actually does (data model: docs/SCHEMA.md; providers: SPEC §1 and
  * §5; deletion: the `account` and `storage-purge` functions and the
- * `payments` delete_shop action). When the product changes what it collects,
- * who receives it or how deletion works, change this file in the same
- * commit and bump LEGAL_LAST_UPDATED (operator.ts); legalVersion.test.tsx
- * holds a fingerprint of the wording per date and fails until both are done.
+ * `payments` delete_shop and erase_customer actions). When the product
+ * changes what it collects, who receives it or how deletion works, change
+ * this file in the same commit and bump LEGAL_LAST_UPDATED (operator.ts);
+ * legalVersion.test.tsx holds a fingerprint of the wording per date and
+ * fails until both are done.
  * Operator details come only from the build-time VITE_LEGAL_* values; nothing
  * is made up when they are missing. The operator reviews the text with
  * counsel (docs/LAUNCH.md).
@@ -489,6 +490,23 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               automatic clean-up job. The shop’s Stripe account belongs to the shop and is not
               closed. Photos, videos, documents and signatures of a deleted job, customer,
               inspection or form are removed the same way.
+            </p>
+            <LegalSubheading>Deleting a shop’s customer</LegalSubheading>
+            <p>
+              When a customer asks a shop to delete their information, the shop’s owner or an admin
+              can delete the customer in the web app. The customer’s saved cards and their customer
+              record in the shop’s Stripe account are deleted first, and open payment links are
+              closed. If the shop has no appointments, invoices, payments or memberships for the
+              customer, their record is deleted together with their vehicles, quotes, messages,
+              uploaded documents and form answers. Otherwise the shop keeps those records for its
+              accounts, with their amounts, numbers and dates, and the customer’s record is
+              anonymised instead: their name, contact details, addresses, notes and vehicle
+              identification and plate numbers are removed; their messages, uploaded documents, form
+              answers and signatures are deleted; notes on their appointments, quotes, invoices and
+              payments are cleared; and their job report links and customer portal access stop
+              working. Duplicate records the shop merged into that customer are handled the same
+              way. Email addresses and phone numbers that asked not to receive messages stay on the
+              shop’s opt-out list, so a new record with the same address still respects that choice.
             </p>
             <p>
               Copies held by our providers — for example messages already delivered through Twilio
