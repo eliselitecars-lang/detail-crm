@@ -201,6 +201,24 @@ const RPC = {
       features: ['proof_feature'],
     },
   ],
+  // The /pricing page reads the plans and the first shop's trial together.
+  public_billing_offer: {
+    plans: [
+      {
+        id: '30000000-0000-4000-8000-000000000001',
+        name: 'Proof Plan',
+        description: null,
+        amount_cents: 1000,
+        currency: 'usd',
+        interval: 'month',
+        interval_count: 1,
+        max_members: null,
+        features: ['proof_feature'],
+      },
+    ],
+    trial_days: 14,
+    trial_available: null,
+  },
   report_revenue: ({ body }) => {
     const rows = [];
     for (let d = new Date(`${body.p_from}T00:00:00Z`); d <= new Date(`${body.p_to}T00:00:00Z`); d = new Date(d.getTime() + 86_400_000)) {

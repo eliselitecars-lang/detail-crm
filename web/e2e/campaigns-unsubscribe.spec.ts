@@ -174,7 +174,9 @@ test.describe('campaign email unsubscribe page', () => {
       page.getByRole('heading', { name: 'You’re unsubscribed from all emails' }),
     ).toBeVisible();
     await expect(page.getByText(/give them a different email address/)).toBeVisible();
-    await expect(page.getByRole('button')).toHaveCount(0);
+    // Only the page's own content: the dev server's query devtools add a button
+    // outside <main> once they have loaded.
+    await expect(page.getByRole('main').getByRole('button')).toHaveCount(0);
   });
 
   test('an unknown link (PT404) says so, and fits a 360px screen', async ({ page }) => {
