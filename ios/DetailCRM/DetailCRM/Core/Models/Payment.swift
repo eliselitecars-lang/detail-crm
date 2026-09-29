@@ -160,6 +160,60 @@ struct Payment: Codable, Identifiable, Hashable, Sendable {
 
     /// The moment to show in lists: when it was paid, else when created.
     var displayDate: Date { paidAt ?? createdAt }
+
+    /// What the money pays (invoice, job, membership), or `.unapplied`.
+    var target: PaymentApplication.Target {
+        PaymentApplication.target(invoiceID: invoiceID, jobID: jobID, membershipID: membershipID)
+    }
+
+    /// Money kept on the customer that pays no invoice, job or membership.
+    var isUnapplied: Bool { target == .unapplied }
+
+    /// Whether staff may try to put it on one of the customer's invoices
+    /// (`apply_payment_to_invoice` re-checks everything).
+    var canApplyToInvoice: Bool {
+        PaymentApplication.canApplyToInvoice(
+            invoiceID: invoiceID,
+            jobID: jobID,
+            membershipID: membershipID,
+            status: status,
+            amountCents: amountCents,
+            refundedCents: refundedCents
+        )
+    }
+
+    /// What applying it puts toward an invoice (tips never count).
+    var applicableCents: Int {
+        PaymentApplication.applicableCents(amountCents: amountCents, refundedCents: refundedCents)
+    }
+}
+
+/// An invoice an unapplied payment can be put on (the customer's open or
+/// partly paid invoices with something due).
+// table: invoices
+struct PaymentApplicableInvoice: Codable, Identifiable, Hashable, Sendable {
+    var id: UUID
+    var number: Int
+    var status: InvoiceStatus
+    var totalCents: Int
+    var balanceCents: Int
+    var dueAt: Date?
+    var issuedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case number
+        case status
+        case totalCents = "total_cents"
+        case balanceCents = "balance_cents"
+        case dueAt = "due_at"
+        case issuedAt = "issued_at"
+    }
+
+    static let selectColumns = "id,number,status,total_cents,balance_cents,due_at,issued_at"
+
+    /// "Invoice #1042"
+    var title: String { "Invoice #\(number)" }
 }
 
 // table: customer_payment_methods

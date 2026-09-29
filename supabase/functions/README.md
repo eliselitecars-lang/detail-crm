@@ -404,6 +404,44 @@ payment is already going through, so the payment page can't be closed.
 Refresh in a moment to see it."). That link keeps its holds (its payment
 row releases them); the invoice's other links are still closed.
 
+#### `deposit_checkout_cancel` (PUBLIC, booking token or invoice token)
+
+Body `{token}` (`token` = `jobs.public_token`, the `/booking/<token>` link;
+the `/q` page passes its `self_schedule.job_token`) or `{invoice_token}`
+(`invoices.public_token`, the `/i/<token>` link: the deposit links of every
+job the invoice bills); exactly one, nothing else is accepted. The customer
+closes a booking's open deposit card page: `/booking` and `/q` call it once
+when Stripe sends the customer back with `?canceled=1`, and `/i` offers it
+("Close it and use the gift card") when a gift card is still refused with
+`checkout_open` after `invoice_checkout_cancel` because a deposit page is
+open. It expires the job's open deposit links, the Checkout Sessions
+`booking_deposit_checkout` and `quote_deposit_checkout` opened (the job
+customer's open sessions with `kind` `deposit` and this `job_id`, and every
+live job hold of the job that has no invoice hold, read from Stripe first
+and closed only when it is such a deposit link: also a link opened for a
+previous customer), and releases their job holds, so the customer's online
+cancel, cash and gift cards on the job's invoice need not wait the ~30-40
+minutes until Stripe expires the page. Nothing else is touched: `/i` pay
+links and their invoice and job holds, card-setup and membership links,
+staff PaymentSheets and Terminal payments stay as they are, and nothing is
+settled or charged.
+
+200: `{released}`, the number of deposit links closed (expired now, or
+already closed in Stripe with a hold left behind). Nothing open, a shop
+without Stripe, or an invoice billing no job: `{released: 0}` and nothing
+changes. A cancelled or completed booking may still have a page to close.
+Repeating the call is harmless. Like `invoice_checkout_cancel` it is bounded
+by the unguessable token (no amount, no new Stripe object; Stripe rate limits
+answer `503 service_unavailable` with `Retry-After`).
+
+Errors: `404 not_found` (unknown token, or a draft invoice), `400
+validation_failed` (both tokens, neither, or any other field), `409
+conflict` reason `payment_in_progress` when a deposit link was just paid,
+its bank debit / pay-later payment is processing, or Stripe will not expire
+it because its payment is being confirmed (`error` is the customer wording
+of `invoice_checkout_cancel`). That link keeps its hold; the others are
+still closed.
+
 #### `booking_deposit_checkout` (PUBLIC, booking token)
 
 Body `{token, request_nonce?}` (`token` = `jobs.public_token`, the
@@ -475,7 +513,7 @@ processing / received (a trigger), or when this function expires the
 session: **every** session it expires (a newer link, a job's deposit links,
 a staff PaymentSheet / Terminal intent or saved-card charge superseding the
 customer's pages, `booking_cancel`, `invoice_checkout_cancel`,
-`cancel_open_payments`) loses its job and invoice holds at once
+`deposit_checkout_cancel`, `cancel_open_payments`) loses its job and invoice holds at once
 (`expireOpenSessions`). `cancel_open_payments` also
 sweeps every live hold that blocks the document — by `invoice_id` the
 invoice's holds and its jobs' holds, by `job_id` the job's and its live
@@ -942,6 +980,54 @@ moment), `422 unprocessable` reason `name_mismatch`, `502 upstream_error`
 reason `platform_subscription_cancel_failed` (nothing was deleted; try again
 in a moment).
 
+#### `erase_customer` (owner/admin)
+
+Body `{shop_id, customer_id, confirm?}`. A customer's deletion request
+(migration 0125): what happens to the record is the database's
+`erase_customer(shop, customer, actor, dry_run)` (service role): deleted when
+no job, invoice, payment or membership references it, otherwise anonymised in
+place (money rows keep their amounts, numbers and dates), together with every
+duplicate merged into it. Clients cannot delete customers directly any more
+(no DELETE policy): the web and iPhone "Delete customer" call this.
+
+Without `confirm` (or `false`) it is the preview: the RPC's dry run, nothing
+changes and Stripe is not called. 200: `{dry_run: true, mode: "deleted" |
+"anonymised", erased, membership_active, payments_in_progress,
+open_checkouts, saved_cards}` (show what will happen, and what is in the
+way: an active membership must be cancelled first; the rest this action
+clears itself).
+
+With `confirm: true`, in this order (every step is safe to repeat):
+
+1. the dry run again: an active, past-due or incomplete membership refuses
+   (`409 membership_active`) before anything changes;
+2. the customers' unsettled card attempts are settled like `cancel_open_payments`
+   does (unconfirmed PaymentSheets / Tap to Pay intents cancelled, money
+   that already landed recorded); a payment still processing, or an ACH /
+   pay-later payment clearing, refuses (`409 payment_in_progress`);
+3. every open Checkout Session of this shop on their Stripe customers (pay,
+   deposit, card-setup and membership join links) and every live job /
+   invoice hold of their jobs and invoices is expired and released (one that
+   was just paid: `409 payment_in_progress`, the others are still closed);
+4. every saved card is detached in Stripe (only from the Stripe customer it
+   is attached to) and removed from the CRM;
+5. their Stripe Customers on the connected account are deleted (idempotency
+   key `customer_delete`; one another CRM customer of the shop still points
+   at is left alone and logged as `stripe_customer_shared`; one Stripe no
+   longer has is skipped);
+6. `erase_customer` runs; it also clears `stripe_customer_id` and
+   `portal_user_id`.
+
+200: `{erased: true, mode, payments_cancelled, sessions_expired,
+cards_removed, stripe_customers_deleted}`. The log line `customer_erased`
+carries ids and counts only. A shop without Stripe skips steps 2-5. An
+already-erased customer answers `mode: "anonymised"` again.
+
+Errors: `401`, `403 forbidden` (not an owner or admin), `404 not_found`,
+`409 conflict` reasons `membership_active`, `payment_in_progress`,
+`checkout_open` / `saved_cards` (a page or card appeared meanwhile: try
+again), `400 validation_failed`.
+
 ### `stripe-webhook` (Stripe only)
 
 `POST /functions/v1/stripe-webhook`, raw body (at most 1 MiB), header
@@ -1033,7 +1119,11 @@ Body `{shop_id?, customer_id?, job_id?, quote_id?, invoice_id?, channel, templat
   `quote_sent`, `invoice_sent`, `payment_receipt`, `review_request`,
   `follow_up`, `membership_welcome`. Without `job_id`, only
   `review_request`, `follow_up` and `membership_welcome` are allowed, and
-  only if the shop's wording uses customer-level variables only.
+  only if the shop's wording uses customer-level variables only
+  (`customer_first_name`, `customer_name`, `shop_name`, `shop_phone`,
+  `review_link`, `booking_page_link`, `portal_link` (0128: the client
+  portal, `APP_BASE_URL/portal?shop=<slug>`); a marketing email also gets its
+  `unsubscribe_link`).
 - `subject`: email free-form only (templates bring their own; SMS has none),
   at most 500 characters. `body`: at most 1600 characters for SMS, 50,000
   for email.
@@ -1126,6 +1216,9 @@ none.
 - `GET`: `303` to `APP_BASE_URL/u/<token>`, which does **not** unsubscribe.
   The web page confirms, then calls the `public_unsubscribe` RPC.
 - `POST` (RFC 8058 one-click, any body up to 4 KiB): `200 {unsubscribed: true}`.
+  It calls `public_unsubscribe(token, 'list_unsubscribe')` (0126): the
+  address stops getting **marketing** email only (confirmations, reminders,
+  invoices and receipts keep going), recorded as a one-click opt-out.
 - Errors: `400 validation_failed` (malformed token), `404 not_found`
   (unknown token), `413 payload_too_large`.
 
@@ -1538,15 +1631,20 @@ purchase UI in the app: App Store 3.1.1 / 3.1.3); it reads the
 
 | action | caller | body | 200 response |
 |---|---|---|---|
-| `plans` | any signed-in user | `{}` | `{billing_enabled, plans: [{id, name, description, amount_cents, currency, interval, interval_count, max_members, features}]}` |
+| `plans` | any signed-in user | `{}` | `{billing_enabled, plans: [{id, name, description, amount_cents, currency, interval, interval_count, max_members, features}], trial_days, trial_available}` |
 | `checkout` | **owner** of `shop_id` | `{shop_id, plan_id, request_nonce?}` | `{url}` (redirect the browser to Stripe Checkout) |
 | `portal` | **owner** of `shop_id` | `{shop_id}` | `{url}` (redirect to the Stripe Customer Portal) |
 | `sync_customer` | **owner or admin** of `shop_id` | `{shop_id}` | `{synced}` (true when Stripe was updated) |
 | `sync_plans` | pg_cron / the deploy (`x-cron-secret`) | `{}` | `{upserted, deactivated, skipped: [{product_id, price_id, reason}], warnings: [{product_id, key, reason}]}` |
 | `sync_customers` | pg_cron (`x-cron-secret`) | `{}` | `{checked, updated, failed}` |
 
-- **`plans`**: `public_billing_plans()` ordered by `sort`, then amount. Never
-  returns Stripe ids. While billing is off: `{billing_enabled: false, plans: []}`.
+- **`plans`**: `public_billing_offer()` (0131) read as the caller: its
+  `plans` are `public_billing_plans()` ordered by `sort`, then amount. Never
+  returns Stripe ids. `trial_days` is the in-app trial of a person's **first**
+  shop (`billing_trial_days`; 0 = no trial) and `trial_available` whether a
+  shop the caller creates now gets it (the trial is once per person, 0120).
+  While billing is off: `{billing_enabled: false, plans: [], trial_days: 0,
+  trial_available: false}`.
   `interval` is `month` or `year`; `max_members` null = unlimited (active
   members + pending invites, owners included); `features` are keys (the web
   maps them to labels). Show the price from `amount_cents` / `currency` /
@@ -1723,7 +1821,26 @@ asserts they match) and update the webhook endpoint's API version.
 ## Secrets
 
 `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` are injected
-by Supabase. Set the rest (never commit them):
+by Supabase. Never commit the rest.
+
+**With `scripts/deploy` (the Deploy backend workflow, docs/DEPLOY.md) the
+deploy inputs are the source of truth**: every run sets the function secrets
+from its inputs (GitHub secrets and variables, or the exported environment
+of a local run) and **removes** each optional secret the inputs leave unset
+(`OPTIONAL_SECRET_NAMES` in `scripts/deploy/lib/config.mjs`, `planSecrets`):
+`PLATFORM_FEE_BPS`, `BILLING_AUTOMATIC_TAX`, `SMS_PROVISIONING_ENABLED`,
+`TWILIO_ISV_ENABLED`, `TWILIO_PRIMARY_CUSTOMER_PROFILE_SID`,
+`CORS_ALLOWED_ORIGINS`, `FUNCTIONS_PUBLIC_URL` and the four `APNS_*`. So an
+optional secret set by hand with `supabase secrets set` is gone after the
+next deploy: set it as a deploy input instead (docs/DEPLOY.md section 2).
+The webhook signing secrets (`STRIPE_WEBHOOK_SECRET`,
+`STRIPE_BILLING_WEBHOOK_SECRET`) are the exception: once stored in the
+project (created by `--stripe-webhooks`, or set once), a deploy that does not
+have them as inputs keeps the stored value, so they need not stay in GitHub;
+delete an old copy there after the deploy recreated an endpoint, or the next
+deploy sends the stale value back (Stripe deliveries then fail with 400).
+
+Without the deploy scripts (a project you manage by hand), set them yourself:
 
 ```sh
 supabase secrets set --project-ref <ref> \

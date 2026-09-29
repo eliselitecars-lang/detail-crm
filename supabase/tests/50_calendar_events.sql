@@ -313,8 +313,9 @@ select tests.eq((select title from public.calendar_events(tests.fx('shop_a'), '2
                 null, 'hidden from the tech');
 
 -- the owner deletes the customer (erasure request); the events stay, unlinked
-select tests.authenticate_as(tests.fx('u_owner_a'));
-select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_priv')$$), 1::bigint, 'the customer is deleted');
+select tests.as_service();   -- 0125: the payments edge's erase_customer
+select tests.eq(public.erase_customer(tests.fx('shop_a'), tests.fx('cust_priv'), tests.fx('u_owner_a')) ->> 'mode', 'deleted',
+                'the customer is deleted');
 select tests.as_superuser();
 select tests.ok((select bool_and(customer_id is null and names_customer) from public.blocked_times
                   where id in (tests.fx('bt_priv'), tests.fx('bt_priv_member'), tests.fx('bt_priv_forced'))),

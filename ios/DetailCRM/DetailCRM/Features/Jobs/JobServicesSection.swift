@@ -139,8 +139,11 @@ struct JobMoneySection: View {
     let currencyCode: String
     let retry: () async -> Void
     let onCreateInvoice: () async -> Void
-    /// Managers see the automatic deposit reminders (P-3).
+    /// Managers see the automatic deposit reminders (P-3) and can send or
+    /// copy the booking link where the customer pays a deposit that is due.
     var showsDepositFollowups: Bool = false
+    /// The job's customer (who the booking link goes to).
+    var customer: JobCustomer? = nil
 
     var body: some View {
         JobSectionCard("Payment") {
@@ -152,6 +155,12 @@ struct JobMoneySection: View {
                         currencyCode: currencyCode,
                         onCreateInvoice: onCreateInvoice
                     )
+                    // The booking page stops taking a deposit once the job
+                    // is completed, cancelled or a no-show.
+                    if showsDepositFollowups && summary.depositDueCents > 0 && !job.status.isClosed {
+                        JobDivider()
+                        JobsDepositRequestRow(jobID: job.id, customer: customer)
+                    }
                     if showsDepositFollowups && summary.depositDueCents > 0 {
                         JobDivider()
                         JobsDepositFollowupRow(jobID: job.id)

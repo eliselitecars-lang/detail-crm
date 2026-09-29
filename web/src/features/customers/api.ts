@@ -3,14 +3,25 @@
  * sees: owners/admins/managers get every customer; technicians only those on
  * jobs assigned to them (customers_select_assigned).
  */
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { z } from 'zod';
 import { pageRange, type SortState } from '@/components/ui';
 import { unwrap, unwrapRequired } from '@/lib/db';
 import { AppError, edgeFunctionError, toAppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
-import { normalizeTags, type CustomerLifecycle, type CustomerRow } from './model';
+import {
+  HISTORY_PAGE_SIZE,
+  normalizeTags,
+  type CustomerLifecycle,
+  type CustomerRow,
+} from './model';
 import type { CustomerWrite, VehicleWrite } from './schemas';
 import { searchPatterns, searchTerms } from './search';
 
@@ -395,94 +406,181 @@ export function useCustomerSummary(shopId: string, customerId: string, enabled =
 
 // ---------------------------------------------------------------- history tabs
 
-const HISTORY_LIMIT = 100;
+/**
+ * History tabs read newest first, a page at a time, with the exact count the
+ * server reports (like the iPhone's DetailCore HistoryList): a fleet or
+ * dealership customer can have more rows than one page, so the tab says how
+ * many exist and offers the older ones ("Load more"; HISTORY_PAGE_SIZE rows
+ * per page).
+ *
+ * One page: its rows and the server's exact count of every matching row.
+ */
+export interface HistoryPage<T> {
+  rows: T[];
+  total: number | null;
+}
+
+/** Every page read so far, flattened (an id listed twice is kept once). */
+export interface HistoryList<T> {
+  rows: T[];
+  /** Every matching row (never less than `rows.length`). */
+  total: number;
+}
+
+type PageResult<T> = {
+  data: T[] | null;
+  error: { code?: string; message: string } | null;
+  count: number | null;
+};
+
+/** Reads rows [offset, offset + HISTORY_PAGE_SIZE) with the exact count. */
+async function readHistoryPage<T>(
+  run: (from: number, to: number) => PromiseLike<PageResult<T>>,
+  offset: number,
+): Promise<HistoryPage<T>> {
+  const result = await run(offset, offset + HISTORY_PAGE_SIZE - 1);
+  // Past the end (rows removed since the count): the list ends here.
+  if (result.error?.code === RANGE_NOT_SATISFIABLE) return { rows: [], total: null };
+  if (result.error) throw toAppError(result.error);
+  return { rows: result.data ?? [], total: result.count };
+}
+
+/** Offset of the next page, or undefined when every row is loaded. */
+export function nextHistoryOffset<T>(
+  last: HistoryPage<T>,
+  pages: HistoryPage<T>[],
+): number | undefined {
+  // An empty page ends the list even when the earlier count said more, so
+  // Load more can't ask for the same page forever.
+  if (last.rows.length === 0) return undefined;
+  const loaded = pages.reduce((n, p) => n + p.rows.length, 0);
+  if (last.total !== null) return loaded < last.total ? loaded : undefined;
+  return last.rows.length >= HISTORY_PAGE_SIZE ? loaded : undefined;
+}
+
+/** Flattens the pages; a row added meanwhile shifts offsets, so ids dedupe. */
+export function flattenHistory<T extends { id: string }>(pages: HistoryPage<T>[]): HistoryList<T> {
+  const seen = new Set<string>();
+  const rows: T[] = [];
+  for (const page of pages) {
+    for (const row of page.rows) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      rows.push(row);
+    }
+  }
+  const last = pages.at(-1);
+  if (!last || last.rows.length === 0) return { rows, total: rows.length };
+  const total =
+    last.total ?? (last.rows.length >= HISTORY_PAGE_SIZE ? rows.length + 1 : rows.length);
+  return { rows, total: Math.max(total, rows.length) };
+}
+
+function useHistoryQuery<T extends { id: string }>(
+  queryKey: readonly unknown[],
+  enabled: boolean,
+  readPage: (offset: number) => Promise<HistoryPage<T>>,
+) {
+  return useInfiniteQuery({
+    queryKey,
+    enabled,
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => readPage(pageParam),
+    getNextPageParam: nextHistoryOffset,
+    select: (data) => flattenHistory(data.pages),
+  });
+}
 
 export function useCustomerJobs(shopId: string, customerId: string) {
-  return useQuery({
-    queryKey: historyKeys.jobs(shopId, customerId),
-    queryFn: async () =>
-      unwrap(
-        await supabase
+  return useHistoryQuery(historyKeys.jobs(shopId, customerId), true, (offset) =>
+    readHistoryPage(
+      (from, to) =>
+        supabase
           .from('jobs')
           .select(
             'id, number, status, scheduled_start, scheduled_end, vehicle_id, total_cents, created_at',
+            { count: 'exact' },
           )
           .eq('shop_id', shopId)
           .eq('customer_id', customerId)
           .order('scheduled_start', { ascending: false, nullsFirst: true })
           .order('number', { ascending: false })
-          .limit(HISTORY_LIMIT),
-      ) ?? [],
-  });
+          .range(from, to),
+      offset,
+    ),
+  );
 }
 
 export function useCustomerQuotes(shopId: string, customerId: string, enabled: boolean) {
-  return useQuery({
-    queryKey: historyKeys.quotes(shopId, customerId),
-    enabled,
-    queryFn: async () =>
-      unwrap(
-        await supabase
+  return useHistoryQuery(historyKeys.quotes(shopId, customerId), enabled, (offset) =>
+    readHistoryPage(
+      (from, to) =>
+        supabase
           .from('quotes')
-          .select('id, number, status, created_at, sent_at, valid_until, total_cents, vehicle_id')
+          .select('id, number, status, created_at, sent_at, valid_until, total_cents, vehicle_id', {
+            count: 'exact',
+          })
           .eq('shop_id', shopId)
           .eq('customer_id', customerId)
           .order('number', { ascending: false })
-          .limit(HISTORY_LIMIT),
-      ) ?? [],
-  });
+          .range(from, to),
+      offset,
+    ),
+  );
 }
 
 export function useCustomerInvoices(shopId: string, customerId: string, enabled: boolean) {
-  return useQuery({
-    queryKey: historyKeys.invoices(shopId, customerId),
-    enabled,
-    queryFn: async () =>
-      unwrap(
-        await supabase
+  return useHistoryQuery(historyKeys.invoices(shopId, customerId), enabled, (offset) =>
+    readHistoryPage(
+      (from, to) =>
+        supabase
           .from('invoices')
           .select(
             'id, number, status, issued_at, due_at, created_at, total_cents, balance_cents, job_id',
+            { count: 'exact' },
           )
           .eq('shop_id', shopId)
           .eq('customer_id', customerId)
           .order('number', { ascending: false })
-          .limit(HISTORY_LIMIT),
-      ) ?? [],
-  });
+          .range(from, to),
+      offset,
+    ),
+  );
 }
 
 export function useCustomerMemberships(shopId: string, customerId: string, enabled: boolean) {
-  return useQuery({
-    queryKey: historyKeys.memberships(shopId, customerId),
-    enabled,
-    queryFn: async () => {
-      const memberships =
-        unwrap(
-          await supabase
-            .from('memberships')
-            .select(
-              'id, plan_id, vehicle_id, status, current_period_end, cancel_at_period_end, started_at, created_at',
-            )
-            .eq('shop_id', shopId)
-            .eq('customer_id', customerId)
-            .order('created_at', { ascending: false })
-            .limit(HISTORY_LIMIT),
-        ) ?? [];
-      const planIds = [...new Set(memberships.map((m) => m.plan_id))];
-      const plans =
-        planIds.length === 0
-          ? []
-          : (unwrap(
-              await supabase
-                .from('membership_plans')
-                .select('id, name, price_cents, interval, interval_count')
-                .eq('shop_id', shopId)
-                .in('id', planIds),
-            ) ?? []);
-      const byId = new Map(plans.map((p) => [p.id, p]));
-      return memberships.map((m) => ({ ...m, plan: byId.get(m.plan_id) ?? null }));
-    },
+  return useHistoryQuery(historyKeys.memberships(shopId, customerId), enabled, async (offset) => {
+    const page = await readHistoryPage(
+      (from, to) =>
+        supabase
+          .from('memberships')
+          .select(
+            'id, plan_id, vehicle_id, status, current_period_end, cancel_at_period_end, started_at, created_at',
+            { count: 'exact' },
+          )
+          .eq('shop_id', shopId)
+          .eq('customer_id', customerId)
+          .order('created_at', { ascending: false })
+          .order('id')
+          .range(from, to),
+      offset,
+    );
+    const planIds = [...new Set(page.rows.map((m) => m.plan_id))];
+    const plans =
+      planIds.length === 0
+        ? []
+        : (unwrap(
+            await supabase
+              .from('membership_plans')
+              .select('id, name, price_cents, interval, interval_count')
+              .eq('shop_id', shopId)
+              .in('id', planIds),
+          ) ?? []);
+    const byId = new Map(plans.map((p) => [p.id, p]));
+    return {
+      rows: page.rows.map((m) => ({ ...m, plan: byId.get(m.plan_id) ?? null })),
+      total: page.total,
+    };
   });
 }
 

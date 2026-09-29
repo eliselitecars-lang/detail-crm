@@ -19,17 +19,17 @@ function oneClick(token: string): Request {
   });
 }
 
-Deno.test("unsubscribe: RFC 8058 one-click POST records the email opt-out", async () => {
+Deno.test("unsubscribe: RFC 8058 one-click POST records the marketing opt-out", async () => {
   const msg = campaignEmail();
-  const { db, handler } = setup({ messages: [msg] });
+  const { db, handler, unsubscribeSources } = setup({ messages: [msg] });
   const res = await handler(oneClick(String(msg.unsubscribe_token)));
   assertEquals(res.status, 200);
   assertEquals(await responseJson(res), { unsubscribed: true });
+  // 0126: marketing only (no email_opted_out_at stamp: invoices and
+  // reminders keep going), recorded as the one-click source
   const customer = db.table("customers").find((c) => c.id === CUSTOMER);
-  assertEquals([customer?.email_opted_out_at, customer?.email_opt_in], [
-    "2026-09-27T15:00:00.000Z",
-    false,
-  ]);
+  assertEquals([customer?.email_opted_out_at, customer?.email_opt_in], [null, false]);
+  assertEquals(unsubscribeSources, ["list_unsubscribe"]);
   assertEquals(db.requests.find((r) => r.target === "public_unsubscribe")?.role, "service_role");
   // Idempotent: a repeated POST (provider retry) succeeds again.
   const again = await handler(oneClick(String(msg.unsubscribe_token)));
@@ -49,7 +49,7 @@ Deno.test("unsubscribe: GET never unsubscribes; it redirects to the confirmation
   assertEquals(res.headers.get("location"), `https://app.example.com/u/${msg.unsubscribe_token}`);
   await res.body?.cancel();
   assertEquals(db.requests.some((r) => r.target === "public_unsubscribe"), false);
-  assertEquals(db.table("customers").find((c) => c.id === CUSTOMER)?.email_opted_out_at, null);
+  assertEquals(db.table("customers").find((c) => c.id === CUSTOMER)?.email_opt_in, true);
 });
 
 Deno.test("unsubscribe: a message id is not an unsubscribe token (transactional mail has none)", async () => {
@@ -68,7 +68,7 @@ Deno.test("unsubscribe: a message id is not an unsubscribe token (transactional 
     const res = await handler(oneClick(id));
     assertEquals([res.status, (await responseJson<ErrorBody>(res)).code], [404, "not_found"]);
   }
-  assertEquals(db.table("customers").find((c) => c.id === CUSTOMER)?.email_opted_out_at, null);
+  assertEquals(db.table("customers").find((c) => c.id === CUSTOMER)?.email_opt_in, true);
 });
 
 Deno.test("unsubscribe: malformed and unknown tokens", async () => {

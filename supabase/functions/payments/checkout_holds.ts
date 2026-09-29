@@ -23,7 +23,11 @@
  * or before using a gift card on /i) closes only the invoice's own /i pay
  * links and releases their invoice holds and the job hold such a link took
  * (releaseInvoicePayLinks): never a deposit link, a staff PaymentSheet or a
- * Terminal payment.
+ * Terminal payment. Its counterpart deposit_checkout_cancel (back from
+ * Stripe with ?canceled=1 on /booking or /q, or from /i when a gift card is
+ * refused because a deposit page is open) closes only the jobs' open deposit
+ * links and releases their job holds (releaseDepositLinks): never an invoice
+ * pay link or its holds, a staff PaymentSheet or a Terminal payment.
  */
 import { errors, type HttpError } from "../_shared/errors.ts";
 import { idempotencyKey, onAccount } from "../_shared/stripe.ts";
@@ -556,4 +560,200 @@ export async function releaseInvoicePayLinks(
   }
   if (paying) throw payLinkPaying();
   return closed.length;
+}
+
+/** The jobs whose deposit links a customer's deposit_checkout_cancel closes. */
+export interface DepositLinkJobs {
+  shopId: string;
+  /** The customer whose Stripe customer's open sessions are listed. */
+  customerId: string;
+  jobIds: ReadonlyArray<string>;
+}
+
+/**
+ * The live job holds of these jobs that only a deposit link can have taken:
+ * an /i pay link's job hold always comes with an invoice hold for the same
+ * session (invoice_checkout holds the invoice first), so a session with an
+ * invoice hold is an invoice pay link and is left out.
+ */
+async function depositHolds(
+  s: Services,
+  shopId: string,
+  jobIds: ReadonlyArray<string>,
+): Promise<string[]> {
+  const held = await liveHolds(s, shopId, jobIds, null);
+  if (held.length === 0) return [];
+  const { data, error } = await s.admin
+    .from("invoice_checkout_holds")
+    .select("stripe_checkout_session_id")
+    .eq("shop_id", shopId)
+    .in("stripe_checkout_session_id", held);
+  if (error) throw dbFailure("invoice_checkout_holds lookup", error);
+  const payLinks = new Set(
+    ((data ?? []) as Array<{ stripe_checkout_session_id: string }>).map((row) =>
+      row.stripe_checkout_session_id
+    ),
+  );
+  return held.filter((id) => !payLinks.has(id));
+}
+
+/**
+ * A held session that was not among the customer's open deposit links: read
+ * it first and close it only when it is one of these jobs' deposit links.
+ * "closed" when Stripe no longer knows it on this account (its hold is
+ * stale); "other" when it is not a deposit link of these jobs (left alone).
+ */
+async function heldDepositLink(
+  s: Services,
+  account: AccountRow,
+  sessionId: string,
+  match: SessionMatch,
+): Promise<"closed" | "paying" | "other"> {
+  let current;
+  try {
+    current = await s.stripe.checkout.sessions.retrieve(
+      sessionId,
+      {},
+      onAccount(account.stripe_account_id),
+    );
+  } catch (err) {
+    if (isInvalidRequest(err)) return "closed";
+    throw err;
+  }
+  if (!match(current)) return "other";
+  if (current.status === "expired") return "closed";
+  if (current.status === "complete") return "paying";
+  return await closePayLink(s, account, sessionId);
+}
+
+/**
+ * The customer's deposit_checkout_cancel (back from Stripe with ?canceled=1
+ * on /booking or /q, or before a gift card on /i): closes the jobs' open
+ * deposit links (the Checkout Sessions booking_deposit_checkout and
+ * quote_deposit_checkout opened: sessionFor.deposits) and releases their job
+ * holds, so the booking is not held for the ~30-40 minutes Stripe keeps the
+ * page alive (the customer's online cancel, and cash or a gift card on the
+ * job's invoice, wait for a live deposit page). The links are
+ *  - the customer's open sessions matching sessionFor.deposits, and
+ *  - every live job hold of the jobs that has no invoice hold (the deposit
+ *    links' holds; also a link opened for the job's previous customer),
+ *    read from Stripe first and closed only when it is such a deposit link.
+ * Invoice pay links (and their invoice and job holds), card-setup and
+ * membership links, staff PaymentSheets and Terminal payments are left
+ * alone, and nothing is settled or charged. Nothing open: nothing changes.
+ * A link that was just paid, or whose payment is going through, keeps its
+ * hold and the call ends in 409 payment_in_progress once every other link is
+ * closed. Returns how many links were closed and released.
+ */
+export async function releaseDepositLinks(
+  s: Services,
+  account: AccountRow,
+  pages: DepositLinkJobs,
+): Promise<number> {
+  const { shopId, jobIds } = pages;
+  if (jobIds.length === 0) return 0;
+  const match = sessionFor.deposits(shopId, jobIds);
+  const listed = new Set<string>();
+  const customer = await loadCustomer(s.admin, shopId, pages.customerId);
+  if (customer.stripe_customer_id) {
+    for (
+      const session of await customerSessions(s, account, customer.stripe_customer_id, "open")
+    ) {
+      if (session.status === "open" && match(session)) listed.add(session.id);
+    }
+  }
+
+  const closed: string[] = [];
+  let paying = false;
+  for (const sessionId of listed) {
+    if (await closePayLink(s, account, sessionId) === "closed") closed.push(sessionId);
+    else paying = true;
+  }
+  for (const sessionId of await depositHolds(s, shopId, jobIds)) {
+    if (listed.has(sessionId)) continue;
+    const outcome = await heldDepositLink(s, account, sessionId, match);
+    if (outcome === "closed") closed.push(sessionId);
+    else if (outcome === "paying") paying = true;
+  }
+  if (closed.length > 0) {
+    // The closed links' job holds (they have no invoice hold), then the
+    // database's own release for each job (idempotent), by session only.
+    await releaseCheckoutHolds(s, shopId, closed);
+    for (const jobId of jobIds) {
+      const { error } = await s.admin.rpc("payments_release_job_checkouts", {
+        p_shop_id: shopId,
+        p_job_id: jobId,
+        p_session_ids: closed,
+      });
+      if (error) throw dbFailure("payments_release_job_checkouts", error);
+    }
+  }
+  if (paying) throw payLinkPaying();
+  return closed.length;
+}
+
+/** What a customer's erasure closes: their Stripe customers' pages and their documents' holds. */
+export interface CustomerPages {
+  shopId: string;
+  /** The Stripe customers of the customer and of every duplicate merged into them. */
+  stripeCustomers: ReadonlyArray<string>;
+  /** Their jobs and invoices (holds of pages opened for an earlier customer too). */
+  jobIds: ReadonlyArray<string>;
+  invoiceIds: ReadonlyArray<string>;
+}
+
+/**
+ * Before a customer is erased (erase_customer, 0125): every Checkout Session
+ * the CRM opened on the shop's account for the customer is expired — the
+ * Stripe customers' open sessions of this shop (pay and deposit links,
+ * card-setup and membership join links) and every live job / invoice hold of
+ * their jobs and invoices (a page opened for a previous customer) — and the
+ * holds are released, so the database's checkout_open refusal is cleared.
+ * 409 payment_in_progress when one was just paid (the others are closed
+ * first; the paid one keeps its hold until its payment row lands). Returns
+ * how many sessions this call expired.
+ */
+export async function releaseCustomerPages(
+  s: Services,
+  account: AccountRow,
+  pages: CustomerPages,
+): Promise<number> {
+  const { shopId } = pages;
+  const ours: SessionMatch = (session) => session.metadata?.shop_id === shopId;
+  const expired: string[] = [];
+  for (const stripeCustomer of new Set(pages.stripeCustomers)) {
+    expired.push(
+      ...await expireOpenSessions(s, account, stripeCustomer, ours, undefined, {
+        refuseCompleted: true,
+      }),
+    );
+  }
+  const held = new Set<string>(await liveHolds(s, shopId, pages.jobIds, null));
+  if (pages.invoiceIds.length > 0) {
+    const { data, error } = await s.admin
+      .from("invoice_checkout_holds")
+      .select("stripe_checkout_session_id")
+      .eq("shop_id", shopId)
+      .in("invoice_id", [...pages.invoiceIds])
+      .gt("expires_at", new Date(s.now).toISOString());
+    if (error) throw dbFailure("invoice_checkout_holds lookup", error);
+    for (const row of (data ?? []) as Array<{ stripe_checkout_session_id: string }>) {
+      held.add(row.stripe_checkout_session_id);
+    }
+  }
+  const released: string[] = [];
+  let paid = false;
+  for (const sessionId of held) {
+    if (expired.includes(sessionId)) continue;
+    const outcome = await closeSession(s, account, sessionId);
+    if (outcome === "complete") {
+      paid = true; // keeps its hold: its payment row releases it
+      continue;
+    }
+    if (outcome === "expired") expired.push(sessionId);
+    released.push(sessionId);
+  }
+  await releaseCheckoutHolds(s, shopId, released);
+  if (paid) throw paymentInProgress();
+  return expired.length;
 }

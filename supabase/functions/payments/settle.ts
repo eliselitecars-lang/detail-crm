@@ -24,7 +24,8 @@
  * ones), the public invoice / deposit checkouts (a pay link supersedes an
  * open sheet; money already processing blocks it), the cancel_open_payments
  * action (sheet dismissed, before void / edits, before a job is cancelled or
- * changes customer), delete_shop (every open attempt of the shop) and the
+ * changes customer), delete_shop (every open attempt of the shop),
+ * erase_customer (every open attempt of the customer) and the
  * sweep_payment_sheets cron action (sheets abandoned without either).
  */
 import { onAccount, type Stripe } from "../_shared/stripe.ts";
@@ -95,13 +96,14 @@ const UNCONFIRMED = new Set([
 async function openRows(
   s: Services,
   shopId: string,
-  scope: { column: "invoice_id" | "job_id"; id: string } | null,
+  scope: { column: "invoice_id" | "job_id"; id: string } | { customerIds: string[] } | null,
 ): Promise<PendingCardRow[]> {
   let query = s.admin
     .from("payments")
     .select(PENDING_COLUMNS)
     .eq("shop_id", shopId);
-  if (scope) query = query.eq(scope.column, scope.id);
+  if (scope && "customerIds" in scope) query = query.in("customer_id", scope.customerIds);
+  else if (scope) query = query.eq(scope.column, scope.id);
   const { data, error } = await query
     .in("status", ["pending", "failed"])
     .in("method", ["card", "card_present"])
@@ -131,6 +133,16 @@ export function pendingJobRows(
   jobId: string,
 ): Promise<PendingCardRow[]> {
   return openRows(s, shopId, { column: "job_id", id: jobId });
+}
+
+/** Unsettled card rows of these customers (a customer's erasure, 0125). */
+export async function pendingCustomerRows(
+  s: Services,
+  shopId: string,
+  customerIds: ReadonlyArray<string>,
+): Promise<PendingCardRow[]> {
+  if (customerIds.length === 0) return [];
+  return await openRows(s, shopId, { customerIds: [...customerIds] });
 }
 
 /** Every unsettled card row of a shop (shop deletion). */
@@ -367,6 +379,16 @@ export async function settleJob(
   jobId: string,
 ): Promise<SettleSummary> {
   return await settleRows(s, account, await pendingJobRows(s, shopId, jobId), {});
+}
+
+/** Settles every unsettled card row of these customers (before they are erased). */
+export async function settleCustomers(
+  s: Services,
+  account: AccountRow,
+  shopId: string,
+  customerIds: ReadonlyArray<string>,
+): Promise<SettleSummary> {
+  return await settleRows(s, account, await pendingCustomerRows(s, shopId, customerIds), {});
 }
 
 /** Settles every unsettled card row of a shop (before the shop is deleted). */

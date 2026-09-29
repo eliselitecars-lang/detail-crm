@@ -68,7 +68,9 @@ enum Theme {
     /// Primary buttons, selected chips, sent message bubbles, today's date.
     /// White: 4.63:1 light, 5.05:1 dark.
     static let glacierSolid = Color(light: 0x1F6FEB, dark: 0x2B6AD8)
-    /// Destructive buttons and damage markers. White: 5.47:1 / 5.23:1.
+    /// Destructive buttons, damage markers and any filled label in the
+    /// danger tone (white on the plain `danger` fill is only 4.44:1 in
+    /// light mode). White: 5.47:1 / 5.23:1.
     static let dangerSolid = Color(light: 0xC53030, dark: 0xC43A3A)
     /// Completed-step markers. White: 5.38:1 / 5.02:1.
     static let successSolid = Color(light: 0x167A45, dark: 0x1A7F4B)
@@ -99,9 +101,15 @@ enum Theme {
 
     // MARK: - Text
 
+    // Each text token meets WCAG AA 4.5:1 on background, surface,
+    // surfaceElevated and surfaceMuted in both modes; tertiary is the
+    // quietest that still does (light 4.65:1 at worst, on surfaceMuted;
+    // dark 4.70:1, on surfaceMuted). `scripts/swift_sanity.py` computes
+    // these ratios from the values below and fails when one drops under.
+
     static let textPrimary = Color(light: 0x0B1220, dark: 0xEEF2F8)
     static let textSecondary = Color(light: 0x52607A, dark: 0x9AA6BD)
-    static let textTertiary = Color(light: 0x8491A7, dark: 0x6B7892)
+    static let textTertiary = Color(light: 0x616D82, dark: 0x8290A8)
 
     // MARK: - Status tones
 

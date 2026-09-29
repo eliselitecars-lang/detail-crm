@@ -254,6 +254,51 @@ describe('QuotePage — self-scheduling', () => {
   });
 });
 
+describe('QuotePage — back from the deposit page', () => {
+  const JOB_TOKEN = 'jjjjjjjj-jjjj-4jjj-8jjj-jjjjjjjjjjjj';
+  const scheduled = (jobToken: string | null) => ({
+    ...quoteFixture({ status: 'converted', can_respond: false }),
+    self_schedule: {
+      available: false,
+      converted: true,
+      job_token: jobToken,
+      deposit_due_cents: 10000,
+      payment_pending: false,
+    },
+  });
+
+  it('closes the abandoned deposit page once on ?canceled=1, by the job’s booking token', async () => {
+    const calls = mockRpc({ public_get_quote: { data: scheduled(JOB_TOKEN) } });
+    supabase.functions.invoke.mockResolvedValue({ data: { released: 1 }, error: null });
+    renderQuote(`/q/${DOC_TOKEN}?canceled=1`);
+    expect(await screen.findByText('You’re booked')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+        body: { action: 'deposit_checkout_cancel', token: JOB_TOKEN },
+      }),
+    );
+    await waitFor(() =>
+      expect(calls.filter((c) => c.fn === 'public_get_quote').length).toBeGreaterThan(1),
+    );
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Pay $100.00 deposit' })).toBeInTheDocument();
+  });
+
+  it('closes nothing without a scheduled job, on ?paid=1, or on a plain visit', async () => {
+    mockRpc({ public_get_quote: { data: scheduled(null) } });
+    const first = renderQuote(`/q/${DOC_TOKEN}?canceled=1`);
+    expect(await screen.findByRole('heading', { level: 1 })).toBeInTheDocument();
+    first.unmount();
+    mockRpc({ public_get_quote: { data: scheduled(JOB_TOKEN) } });
+    const second = renderQuote(`/q/${DOC_TOKEN}?paid=1&canceled=1`);
+    expect(await screen.findByText('You’re booked')).toBeInTheDocument();
+    second.unmount();
+    renderQuote();
+    expect(await screen.findByText('You’re booked')).toBeInTheDocument();
+    expect(supabase.functions.invoke).not.toHaveBeenCalled();
+  });
+});
+
 describe('QuoteScheduledPanel — back from Stripe', () => {
   const scheduledDoc = (paymentPending: boolean) =>
     quoteDocumentSchema.parse({
@@ -443,9 +488,67 @@ describe('InvoicePage — parity', () => {
     expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(2);
   });
 
-  it('explains a deposit page it cannot close instead of offering to close it again', async () => {
+  it('then offers to close the booking’s deposit page, which invoice_checkout_cancel leaves alone', async () => {
     // A deposit page from the booking link holds the job: invoice_checkout_cancel
-    // leaves it alone (200 {released: 0}), so the redemption stays refused.
+    // leaves it alone (200 {released: 0}), so the redemption stays refused
+    // until deposit_checkout_cancel closes it.
+    let depositOpen = true;
+    const calls = mockRpc({
+      public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },
+      public_redeem_gift_card: () =>
+        depositOpen
+          ? {
+              data: null,
+              error: {
+                code: '55000',
+                message:
+                  'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+                details: null,
+                hint: 'checkout_open',
+              },
+            }
+          : {
+              data: {
+                ...invoiceFixture({ balance_cents: 15000, amount_paid_cents: 15000 }),
+                gift_card_result: {
+                  redeemed: true,
+                  message: null,
+                  amount_cents: 5000,
+                  remaining_cents: 0,
+                  last4: 'Q7ZK',
+                },
+              },
+            },
+    });
+    supabase.functions.invoke.mockImplementation((_fn: string, options: unknown) => {
+      const body = (options as { body: { action: string } }).body;
+      if (body.action === 'deposit_checkout_cancel') depositOpen = false;
+      return Promise.resolve({ data: { released: depositOpen ? 0 : 1 }, error: null });
+    });
+    const { user } = renderInvoice();
+    await user.type(await screen.findByLabelText(/Gift card code/), 'ABCD-EFGH');
+    await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
+    await user.click(await screen.findByRole('button', { name: 'Close it and use the gift card' }));
+
+    expect(
+      await screen.findByText(
+        'A card page for this booking’s deposit is still open (until 3:40 PM). It was opened from the booking link: finish paying the deposit there, or close it to use your gift card now.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText('The booking’s deposit page is still open')).toBeInTheDocument();
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(1);
+    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(2);
+
+    await user.click(screen.getByRole('button', { name: 'Close it and use the gift card' }));
+    expect(await screen.findByText('Gift card applied')).toBeInTheDocument();
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(2);
+    expect(supabase.functions.invoke).toHaveBeenLastCalledWith('payments', {
+      body: { action: 'deposit_checkout_cancel', invoice_token: DOC_TOKEN },
+    });
+    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(3);
+  });
+
+  it('explains a page it cannot close instead of offering to close it again', async () => {
     const calls = mockRpc({
       public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },
       public_redeem_gift_card: {
@@ -464,25 +567,67 @@ describe('InvoicePage — parity', () => {
     await user.type(await screen.findByLabelText(/Gift card code/), 'ABCD-EFGH');
     await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
     await user.click(await screen.findByRole('button', { name: 'Close it and use the gift card' }));
+    await screen.findByText('The booking’s deposit page is still open');
+    await user.click(screen.getByRole('button', { name: 'Close it and use the gift card' }));
 
     expect(
       await screen.findByText(
-        'A card page for this booking’s deposit is still open (until 3:40 PM). It was opened from the booking link and can’t be closed from here: finish paying the deposit there, or use your gift card after that page expires.',
+        'A card payment page for this invoice is still open (until 3:40 PM) and can’t be closed from here. Finish paying there, or use your gift card after that page expires.',
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText('The booking’s deposit page is still open')).toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: 'Close it and use the gift card' }),
     ).not.toBeInTheDocument();
-    expect(supabase.functions.invoke).toHaveBeenCalledTimes(1);
-    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(2);
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(2);
+    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(3);
 
     // Trying the code again by hand later starts over (the page may have expired).
     await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
     expect(
       await screen.findByRole('button', { name: 'Close it and use the gift card' }),
     ).toBeInTheDocument();
-    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(3);
+    expect(screen.getByText('A card payment page is still open')).toBeInTheDocument();
+    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(4);
+  });
+
+  it('says why the deposit page could not be closed (e.g. it was just paid)', async () => {
+    mockRpc({
+      public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },
+      public_redeem_gift_card: {
+        data: null,
+        error: {
+          code: '55000',
+          message: 'a card payment page for this invoice is still open (until 3:40 PM)',
+          details: null,
+          hint: 'checkout_open',
+        },
+      },
+    });
+    supabase.functions.invoke.mockImplementation((_fn: string, options: unknown) => {
+      const body = (options as { body: { action: string } }).body;
+      return Promise.resolve(
+        body.action === 'deposit_checkout_cancel'
+          ? {
+              data: null,
+              error: edgeHttpError(409, {
+                error: 'Your card payment is already going through.',
+                reason: 'payment_in_progress',
+              }),
+            }
+          : { data: { released: 0 }, error: null },
+      );
+    });
+    const { user } = renderInvoice();
+    await user.type(await screen.findByLabelText(/Gift card code/), 'ABCD-EFGH');
+    await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
+    await user.click(await screen.findByRole('button', { name: 'Close it and use the gift card' }));
+    await screen.findByText('The booking’s deposit page is still open');
+    await user.click(screen.getByRole('button', { name: 'Close it and use the gift card' }));
+    expect(
+      await screen.findByText(
+        /Couldn’t close the deposit page: Your card payment is already going through/,
+      ),
+    ).toBeInTheDocument();
   });
 
   it('says why the card page could not be closed (e.g. it was just paid)', async () => {

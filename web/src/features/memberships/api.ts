@@ -11,6 +11,7 @@ import { pageRange } from '@/components/ui';
 import { unwrap, unwrapRequired, type InsertRow, type Row } from '@/lib/db';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
+import { searchPatterns, searchTerms } from '@/features/customers/search';
 import { useShop } from '@/features/shop/shopContext';
 import { unwrapList } from '@/features/quotes/shared/db';
 import { invokeEdge } from '@/features/quotes/shared/edge';
@@ -32,7 +33,20 @@ export const SUBSCRIBER_PAGE_SIZE = 25;
 
 export interface SubscriberFilters {
   status: MembershipStatus | 'all';
+  /** Customer name, phone or email (every word must match), like the iPhone. */
+  search: string;
   page: number;
+}
+
+/** Customers a subscriber search looks through (archived ones too, like iOS). */
+export const SUBSCRIBER_SEARCH_CUSTOMER_LIMIT = 200;
+
+/** Ids of the customers whose name, phone or email match every search word. */
+async function customerIdsMatching(shopId: string, search: string): Promise<string[]> {
+  let request = supabase.from('customers').select('id').eq('shop_id', shopId);
+  for (const pattern of searchPatterns(search)) request = request.ilike('search_text', pattern);
+  const rows = unwrapList(await request.limit(SUBSCRIBER_SEARCH_CUSTOMER_LIMIT));
+  return rows.map((r) => r.id);
 }
 
 export const membershipKeys = {
@@ -125,8 +139,10 @@ const SUBSCRIBER_COLUMNS =
 
 export function useSubscribers(filters: SubscriberFilters) {
   const { shopId } = useShop();
+  // "jane" and "jane " share one request.
+  const keyFilters = { ...filters, search: searchTerms(filters.search).join(' ') };
   return useQuery({
-    queryKey: membershipKeys.subscribers(shopId, filters),
+    queryKey: membershipKeys.subscribers(shopId, keyFilters),
     placeholderData: keepPreviousData,
     queryFn: async (): Promise<{ rows: SubscriberRow[]; total: number }> => {
       let request = supabase
@@ -134,9 +150,15 @@ export function useSubscribers(filters: SubscriberFilters) {
         .select(SUBSCRIBER_COLUMNS, { count: 'exact' })
         .eq('shop_id', shopId);
       if (filters.status !== 'all') request = request.eq('status', filters.status);
+      if (keyFilters.search) {
+        const ids = await customerIdsMatching(shopId, filters.search);
+        if (ids.length === 0) return { rows: [], total: 0 };
+        request = request.in('customer_id', ids);
+      }
       const { from, to } = pageRange(filters.page, SUBSCRIBER_PAGE_SIZE);
       const { data, error, count } = await request
         .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
         .range(from, to);
       const rows = z.array(subscriberRowSchema).parse(unwrap({ data, error }) ?? []);
       return { rows, total: count ?? rows.length };

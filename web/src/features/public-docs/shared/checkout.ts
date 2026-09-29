@@ -64,6 +64,37 @@ export async function createCheckout(request: CheckoutRequest): Promise<Checkout
   return parsed.data;
 }
 
+/**
+ * Whose deposit card pages payments `deposit_checkout_cancel` closes: a
+ * booking's (its /booking token; the /q page passes self_schedule.job_token),
+ * or every job an invoice bills (the /i token).
+ */
+export type DepositCheckoutTarget = { bookingToken: string } | { invoiceToken: string };
+
+/**
+ * payments `deposit_checkout_cancel` (PUBLIC by link token): expires the
+ * booking's open deposit card pages (the Checkout Sessions
+ * booking_deposit_checkout / quote_deposit_checkout opened) and releases
+ * their holds, so the booking is not held (online cancel, cash and gift cards
+ * on its invoice wait for an open page) for the ~30-40 minutes Stripe keeps a
+ * page alive. Invoice pay pages, staff payment sheets and terminal payments
+ * are never touched. The edge refuses (409 payment_in_progress) when one of
+ * the pages was just paid.
+ */
+export async function cancelDepositCheckout(target: DepositCheckoutTarget): Promise<void> {
+  const body =
+    'invoiceToken' in target
+      ? { action: 'deposit_checkout_cancel', invoice_token: target.invoiceToken }
+      : { action: 'deposit_checkout_cancel', token: target.bookingToken };
+  let response: Awaited<ReturnType<typeof supabase.functions.invoke<unknown>>>;
+  try {
+    response = await supabase.functions.invoke<unknown>('payments', { body });
+  } catch (error) {
+    throw await edgeFunctionError(error);
+  }
+  if (response.error) throw await edgeFunctionError(response.error);
+}
+
 /** Leaves the app for Stripe Checkout (wrapped so tests can observe it). */
 export const navigation = {
   assign(url: string) {

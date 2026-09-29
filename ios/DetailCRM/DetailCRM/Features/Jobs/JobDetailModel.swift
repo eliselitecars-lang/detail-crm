@@ -85,6 +85,12 @@ final class JobDetailModel {
     /// member).
     var report: LoadState<JobsReport?> = .idle
     var documents: LoadState<[JobsDocument]> = .idle
+    /// The job's time entries and the member's running job timer (the
+    /// Time section; technicians read only their own entries).
+    var time: LoadState<JobTimeSnapshot> = .idle
+    /// Bumped per time read so a late answer can't replace a newer one
+    /// (a Realtime change and a clock punch often land together).
+    @ObservationIgnored private var timeReadGeneration = 0
     /// The shop's job fields (archived ones too, to label stored values).
     var customFields: LoadState<[JobsCustomField]> = .idle
     /// Video uploads of this job still in progress / paused (P-30).
@@ -163,6 +169,7 @@ final class JobDetailModel {
         async let fieldsDone: Void = loadCustomFields()
         async let reportDone: Void = loadReport()
         async let overridesDone: Void = loadGateOverrides()
+        async let timeDone: Void = loadTime()
         let errors: [String?] = [
             detailError,
             await checklistError,
@@ -176,6 +183,7 @@ final class JobDetailModel {
         _ = await fieldsDone
         _ = await reportDone
         _ = await overridesDone
+        _ = await timeDone
         refreshPendingUploads()
         await loadSeries()
         return errors.compactMap { $0 }.first
@@ -498,6 +506,21 @@ final class JobDetailModel {
         guard generation == paymentReadGeneration else { return nil }
         payment.apply(result)
         return hadContent ? result.errorMessage : nil
+    }
+
+    /// The Time section: the job's entries and the member's job timer.
+    func loadTime() async {
+        guard let shopID else { return }
+        time.beginLoading()
+        timeReadGeneration += 1
+        let generation = timeReadGeneration
+        let jobID = self.jobID
+        let memberID = self.memberID
+        let result = await LoadState<JobTimeSnapshot>.result {
+            try await TimeClockService.jobTime(shopID: shopID, jobID: jobID, memberID: memberID)
+        }
+        guard generation == timeReadGeneration else { return }
+        time.apply(result)
     }
 
     @discardableResult

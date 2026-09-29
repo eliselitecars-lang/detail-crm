@@ -32,7 +32,9 @@ struct SettingsHoursView: View {
             SettingsHoursList(
                 hours: hours,
                 canEdit: canEdit,
-                weekdays: ShopSettingsHours.orderedWeekdays(firstWeekday: appState.clock.firstWeekday),
+                // Monday first, like the web's hours editor (the calendar's
+                // Sunday-first display week is for the calendar grid only).
+                weekdays: ShopSettingsHours.editorWeekdays,
                 add: { weekday in editing = SettingsHourEdit(weekday: weekday, hour: nil) },
                 edit: { hour in editing = SettingsHourEdit(weekday: hour.weekday, hour: hour) },
                 delete: { hour in confirmDelete(hour) }

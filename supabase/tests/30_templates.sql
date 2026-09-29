@@ -41,7 +41,9 @@ select tests.eq((
                             'quote_number', 'quote_total', 'valid_until', 'invoice_number', 'due_date', 'days_overdue',
                             'deposit_due', 'deposit_link', 'rebook_link', 'report_link', 'gift_card_code',
                             'gift_card_amount', 'sender_name', 'recipient_name', 'gift_message', 'credit_amount',
-                            'referee_first_name'])),
+                            'referee_first_name',
+                            -- 0128
+                            'portal_link'])),
   '{}'::text[], 'defaults only use documented placeholders');
 select tests.ok((select bool_and(char_length(body) <= 320) from public.default_message_templates() where channel = 'sms'),
                 'default texts stay short (≤ 2 segments of text)');

@@ -113,11 +113,11 @@ select tests.ok((select body like E'%complete.\n\nVehicle: 2021 Honda Civic\nSer
 select tests.as_service();
 select tests.fx_set('welcome', public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'membership_welcome', 'sms'));
 select tests.eq((select body from public.messages where id = tests.fx('welcome')),
-                'Hi Alice, welcome to your Shop A membership! We are glad to have you.',
+                E'Hi Alice, welcome to your Shop A membership! We are glad to have you.\nManage or cancel your membership any time in your account: https://app.example.test/portal?shop=shop-a',
                 'membership welcome text without a shop phone');
 select tests.fx_set('welcome_b', public.enqueue_customer_template(tests.fx('shop_b'), tests.fx('cust_b'), 'membership_welcome', 'sms'));
 select tests.eq((select body from public.messages where id = tests.fx('welcome_b')),
-                E'Hi Bob, welcome to your Shop B membership! We are glad to have you.\nQuestions? Call (312) 555-0100.',
+                E'Hi Bob, welcome to your Shop B membership! We are glad to have you.\nManage or cancel your membership any time in your account: https://app.example.test/portal?shop=shop-b\nQuestions? Call (312) 555-0100.',
                 'with a shop phone the line is there');
 -- a receipt for a payment on no job / invoice (no balance to state) still thanks the customer
 select tests.fx_set('rcpt', public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'payment_receipt', 'sms',

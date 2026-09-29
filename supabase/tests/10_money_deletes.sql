@@ -237,7 +237,7 @@ select tests.eq((select count(*) from public.payments where stripe_payment_inten
 select tests.as_service();
 select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_dead4', 'failed', 1500, 0, 'payment', 'card', p_customer_id => tests.fx('cust_f'));
 select public.upsert_stripe_payment(tests.fx('shop_a'), 'pi_keep', 'succeeded', 1500, 0, 'payment', 'card', p_customer_id => tests.fx('cust_e'));
-select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.as_service();   -- 0125: deletes go through erase_customer (service role)
 select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_f')$$), 1::bigint,
                 'a customer with only a declined attempt can be deleted');
 select tests.throws($$delete from public.customers where id = tests.fx('cust_e')$$, '23503', 'a customer who paid cannot');

@@ -1048,13 +1048,16 @@ export function deleteShopErrorMessage(error: unknown): string {
 }
 
 /**
- * Deletes the current shop through payments → delete_shop (owner only):
- * the server first cancels the shop's own platform subscription (502
- * platform_subscription_cancel_failed stops it before anything changes),
- * then every membership's Stripe subscription, settles
- * or expires open card payments and pay links (409 payment_in_progress when
- * one is still processing — nothing is deleted), then deletes the shop (every
- * tenant row cascades; its SMS number is logged for release). `confirmName`
+ * Deletes the current shop through payments → delete_shop (owner only;
+ * functions README → delete_shop): the server settles open card payments
+ * (409 payment_in_progress while one is still processing — nothing is
+ * deleted), then stops the shop's own platform subscriptions from renewing
+ * (cancel_at_period_end; 502 platform_subscription_cancel_failed stops it
+ * before anything else changes), expires open pay links, cancels every
+ * membership's Stripe subscription and deletes the shop (every tenant row
+ * cascades; its SMS number is logged for release). If any of that fails the
+ * shop stays and renewal is switched back on; after the delete the platform
+ * subscriptions are cancelled now. `confirmName`
  * must be the shop's name (422 name_mismatch otherwise). Afterwards the
  * shop's cached queries are dropped and the membership list is refetched,
  * which switches to another shop (or to onboarding when none are left).

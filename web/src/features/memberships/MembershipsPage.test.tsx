@@ -93,6 +93,45 @@ describe('MembershipsPage', () => {
     );
   });
 
+  it('searches subscribers by customer and keeps the search in the URL', async () => {
+    setTableResult('memberships', { data: [subscriber('active')], count: 1 });
+    setTableResult('customers', { data: [{ id: customerRow().id }] });
+    const { user, router } = renderRoute(<MembershipsPage />, {
+      path: '/app/memberships?status=active',
+      routePath: '/app/memberships',
+    });
+    expect((await screen.findAllByText(/Renews Oct 27, 2026/)).length).toBeGreaterThan(0);
+    expect(builders.customers).toBeUndefined();
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search memberships' }), 'jane doe');
+    await waitFor(() => expect(router.state.location.search).toBe('?status=active&q=jane+doe'));
+    await waitFor(() => expect(builders.customers?.length ?? 0).toBeGreaterThan(0));
+    const lookup = builders.customers?.at(-1);
+    expect(lookup?.eq).toHaveBeenCalledWith('shop_id', 'shop-1');
+    expect(lookup?.ilike).toHaveBeenCalledWith('search_text', '%jane%');
+    expect(lookup?.ilike).toHaveBeenCalledWith('search_text', '%doe%');
+    await waitFor(() =>
+      expect(builders.memberships?.at(-1)?.in).toHaveBeenCalledWith('customer_id', [
+        customerRow().id,
+      ]),
+    );
+    expect(builders.memberships?.at(-1)?.eq).toHaveBeenCalledWith('status', 'active');
+  });
+
+  it('says so when no customer matches the search, without reading memberships', async () => {
+    setTableResult('memberships', { data: [subscriber('active')], count: 1 });
+    setTableResult('customers', { data: [] });
+    renderRoute(<MembershipsPage />, {
+      path: '/app/memberships?q=nobody',
+      routePath: '/app/memberships',
+    });
+    expect(await screen.findByText('No memberships match')).toBeVisible();
+    expect(screen.getByText('Try another name, phone or email.')).toBeVisible();
+    expect(screen.getByRole('searchbox', { name: 'Search memberships' })).toHaveValue('nobody');
+    // The list itself is never read.
+    for (const b of builders.memberships ?? []) expect(b.range).not.toHaveBeenCalled();
+  });
+
   it('cancels an active membership at the end of the period', async () => {
     setTableResult('memberships', { data: [subscriber('active')], count: 1 });
     invoke.mockResolvedValueOnce({

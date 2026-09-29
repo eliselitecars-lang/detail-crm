@@ -22,6 +22,7 @@ import {
   checkoutOpenUntil,
   PAID_POLL_ATTEMPTS,
   useCancelInvoiceCheckout,
+  useCancelInvoiceDepositCheckout,
   useInvoiceCheckout,
   usePublicInvoice,
   useRedeemInvoiceGiftCard,
@@ -525,14 +526,29 @@ function GroupedItems({ doc }: { doc: InvoiceDocument }) {
 
 /**
  * A gift card is still refused after this page closed the invoice's own card
- * pages: what's left open is a deposit page from the booking link, which only
- * expiring (or paying) ends.
+ * pages: what's left open is a deposit page from the booking (or quote) link,
+ * which this page can close too (payments deposit_checkout_cancel for the
+ * jobs the invoice bills).
  */
 function depositPageOpenText(until: string | null): string {
   return `A card page for this booking’s deposit is still open${
     until ? ` (until ${until})` : ''
-  }. It was opened from the booking link and can’t be closed from here: finish paying the deposit there, or use your gift card after that page expires.`;
+  }. It was opened from the booking link: finish paying the deposit there, or close it to use your gift card now.`;
 }
+
+/**
+ * Still refused after both the invoice's and the deposit's card pages were
+ * closed: a page is being paid or was opened again meanwhile, so only
+ * waiting (or paying there) ends it.
+ */
+function pageStillOpenText(until: string | null): string {
+  return `A card payment page for this invoice is still open${
+    until ? ` (until ${until})` : ''
+  } and can’t be closed from here. Finish paying there, or use your gift card after that page expires.`;
+}
+
+/** Which card pages this panel already closed before retrying the gift card. */
+type ClosedPages = 'none' | 'invoice' | 'deposit';
 
 /**
  * Pay from a gift card or store credit code (public_redeem_gift_card). Stays
@@ -550,19 +566,21 @@ function GiftCardPanel({
 }) {
   const redeem = useRedeemInvoiceGiftCard(token);
   const closeCheckout = useCancelInvoiceCheckout(token);
+  const closeDeposit = useCancelInvoiceDepositCheckout(token);
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GiftCardResult | null>(null);
-  // The redemption was retried right after this page closed the invoice's
-  // own pay pages: a checkout_open refusal now comes from a page it can't
-  // close (a deposit page opened from the booking link, which
-  // invoice_checkout_cancel leaves alone), so offering "Close it" again would
-  // only repeat the same refusal.
-  const [afterClose, setAfterClose] = useState(false);
+  // The card pages closed right before this redemption: a checkout_open
+  // refusal after the invoice's own pay pages were closed comes from a
+  // deposit page opened from the booking link (which invoice_checkout_cancel
+  // leaves alone), so the next offer closes that one; after both, offering
+  // "Close it" again would only repeat the same refusal.
+  const [closed, setClosed] = useState<ClosedPages>('none');
 
-  const apply = (retryAfterClose = false) => {
+  const apply = (closedBefore: ClosedPages = 'none') => {
     closeCheckout.reset();
-    setAfterClose(retryAfterClose);
+    closeDeposit.reset();
+    setClosed(closedBefore);
     setResult(null);
     if (code.trim().length < 4) {
       setError('Enter the code from your gift card.');
@@ -622,9 +640,34 @@ function GiftCardPanel({
             onChange={(event) => setCode(event.target.value)}
           />
         </FormField>
-        {redeem.isError && isCheckoutOpenError(redeem.error) && afterClose ? (
-          <Banner tone="warning" title="The booking’s deposit page is still open">
+        {redeem.isError && isCheckoutOpenError(redeem.error) && closed === 'deposit' ? (
+          <Banner tone="warning" title="A card payment page is still open">
+            {pageStillOpenText(checkoutOpenUntil(redeem.error))}
+          </Banner>
+        ) : redeem.isError && isCheckoutOpenError(redeem.error) && closed === 'invoice' ? (
+          <Banner
+            tone="warning"
+            title="The booking’s deposit page is still open"
+            action={
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={closeDeposit.isPending}
+                onClick={() =>
+                  // Close the deposit page, then use the gift card as asked.
+                  closeDeposit.mutate(undefined, { onSuccess: () => apply('deposit') })
+                }
+              >
+                Close it and use the gift card
+              </Button>
+            }
+          >
             {depositPageOpenText(checkoutOpenUntil(redeem.error))}
+            {closeDeposit.isError && (
+              <span className="mt-1 block">
+                Couldn’t close the deposit page: {errorMessage(closeDeposit.error)}
+              </span>
+            )}
           </Banner>
         ) : redeem.isError && isCheckoutOpenError(redeem.error) ? (
           <Banner
@@ -637,7 +680,7 @@ function GiftCardPanel({
                 loading={closeCheckout.isPending}
                 onClick={() =>
                   // Close the card page, then use the gift card as asked.
-                  closeCheckout.mutate(undefined, { onSuccess: () => apply(true) })
+                  closeCheckout.mutate(undefined, { onSuccess: () => apply('invoice') })
                 }
               >
                 Close it and use the gift card

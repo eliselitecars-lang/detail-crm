@@ -196,9 +196,17 @@ enum PaymentService {
         end: Date,
         fromDay: String,
         toDay: String,
-        method: PaymentMethod?
+        method: PaymentMethod?,
+        unappliedOnly: Bool = false
     ) async throws -> LedgerData {
-        let page = try await ledgerPage(shopID: shopID, start: start, end: end, method: method, offset: 0)
+        let page = try await ledgerPage(
+            shopID: shopID,
+            start: start,
+            end: end,
+            method: method,
+            unappliedOnly: unappliedOnly,
+            offset: 0
+        )
 
         struct Params: Encodable {
             let p_shop_id: UUID
@@ -214,7 +222,7 @@ enum PaymentService {
         // Settling payments are an extra: a failure leaves the ledger as is.
         var processing: [Payment] = []
         var customers = page.customers
-        if let settling = try? await processingPayments(shopID: shopID, method: method) {
+        if let settling = try? await processingPayments(shopID: shopID, method: method, unappliedOnly: unappliedOnly) {
             processing = settling
             let missing = settling.map { $0.customerID }.filter { customers[$0] == nil }
             if let more = try? await customerRefs(shopID: shopID, ids: missing) {
@@ -234,7 +242,7 @@ enum PaymentService {
 
     /// Payments Stripe is still settling (`processing`: bank debits and
     /// pay-later), newest first.
-    static func processingPayments(shopID: UUID, method: PaymentMethod?) async throws -> [Payment] {
+    static func processingPayments(shopID: UUID, method: PaymentMethod?, unappliedOnly: Bool = false) async throws -> [Payment] {
         var query = Supa.client
             .from("payments")
             .select(Payment.selectColumns)
@@ -242,6 +250,9 @@ enum PaymentService {
             .eq("status", value: PaymentStatus.processing.rawValue)
         if let method {
             query = query.eq("method", value: method.rawValue)
+        }
+        if unappliedOnly {
+            query = unapplied(query)
         }
         return try await query
             .order("created_at", ascending: false)
@@ -256,6 +267,7 @@ enum PaymentService {
         start: Date,
         end: Date,
         method: PaymentMethod?,
+        unappliedOnly: Bool = false,
         offset: Int
     ) async throws -> LedgerPage {
         var query = Supa.client
@@ -266,6 +278,9 @@ enum PaymentService {
             .lt("paid_at", value: Supa.iso(end))
         if let method {
             query = query.eq("method", value: method.rawValue)
+        }
+        if unappliedOnly {
+            query = unapplied(query)
         }
         // One extra row tells whether another page exists.
         let first = max(0, offset)
@@ -279,6 +294,15 @@ enum PaymentService {
         if hasMore { payments = Array(payments.prefix(ledgerPageSize)) }
         let customers = try await customerRefs(shopID: shopID, ids: payments.map { $0.customerID })
         return LedgerPage(payments: payments, customers: customers, hasMore: hasMore)
+    }
+
+    /// Only money that pays no invoice, job or membership (the web
+    /// ledger's `?unapplied=1`; `PaymentApplication.isUnapplied`).
+    static func unapplied(_ query: PostgrestFilterBuilder) -> PostgrestFilterBuilder {
+        query
+            .is("invoice_id", value: nil)
+            .is("job_id", value: nil)
+            .is("membership_id", value: nil)
     }
 
     /// Customer names for a set of ids.
@@ -355,6 +379,46 @@ enum PaymentService {
             ))
             .execute()
             .value
+    }
+
+    // MARK: Unapplied money
+
+    /// The customer's invoices an unapplied payment can go on: open or
+    /// partly paid with something due, oldest first (the web's
+    /// `useApplicableInvoices`).
+    static func applicableInvoices(shopID: UUID, customerID: UUID) async throws -> [PaymentApplicableInvoice] {
+        try await Supa.client
+            .from("invoices")
+            .select(PaymentApplicableInvoice.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("customer_id", value: customerID.uuidString)
+            .in("status", values: [InvoiceStatus.open.rawValue, InvoiceStatus.partiallyPaid.rawValue])
+            .gt("balance_cents", value: 0)
+            .order("issued_at", ascending: true)
+            .limit(100)
+            .execute()
+            .value
+    }
+
+    /// Manager+: puts an unapplied payment on one of the same customer's
+    /// open invoices (`apply_payment_to_invoice`). The server moves the
+    /// whole row (tip and refunds stay with it), refuses a target it would
+    /// overpay, and appends "Applied to invoice #N" to the note. Like cash
+    /// and checks it waits for the invoice's open card pay pages (0121:
+    /// 55000 HINT `checkout_open`): those are released and the apply tried
+    /// once more; a page already processing keeps it refused with the
+    /// server's text.
+    static func applyToInvoice(shopID: UUID, paymentID: UUID, invoiceID: UUID) async throws -> Payment {
+        struct Params: Encodable {
+            let p_payment_id: UUID
+            let p_invoice_id: UUID
+        }
+        return try await releasingOpenCheckouts(shopID: shopID, invoiceID: invoiceID) {
+            try await Supa.client
+                .rpc("apply_payment_to_invoice", params: Params(p_payment_id: paymentID, p_invoice_id: invoiceID))
+                .execute()
+                .value
+        }
     }
 
     /// Owner/admin: money handed back for a manual payment

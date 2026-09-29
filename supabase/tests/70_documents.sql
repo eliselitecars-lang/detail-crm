@@ -245,6 +245,7 @@ select tests.authenticate_as(tests.fx('u_manager_a'));
 insert into public.documents (shop_id, customer_id, storage_path, file_name, content_type, size_bytes)
   values (tests.fx('shop_a'), tests.fx('cust_tmp'), tests.fx('shop_a') || '/customers/' || tests.fx('cust_tmp') || '/a.pdf', 'a.pdf',
           'application/pdf', 1);
+select tests.as_service();   -- 0125: deletes go through erase_customer (service role)
 delete from public.customers where id = tests.fx('cust_tmp');
 select tests.as_superuser();
 select tests.eq((select array_agg(bucket_id || ' ' || path || ' ' || is_prefix::text || ' ' || reason order by path) from public.storage_purge_requests),

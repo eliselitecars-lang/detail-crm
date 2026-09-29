@@ -448,6 +448,7 @@ select tests.fx_set('ser_solo', (public.create_job_series(tests.fx('shop_a'), js
           'template_lines', jsonb_build_array(jsonb_build_object('service_id', tests.fx('svc_a'))))) ->> 'series_id')::uuid);
 select tests.eq(public.delete_job_series(tests.fx('ser_solo')), '{"deleted": 2, "kept": 0}'::jsonb,
                 'eligible occurrences are deleted with the series');
+select tests.as_service();   -- 0125: deletes go through erase_customer (service role)
 select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_solo')$$), 1::bigint,
                 'the customer can then be deleted');
 

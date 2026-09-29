@@ -75,12 +75,16 @@ struct MembershipNewSheet: View {
     @State private var showingCustomerPicker = false
     @State private var created: Membership?
     @State private var errorText: String?
+    /// A lapsed shop can't start new memberships (PT402): said before the
+    /// form, and the create button waits until the shop can write again.
+    @State private var billingNotice: ShopEntitlement.Notice?
 
     var body: some View {
         NavigationStack {
             LoadStateView(plans, loadingLabel: "Loading plans…", retry: { await loadPlans() }) { list in
                 formContent(plans: list.filter { $0.isAvailable })
             }
+            .billingNotice($billingNotice, shopID: appState.shop?.id)
             .screenBackground()
             .navigationTitle("New membership")
             .navigationBarTitleDisplayMode(.inline)
@@ -115,6 +119,13 @@ struct MembershipNewSheet: View {
             createdContent(created, plan: available.first(where: { $0.id == created.planID }))
         } else {
             FormScreen {
+                if isPaused {
+                    BillingPausedNotice(
+                        notice: billingNotice,
+                        clock: appState.clock,
+                        detail: MembershipsView.pausedDetail
+                    )
+                }
                 MoneyPickerField(
                     label: "Customer",
                     value: customer?.displayName,
@@ -152,7 +163,7 @@ struct MembershipNewSheet: View {
                 AsyncButton("Create membership") {
                     await create()
                 }
-                .disabled(customer == nil || planID == nil)
+                .disabled(customer == nil || planID == nil || isPaused)
             }
         }
     }
@@ -171,6 +182,8 @@ struct MembershipNewSheet: View {
             MembershipCheckoutLinkBlock(membershipID: membership.id)
         }
     }
+
+    private var isPaused: Bool { billingNotice?.pausesNewRecords ?? false }
 
     private func loadPlans() async {
         guard let shopID = try? appState.requireShopID() else { return }

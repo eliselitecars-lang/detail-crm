@@ -302,6 +302,9 @@ const BASE_PLACEHOLDERS: readonly PlaceholderMeta[] = [
   { name: 'customer_name', label: 'Customer full name' },
   { name: 'shop_name', label: 'Shop name' },
   { name: 'shop_phone', label: 'Shop phone' },
+  // 0128: APP_BASE_URL/portal?shop=<slug>, every customer message; a line
+  // using it is left out while the app's address isn't set.
+  { name: 'portal_link', label: 'Client portal link' },
 ];
 
 const APPOINTMENT_PLACEHOLDERS: readonly PlaceholderMeta[] = [

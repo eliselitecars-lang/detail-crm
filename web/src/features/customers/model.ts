@@ -120,3 +120,22 @@ export function cardSetupMessage(shopName: string, firstName: string | null, url
   const greeting = firstName?.trim() ? `Hi ${firstName.trim()}, ` : 'Hi, ';
   return `${greeting}${shopName} here. Add a card on file securely using this link: ${url}`;
 }
+
+// ---------------------------------------------------------------- history lists
+
+/** Rows per page of the customer page's history tabs (the iPhone's HistoryListing.pageSize). */
+export const HISTORY_PAGE_SIZE = 50;
+
+/**
+ * Under a list that doesn't hold every row: "Showing the 50 most recent of
+ * 80 jobs." (same words as the iPhone's HistoryListing). Null when complete.
+ */
+export function truncationNotice(loaded: number, total: number, plural: string): string | null {
+  if (total <= loaded) return null;
+  return `Showing the ${loaded.toLocaleString('en-US')} most recent of ${total.toLocaleString('en-US')} ${plural}.`;
+}
+
+/** "Load 30 more" (at most a page). */
+export function loadMoreLabel(remaining: number): string {
+  return `Load ${Math.min(Math.max(remaining, 1), HISTORY_PAGE_SIZE)} more`;
+}

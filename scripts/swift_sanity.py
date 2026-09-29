@@ -34,6 +34,11 @@ mechanical mistakes that would otherwise burn a macOS CI run:
     `.iconTapTarget()`); and two
     or more theme buttons side by side in a bare `HStack` (labels
     truncate at accessibility text sizes — use `AdaptiveButtonRow`)
+  * Theme contrast: the WCAG ratios of Theme.swift's own values, both
+    modes — every text token (`textPrimary/Secondary/Tertiary`, the `…Ink`
+    tones) on `background`, `surface`, `surfaceElevated` and
+    `surfaceMuted`, and white `onAccent` on every `…Solid` fill — must be
+    at least 4.5:1 (WCAG AA for normal text)
   * auth: a `SupabaseClient(` built without `flowType: .implicit` (the
     app's reset/confirmation links open the web app, which can't redeem a
     PKCE code whose verifier is on the phone)
@@ -404,6 +409,65 @@ def check_contrast_pairs(path: Path, code_lines: list[str], report: Report) -> N
                     report.error(path, index + 1, message)
 HARD_COLOR = re.compile(r"\b(?:UIColor|Color)\((?:red:|white:|hue:|\.sRGB|light:|hex:)")
 
+# ---------------------------------------------------------------------------
+# Theme contrast (computed from Theme.swift's own values)
+# ---------------------------------------------------------------------------
+
+THEME_COLOR = re.compile(r"static\s+let\s+(\w+)\s*=\s*Color\(\s*light:\s*0x([0-9A-Fa-f]{6})\s*,\s*dark:\s*0x([0-9A-Fa-f]{6})\s*\)")
+THEME_ENUM = re.compile(r"^\s*enum\s+Theme\b", re.M)
+THEME_WHITE = re.compile(r"static\s+let\s+(\w+)\s*=\s*Color\.white\b")
+MIN_TEXT_CONTRAST = 4.5
+TEXT_SURFACES = ("background", "surface", "surfaceElevated", "surfaceMuted")
+TEXT_TOKENS = ("textPrimary", "textSecondary", "textTertiary",
+               "moneyInk", "successInk", "warningInk", "dangerInk", "glacierInk")
+SOLID_FILLS = ("glacierSolid", "dangerSolid", "successSolid", "neutralSolid")
+# (text token, background token): each must reach MIN_TEXT_CONTRAST in both modes.
+REQUIRED_CONTRAST = [(text, surface) for text in TEXT_TOKENS for surface in TEXT_SURFACES] + \
+                    [("onAccent", fill) for fill in SOLID_FILLS]
+
+
+def relative_luminance(rgb: int) -> float:
+    def channel(value: int) -> float:
+        c = value / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def contrast_ratio(first: int, second: int) -> float:
+    """WCAG 2.x contrast ratio of two sRGB colors (1.0 … 21.0)."""
+    a, b = relative_luminance(first), relative_luminance(second)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def theme_colors(source_lines: list[str]) -> dict[str, tuple[int, int, int]]:
+    """token -> (light, dark, line) for `Color(light: 0x…, dark: 0x…)` and `Color.white` tokens."""
+    colors: dict[str, tuple[int, int, int]] = {}
+    for index, text in enumerate(source_lines):
+        match = THEME_COLOR.search(text)
+        if match:
+            colors[match.group(1)] = (int(match.group(2), 16), int(match.group(3), 16), index + 1)
+            continue
+        white = THEME_WHITE.search(text)
+        if white:
+            colors[white.group(1)] = (0xFFFFFF, 0xFFFFFF, index + 1)
+    return colors
+
+
+def check_theme_contrast(path: Path, source_lines: list[str], report: Report) -> None:
+    colors = theme_colors(source_lines)
+    for text, background in REQUIRED_CONTRAST:
+        if text not in colors or background not in colors:
+            report.error(path, None, f"contrast check: Theme.{text} or Theme.{background} is not a "
+                                     "`Color(light: 0x…, dark: 0x…)` token — keep both readable here")
+            continue
+        fg, bg = colors[text], colors[background]
+        for mode, index in (("light", 0), ("dark", 1)):
+            ratio = contrast_ratio(fg[index], bg[index])
+            if ratio < MIN_TEXT_CONTRAST:
+                report.error(path, fg[2], f"Theme.{text} on Theme.{background} is {ratio:.2f}:1 in {mode} mode "
+                                          f"(#{fg[index]:06X} on #{bg[index]:06X}) — needs {MIN_TEXT_CONTRAST}:1")
+
 
 def check_forbidden(path: Path, code_lines: list[str], source: str, report: Report) -> None:
     name = path.name
@@ -558,6 +622,8 @@ def check_swift_file(path: Path, report: Report, is_app: bool, functions_dir: Pa
         check_forbidden(path, code_lines, source, report)
         check_sign_out(path, code_lines, report)
         check_edge_calls(path, code, source, report, functions_dir)
+        if path.name == "Theme.swift" and THEME_ENUM.search(code):
+            check_theme_contrast(path, source_lines, report)
 
 
 # ---------------------------------------------------------------------------
@@ -931,6 +997,32 @@ def self_test() -> int:
     expect("contrast pairs allowed inside Theme.swift", not run_swift(
         "let v = Text(a)\n    .foregroundStyle(Theme.onAccent)\n    .background(Capsule().fill(Theme.glacier))\n",
         filename="Theme.swift").errors)
+    # Theme contrast computed from the token values.
+    expect("WCAG ratio of black on white", abs(contrast_ratio(0x000000, 0xFFFFFF) - 21.0) < 1e-9)
+    expect("white on the light danger fill is under AA", 4.43 < contrast_ratio(0xFFFFFF, 0xD93F3F) < 4.45)
+    theme_ok = "enum Theme {\n" + "\n".join(
+        [f"    static let {name} = Color(light: 0xFFFFFF, dark: 0x0B1220)" for name in TEXT_SURFACES]
+        + [f"    static let {name} = Color(light: 0x1F2937, dark: 0xE5E7EB)" for name in TEXT_TOKENS]
+        + [f"    static let {name} = Color(light: 0x1F2937, dark: 0x1F2937)" for name in SOLID_FILLS]
+        + ["    static let onAccent = Color.white"]) + "\n}\n"
+    expect("readable Theme tokens pass", not run_swift(theme_ok, filename="Theme.swift").errors)
+    faint = theme_ok.replace("static let textTertiary = Color(light: 0x1F2937, dark: 0xE5E7EB)",
+                             "static let textTertiary = Color(light: 0x8491A7, dark: 0x6B7892)")
+    faint_errors = run_swift(faint, filename="Theme.swift").errors
+    expect("faint tertiary text detected in light mode",
+           any("Theme.textTertiary on Theme.surfaceMuted" in e and "light mode" in e for e in faint_errors))
+    expect("faint tertiary text detected in dark mode",
+           any("Theme.textTertiary on Theme.surface is" in e and "dark mode" in e for e in faint_errors))
+    weak_fill = theme_ok.replace("static let dangerSolid = Color(light: 0x1F2937, dark: 0x1F2937)",
+                                 "static let dangerSolid = Color(light: 0xD93F3F, dark: 0xF06464)")
+    expect("white on a light solid fill detected", any("Theme.onAccent on Theme.dangerSolid" in e for e in run_swift(
+        weak_fill, filename="Theme.swift").errors))
+    expect("missing Theme token reported", any("not a" in e for e in run_swift(
+        theme_ok.replace("    static let onAccent = Color.white\n", ""), filename="Theme.swift").errors))
+    expect("contrast values only checked in Theme.swift",
+           all("Theme.textTertiary on" not in e for e in run_swift(faint, filename="Other.swift").errors))
+    expect("a Theme.swift fragment without the Theme enum is not contrast-checked",
+           not run_swift("let v = Text(a)\n", filename="Theme.swift").errors)
     expect("fixed small icon menu label detected", any("iconTapTarget" in e for e in run_swift(
         "let v = Menu {\n    Button(\"Remove\", role: .destructive) { f() }\n} label: {\n"
         "    Image(systemName: \"ellipsis\")\n        .foregroundStyle(Theme.textTertiary)\n"

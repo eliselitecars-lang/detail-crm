@@ -117,6 +117,37 @@ enum TimeClockService {
         "clock_out.is.null,clock_out.gt.\(Supa.iso(from))"
     }
 
+    /// Every time entry recorded on one job (shifts never name a job),
+    /// newest first: the job page's Time section. Read in pages, so a job
+    /// with more than the server's 1,000-row reply cap is still listed
+    /// whole (`PagedQuery`). Managers+ read everyone's; technicians only
+    /// their own rows (RLS).
+    static func jobEntries(shopID: UUID, jobID: UUID) async throws -> [TimeEntry] {
+        try await PagedQuery.all {
+            Supa.client
+                .from("time_entries")
+                .select(TimeEntry.selectColumns, count: .exact)
+                .eq("shop_id", value: shopID.uuidString)
+                .eq("job_id", value: jobID.uuidString)
+                .order("clock_in", ascending: false)
+                .order("id", ascending: false)
+        }
+    }
+
+    /// The job page's Time section: the job's entries and the signed-in
+    /// member's running job timer (on this job or another), which decides
+    /// between "Clock in on this job", "Clock out" and "clocked in
+    /// elsewhere" (`JobTime.action`).
+    static func jobTime(shopID: UUID, jobID: UUID, memberID: UUID?) async throws -> JobTimeSnapshot {
+        async let entryRows = jobEntries(shopID: shopID, jobID: jobID)
+        var openJobTimer: TimeEntry?
+        if let memberID {
+            let open = try await openEntries(shopID: shopID, memberID: memberID)
+            openJobTimer = open.first { $0.kind == .job }
+        }
+        return JobTimeSnapshot(entries: try await entryRows, openJobTimer: openJobTimer)
+    }
+
     /// Everyone currently clocked in (managers+; technicians see only themselves).
     static func openEntriesForShop(shopID: UUID) async throws -> [TimeEntry] {
         try await Supa.client

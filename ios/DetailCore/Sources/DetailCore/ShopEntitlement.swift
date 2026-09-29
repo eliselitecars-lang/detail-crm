@@ -152,6 +152,18 @@ public struct ShopEntitlement: Decodable, Hashable, Sendable {
             case .paymentProblem, .paused, .trialEnded, .noSubscription: return true
             }
         }
+
+        /// The shop is lapsed: the server refuses new business records
+        /// (PT402), new memberships included (0103's
+        /// `memberships_01_billing_guard`). A screen that offers to create
+        /// one shows this notice first. The trial reminder and a failing
+        /// payment still let the shop work, so they don't count.
+        public var pausesNewRecords: Bool {
+            switch self {
+            case .paused, .trialEnded, .noSubscription: return true
+            case .trialEnds, .paymentProblem: return false
+            }
+        }
     }
 
     public static let paymentProblemText = "There's a problem with this shop's subscription payment."

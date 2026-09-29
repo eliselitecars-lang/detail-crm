@@ -301,6 +301,8 @@ export interface Fixture {
   db: FakeSupabase;
   handler: (req: Request) => Promise<Response>;
   logs: ReturnType<typeof memoryLogger>;
+  /** p_source of each public_unsubscribe call (0126). */
+  unsubscribeSources: string[];
 }
 
 export function setup(
@@ -314,6 +316,7 @@ export function setup(
     deps?: Pick<Deps, "providerTimeoutMs" | "queueTimeBudgetMs">;
   } = {},
 ): Fixture {
+  const unsubscribeSources: string[] = [];
   const db = new FakeSupabase({
     env: options.env,
     users: {
@@ -838,14 +841,14 @@ export function setup(
       (m.campaign_id !== null || MARKETING_KEYS.includes(String(m.template_key)))
     );
     if (!msg) return false;
+    // 0126: a marketing-only opt-out (email_opt_in off, no email_opted_out_at
+    // stamp: confirmations and invoices keep going); the source is recorded.
     const customers = ctx.db.table("customers");
     for (const c of customers) {
-      if (c.id === msg.customer_id && c.shop_id === msg.shop_id) {
-        c.email_opted_out_at ??= NOW.toISOString();
-        c.email_opt_in = false;
-      }
+      if (c.id === msg.customer_id && c.shop_id === msg.shop_id) c.email_opt_in = false;
     }
     ctx.db.seed("customers", customers);
+    unsubscribeSources.push(String(args.p_source ?? "link"));
     return true;
   });
 
@@ -883,7 +886,7 @@ export function setup(
     concurrency: options.concurrency ?? 3,
     ...options.deps,
   });
-  return { db, handler, logs };
+  return { db, handler, logs, unsubscribeSources };
 }
 
 export function message(db: FakeSupabase, id: string): Row {

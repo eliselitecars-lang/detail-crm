@@ -339,11 +339,33 @@ the Customer Portal (switch plan, update the card, cancel, invoices).
   (`billing_event_ignored`, reason `duplicate_subscription`), and you refund
   or cancel it in Stripe.
 
+**The billing customer follows the shop owner.** Each shop has one
+platform Stripe customer, and Stripe sends the shop's receipts, renewal
+notices and failed-payment emails to that customer's email, so it always
+carries the **current owner's** email (and `metadata.owner_user_id`):
+
+- **Choose plan** (checkout) and **Manage billing** (portal) update it first
+  when the owner, or the owner's email, changed since it was last written;
+- after **Transfer ownership** the web and iPhone apps call the `billing`
+  function's `sync_customer`, which readdresses it to the new owner at once;
+- the daily `sync_customers` job (`detail-crm-billing-sync-customers`,
+  supabase/setup/cron.sql) catches every ownership change the apps did not
+  report (a customer whose `owner_user_id` is not the shop's current owner).
+  An owner who only changed their own sign-in email is picked up at their
+  next checkout, Manage billing or `sync_customer`.
+
+A Stripe failure while readdressing never blocks checkout or managing
+billing (`billing_customer_contact_sync_failed` in the function log); the
+next one tries again. Invoices Stripe already finalized keep the address
+they were finalized with. Do not change the customer's email in the Stripe
+Dashboard: the next readdress writes the owner's back.
+
 ### 6.1 What the web app shows
 
 Everything below is read from the server at run time
-(`shop_entitlement`, `public_billing_plans()`, the `billing` function);
-the web never has a plan, price, trial length or limit of its own.
+(`shop_entitlement`, `public_billing_plans()`, `public_billing_offer()`
+(0131: the plans plus the trial length), the `billing` function); the web
+never has a plan, price, trial length or limit of its own.
 
 | Where | Who | What |
 |---|---|---|
@@ -357,7 +379,8 @@ the web never has a plan, price, trial length or limit of its own.
 | A refused action (section 8) | everyone | the server's sentence as it is |
 | | owner | plus a **Go to Billing** link (forms and dialogs) or action (error pop-ups) |
 | Notifications | owner | "Subscription payment problem" opens Settings -> Billing |
-| `/pricing` (public) | anyone | the plans with price, period, team size and feature keys, and **Create your shop** (sign-up); "Pricing coming soon" without plans |
+| `/pricing` (public) | anyone | the plans with price, period, team size and feature keys, the trial length ("14-day free trial for your first shop", from `public_billing_offer()`; nothing when no trial is set), and **Create your shop** (sign-up); "Pricing coming soon" without plans |
+| Shop setup (`/app/onboarding`, before the shop exists) | signed-in user | with billing on, a link to `/pricing`, and "Your first shop gets a N-day free trial" when this person never had one, or that the trial was already used (this shop starts without one) when they did (`public_billing_offer().trial_available`, once per person) |
 
 Nothing appears while billing is off, while a shop is `active` or `comped`,
 or while its standing cannot be read.
@@ -386,6 +409,13 @@ select public.billing_set_comp('<shop id>', now());
 A comp does not touch Stripe. If a comped shop also has a subscription,
 Stripe still charges it: cancel that subscription in Stripe if the shop
 should be free.
+
+Comp **forever** the shops that must never lapse:
+
+- the **App Review demo shop** ([LAUNCH.md](LAUNCH.md) section 6, "Demo
+  account"): Apple's reviewers sign in to it, possibly weeks after you
+  created it, and a lapsed shop cannot create records;
+- your own pilot, test and internal shops.
 
 ---
 
@@ -418,7 +448,16 @@ Paused:
 - automations and campaign sends (reminders, follow-ups, document
   follow-ups);
 - **inviting team members**: no new invites, and no invite emails (new or
-  resent). An invite that was already sent can still be accepted.
+  resent). An invite that was already sent can still be accepted;
+- **buying a self-serve text number and registering 10DLC** (Settings ->
+  Text messaging). The platform pays Twilio for these, so they need a
+  **paid** subscription (or a comp) even before a shop lapses: a shop on its
+  free trial (or a Stripe trial) or `past_due` is refused too ("Self-serve
+  text numbers are available once the shop's subscription is paid. Contact
+  support to connect a number during the trial.", or, `past_due`, update the
+  payment method first). You can connect a number by hand meanwhile
+  (supabase/setup/twilio.md). A number the shop already has stays
+  connected.
 
 Customers on the public pages never see the subscription sentence below:
 they get the page's usual "not available" answer.

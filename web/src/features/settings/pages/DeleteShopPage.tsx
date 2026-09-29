@@ -2,7 +2,8 @@ import { Info, Trash2 } from 'lucide-react';
 import { useId, useRef, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { Button, Dialog, FormField, Input, SectionCard, useToast } from '@/components/ui';
-import { useShopEntitlement } from '@/features/billing/api';
+import { useShopBillingStatus, useShopEntitlement } from '@/features/billing/api';
+import { entitlementShowsSubscription, hasLiveSubscription } from '@/features/billing/model';
 import { useShop } from '@/features/shop/shopContext';
 import { deleteShopErrorMessage, useBillingMembershipCount, useDeleteShop } from '../api';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
@@ -10,9 +11,11 @@ import { confirmationMatches } from '../deleteShop';
 
 /**
  * Owner only (route guard + nav: shop.delete; the payments function checks
- * the owner again). The server cancels the shop's own subscription (while
- * platform billing is on) and its customers' memberships in Stripe, expires
- * open pay links and then deletes the shop; every tenant row cascades.
+ * the owner again). The server stops the shop's own platform subscription
+ * from renewing, cancels its customers' memberships in Stripe, expires open
+ * pay links and then deletes the shop (every tenant row cascades); after the
+ * delete the platform subscription is cancelled now. That happens whenever
+ * a subscription can still bill, even with platform billing switched off.
  */
 export default function DeleteShopPage() {
   const query = useBillingMembershipCount(true);
@@ -28,8 +31,14 @@ export default function DeleteShopPage() {
 function DeleteShopCard({ billingMemberships }: { billingMemberships: number }) {
   const { shop, shopId } = useShop();
   const [open, setOpen] = useState(false);
-  // While platform billing is on, deleting also ends the shop's subscription.
-  const billingOn = useShopEntitlement(shopId).data?.billing_enabled === true;
+  // Deleting also ends the shop's own subscription whenever one can still
+  // bill: shop_billing says so, or (row unreadable) the entitlement does.
+  // Billing switched off platform-wide doesn't stop an existing one billing.
+  const entitlement = useShopEntitlement(shopId).data;
+  const billing = useShopBillingStatus(shopId, true).data;
+  const endsSubscription =
+    (billing != null && hasLiveSubscription(billing.status)) ||
+    (entitlement != null && entitlementShowsSubscription(entitlement, { liveOnly: true }));
   return (
     <SectionCard
       title="Delete this shop"
@@ -48,7 +57,7 @@ function DeleteShopCard({ billingMemberships }: { billingMemberships: number }) 
             Your Stripe account is not closed: money already collected stays in Stripe, and you
             manage or close the account at stripe.com.
           </li>
-          {billingOn && (
+          {endsSubscription && (
             <li>
               This shop’s Detail CRM subscription is cancelled right away, so it isn’t charged
               again.
@@ -80,7 +89,7 @@ function DeleteShopCard({ billingMemberships }: { billingMemberships: number }) 
         open={open}
         onClose={() => setOpen(false)}
         shopName={shop.name}
-        billingOn={billingOn}
+        endsSubscription={endsSubscription}
       />
     </SectionCard>
   );
@@ -90,12 +99,12 @@ function DeleteShopDialog({
   open,
   onClose,
   shopName,
-  billingOn,
+  endsSubscription,
 }: {
   open: boolean;
   onClose: () => void;
   shopName: string;
-  billingOn: boolean;
+  endsSubscription: boolean;
 }) {
   const toast = useToast();
   const navigate = useNavigate();
@@ -135,7 +144,7 @@ function DeleteShopDialog({
       size="sm"
       title={`Delete ${shopName}?`}
       description={
-        billingOn
+        endsSubscription
           ? 'Everything in this shop is permanently deleted and its subscription is cancelled. This cannot be undone.'
           : 'Everything in this shop is permanently deleted. This cannot be undone.'
       }

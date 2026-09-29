@@ -573,7 +573,9 @@ export type Database = {
           created_at: string
           id: string
           opted_out_at: string
+          scope: string
           shop_id: string
+          source: string | null
         }
         Insert: {
           address: string
@@ -581,7 +583,9 @@ export type Database = {
           created_at?: string
           id?: string
           opted_out_at?: string
+          scope?: string
           shop_id: string
+          source?: string | null
         }
         Update: {
           address?: string
@@ -589,7 +593,9 @@ export type Database = {
           created_at?: string
           id?: string
           opted_out_at?: string
+          scope?: string
           shop_id?: string
+          source?: string | null
         }
         Relationships: [
           {
@@ -894,6 +900,92 @@ export type Database = {
           },
         ]
       }
+      customer_consent_events: {
+        Row: {
+          action: string
+          address_key: string
+          channel: Database["public"]["Enums"]["message_channel"]
+          client_ip: unknown
+          created_at: string
+          customer_id: string
+          id: string
+          shop_id: string
+          source: string
+        }
+        Insert: {
+          action: string
+          address_key: string
+          channel: Database["public"]["Enums"]["message_channel"]
+          client_ip?: unknown
+          created_at?: string
+          customer_id: string
+          id?: string
+          shop_id: string
+          source: string
+        }
+        Update: {
+          action?: string
+          address_key?: string
+          channel?: Database["public"]["Enums"]["message_channel"]
+          client_ip?: unknown
+          created_at?: string
+          customer_id?: string
+          id?: string
+          shop_id?: string
+          source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "customer_consent_events_customer_fk"
+            columns: ["shop_id", "customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["shop_id", "id"]
+          },
+          {
+            foreignKeyName: "customer_consent_events_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      customer_erasures: {
+        Row: {
+          customer_id: string
+          erased_at: string
+          erased_by: string | null
+          id: string
+          mode: string
+          shop_id: string
+        }
+        Insert: {
+          customer_id: string
+          erased_at?: string
+          erased_by?: string | null
+          id?: string
+          mode: string
+          shop_id: string
+        }
+        Update: {
+          customer_id?: string
+          erased_at?: string
+          erased_by?: string | null
+          id?: string
+          mode?: string
+          shop_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "customer_erasures_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       customer_payment_methods: {
         Row: {
           brand: string | null
@@ -967,6 +1059,7 @@ export type Database = {
           email: string | null
           email_opt_in: boolean
           email_opted_out_at: string | null
+          erased_at: string | null
           first_name: string | null
           id: string
           last_name: string | null
@@ -1004,6 +1097,7 @@ export type Database = {
           email?: string | null
           email_opt_in?: boolean
           email_opted_out_at?: string | null
+          erased_at?: string | null
           first_name?: string | null
           id?: string
           last_name?: string | null
@@ -1040,6 +1134,7 @@ export type Database = {
           email?: string | null
           email_opt_in?: boolean
           email_opted_out_at?: string | null
+          erased_at?: string | null
           first_name?: string | null
           id?: string
           last_name?: string | null
@@ -7112,6 +7207,7 @@ export type Database = {
           email: string | null
           email_opt_in: boolean
           email_opted_out_at: string | null
+          erased_at: string | null
           first_name: string | null
           id: string
           last_name: string | null
@@ -7157,6 +7253,14 @@ export type Database = {
       }
       comms_is_marketing_key: {
         Args: { p_key: Database["public"]["Enums"]["message_template_key"] }
+        Returns: boolean
+      }
+      comms_is_marketing_suppressed: {
+        Args: {
+          p_address: string
+          p_channel: Database["public"]["Enums"]["message_channel"]
+          p_shop_id: string
+        }
         Returns: boolean
       }
       comms_is_suppressed: {
@@ -7232,6 +7336,14 @@ export type Database = {
         Args: { p_at: string; p_timezone: string }
         Returns: string
       }
+      comms_marketing_email_needs_address: {
+        Args: {
+          p_customer_id: string
+          p_key: Database["public"]["Enums"]["message_template_key"]
+          p_shop_id: string
+        }
+        Returns: boolean
+      }
       comms_marketing_send_after: {
         Args: { p_now: string; p_timezone: string }
         Returns: string
@@ -7279,7 +7391,9 @@ export type Database = {
           p_address: string
           p_at?: string
           p_channel: Database["public"]["Enums"]["message_channel"]
+          p_scope?: string
           p_shop_id: string
+          p_source?: string
         }
         Returns: boolean
       }
@@ -7533,6 +7647,10 @@ export type Database = {
           p_job_id?: string
         }
         Returns: string
+      }
+      coupon_line_eligible: {
+        Args: { p_service_id: string; p_service_ids: string[] }
+        Returns: boolean
       }
       coupon_redeem_for_job:
         | {
@@ -7909,6 +8027,11 @@ export type Database = {
         }
         Returns: Json
       }
+      customer_erase_apply: {
+        Args: { p_customer_id: string; p_shop_id: string }
+        Returns: string
+      }
+      customer_erase_in_progress: { Args: { p_id: string }; Returns: boolean }
       customer_summary: {
         Args: { p_customer_id: string }
         Returns: {
@@ -8013,6 +8136,15 @@ export type Database = {
           p_send_after?: string
         }
         Returns: string
+      }
+      erase_customer: {
+        Args: {
+          p_actor: string
+          p_customer_id: string
+          p_dry_run?: boolean
+          p_shop_id: string
+        }
+        Returns: Json
       }
       expire_quotes: { Args: { p_now?: string }; Returns: number }
       export_jobs: {
@@ -8409,6 +8541,10 @@ export type Database = {
       }
       job_booking_token: { Args: { p_job_id: string }; Returns: string }
       job_completion_blockers: { Args: { p_job_id: string }; Returns: Json }
+      job_coupon_eligibility_stale: {
+        Args: { p_job_id: string }
+        Returns: boolean
+      }
       job_gate_blockers_for: {
         Args: {
           p_old: Database["public"]["Enums"]["job_status"]
@@ -9185,6 +9321,10 @@ export type Database = {
         Returns: Json
       }
       portal_documents: { Args: Record<PropertyKey, never>; Returns: Json }
+      portal_email_marketing: {
+        Args: Record<PropertyKey, never>
+        Returns: Json
+      }
       portal_job_reports: { Args: Record<PropertyKey, never>; Returns: Json }
       portal_membership_access: {
         Args: { p_membership_id: string; p_user_id: string }
@@ -9193,6 +9333,10 @@ export type Database = {
       portal_memberships: { Args: Record<PropertyKey, never>; Returns: Json }
       portal_overview: { Args: Record<PropertyKey, never>; Returns: Json }
       portal_referrals: { Args: Record<PropertyKey, never>; Returns: Json }
+      portal_set_email_marketing: {
+        Args: { p_customer_id: string; p_opt_in: boolean }
+        Returns: boolean
+      }
       postal_code_in_area: {
         Args: { p_area: string[]; p_postal: string }
         Returns: boolean
@@ -9236,6 +9380,7 @@ export type Database = {
         Returns: {
           body: string
           enabled: boolean
+          postal_address_missing: boolean
           subject: string | null
           to_address: string | null
         }[]
@@ -9271,6 +9416,7 @@ export type Database = {
         }
         Returns: Json
       }
+      public_billing_offer: { Args: Record<PropertyKey, never>; Returns: Json }
       public_billing_plans: { Args: Record<PropertyKey, never>; Returns: Json }
       public_booking_catalog: { Args: { p_slug: string }; Returns: Json }
       public_booking_documents: { Args: { p_token: string }; Returns: Json }
@@ -9357,6 +9503,7 @@ export type Database = {
         }
         Returns: Json
       }
+      public_resubscribe: { Args: { p_token: string }; Returns: boolean }
       public_schedule_quote: {
         Args: {
           p_location?: Json
@@ -9379,7 +9526,11 @@ export type Database = {
         Args: { p_now?: string; p_payload: Json; p_token: string }
         Returns: Json
       }
-      public_unsubscribe: { Args: { p_token: string }; Returns: boolean }
+      public_unsubscribe: {
+        Args: { p_source?: string; p_token: string }
+        Returns: boolean
+      }
+      public_unsubscribe_all: { Args: { p_token: string }; Returns: boolean }
       public_unsubscribe_info: { Args: { p_token: string }; Returns: Json }
       public_validate_coupon: {
         Args: {
@@ -9997,6 +10148,7 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      restamp_job_coupon: { Args: { p_job_id: string }; Returns: Json }
       revoke_calendar_feed: { Args: { p_shop_id: string }; Returns: boolean }
       revoke_invite: { Args: { p_invite_id: string }; Returns: undefined }
       revoke_job_report: { Args: { p_report_id: string }; Returns: undefined }

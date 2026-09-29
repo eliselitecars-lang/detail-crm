@@ -20,12 +20,13 @@ select tests.eq(public.preview_campaign_message(tests.fx('shop_a'), 'sms',
                   'body_length', char_length('Hi [first name]! Spring special at Shop A: https://app.example.test/book/shop-a'),
                   'max_body_length', 1600 - char_length(E'\nReply STOP to opt out.'),
                   'footer_added', true,
-                  'truncated', false),
+                  'truncated', false,
+                  'postal_address_missing', false),
                 'rendered with placeholder names; the opt-out line is appended and shortens the limit');
 -- SMS that already tells how to opt out: no footer, full limit
 select tests.eq(public.preview_campaign_message(tests.fx('shop_a'), 'sms', 'Deal for {{customer_name}}. Text STOP to end.')
                   - 'body_length',
-                '{"subject": null, "body": "Deal for [name]. Text STOP to end.", "max_body_length": 1600, "footer_added": false, "truncated": false}'::jsonb,
+                '{"subject": null, "body": "Deal for [name]. Text STOP to end.", "max_body_length": 1600, "footer_added": false, "truncated": false, "postal_address_missing": false}'::jsonb,
                 'an opt-out instruction in the wording: kept as is');
 select tests.eq(public.preview_campaign_message(tests.fx('shop_a'), 'sms', 'Stop by Saturday!') -> 'footer_added', 'true'::jsonb,
                 'merely using the word STOP is not an instruction');
@@ -51,14 +52,17 @@ select tests.eq(public.preview_campaign_message(tests.fx('shop_a'), 'email', 'He
                   'subject', 'News from Shop A',
                   'body', E'Hello [first name], call (205) 555-0199.\n\nTo unsubscribe from these emails, visit: [unsubscribe link]',
                   'body_length', char_length('Hello [first name], call (205) 555-0199.'),
-                  'max_body_length', 50000, 'footer_added', false, 'truncated', false),
-                'email: the unsubscribe footer is shown with a placeholder link');
+                  'max_body_length', 50000 - char_length(E'\n\nTo unsubscribe from these emails, visit: https://app.example.test/u/00000000-0000-0000-0000-000000000000'),
+                  'footer_added', false, 'truncated', false,
+                  'postal_address_missing', true),
+                'email: the unsubscribe footer is shown with a placeholder link; the limit leaves room for the real one (0127); no postal address on file');
 select tests.eq(public.preview_campaign_message(tests.fx('shop_a'), 'email', 'Bye: {{unsubscribe_link}}') ->> 'body',
                 'Bye: [unsubscribe link]', 'the wording may place the link itself');
 select tests.eq(public.preview_campaign_message(tests.fx('shop_a'), 'email', 'Hi') ->> 'subject', 'Shop A',
                 'no subject: the shop name (as sent)');
-select tests.eq(public.preview_campaign_message(tests.fx('shop_a'), 'email', repeat('e', 50000)) -> 'truncated', 'false'::jsonb,
-                '50000 characters are allowed');
+select tests.eq((select jsonb_build_array(r -> 'truncated', char_length(r ->> 'body'))
+                   from (select public.preview_campaign_message(tests.fx('shop_a'), 'email', repeat('e', 50000)) r) x),
+                '[true, 50000]'::jsonb, '50000 characters are allowed, but cut to make room for the footer (0127)');
 select tests.throws_like($$select public.preview_campaign_message(tests.fx('shop_a'), 'email', repeat('e', 50001))$$, '22023', '%too long%',
                          'longer bodies are refused');
 select tests.throws($$select public.preview_campaign_message(tests.fx('shop_a'), 'sms', repeat('e', 50001))$$, '22023',

@@ -6,6 +6,9 @@
  *   invoice_checkout           PUBLIC by invoice token
  *   invoice_checkout_cancel    PUBLIC by invoice token: expire the invoice's open
  *                              /i pay links (only those) and release their holds
+ *   deposit_checkout_cancel    PUBLIC by booking (job) token, or by invoice token
+ *                              for the jobs it bills: expire the open deposit
+ *                              links (only those) and release their job holds
  *   booking_deposit_checkout   PUBLIC by booking (job) token
  *   quote_deposit_checkout     PUBLIC by quote token (a self-scheduled quote's deposit)
  *   booking_cancel             PUBLIC by booking (job) token: expire the booking's
@@ -31,6 +34,11 @@
  *   membership_cancel          manager+
  *   delete_shop                owner (cancels billing, expires links, then
  *                              deletes the shop)
+ *   erase_customer             owner/admin: a customer's deletion request —
+ *                              preview (dry run), or settle their card attempts,
+ *                              expire their pages, detach their cards, delete
+ *                              their Stripe Customer, then erase_customer
+ *                              (deleted, or anonymised when money rows remain)
  *
  * All amounts are derived from the database (invoice balance, deposit due,
  * plan price, gift card offer); a client may only request a partial amount
@@ -43,6 +51,7 @@ import { createActionRouter, jsonAction } from "../_shared/actions.ts";
 import { createHandler } from "../_shared/http.ts";
 import { type Deps, services } from "./lib.ts";
 import { deleteShop, deleteShopInput } from "./shop_delete.ts";
+import { eraseCustomer, eraseCustomerInput } from "./erase_customer.ts";
 import { giftCardCheckout, giftCardCheckoutInput } from "./gift_cards.ts";
 import {
   membershipCancel,
@@ -60,6 +69,8 @@ import {
   bookingCancelInput,
   bookingDepositCheckout,
   bookingDepositCheckoutInput,
+  depositCheckoutCancel,
+  depositCheckoutCancelInput,
   invoiceCheckout,
   invoiceCheckoutCancel,
   invoiceCheckoutCancelInput,
@@ -105,6 +116,10 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     invoice_checkout_cancel: jsonAction(
       invoiceCheckoutCancelInput,
       (input, ctx) => invoiceCheckoutCancel(services(deps, ctx), input),
+    ),
+    deposit_checkout_cancel: jsonAction(
+      depositCheckoutCancelInput,
+      (input, ctx) => depositCheckoutCancel(services(deps, ctx), input),
     ),
     booking_deposit_checkout: jsonAction(
       bookingDepositCheckoutInput,
@@ -186,6 +201,10 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     delete_shop: jsonAction(
       deleteShopInput,
       (input, ctx) => deleteShop(services(deps, ctx), ctx.req, input),
+    ),
+    erase_customer: jsonAction(
+      eraseCustomerInput,
+      (input, ctx) => eraseCustomer(services(deps, ctx), ctx.req, input),
     ),
   });
   return createHandler(

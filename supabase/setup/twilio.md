@@ -217,7 +217,14 @@ RPC (`p_token` = the token; granted to `anon`; `true` = done, `false` =
 invalid link) and then confirms. Without that route the visible link and any
 mail client that opens the List-Unsubscribe URL in a browser land on the
 404 page, and only RFC 8058 one-click (Gmail/Yahoo) works; CAN-SPAM needs a
-working opt-out in every campaign email. The function cannot serve the page
+working opt-out in every campaign email. CAN-SPAM also requires the sender's
+valid postal address in every marketing email: the platform appends the
+shop's address (Settings -> Business profile) as a footer to every campaign
+and promotional follow-up email (0119). A campaign is refused (55000 HINT
+`postal_address_required`) while the shop has no address on file, and other
+marketing emails are not queued (follow-ups are logged as
+`no_postal_address`), so ask shops to fill in their address before they
+send marketing email. The function cannot serve the page
 itself: Supabase rewrites `text/html` answers to GET requests on the default
 `*.supabase.co` domain to `text/plain`.
 `messaging` is deployed with `verify_jwt = false`, so no extra setup is needed.

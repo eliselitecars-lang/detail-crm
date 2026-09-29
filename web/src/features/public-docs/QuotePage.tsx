@@ -1,5 +1,5 @@
 import { CircleX, FileCheck2, FileDown, Printer } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useParams, useSearchParams } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
@@ -23,6 +23,7 @@ import { formatCents } from '@/lib/money';
 import { publicPdfUrl } from '@/features/quotes/shared/pdf';
 import {
   PAID_POLL_ATTEMPTS,
+  useCancelQuoteDepositCheckout,
   usePublicQuote,
   useRespondQuote,
   type QuoteDocument,
@@ -71,6 +72,23 @@ function QuoteView({ token }: { token: string }) {
       onRefresh={() => void query.refetch()}
     />
   );
+}
+
+/**
+ * Back from Stripe with ?canceled=1: the customer left the deposit page of
+ * the job they scheduled here, yet it stays payable (and holds the booking)
+ * until Stripe expires it ~30-40 minutes later. Close it once, quietly, by
+ * the job's booking token (self_schedule.job_token); if that fails, the page
+ * still expires on its own.
+ */
+function useCloseAbandonedDeposit(token: string, jobToken: string | null, active: boolean) {
+  const { mutate } = useCancelQuoteDepositCheckout(token);
+  const done = useRef(false);
+  useEffect(() => {
+    if (!active || !jobToken || done.current) return;
+    done.current = true;
+    mutate(jobToken);
+  }, [active, jobToken, mutate]);
 }
 
 /** Lines of one option (or the shared ones, optionId null), split into required / optional. */
@@ -128,6 +146,7 @@ function QuoteDocumentView({
   const totals = totalsOption ?? quote;
   const pdfUrl = publicPdfUrl('quote', token);
   const schedule = doc.self_schedule;
+  useCloseAbandonedDeposit(token, schedule.job_token, canceledReturn && !paidReturn);
 
   const toggle = (id: string, on: boolean) =>
     setPicked((prev) => {

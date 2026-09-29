@@ -7,7 +7,7 @@ import {
   RefreshCw,
   XCircle,
 } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
@@ -46,6 +46,7 @@ import {
   DEPOSIT_POLL_ATTEMPTS,
   depositSettled,
   useCancelBooking,
+  useCancelDepositCheckout,
   useDepositCheckout,
   usePublicBooking,
   useShopProfile,
@@ -102,6 +103,23 @@ function ManageBookingView({ token }: { token: string }) {
 
 const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'no_show']);
 
+/**
+ * Back from Stripe with ?canceled=1: the customer left the deposit page on
+ * purpose, yet it stays payable (and holds the booking: the online cancel,
+ * cash and gift cards on its invoice wait for it) until Stripe expires it
+ * ~30-40 minutes later. Close it once, quietly: if that fails, the page
+ * still expires on its own and Cancel booking closes it too.
+ */
+function useCloseAbandonedDeposit(token: string, active: boolean) {
+  const { mutate } = useCancelDepositCheckout(token);
+  const done = useRef(false);
+  useEffect(() => {
+    if (!active || done.current) return;
+    done.current = true;
+    mutate();
+  }, [active, mutate]);
+}
+
 function BookingDocumentView({
   token,
   doc,
@@ -130,6 +148,7 @@ function BookingDocumentView({
       : addressLines(shop);
   const pendingForms = doc.forms.filter((f) => f.status === 'pending');
   useDepositPurchaseEvent(token, doc, paidReturn);
+  useCloseAbandonedDeposit(token, canceledReturn && !paidReturn);
   const tracking = useTrackingActive();
 
   const totalRows = [

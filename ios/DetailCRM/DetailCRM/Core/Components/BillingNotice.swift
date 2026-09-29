@@ -2,7 +2,9 @@
 //  BillingNotice.swift
 //  DetailCRM
 //
-//  The shop's subscription status line on Today and in More: the owner's
+//  The shop's subscription status line on Today and in More (and, when the
+//  shop is lapsed, on Memberships and the new-membership sheet, before a
+//  sale the server would refuse): the owner's
 //  trial end or a failing subscription payment, and for everyone the
 //  "creating new records is paused" notice while the subscription is
 //  inactive, with the reason when the trial ended or the shop never had a
@@ -32,6 +34,33 @@ struct BillingNoticeBanner: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The lapsed-shop notice on a screen that offers to create something the
+/// server will refuse while creating is paused (PT402), e.g. a new
+/// membership: shows only `.paused` / `.trialEnded` / `.noSubscription`
+/// (`Notice.pausesNewRecords`), with what it means on this screen. Text
+/// only, like the status line on Today and More.
+struct BillingPausedNotice: View {
+    let notice: ShopEntitlement.Notice?
+    let clock: ShopClock
+    /// One line on what is paused here ("New memberships are paused too.").
+    var detail: String?
+
+    var body: some View {
+        if let notice, notice.pausesNewRecords {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                BillingNoticeBanner(notice: notice, clock: clock)
+                if let detail {
+                    Text(detail)
+                        .font(Theme.Typography.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .cardStyle(padding: Theme.Spacing.md)
+        }
     }
 }
 

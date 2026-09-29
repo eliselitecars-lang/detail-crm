@@ -7,7 +7,11 @@
  *
  *   plans       {}                                  any signed-in user
  *               -> {billing_enabled, plans: [{id, name, description, amount_cents,
- *                   currency, interval, interval_count, max_members, features}]}
+ *                   currency, interval, interval_count, max_members, features}],
+ *                   trial_days, trial_available}
+ *               trial_days = the in-app trial of a person's FIRST shop (0 while
+ *               billing is off or no trial is set; once per person, 0120);
+ *               trial_available = whether a shop the caller creates now gets it.
  *   checkout    {shop_id, plan_id, request_nonce?}  owner only -> {url}
  *               Stripe Checkout (mode subscription) for the shop's platform
  *               customer (created and linked on first use). Stripe Tax only
@@ -202,20 +206,46 @@ function toPublicPlan(row: Record<string, unknown>): PublicPlan {
   };
 }
 
-/**
- * The flag is read with the service role (platform_config has no client
- * grants); the plans as the signed-in caller (public_billing_plans is granted
- * to anon and authenticated), so the database stays the enforcement point.
- */
-export async function listPlans(s: Services, caller: SupabaseClient): Promise<{
+/** What `plans` returns. */
+export interface PlansResult {
   billing_enabled: boolean;
   plans: PublicPlan[];
-}> {
-  if (!(await billingEnabled(s.admin))) return { billing_enabled: false, plans: [] };
-  const { data, error } = await caller.rpc("public_billing_plans");
-  if (error) throw dbFailure("public_billing_plans", error);
-  const rows = Array.isArray(data) ? data as Record<string, unknown>[] : [];
-  return { billing_enabled: true, plans: rows.map(toPublicPlan) };
+  /** The in-app trial of a person's first shop, in days (0: none; 0120 once per person). */
+  trial_days: number;
+  /** Whether a shop the caller creates now gets that trial. */
+  trial_available: boolean;
+}
+
+function wholeDays(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+/**
+ * The flag is read with the service role (platform_config has no client
+ * grants); the offer as the signed-in caller (public_billing_offer, 0131, is
+ * granted to anon and authenticated: its plans are public_billing_plans and
+ * trial_available is about the caller), so the database stays the
+ * enforcement point.
+ */
+export async function listPlans(s: Services, caller: SupabaseClient): Promise<PlansResult> {
+  if (!(await billingEnabled(s.admin))) {
+    return { billing_enabled: false, plans: [], trial_days: 0, trial_available: false };
+  }
+  const { data, error } = await caller.rpc("public_billing_offer");
+  if (error) throw dbFailure("public_billing_offer", error);
+  const offer = (data ?? {}) as {
+    plans?: unknown;
+    trial_days?: unknown;
+    trial_available?: unknown;
+  };
+  const rows = Array.isArray(offer.plans) ? offer.plans as Record<string, unknown>[] : [];
+  const trialDays = wholeDays(offer.trial_days);
+  return {
+    billing_enabled: true,
+    plans: rows.map(toPublicPlan),
+    trial_days: trialDays,
+    trial_available: trialDays > 0 && offer.trial_available === true,
+  };
 }
 
 async function checkoutContext(

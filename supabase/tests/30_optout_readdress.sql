@@ -48,8 +48,11 @@ select tests.ok(public.enqueue_template_message(tests.fx('job_a'), 'booking_conf
 -- the old addresses stay suppressed for everyone
 select tests.eq((select array_agg(address order by address) from public.comms_suppressions where shop_id = tests.fx('shop_a')),
                 array['+12055550101', 'alice@example.com'], 'the old addresses keep their opt-outs');
-insert into public.customers (shop_id, first_name, phone, email, sms_opt_in, email_opt_in)
-  values (tests.fx('shop_a'), 'Newcomer', '+12055550101', 'ALICE@example.com', true, true) returning tests.fx_set('c_new', id);
+select tests.throws($$insert into public.customers (shop_id, first_name, phone, email, sms_opt_in, email_opt_in)
+                      values (tests.fx('shop_a'), 'Newcomer', '+12055550101', 'ALICE@example.com', true, true)$$,
+                    '42501', 'staff cannot opt the unsubscribed email in (0126)');
+insert into public.customers (shop_id, first_name, phone, email, sms_opt_in)
+  values (tests.fx('shop_a'), 'Newcomer', '+12055550101', 'ALICE@example.com', true) returning tests.fx_set('c_new', id);
 select tests.ok((select sms_opted_out_at is not null and email_opted_out_at is not null and not sms_opt_in and not email_opt_in
                    from public.customers where id = tests.fx('c_new')),
                 'a customer with the old addresses is still opted out');

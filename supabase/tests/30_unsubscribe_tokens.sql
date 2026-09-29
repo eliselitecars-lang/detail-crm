@@ -109,7 +109,7 @@ select tests.ok((select unsubscribe_token is null and body like E'%\nReply STOP 
 
 -- preview shows where the link goes
 select tests.authenticate_as(tests.fx('u_manager_a'));
-select tests.ok((select body like E'%\n\nTo unsubscribe from these emails, visit: [unsubscribe link]'
+select tests.ok((select body like E'%\n\nTo unsubscribe from these emails, visit: [unsubscribe link]%'
                    from public.preview_template_message(tests.fx('job_a'), 'follow_up', 'email')),
                 'preview of a marketing email shows the unsubscribe footer');
 select tests.ok((select body not like '%unsubscribe%'
@@ -150,8 +150,8 @@ select tests.eq(public.public_unsubscribe(tests.fx('fu_mail')), false, 'the foll
 select tests.eq(public.public_unsubscribe(tests.fx('fu_token')), true, 'the follow-up''s unsubscribe link works');
 select tests.eq(public.public_unsubscribe(tests.fx('fu_token')), true, 'idempotent');
 select tests.as_superuser();
-select tests.ok((select email_opted_out_at = now() and not email_opt_in from public.customers where id = tests.fx('cust_a')),
-                'Alice unsubscribed');
+select tests.ok((select email_opted_out_at is null and not email_opt_in from public.customers where id = tests.fx('cust_a')),
+                'Alice unsubscribed from marketing (0126)');
 select tests.eq((select array_agg(address) from public.comms_suppressions where shop_id = tests.fx('shop_a') and channel = 'email'),
                 array['alice@example.com'], 'her address is suppressed in shop A');
 select tests.ok((select email_opted_out_at is null and email_opt_in from public.customers where id = tests.fx('cust_b_alice')),

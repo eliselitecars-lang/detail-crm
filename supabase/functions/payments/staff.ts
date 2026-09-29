@@ -835,7 +835,7 @@ function isGoneCard(err: unknown): boolean {
 }
 
 /** remove_customer_payment_method (0011, service role): also promotes the next default. */
-async function removeCardRow(
+export async function removeCardRow(
   s: Services,
   shopId: string,
   paymentMethodId: string,
@@ -894,7 +894,7 @@ export async function removeSavedCard(
 }
 
 /** Detaches the card from the customer's Stripe customer; never from another customer. */
-async function detachCard(
+export async function detachCard(
   s: Services,
   account: AccountRow,
   stripeCustomer: string | null,

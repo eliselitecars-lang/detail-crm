@@ -249,8 +249,8 @@ select tests.as_anon();
 select tests.eq(public.public_unsubscribe(tests.fx('mail_alice_token')), true, 'anyone with the link can unsubscribe');
 select tests.eq(public.public_unsubscribe(gen_random_uuid()), false, 'unknown token');
 select tests.as_superuser();
-select tests.ok((select email_opted_out_at = now() and not email_opt_in from public.customers where id = tests.fx('cust_a')),
-                'Alice unsubscribed from email');
+select tests.ok((select email_opted_out_at is null and not email_opt_in from public.customers where id = tests.fx('cust_a')),
+                'Alice unsubscribed from marketing email (0126: not from transactional email)');
 select tests.eq(public.public_unsubscribe((select id from public.messages where campaign_id = tests.fx('camp_stop'))), false,
                 'text messages are not unsubscribe tokens');
 select tests.authenticate_as(tests.fx('u_manager_a'));

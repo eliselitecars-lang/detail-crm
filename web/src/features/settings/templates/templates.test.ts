@@ -115,6 +115,15 @@ describe('template meta', () => {
     expect(names('job_report')).toContain('report_link');
     expect(names('booking_confirmed')).toContain('rebook_link');
     expect(names('gift_card_delivery')).not.toContain('balance');
+    // 0128: {{portal_link}} in every customer message (not the team invite).
+    for (const key of [
+      'membership_welcome',
+      'quote_reminder',
+      'lead_received',
+      'job_report',
+    ] as const)
+      expect(names(key)).toContain('portal_link');
+    expect(names('invite')).not.toContain('portal_link');
   });
 
   it('keeps several reminders nearest-first and stores one reminder the old way', () => {

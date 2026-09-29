@@ -17,7 +17,7 @@ import {
 } from '@/components/ui';
 import { useAuth } from '@/features/auth/authContext';
 import { FormAlert } from '@/features/auth/FormAlert';
-import { billingKeys, fetchShopEntitlement, useBillingPlans } from '@/features/billing/api';
+import { billingKeys, fetchShopEntitlement, useBillingOffer } from '@/features/billing/api';
 import {
   BILLING_PATH,
   newShopTrialText,
@@ -104,9 +104,13 @@ export default function OnboardingPage() {
       setStep((s) => Math.min(s + 1, 2));
   };
 
-  // Billing on = the platform offers plans ([] while billing is off).
-  const plans = useBillingPlans();
-  const billingOn = (plans.data?.length ?? 0) > 0;
+  // Billing on = the platform offers plans ([] while billing is off). The
+  // offer also says how long a first shop's trial runs and whether this
+  // person's next shop still gets it (once per person, 0120).
+  const offer = useBillingOffer(user?.id ?? null);
+  const billingOn = (offer.data?.plans.length ?? 0) > 0;
+  const trialDays = billingOn ? (offer.data?.trial_days ?? 0) : 0;
+  const trialAvailable = offer.data?.trial_available ?? null;
 
   /** The new shop's standing, or null (unknown: Settings > Billing shows it). */
   const newShopEntitlement = async (shopId: string): Promise<Entitlement | null> => {
@@ -225,6 +229,18 @@ export default function OnboardingPage() {
               pricing page
             </Link>
             . Your shop’s trial and subscription are under Settings › Billing.
+          </p>
+        )}
+        {trialDays > 0 && trialAvailable === true && (
+          <p className="text-ink mt-2 text-sm font-medium">
+            Your first shop gets a {trialDays}-day free trial, starting when you create it.
+          </p>
+        )}
+        {trialDays > 0 && trialAvailable === false && (
+          <p className="text-muted mt-2 text-sm">
+            The {trialDays}-day free trial is for your first shop only, and you’ve already had it:
+            this shop starts without one, so choose a plan under Settings › Billing to add customers
+            and jobs.
           </p>
         )}
         {memberships.length === 0 && (

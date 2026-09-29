@@ -124,18 +124,16 @@ describe('Settings > Billing', () => {
     supabase.functions.invoke.mockResolvedValueOnce({
       data: null,
       error: edgeHttpError(409, {
-        error: 'This shop already has a subscription. Use Manage billing to change or cancel it.',
+        error: 'This plan is no longer offered. Choose another plan.',
         code: 'conflict',
-        details: { reason: 'already_subscribed' },
+        details: { reason: 'plan_unavailable' },
       }),
     });
     const { user } = renderSettings('/app/settings/billing');
     const card = await screen.findByRole('article', { name: 'Plan A' });
     await user.click(within(card).getByRole('button', { name: /Choose Plan A/ }));
     expect(
-      await screen.findByText(
-        'This shop already has a subscription. Use Manage billing to change or cancel it.',
-      ),
+      await screen.findByText('This plan is no longer offered. Choose another plan.'),
     ).toBeVisible();
     expect(redirectTo).not.toHaveBeenCalled();
 
@@ -258,7 +256,18 @@ describe('Settings > Billing', () => {
     expect(builders.shop_billing?.length ?? 0).toBeGreaterThan(reads);
   });
 
-  it('back from Checkout: stops waiting after a bounded time with a clear message', async () => {
+  it('back from Checkout: offers no plans while Stripe’s confirmation is pending', async () => {
+    backend(entitlement());
+    renderSettings('/app/settings/billing?checkout=success');
+    expect(await screen.findByText('Confirming your subscription with Stripe…')).toBeVisible();
+    expect(await screen.findByText('Trial')).toBeVisible();
+    // The billing row (status none) has loaded; the plans stay hidden.
+    await waitFor(() => expect(builders.shop_billing?.length ?? 0).toBeGreaterThan(0));
+    expect(screen.queryByRole('heading', { name: 'Choose a plan' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose/ })).not.toBeInTheDocument();
+  });
+
+  it('back from Checkout: stops waiting after a bounded time, still without plans; Check again brings them back only if still not live', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       backend(entitlement());
@@ -268,11 +277,72 @@ describe('Settings > Billing', () => {
         await vi.advanceTimersByTimeAsync(61_000);
       });
       expect(await screen.findByText(/Stripe hasn’t confirmed the subscription yet/)).toBeVisible();
+      expect(
+        screen.getByText(/If it still doesn’t show after a few minutes, contact support\./),
+      ).toBeVisible();
+      expect(screen.queryByText(/before paying again/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Choose/ })).not.toBeInTheDocument();
+
+      // Still not live after one more read: the plans come back.
+      const reads = builders.shop_billing?.length ?? 0;
       await user.click(screen.getByRole('button', { name: 'Check again' }));
-      expect(await screen.findByText('Confirming your subscription with Stripe…')).toBeVisible();
+      expect(await screen.findByRole('button', { name: /Choose Plan A/ })).toBeVisible();
+      expect(builders.shop_billing?.length ?? 0).toBeGreaterThan(reads);
+      expect(screen.getByText(/Stripe still hasn’t confirmed a subscription/)).toBeVisible();
+      expect(screen.queryByRole('button', { name: 'Check again' })).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('back from Checkout: Check again confirms a subscription that landed and keeps the plans hidden', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      backend(entitlement());
+      const { user } = renderSettings('/app/settings/billing?checkout=success');
+      expect(await screen.findByText('Confirming your subscription with Stripe…')).toBeVisible();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(61_000);
+      });
+      expect(await screen.findByText(/Stripe hasn’t confirmed the subscription yet/)).toBeVisible();
+      setTableResult('shop_billing', {
+        data: [billingRow({ status: 'active', plan_id: PLAN.id })],
+      });
+      await user.click(screen.getByRole('button', { name: 'Check again' }));
+      expect(await screen.findByText('Thanks! Stripe confirmed your subscription.')).toBeVisible();
+      expect(screen.queryByRole('button', { name: /Choose/ })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a checkout refused as already subscribed waits for Stripe instead of just toasting', async () => {
+    backend(entitlement());
+    supabase.functions.invoke.mockResolvedValueOnce({
+      data: null,
+      error: edgeHttpError(409, {
+        error: 'This shop already has a subscription. Use Manage billing to change or cancel it.',
+        code: 'conflict',
+        details: { reason: 'already_subscribed' },
+      }),
+    });
+    const { user } = renderSettings('/app/settings/billing');
+    const card = await screen.findByRole('article', { name: 'Plan A' });
+    await user.click(within(card).getByRole('button', { name: /Choose Plan A/ }));
+    expect(
+      await screen.findByText('Stripe already has a subscription for this shop. Confirming it…'),
+    ).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Choose/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Use Manage billing to change or cancel it/)).not.toBeInTheDocument();
+    expect(redirectTo).not.toHaveBeenCalled();
+
+    // The webhook lands: the poll sees it.
+    setTableResult('shop_billing', {
+      data: [billingRow({ status: 'active', plan_id: PLAN.id })],
+    });
+    expect(
+      await screen.findByText('Thanks! Stripe confirmed your subscription.', {}, { timeout: 6000 }),
+    ).toBeVisible();
   });
 
   it('notes a cancelled checkout', async () => {

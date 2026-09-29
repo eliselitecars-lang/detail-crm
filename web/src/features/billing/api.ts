@@ -5,6 +5,7 @@
  *   shop_billing (select)         the subscription status (owner/admin/manager;
  *                                 explicit columns: the Stripe ids are not granted)
  *   public_billing_plans()        the plans ([] while billing is off; anon too)
+ *   public_billing_offer()        the plans + the first shop's trial length (anon too)
  *   billing function              checkout / portal (owner) -> a Stripe URL
  *
  * Nothing here writes billing state: Stripe's webhook does (billing-webhook).
@@ -20,12 +21,14 @@ import { supabase } from '@/lib/supabase';
 import { invokeEdge } from '@/features/quotes/shared/edge';
 import { redirectTo } from '@/features/settings/externalRedirect';
 import {
+  billingOfferSchema,
   CONFIRM_POLL_MS,
   entitlementSchema,
   isStripeUrl,
   planSchema,
   shopBillingSchema,
   subscriptionConfirmed,
+  type BillingOffer,
   type BillingPlan,
   type Entitlement,
   type ShopBilling,
@@ -36,6 +39,8 @@ export const billingKeys = {
   entitlement: (shopId: string) => [...billingKeys.all(shopId), 'entitlement'] as const,
   status: (shopId: string) => [...billingKeys.all(shopId), 'status'] as const,
   plans: () => publicKey('billing-plans', 'all'),
+  /** Per person (trial_available): keyed by the signed-in user id, or 'anon'. */
+  offer: (userId: string | null) => publicKey('billing-offer', userId ?? 'anon'),
 };
 
 function parse<S extends z.ZodType>(schema: S, value: unknown, what: string): z.output<S> {
@@ -118,6 +123,24 @@ export function useBillingPlans(enabled = true) {
     queryFn: async (): Promise<BillingPlan[]> => {
       const data = unwrap(await supabase.rpc('public_billing_plans'));
       return parse(z.array(planSchema), data ?? [], 'plan list');
+    },
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * The platform's offer: the plans ([] while billing is off) and the trial of
+ * a person's first shop (/pricing signed out, shop setup signed in: whether
+ * the caller's next shop still gets it). `userId` only keys the cache: the
+ * server answers for whoever is signed in.
+ */
+export function useBillingOffer(userId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: billingKeys.offer(userId),
+    enabled,
+    queryFn: async (): Promise<BillingOffer> => {
+      const data = unwrap(await supabase.rpc('public_billing_offer'));
+      return parse(billingOfferSchema, data ?? { plans: [] }, 'pricing offer');
     },
     staleTime: 5 * 60_000,
   });

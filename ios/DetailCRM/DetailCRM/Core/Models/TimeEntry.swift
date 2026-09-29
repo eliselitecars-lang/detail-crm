@@ -174,6 +174,30 @@ struct TimeEntry: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+extension TimeEntry {
+    /// The row as the job page's Time section counts it (DetailCore).
+    var jobTimeEntry: JobTime.Entry {
+        JobTime.Entry(id: id, memberID: memberID, clockIn: clockIn, clockOut: clockOut)
+    }
+}
+
+/// The job page's Time section: the job's entries (newest first) and the
+/// signed-in member's running job timer, wherever it runs.
+struct JobTimeSnapshot: Hashable, Sendable {
+    var entries: [TimeEntry]
+    /// nil when the member has no job timer running.
+    var openJobTimer: TimeEntry?
+
+    func summary(now: Date = Date()) -> JobTime.Summary {
+        JobTime.summary(of: entries.map(\.jobTimeEntry), now: now)
+    }
+
+    /// The clock action the member gets on `job`.
+    func action(jobID: UUID, jobStatus: JobStatus, isAssigned: Bool) -> JobTime.Action {
+        JobTime.action(jobID: jobID, jobStatus: jobStatus, isAssigned: isAssigned, openJobTimerJobID: openJobTimer?.jobID)
+    }
+}
+
 /// A job the signed-in member may clock in to today: jobs from the
 /// `calendar_events` feed that are assigned to them and still workable.
 // rpc: calendar_events

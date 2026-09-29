@@ -148,6 +148,9 @@ select tests.throws($$insert into public.payments (shop_id, customer_id, method,
                       values (tests.fx('shop_a'), tests.fx('cust_a'), 'cash', 'succeeded', 100)$$, '42501', 'owners cannot insert payments');
 select tests.throws($$update public.payments set amount_cents = 1 where invoice_id = tests.fx('inv')$$, '42501', 'owners cannot update payments');
 select tests.throws($$delete from public.payments where invoice_id = tests.fx('inv')$$, '42501', 'owners cannot delete payments');
+select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_a')$$), 0::bigint,
+                'owners cannot delete customers directly (0125)');
+select tests.as_service();
 select tests.throws($$delete from public.customers where id = tests.fx('cust_a')$$, '23503', 'a customer with payments cannot be deleted');
 
 -- ------------------------------------------------------------ refunds (Stripe, cumulative + monotonic)

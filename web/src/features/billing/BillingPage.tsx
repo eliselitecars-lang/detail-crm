@@ -15,6 +15,7 @@ import {
   type KeyValueItem,
 } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { EdgeFunctionError } from '@/features/quotes/shared/edge';
 import { SettingsSectionLayout } from '@/features/settings/components/SettingsSectionLayout';
 import { formatDate } from '@/lib/dates';
 import {
@@ -54,23 +55,32 @@ import { PlanCard } from './components/PlanCard';
  * (Stripe Customer Portal). Plans and prices come from the server only.
  * Checkout returns here with ?checkout=success (re-read until Stripe's
  * webhook has recorded the subscription, for at most CONFIRM_TIMEOUT_MS) or
- * ?checkout=cancelled.
+ * ?checkout=cancelled. While that confirmation is pending (and after it
+ * timed out, until Check again finds the shop still not subscribed) no plan
+ * is offered; a checkout answered 409 already_subscribed waits the same way.
  */
 export default function BillingPage() {
   const { shopId, role } = useShop();
   const owner = role === 'owner';
   const [params, setParams] = useSearchParams();
-  const [returned] = useState<CheckoutReturn | null>(() => checkoutReturn(params));
+  const [returned, setReturned] = useState<ReturnState | null>(() => checkoutReturn(params));
   const [waitStarted, setWaitStarted] = useState<number | null>(() =>
     returned === 'success' ? Date.now() : null,
   );
   const [timedOut, setTimedOut] = useState(false);
+  // "Check again" answered and Stripe still has not confirmed: stop holding
+  // the plans back (the server refuses a second checkout anyway).
+  const [released, setReleased] = useState(false);
+  const [checking, setChecking] = useState(false);
   const waiting = waitStarted !== null && !timedOut;
 
   const entitlement = useShopEntitlement(shopId);
   const status = useShopBillingStatus(shopId, true, { pollUntilConfirmed: waiting });
   const refresh = useRefreshBilling(shopId);
   const confirmed = status.data ? subscriptionConfirmed(status.data.status) : false;
+  // Back from a paid Checkout (or told the shop already subscribed) and not
+  // confirmed yet: no plan picker, only the notice (waiting, then Check again).
+  const confirming = returned !== null && returned !== 'cancelled' && !confirmed && !released;
 
   // Drop ?checkout= from the URL (a reload must not start waiting again).
   const returnParam = checkoutReturn(params);
@@ -97,12 +107,25 @@ export default function BillingPage() {
     return () => clearTimeout(timer);
   }, [waiting, confirmed, waitStarted]);
   // Once Stripe's confirmation is recorded, re-read the standing (plan, dates).
-  const confirmedNow = returned === 'success' && confirmed;
+  const confirmedNow = returned !== null && returned !== 'cancelled' && confirmed;
   useEffect(() => {
     if (confirmedNow) void refresh();
   }, [confirmedNow, refresh]);
 
+  // One more read; if Stripe still hasn't confirmed, the plans come back.
   const checkAgain = () => {
+    setChecking(true);
+    void refresh().finally(() => {
+      setChecking(false);
+      setReleased(true);
+    });
+  };
+
+  // Checkout answered 409 already_subscribed: Stripe has a subscription the
+  // webhook hasn't recorded yet (or this page was stale). Wait for it.
+  const alreadySubscribed = () => {
+    setReturned('already_subscribed');
+    setReleased(false);
     setTimedOut(false);
     setWaitStarted(Date.now());
     void refresh();
@@ -115,6 +138,8 @@ export default function BillingPage() {
           returned={returned}
           confirmed={confirmed}
           timedOut={timedOut}
+          released={released}
+          checking={checking}
           onCheckAgain={checkAgain}
         />
       )}
@@ -147,6 +172,8 @@ export default function BillingPage() {
               entitlement={entitlement.data}
               status={status.data ?? null}
               statusLoading={status.isPending}
+              confirming={confirming}
+              onAlreadySubscribed={alreadySubscribed}
               statusError={
                 status.isError && status.data === undefined
                   ? {
@@ -168,15 +195,22 @@ export default function BillingPage() {
   );
 }
 
+/** Why the page waits for Stripe: back from Checkout, or checkout said already subscribed. */
+type ReturnState = CheckoutReturn | 'already_subscribed';
+
 function ReturnNotice({
   returned,
   confirmed,
   timedOut,
+  released,
+  checking,
   onCheckAgain,
 }: {
-  returned: CheckoutReturn;
+  returned: ReturnState;
   confirmed: boolean;
   timedOut: boolean;
+  released: boolean;
+  checking: boolean;
   onCheckAgain: () => void;
 }) {
   const base = 'rounded-card border px-3 py-2 text-sm';
@@ -198,6 +232,14 @@ function ReturnNotice({
       </p>
     );
   }
+  if (released) {
+    return (
+      <p role="status" className={`${base} border-warning/30 bg-warning-soft text-warning-ink`}>
+        Stripe still hasn’t confirmed a subscription for this shop. If you paid, it can take a few
+        minutes to show here; if it still doesn’t show after a few minutes, contact support.
+      </p>
+    );
+  }
   if (timedOut) {
     return (
       <div
@@ -206,10 +248,9 @@ function ReturnNotice({
       >
         <p className="min-w-0 flex-1">
           Stripe hasn’t confirmed the subscription yet. It usually takes a few seconds, but can take
-          longer. Check again in a minute; if it still doesn’t show, contact support before paying
-          again.
+          longer. If it still doesn’t show after a few minutes, contact support.
         </p>
-        <Button size="sm" variant="secondary" onClick={onCheckAgain}>
+        <Button size="sm" variant="secondary" loading={checking} onClick={onCheckAgain}>
           Check again
         </Button>
       </div>
@@ -221,7 +262,9 @@ function ReturnNotice({
       className={`${base} border-primary/25 bg-primary-soft text-primary-ink flex items-center gap-2`}
     >
       <Spinner className="shrink-0" />
-      Confirming your subscription with Stripe…
+      {returned === 'already_subscribed'
+        ? 'Stripe already has a subscription for this shop. Confirming it…'
+        : 'Confirming your subscription with Stripe…'}
     </p>
   );
 }
@@ -313,11 +356,16 @@ function OwnerBilling({
   entitlement,
   status,
   statusLoading,
+  confirming,
+  onAlreadySubscribed,
   statusError,
 }: {
   entitlement: Entitlement;
   status: ShopBilling | null;
   statusLoading: boolean;
+  /** Waiting for (or timed out waiting for) Stripe's confirmation: no plans. */
+  confirming: boolean;
+  onAlreadySubscribed: () => void;
   statusError: StatusError | null;
 }) {
   const { shopId } = useShop();
@@ -379,7 +427,15 @@ function OwnerBilling({
           />
         </Card>
       ) : (
-        !statusLoading && !live && <PlanPicker entitlement={entitlement} status={status} />
+        !statusLoading &&
+        !live &&
+        !confirming && (
+          <PlanPicker
+            entitlement={entitlement}
+            status={status}
+            onAlreadySubscribed={onAlreadySubscribed}
+          />
+        )
       )}
     </>
   );
@@ -388,9 +444,11 @@ function OwnerBilling({
 function PlanPicker({
   entitlement,
   status,
+  onAlreadySubscribed,
 }: {
   entitlement: Entitlement;
   status: ShopBilling | null;
+  onAlreadySubscribed: () => void;
 }) {
   const { shopId } = useShop();
   const toast = useToast();
@@ -402,11 +460,15 @@ function PlanPicker({
   const choose = (plan: BillingPlan) => {
     setPending(plan.id);
     checkout.mutate(plan.id, {
-      // The server's own sentence (e.g. already subscribed, a plan no longer
-      // offered, the billing account just set up by another request: try
+      // Already subscribed (paid, the webhook not in yet): wait for it.
+      // Otherwise the server's own sentence (e.g. a plan no longer offered, the billing account just set up by another request: try
       // again). Re-read the plans and the standing it may have changed.
       onError: (error) => {
         setPending(null);
+        if (error instanceof EdgeFunctionError && error.reason === 'already_subscribed') {
+          onAlreadySubscribed();
+          return;
+        }
         toast.error(error);
         void plans.refetch();
         void refresh();

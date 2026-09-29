@@ -256,8 +256,8 @@ insert into public.blocked_times (shop_id, kind, title, reason, customer_id, sta
           tests.fx('cust_priv'), '2025-06-03 16:00Z', '2025-06-03 16:30Z') returning tests.fx_set('ev_priv', id);
 select tests.authenticate_as(tests.fx('u_tech_a'));
 select tests.fx_set('tok_priv', (public.create_calendar_feed(tests.fx('shop_a')) ->> 'token')::uuid);
-select tests.authenticate_as(tests.fx('u_owner_a'));
-select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_priv')$$), 1::bigint,
+select tests.as_service();   -- 0125: the payments edge's erase_customer
+select tests.eq(public.erase_customer(tests.fx('shop_a'), tests.fx('cust_priv'), tests.fx('u_owner_a')) ->> 'mode', 'deleted',
                 'the customer is deleted (the event stays, unlinked)');
 select tests.as_service();
 select tests.ok((select not exists (select 1 from jsonb_array_elements(public.calendar_feed_events(tests.fx('tok_priv'),

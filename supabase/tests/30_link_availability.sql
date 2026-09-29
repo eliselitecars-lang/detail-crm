@@ -111,7 +111,7 @@ select tests.fx_set('m', public.enqueue_customer_template(tests.fx('shop_a'), te
 select tests.ok((select body not like '%/book/shop-a%' from public.messages where id = tests.fx('m')),
                 'customers are not sent a "book here" link to a booking page that is turned off');
 select tests.eq((select body from public.messages where id = tests.fx('m')),
-                E'Hi Alice,\n\nWelcome to your Shop A membership! We are glad to have you.\n\nQuestions? Call us at (205) 555-0199.\n\nShop A',
+                E'Hi Alice,\n\nWelcome to your Shop A membership! We are glad to have you.\n\nManage or cancel your membership any time in your account: https://app.example.test/portal?shop=shop-a\n\nQuestions? Call us at (205) 555-0199.\n\nShop A',
                 'the welcome still goes out, without the booking line');
 
 -- the follow-up: the SMS is nothing but the booking call, so it is not sent; the email goes without it

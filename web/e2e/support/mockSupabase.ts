@@ -51,6 +51,11 @@ export interface MockBackendOptions {
   rpc?: Record<string, Json | MockReply | Handler>;
   /** Exact counts for `HEAD` count queries, by table. */
   counts?: Record<string, number>;
+  /**
+   * Exact totals for `GET` reads asking `Prefer: count=exact`, by table: the
+   * answer's Content-Range carries the request's offset and this total.
+   */
+  exactCounts?: Record<string, number>;
   /** Users that may sign in with password (any password is accepted). */
   accounts?: MockUser[];
   /**
@@ -215,6 +220,7 @@ export async function mockSupabase(page: Page, options: MockBackendOptions = {})
     tables = {},
     rpc = {},
     counts = {},
+    exactCounts = {},
     accounts = [],
     functions = {},
     storage,
@@ -289,8 +295,19 @@ export async function mockSupabase(page: Page, options: MockBackendOptions = {})
         ? json(route, 406, { code: 'PGRST116', message: 'no rows' })
         : json(route, 200, first);
     }
+    const total =
+      method === 'GET' && (headers['prefer'] ?? '').includes('count=exact')
+        ? exactCounts[table]
+        : undefined;
+    const offset = Number(url.searchParams.get('offset') ?? 0);
+    const length = Array.isArray(rows) ? rows.length : 1;
     return json(route, method === 'POST' ? 201 : 200, rows, {
-      'content-range': `0-${Array.isArray(rows) ? rows.length - 1 : 0}/*`,
+      'content-range':
+        total === undefined
+          ? `0-${Array.isArray(rows) ? rows.length - 1 : 0}/*`
+          : length === 0
+            ? `*/${total}`
+            : `${offset}-${offset + length - 1}/${total}`,
     });
   });
 

@@ -6,7 +6,7 @@
  * public_cancel_booking), 0053 (public_booking_slots, public_booking_link),
  * 0062 (public_validate_coupon), 0075 (public_booking_documents), 0088
  * (public_booking_questions, tracking ids) plus the payments
- * (booking_deposit_checkout, booking_cancel) and public-media
+ * (booking_deposit_checkout, deposit_checkout_cancel, booking_cancel) and public-media
  * (booking_documents) edge functions. Prices, totals, taxes and deposits are always the server's: the
  * wizard never sends or sums prices.
  */
@@ -16,7 +16,11 @@ import { unwrap } from '@/lib/db';
 import { edgeFunctionError, toAppError } from '@/lib/errors';
 import { publicKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
-import { createCheckout, navigation } from '@/features/public-docs/shared/checkout';
+import {
+  cancelDepositCheckout,
+  createCheckout,
+  navigation,
+} from '@/features/public-docs/shared/checkout';
 import {
   parseDocument,
   publicLineSchema,
@@ -521,6 +525,19 @@ export function useDepositCheckout(token: string) {
       navigation.assign(session.url);
       return session;
     },
+  });
+}
+
+/**
+ * Back from Stripe with ?canceled=1: closes the booking's open deposit card
+ * page (payments deposit_checkout_cancel) instead of leaving the booking held
+ * until Stripe expires it, then reads the booking again.
+ */
+export function useCancelDepositCheckout(token: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => cancelDepositCheckout({ bookingToken: token }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: bookingKeys.booking(token) }),
   });
 }
 

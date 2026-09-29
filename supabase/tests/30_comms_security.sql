@@ -111,7 +111,7 @@ insert into fn_matrix values
   ('public.comms_key_required_link(public.message_template_key)',                      false, true,  true),
   ('public.comms_render_parts(public.message_channel, text, text, jsonb, text)',       false, true,  true),
   ('public.comms_is_suppressed(uuid, public.message_channel, text)',                   false, false, true),
-  ('public.comms_suppress(uuid, public.message_channel, text, timestamptz)',           false, false, true),
+  ('public.comms_suppress(uuid, public.message_channel, text, timestamptz, text, text)', false, false, true),
   ('public.comms_unsuppress(uuid, public.message_channel, text)',                      false, false, true),
   ('public.comms_withdraw_reason(public.messages, timestamptz)',                       false, false, true),
   ('public.comms_customer_vars(uuid, uuid)',                                           false, false, true),
@@ -133,7 +133,7 @@ insert into fn_matrix values
   ('public.preview_campaign_audience(uuid, public.message_channel, jsonb)',            false, true,  true),
   ('public.launch_campaign(uuid, timestamptz)',                                        false, true,  true),
   ('public.cancel_campaign(uuid)',                                                     false, true,  true),
-  ('public.public_unsubscribe(uuid)',                                                  true,  true,  true);
+  ('public.public_unsubscribe(uuid, text)',                                            true,  true,  true);
 
 select tests.eq((select coalesce(string_agg(sig, ', ' order by sig), '') from fn_matrix
                   where has_function_privilege('anon', sig, 'execute') <> anon_ok), '', 'anon EXECUTE matrix');

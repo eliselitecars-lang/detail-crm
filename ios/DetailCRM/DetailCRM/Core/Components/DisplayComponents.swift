@@ -64,11 +64,19 @@ struct StatusBadge: View {
     let text: String
     let tone: StatusTone
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
         Text(text)
             .font(Theme.Typography.captionEmphasis)
             .foregroundStyle(Theme.color(for: tone))
-            .lineLimit(1)
+            // One line normally; at accessibility text sizes a long status
+            // ("Partially refunded", "Partially paid") wraps to a second
+            // line and may shrink a little instead of being cut off.
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+            .minimumScaleFactor(dynamicTypeSize.isAccessibilitySize ? 0.8 : 1)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, Theme.Spacing.sm)
             .padding(.vertical, Theme.Spacing.xxs + 1)
             .background(

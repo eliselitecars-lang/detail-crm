@@ -913,6 +913,68 @@ describe('DeleteShopPage', () => {
     ).toBeVisible();
   });
 
+  it('says the subscription is cancelled when one is live though billing is switched off', async () => {
+    setTableResult('memberships', { data: null, count: 0 });
+    setTableResult('shop_billing', {
+      data: [
+        {
+          plan_id: 'plan-a',
+          status: 'active',
+          trial_ends_at: null,
+          current_period_end: '2099-01-01T00:00:00Z',
+          cancel_at_period_end: false,
+        },
+      ],
+    });
+    supabase.rpc.mockImplementation(((fn: string) =>
+      createBuilder(
+        fn === 'shop_entitlement'
+          ? {
+              data: {
+                billing_enabled: false,
+                state: 'active',
+                reason: 'billing_off',
+                plan_name: null,
+                trial_ends_at: null,
+                current_period_end: null,
+                cancel_at_period_end: false,
+                max_members: null,
+                members_used: null,
+                can_write: true,
+                is_owner: true,
+              },
+            }
+          : { data: null },
+      )) as never);
+    const { user } = renderSettings('/app/settings/delete-shop');
+    expect(
+      await screen.findByText(/subscription is cancelled right away, so it isn’t charged again/),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /Delete shop/ }));
+    expect(
+      await screen.findByRole('alertdialog', { description: /and its subscription is cancelled/ }),
+    ).toBeVisible();
+  });
+
+  it('promises no subscription cancel when the shop has none that can bill', async () => {
+    setTableResult('memberships', { data: null, count: 0 });
+    setTableResult('shop_billing', {
+      data: [
+        {
+          plan_id: null,
+          status: 'canceled',
+          trial_ends_at: null,
+          current_period_end: '2020-01-01T00:00:00Z',
+          cancel_at_period_end: false,
+        },
+      ],
+    });
+    renderSettings('/app/settings/delete-shop');
+    expect(await screen.findByRole('button', { name: /Delete shop/ })).toBeVisible();
+    await waitFor(() => expect(builders.shop_billing?.length ?? 0).toBeGreaterThan(0));
+    expect(screen.queryByText(/subscription is cancelled/)).not.toBeInTheDocument();
+  });
+
   it('shows a retryable error when the membership check fails', async () => {
     setTableResult('memberships', { data: null, error: { message: 'boom', code: '500' } });
     renderSettings('/app/settings/delete-shop');

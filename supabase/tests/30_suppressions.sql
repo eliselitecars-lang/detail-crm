@@ -42,9 +42,19 @@ select tests.fx_set('msg1_token', (select unsubscribe_token from public.messages
 select tests.as_anon();
 select tests.ok(public.public_unsubscribe(tests.fx('msg1_token')), 'unsubscribe link accepted');
 select tests.as_superuser();
+select tests.ok((select bool_and(email_opted_out_at is null and not email_opt_in) and count(*) = 2
+                   from public.customers where id in (tests.fx('c_old'), tests.fx('c_new'))),
+                'every customer of the shop with the address stops getting marketing (0126: transactional email continues)');
+select tests.eq((select scope || '/' || source from public.comms_suppressions
+                  where shop_id = tests.fx('shop_a') and channel = 'email' and address = 'dup@example.com'), 'marketing/link',
+                'a marketing-only suppression from the link');
+-- the page's "also stop appointment and invoice email": a full opt-out
+select tests.as_anon();
+select tests.ok(public.public_unsubscribe_all(tests.fx('msg1_token')), 'unsubscribe from everything');
+select tests.as_superuser();
 select tests.ok((select bool_and(email_opted_out_at = now() and not email_opt_in) and count(*) = 2
                    from public.customers where id in (tests.fx('c_old'), tests.fx('c_new'))),
-                'every customer of the shop with the address is opted out');
+                'now every customer of the shop with the address is opted out of all email');
 select tests.eq((select array_agg(address) from public.comms_suppressions
                   where shop_id = tests.fx('shop_a') and channel = 'email'), array['dup@example.com'],
                 'the address is suppressed (normalized to lower case)');
@@ -62,8 +72,12 @@ select tests.eq((select count(*) from public.messages where campaign_id = tests.
 
 -- a duplicate created later (any case) starts out unsubscribed and is never an audience member
 select tests.authenticate_as(tests.fx('u_manager_a'));
-insert into public.customers (shop_id, first_name, email, email_opt_in)
-  values (tests.fx('shop_a'), 'Third', 'DUP@example.COM', true) returning tests.fx_set('c_third', id);
+select tests.throws_like($$insert into public.customers (shop_id, first_name, email, email_opt_in)
+                           values (tests.fx('shop_a'), 'Third', 'DUP@example.COM', true)$$,
+                         '42501', 'this address unsubscribed; only the customer can opt back in%',
+                         'staff cannot opt an unsubscribed address in (0126)');
+insert into public.customers (shop_id, first_name, email)
+  values (tests.fx('shop_a'), 'Third', 'DUP@example.COM') returning tests.fx_set('c_third', id);
 select tests.ok((select email_opted_out_at is not null and not email_opt_in from public.customers where id = tests.fx('c_third')),
                 'a new customer with a suppressed email is opted out on creation');
 select tests.eq(public.preview_campaign_audience(tests.fx('shop_a'), 'email', '{}'), 1, 'audience still excludes the address');
@@ -132,7 +146,9 @@ select tests.ok((select status = 'cancelled' and error like '%opted out%' from p
 select tests.authenticate_as(tests.fx('u_manager_a'));
 insert into public.customers (shop_id, first_name, phone) values (tests.fx('shop_a'), 'Temp', '+12055550144')
   returning tests.fx_set('c_tmp', id);
+select tests.as_service();   -- 0125: deletes go through erase_customer (service role)
 delete from public.customers where id = tests.fx('c_tmp');
+select tests.authenticate_as(tests.fx('u_manager_a'));
 insert into public.customers (shop_id, first_name, phone) values (tests.fx('shop_a'), 'Temp again', '+12055550144')
   returning tests.fx_set('c_tmp2', id);
 select tests.ok((select sms_opted_out_at is not null from public.customers where id = tests.fx('c_tmp2')),

@@ -271,7 +271,12 @@ requests, the governing law of your terms and (optionally) a postal address
 5. [ ] **iPhone build**: Actions -> *ios-testflight* -> Run workflow. The build
        shows up in App Store Connect -> TestFlight after Apple processes it;
        add yourself as an internal tester.
-6. [ ] **Twilio numbers** for the first shop (1.3, `twilio.md`).
+6. [ ] **Twilio numbers** for the first shop (1.3, `twilio.md`). When a
+       shop is deleted later, its self-serve numbers are released
+       automatically; numbers you bound by hand are not: they appear on the
+       daily `release_worklist` (`sms_numbers_awaiting_release` in the
+       `sms-provisioning` logs) for you to release or give to another shop
+       (`supabase/setup/twilio.md`).
 7. [ ] **Billing** (optional, later): [BILLING.md](BILLING.md) section 5.
        Until `BILLING_ENABLED` is `true` every shop can use everything for
        free. In short, in this order:
@@ -336,7 +341,9 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       `<APP_BASE_URL>/privacy` and `<APP_BASE_URL>/terms` (no sign-in), and
       links them under the sign-in and sign-up pages, in the footer of the
       public booking, quote, invoice, form and portal pages, on the web
-      Your account page and in the iPhone app (More -> Your account).
+      Your account page, and in the iPhone app on Create account, Sign in,
+      the shop picker, Create shop and Join a team, and under More -> Your
+      account.
       **Have your lawyer review both texts before launch**: they describe
       what this code does (wording in `web/src/features/legal/content.tsx`),
       but they are not legal advice and the legal choices in them (liability
@@ -356,14 +363,22 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
 - [ ] **Privacy policy URL** in App Store Connect (App Information -> Privacy
       Policy URL): `<APP_BASE_URL>/privacy`, e.g.
       `https://app.yourdomain.com/privacy`.
-- [ ] **Demo account**: create a real shop yourself (e.g. "Review Demo
+- [ ] **Demo account**: sign up with a **fresh email address that never
+      had a free trial** (the trial is given once per person, by account and
+      by email, `+tag` and Gmail-dot variants included: an address that
+      already had one gets a shop without a trial, lapsed at once while
+      billing is on). Create a real shop with it (e.g. "Review Demo
       Detailing") with an owner login, a few services, a customer and a job,
-      and give the email/password in App Store Connect -> App Review
-      Information. Reviewers can also sign up and create a shop on the phone
-      (Create account -> confirm the email -> Create my shop), but that shop
-      is empty, and with billing on it is a trial. The demo shop shows the
-      app with real records. The app only shows what you enter (no fake data
-      ships with it).
+      then **comp that shop forever** so it never lapses during a review
+      (`select public.billing_set_comp('<shop id>', 'infinity');`,
+      [BILLING.md](BILLING.md) section 7). Do not create extra shops from the
+      demo login: they would start without a trial. Give the email/password
+      in App Store Connect -> App Review Information. Reviewers can also sign
+      up and create a shop on the phone (Create account -> confirm the email
+      -> Create my shop), but that shop is empty, and with billing on it gets
+      the free trial only if that person never had one (once per person).
+      The demo shop shows the app with real records. The app only shows what
+      you enter (no fake data ships with it).
 - [ ] **Privacy "nutrition" labels** (App Store Connect -> App Privacy,
       [details](https://developer.apple.com/app-store/app-privacy-details/)).
       From what this build of the iPhone app actually handles:
@@ -451,8 +466,9 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       "Go to Billing" links and banners exist only on the web.
       Know the weak spot of that answer: the app lets anyone create an
       account and a shop (Create my shop, `create_shop`). With billing on,
-      that shop starts a trial, and after the trial it can only be paid for
-      on the web. A reviewer who tries this may read it as a subscription
+      that shop starts a trial unless that person already had one (the trial
+      is once per person; then the shop starts lapsed), and after the trial
+      it can only be paid for on the web. A reviewer who tries this may read it as a subscription
       sold outside the app for an account made in the app (3.1.1 / 3.1.3(b)).
       Decide before you submit how you answer that: explain that the
       subscription is a business service bought by the shop on the web, and

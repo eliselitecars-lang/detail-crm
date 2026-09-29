@@ -57,10 +57,11 @@ function setup(
   categories: unknown[] = [{ id: 'cat-1', name: 'Car', sort: 1 }],
   /** While true, shop_team fails. */
   teamFails: () => boolean = () => false,
+  pricing: unknown = PRICING,
 ) {
   const rpc: Record<string, unknown> = {
     shop_team: TEAM,
-    price_services: PRICING,
+    price_services: pricing,
     job_series_preview: [
       { seq: 1, starts_at: '2026-09-28T14:00:00Z', ends_at: '2026-09-28T16:00:00Z' },
       { seq: 2, starts_at: '2026-10-12T14:00:00Z', ends_at: '2026-10-12T16:00:00Z' },
@@ -358,6 +359,64 @@ describe('NewJobPage', () => {
     );
     expect(JSON.stringify(series)).not.toContain('price');
     expect(builders.jobs).toBeUndefined();
+  });
+
+  it('locks the member discount on for a repeating job and prices the estimate with it', async () => {
+    const MEMBER_PRICING = {
+      ...PRICING,
+      memberships: [
+        {
+          membership_id: 'm-1',
+          plan_id: 'plan-1',
+          plan_name: 'Gold club',
+          discount_bps: 1000,
+          vehicle_id: null,
+        },
+      ],
+      suggested_discount_kind: 'percent',
+      suggested_discount_value: 1000,
+      totals: { subtotal_cents: 24000, discount_cents: 2400, tax_cents: 1890, total_cents: 23490 },
+    };
+    const { user, router } = setup(
+      '/app/jobs/new?start=2026-09-28T14:00:00.000Z&end=2026-09-28T16:00:00.000Z',
+      undefined,
+      undefined,
+      undefined,
+      MEMBER_PRICING,
+    );
+    await user.type(screen.getByRole('combobox', { name: /Customer/ }), 'Jane');
+    await user.click(await screen.findByRole('option', { name: /Jane Doe/ }));
+    await user.click(await screen.findByRole('radio', { name: /2021 Honda Civic/ }));
+    await user.click(await screen.findByRole('checkbox', { name: /Full detail/ }));
+
+    // A one-off job: the manager may turn it off.
+    const box = await screen.findByRole('checkbox', { name: /Apply member discount/ });
+    expect(box).toBeEnabled();
+    await user.click(box);
+    expect(box).not.toBeChecked();
+
+    await user.click(screen.getByRole('checkbox', { name: /Repeat this job/ }));
+    const locked = screen.getByRole('checkbox', { name: /Apply member discount/ });
+    expect(locked).toBeChecked();
+    expect(locked).toBeDisabled();
+    expect(locked).toHaveAccessibleDescription(
+      'A repeating job always gets the member discount: every visit is priced with it.',
+    );
+    expect(screen.getByText('$234.90')).toBeInTheDocument();
+    expect(screen.getByText(/with the member discount/)).toBeInTheDocument();
+
+    // Repeat off: the manager's own choice comes back; on again: locked.
+    await user.click(screen.getByRole('checkbox', { name: /Repeat this job/ }));
+    expect(screen.getByRole('checkbox', { name: /Apply member discount/ })).not.toBeChecked();
+    await user.click(screen.getByRole('checkbox', { name: /Repeat this job/ }));
+    expect(screen.getByRole('checkbox', { name: /Apply member discount/ })).toBeChecked();
+
+    await user.click(screen.getByRole('button', { name: 'Create repeating job' }));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/app/jobs/job-first'));
+    const series = (supabase.rpc.mock.calls as unknown[][]).find(
+      (c) => c[0] === 'create_job_series',
+    );
+    expect(JSON.stringify(series)).not.toContain('discount');
   });
 
   it('needs a service before a job can repeat', async () => {

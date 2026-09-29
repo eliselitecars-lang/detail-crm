@@ -27,6 +27,18 @@ function setup() {
   return { ...utils, switchShop };
 }
 
+const SOLO_PLAN = {
+  id: 'plan-1',
+  name: 'Solo',
+  description: null,
+  amount_cents: 4900,
+  currency: 'usd',
+  interval: 'month',
+  interval_count: 1,
+  max_members: 1,
+  features: [],
+};
+
 describe('OnboardingPage', () => {
   it('validates each step before moving on', async () => {
     const { user } = setup();
@@ -100,20 +112,12 @@ describe('OnboardingPage', () => {
   it('links the pricing page and tells the owner how long their trial runs when billing is on', async () => {
     const trialEnd = new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString();
     const calls = mockRpc({
-      public_billing_plans: {
-        data: [
-          {
-            id: 'plan-1',
-            name: 'Solo',
-            description: null,
-            amount_cents: 4900,
-            currency: 'usd',
-            interval: 'month',
-            interval_count: 1,
-            max_members: 1,
-            features: [],
-          },
-        ],
+      public_billing_offer: {
+        data: {
+          plans: [SOLO_PLAN],
+          trial_days: 14,
+          trial_available: true,
+        },
       },
       create_shop: { data: { id: 'shop-new', name: 'Glacier Detailing' } },
       replace_business_hours: { data: [] },
@@ -138,6 +142,9 @@ describe('OnboardingPage', () => {
       'href',
       '/pricing',
     );
+    expect(
+      screen.getByText('Your first shop gets a 14-day free trial, starting when you create it.'),
+    ).toBeInTheDocument();
     await user.type(screen.getByLabelText(/Shop name/), 'Glacier Detailing');
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await screen.findByRole('heading', { name: 'Contact & location' });
@@ -154,20 +161,12 @@ describe('OnboardingPage', () => {
 
   it('sends an owner whose trial was already used to Billing (a second shop starts without one)', async () => {
     mockRpc({
-      public_billing_plans: {
-        data: [
-          {
-            id: 'plan-1',
-            name: 'Solo',
-            description: null,
-            amount_cents: 4900,
-            currency: 'usd',
-            interval: 'month',
-            interval_count: 1,
-            max_members: 1,
-            features: [],
-          },
-        ],
+      public_billing_offer: {
+        data: {
+          plans: [SOLO_PLAN],
+          trial_days: 14,
+          trial_available: false,
+        },
       },
       create_shop: { data: { id: 'shop-new', name: 'Glacier Detailing' } },
       replace_business_hours: { data: [] },
@@ -197,6 +196,10 @@ describe('OnboardingPage', () => {
         { path: '/app/settings/billing', element: <p>Billing settings</p> },
       ],
     });
+    expect(
+      await screen.findByText(/The 14-day free trial is for your first shop only, and you’ve/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Your first shop gets a/)).not.toBeInTheDocument();
     await user.type(await screen.findByLabelText(/Shop name/), 'Glacier Detailing');
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await screen.findByRole('heading', { name: 'Contact & location' });
@@ -214,15 +217,27 @@ describe('OnboardingPage', () => {
   });
 
   it('shows no pricing link or trial while billing is off', async () => {
-    mockRpc({ public_billing_plans: { data: [] } });
+    mockRpc({
+      public_billing_offer: { data: { plans: [], trial_days: 0, trial_available: false } },
+    });
     setup();
     await screen.findByRole('heading', { name: 'Your business' });
     await waitFor(() =>
       expect(
-        (supabase.rpc.mock.calls as unknown[][]).some((call) => call[0] === 'public_billing_plans'),
+        (supabase.rpc.mock.calls as unknown[][]).some((call) => call[0] === 'public_billing_offer'),
       ).toBe(true),
     );
     expect(screen.queryByRole('link', { name: 'pricing page' })).toBeNull();
+    expect(screen.queryByText(/free trial/)).toBeNull();
+  });
+
+  it('states no trial when none is configured', async () => {
+    mockRpc({
+      public_billing_offer: { data: { plans: [SOLO_PLAN], trial_days: 0, trial_available: false } },
+    });
+    setup();
+    expect(await screen.findByRole('link', { name: 'pricing page' })).toBeInTheDocument();
+    expect(screen.queryByText(/free trial/)).toBeNull();
   });
 
   it('sends the user back to step 1 when the booking link is taken', async () => {

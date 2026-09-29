@@ -366,6 +366,27 @@ Deno.test("send: follow_up that mentions the vehicle needs a job (its {{vehicle}
   assertEquals(reworded.status, "sent");
 });
 
+Deno.test("send: {{portal_link}} is a customer-level variable (no job needed, 0128)", async () => {
+  const { db, handler } = setup();
+  useTemplate(
+    db,
+    "membership_welcome",
+    "sms",
+    "Hi {{customer_first_name}}, manage your membership any time: {{portal_link}}",
+  );
+  const out = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "sms",
+        template_key: "membership_welcome",
+      }),
+    ),
+  );
+  assertEquals(out.status, "sent");
+  assertEquals(db.requests.some((r) => r.target === "enqueue_customer_template"), true);
+});
+
 Deno.test("send: a review request is refused while the shop has no review link", async () => {
   const { db, handler } = setup();
   useTemplate(

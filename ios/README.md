@@ -126,7 +126,13 @@ ios/
   lists fetched with one extra row; id look-ups split into de-duplicated
   chunks of 100 to keep request URLs short) and `SideLoad` (an optional
   extra such as saved cards or a pay-link token whose failure is reported
-  to the screen, never silently turned into "none").
+  to the screen, never silently turned into "none"), `JobTime` (the job
+  page's Time section: totals, who is on the clock, and whether the
+  member gets "Clock in on this job", "Clock out" or "clocked in
+  elsewhere"), `PaymentApplication` (what a ledger payment pays, unapplied
+  money, what can be applied or refunded — the web's paymentFormat.ts) and
+  `BookingLink` (`WEB_APP_URL/booking/<token>` and the channels the link
+  can be sent on).
 
 ## Shared building blocks (jobs agent; other features use them read-only)
 
@@ -194,6 +200,14 @@ ios/
   as the web timesheet and `report_team`: a shift across Sunday night is
   split between the two weeks, and a shift left open from last week is
   listed (so a manager can close it) and counts from Monday.
+* **Time on the job page.** `JobTimeSection` (the web TimeCard) lists the
+  job's `time_entries` (`TimeClockService.jobEntries`, paged past the
+  1,000-row reply cap) with member, start, end, duration and the total,
+  says who is on the clock, and offers an assigned member "Clock in on
+  this job" / "Clock out" through the same geostamped `clock_in` /
+  `clock_out`. It stays live through `JobsRealtimeHub` `.timeEntries`;
+  a completed, cancelled or no-show job never offers "Clock in" and hides
+  the section when no time was recorded.
 * **Customer screen:** custom fields (`OpsCustomerCustomDataSection`),
   documents (`OpsCustomerDocumentsSection`), referral link
   (`OpsReferralCodeRow`). Managers and up also see "Web form requests"
@@ -239,7 +253,26 @@ ios/
   `PaymentOutcomeSpeech`): Apple's card screen has just closed, so the
   changed text alone isn't heard.
 * **Memberships** support weekly plans, visit limits (`Membership.Usage`,
-  `MoneyMembershipUsageRow`) and "Offer on the online join page".
+  `MoneyMembershipUsageRow`) and "Offer on the online join page". While
+  the shop is lapsed, Memberships and the new-membership sheet show the
+  paused notice (`BillingPausedNotice`, DetailCore
+  `Notice.pausesNewRecords`) and "Create membership" waits, since the
+  server refuses a new membership (PT402).
+* **Payments ledger** rows say what the money pays (invoice or job — tap
+  to open —, membership, or "Unapplied" with the server's note), and
+  "Unapplied only" filters like the web's `?unapplied=1`. Managers and
+  above get "Apply to invoice…" on unapplied money (`PaymentApplySheet`,
+  `PaymentService.applyToInvoice` → `apply_payment_to_invoice`, releasing
+  open card pay pages on 55000 `checkout_open` and trying once more);
+  owners and admins get "Refund…" on any received payment (the invoice
+  screen's `InvoiceRefundSheet`: Stripe-backed ones through `payments`
+  `refund`, manual ones through `refund_manual_payment`).
+* **Deposit due on the job page** (managers+, job still open):
+  `JobsDepositRequestRow` texts or emails the shop's "Booking confirmed"
+  message, which carries the booking link (`JobService.sendBookingLink`,
+  `messaging` `send` with `template_key` `booking_confirmed`), or copies
+  the link (`JobService.bookingLink`: `job_booking_token` +
+  `WEB_APP_URL/booking/<token>`).
 * **Save a card without charging** (customer screen, managers and above):
   `CustomerAddCardSheet` calls `payments` `setup_card` and opens Stripe's
   PaymentSheet in setup mode; the webhook stores the card and the sheet

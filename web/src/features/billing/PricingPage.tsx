@@ -2,20 +2,25 @@ import { Tags } from 'lucide-react';
 import { Link } from 'react-router';
 import { Logo } from '@/components/layout/Logo';
 import { PublicLayout } from '@/components/layout/PublicLayout';
-import { Card, EmptyState, ErrorState, LoadingState } from '@/components/ui';
-import { useBillingPlans } from './api';
+import { Badge, Card, EmptyState, ErrorState, LoadingState } from '@/components/ui';
+import { useBillingOffer } from './api';
 import { PlanCard } from './components/PlanCard';
+import { firstShopTrialLabel } from './model';
 
 const ctaClass =
   'rounded-control bg-primary text-primary-fg hover:bg-primary-hover focus-visible:outline-primary inline-flex h-10 items-center justify-center px-4 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2';
 
 /**
- * Public /pricing — the platform's plans (not a shop's), from
- * public_billing_plans() (anon; [] while billing is off). No plan, price or
- * trial is written here: without plans the page says pricing is coming soon.
+ * Public /pricing — the platform's plans (not a shop's) and the trial of a
+ * person's first shop, from public_billing_offer() (anon; no plans and no
+ * trial while billing is off). No plan, price or trial is written here:
+ * without plans the page says pricing is coming soon. The trial is once per
+ * person (0120), so it is offered "for your first shop"; trial_available
+ * (about the signed-in caller) is not used on this public page.
  */
 export default function PricingPage() {
-  const plans = useBillingPlans();
+  const offer = useBillingOffer(null);
+  const trial = firstShopTrialLabel(offer.data);
 
   return (
     <PublicLayout
@@ -37,20 +42,20 @@ export default function PricingPage() {
           </p>
         </header>
 
-        {plans.isPending ? (
+        {offer.isPending ? (
           <Card>
             <LoadingState label="Loading plans…" />
           </Card>
-        ) : plans.isError ? (
+        ) : offer.isError ? (
           <Card>
             <ErrorState
               title="Couldn’t load the plans"
-              error={plans.error}
-              onRetry={() => void plans.refetch()}
-              retrying={plans.isRefetching}
+              error={offer.error}
+              onRetry={() => void offer.refetch()}
+              retrying={offer.isRefetching}
             />
           </Card>
-        ) : plans.data.length === 0 ? (
+        ) : offer.data.plans.length === 0 ? (
           <Card>
             <EmptyState
               icon={<Tags aria-hidden="true" />}
@@ -65,8 +70,17 @@ export default function PricingPage() {
           </Card>
         ) : (
           <>
+            {trial && (
+              <p className="flex flex-wrap items-center gap-2 text-sm">
+                <Badge tone="info">Free trial</Badge>
+                <span className="text-ink font-medium">{trial}.</span>
+                <span className="text-muted">
+                  It starts when you create the shop; choose a plan before it ends.
+                </span>
+              </p>
+            )}
             <ul aria-label="Plans" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {plans.data.map((plan) => (
+              {offer.data.plans.map((plan) => (
                 <li key={plan.id}>
                   <PlanCard plan={plan} />
                 </li>

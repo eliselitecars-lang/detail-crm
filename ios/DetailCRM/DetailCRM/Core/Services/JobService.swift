@@ -548,12 +548,63 @@ enum JobService {
         channel: JobMessageChannel,
         nonce: String
     ) async throws -> JobMessageSendResult {
+        try await sendJobTemplate(shopID: shopID, jobID: jobID, templateKey: key.rawValue, channel: channel, nonce: nonce)
+    }
+
+    // MARK: - Booking link (deposit due)
+
+    /// The shop template that carries the customer's booking page link
+    /// (`{{booking_link}}`), where they pay a deposit that is due.
+    static let bookingLinkTemplateKey = "booking_confirmed"
+
+    /// Manager+: the customer's booking page (`WEB_APP_URL/booking/<token>`,
+    /// token from `job_booking_token`; a credential, so it is read on
+    /// demand and never kept). Throws when this build has no web app URL.
+    static func bookingLink(jobID: UUID) async throws -> URL {
+        let token: UUID = try await Supa.client
+            .rpc("job_booking_token", params: ["p_job_id": jobID.uuidString])
+            .execute()
+            .value
+        guard let url = BookingLink.url(token: token.uuidString.lowercased(), webAppBase: AppConfig.webAppURL) else {
+            throw AppError.message("The web app address isn't set in this build (WEB_APP_URL), so the booking link can't be made here. Send it as a text or email instead.")
+        }
+        return url
+    }
+
+    /// Manager+: sends the shop's "Booking confirmed" message, which carries
+    /// the booking page link, so the customer can pay the deposit due. The
+    /// server re-checks the role and the customer's consent for the channel;
+    /// `nonce` is one per attempt, reused on a retry, so a lost reply never
+    /// sends it twice.
+    static func sendBookingLink(
+        shopID: UUID,
+        jobID: UUID,
+        channel: JobMessageChannel,
+        nonce: String
+    ) async throws -> JobMessageSendResult {
+        try await sendJobTemplate(
+            shopID: shopID,
+            jobID: jobID,
+            templateKey: bookingLinkTemplateKey,
+            channel: channel,
+            nonce: nonce
+        )
+    }
+
+    /// `messaging` / `send` with a job template.
+    private static func sendJobTemplate(
+        shopID: UUID,
+        jobID: UUID,
+        templateKey: String,
+        channel: JobMessageChannel,
+        nonce: String
+    ) async throws -> JobMessageSendResult {
         let body = JobMessageSendBody(
             action: "send",
             shop_id: shopID.uuidString.lowercased(),
             job_id: jobID.uuidString.lowercased(),
             channel: channel.rawValue,
-            template_key: key.rawValue,
+            template_key: templateKey,
             request_nonce: nonce
         )
         let reply: JobMessageSendReply = try await EdgeFunctions.invoke("messaging", body: body)

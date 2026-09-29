@@ -8,6 +8,14 @@
 //  Bank debits and pay-later payments still clearing (`processing`) are
 //  listed on their own: they count once Stripe confirms them.
 //
+//  Each row says what the money pays: an invoice or job (tap to open), a
+//  membership, or nothing yet ("Unapplied": money kept on the customer,
+//  with the server's note on why). Managers and above can put unapplied
+//  money on one of the customer's open invoices ("Apply to invoice…");
+//  owners and admins can refund any received payment, membership and
+//  unapplied ones included ("Refund…"). "Unapplied only" matches the web
+//  ledger's `?unapplied=1`.
+//
 
 import SwiftUI
 import DetailCore
@@ -76,6 +84,20 @@ struct PaymentsLedgerRange: Hashable {
 struct PaymentsQueryKey: Hashable {
     var range: PaymentsLedgerRange
     var method: PaymentMethod?
+    var unappliedOnly = false
+}
+
+/// Row actions of the ledger.
+enum PaymentsSheet: Identifiable {
+    case apply(Payment)
+    case refund(Payment)
+
+    var id: String {
+        switch self {
+        case .apply(let payment): return "apply-" + payment.id.uuidString
+        case .refund(let payment): return "refund-" + payment.id.uuidString
+        }
+    }
 }
 
 struct PaymentsView: View {
@@ -87,6 +109,8 @@ struct PaymentsView: View {
     @State private var customFrom = Date()
     @State private var customTo = Date()
     @State private var method: PaymentMethod?
+    @State private var unappliedOnly = false
+    @State private var sheet: PaymentsSheet?
 
     var body: some View {
         Group {
@@ -102,6 +126,31 @@ struct PaymentsView: View {
         }
         .screenBackground()
         .navigationTitle("Payments")
+        .sheet(item: $sheet) { item in
+            sheetContent(item)
+        }
+    }
+
+    @ViewBuilder
+    private func sheetContent(_ item: PaymentsSheet) -> some View {
+        switch item {
+        case .apply(let payment):
+            PaymentApplySheet(payment: payment, customerName: customerName(payment)) {
+                await load()
+            }
+        case .refund(let payment):
+            InvoiceRefundSheet(payment: payment) {
+                await load()
+            }
+        }
+    }
+
+    private func customerName(_ payment: Payment) -> String {
+        state.value?.customers[payment.customerID]?.displayName ?? "Customer"
+    }
+
+    private var queryKey: PaymentsQueryKey {
+        PaymentsQueryKey(range: range, method: method, unappliedOnly: unappliedOnly)
     }
 
     private var range: PaymentsLedgerRange {
@@ -115,6 +164,7 @@ struct PaymentsView: View {
                 customFrom: $customFrom,
                 customTo: $customTo,
                 method: $method,
+                unappliedOnly: $unappliedOnly,
                 timeZone: appState.clock.timeZone
             )
             LoadStateView(state, loadingLabel: "Loading payments…", retry: { await load() }) { data in
@@ -123,12 +173,19 @@ struct PaymentsView: View {
                     rangeText: rangeText,
                     currencyCode: appState.currencyCode,
                     clock: appState.clock,
+                    unappliedOnly: unappliedOnly,
+                    actions: PaymentsRowActions(
+                        canApply: appState.can(.manageInvoices),
+                        canRefund: appState.can(.refundPayments),
+                        apply: { payment in sheet = .apply(payment) },
+                        refund: { payment in sheet = .refund(payment) }
+                    ),
                     onLoadMore: { await loadMore() }
                 )
             }
         }
         .refreshable { await load() }
-        .task(id: PaymentsQueryKey(range: range, method: method)) {
+        .task(id: queryKey) {
             await load()
         }
     }
@@ -148,6 +205,7 @@ struct PaymentsView: View {
         state.beginLoading()
         let current = range
         let selectedMethod = method
+        let onlyUnapplied = unappliedOnly
         let result = await LoadState<PaymentService.LedgerData>.result {
             try await PaymentService.ledger(
                 shopID: shopID,
@@ -155,7 +213,8 @@ struct PaymentsView: View {
                 end: current.end,
                 fromDay: current.fromDay,
                 toDay: current.toDay,
-                method: selectedMethod
+                method: selectedMethod,
+                unappliedOnly: onlyUnapplied
             )
         }
         if let message = result.errorMessage, state.value != nil {
@@ -167,17 +226,18 @@ struct PaymentsView: View {
     /// Appends the next page of older payments in the same range.
     private func loadMore() async {
         guard let shopID = try? appState.requireShopID(), let current = state.value, current.hasMore else { return }
-        let key = PaymentsQueryKey(range: range, method: method)
+        let key = queryKey
         do {
             let page = try await PaymentService.ledgerPage(
                 shopID: shopID,
                 start: key.range.start,
                 end: key.range.end,
                 method: key.method,
+                unappliedOnly: key.unappliedOnly,
                 offset: current.payments.count
             )
             // Ignore a page for a range or filter that changed meanwhile.
-            guard key == PaymentsQueryKey(range: range, method: method), let latest = state.value else { return }
+            guard key == queryKey, let latest = state.value else { return }
             state = .loaded(latest.appending(page))
         } catch {
             toasts.show(ErrorText.message(for: error), style: .error)
@@ -192,6 +252,7 @@ private struct PaymentsFilterBar: View {
     @Binding var customFrom: Date
     @Binding var customTo: Date
     @Binding var method: PaymentMethod?
+    @Binding var unappliedOnly: Bool
     let timeZone: TimeZone
 
     var body: some View {
@@ -221,29 +282,61 @@ private struct PaymentsFilterBar: View {
                 }
                 .environment(\.timeZone, timeZone)
             }
-            Menu {
-                Button("All methods") { method = nil }
-                ForEach(PaymentMethod.allCases, id: \.self) { option in
-                    Button(option.displayName) { method = option }
+            // Side by side when they fit; stacked at large text sizes.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: Theme.Spacing.md) {
+                    methodMenu
+                    Spacer(minLength: 0)
+                    unappliedChip
                 }
-            } label: {
-                HStack(spacing: Theme.Spacing.xs) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                        .accessibilityHidden(true)
-                    Text(method?.displayName ?? "All methods")
-                        .font(Theme.Typography.subheadline.weight(.semibold))
-                    Image(systemName: "chevron.down")
-                        .font(Theme.Typography.caption)
-                        .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    methodMenu
+                    unappliedChip
                 }
-                .foregroundStyle(Theme.glacier)
             }
-            .accessibilityLabel("Payment method: \(method?.displayName ?? "All methods")")
         }
         .padding(.horizontal, Theme.Spacing.gutter)
         .padding(.vertical, Theme.Spacing.sm)
         .background(Theme.background)
     }
+
+    private var unappliedChip: some View {
+        MoneyFilterChip(title: "Unapplied only", isSelected: unappliedOnly) {
+            unappliedOnly.toggle()
+        }
+        .accessibilityHint("Shows only received money that pays no invoice, job or membership")
+    }
+
+    private var methodMenu: some View {
+        Menu {
+            Button("All methods") { method = nil }
+            ForEach(PaymentMethod.allCases, id: \.self) { option in
+                Button(option.displayName) { method = option }
+            }
+        } label: {
+            HStack(spacing: Theme.Spacing.xs) {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .accessibilityHidden(true)
+                Text(method?.displayName ?? "All methods")
+                    .font(Theme.Typography.subheadline.weight(.semibold))
+                Image(systemName: "chevron.down")
+                    .font(Theme.Typography.caption)
+                    .accessibilityHidden(true)
+            }
+            .foregroundStyle(Theme.glacier)
+        }
+        .accessibilityLabel("Payment method: \(method?.displayName ?? "All methods")")
+    }
+}
+
+/// Who may do what on a ledger row, and how the screen opens it.
+struct PaymentsRowActions {
+    /// Managers+: put unapplied money on an invoice.
+    var canApply = false
+    /// Owners/admins: refund received money.
+    var canRefund = false
+    var apply: (Payment) -> Void = { _ in }
+    var refund: (Payment) -> Void = { _ in }
 }
 
 // MARK: - Content
@@ -253,6 +346,8 @@ private struct PaymentsLedgerContent: View {
     let rangeText: String
     let currencyCode: String
     let clock: ShopClock
+    let unappliedOnly: Bool
+    let actions: PaymentsRowActions
     let onLoadMore: () async -> Void
 
     var body: some View {
@@ -265,13 +360,7 @@ private struct PaymentsLedgerContent: View {
             if !data.processing.isEmpty {
                 Section {
                     ForEach(data.processing) { payment in
-                        PaymentsLedgerRow(
-                            payment: payment,
-                            customerName: data.customers[payment.customerID]?.displayName ?? "Customer",
-                            currencyCode: currencyCode,
-                            clock: clock
-                        )
-                        .themedRow()
+                        row(payment)
                     }
                 } header: {
                     Text("Still clearing")
@@ -281,19 +370,13 @@ private struct PaymentsLedgerContent: View {
             }
             Section {
                 if data.payments.isEmpty {
-                    Text("No payments received in this range.")
+                    Text(unappliedOnly ? "No unapplied money in this range." : "No payments received in this range.")
                         .font(Theme.Typography.subheadline)
                         .foregroundStyle(Theme.textSecondary)
                         .themedRow()
                 } else {
                     ForEach(data.payments) { payment in
-                        PaymentsLedgerRow(
-                            payment: payment,
-                            customerName: data.customers[payment.customerID]?.displayName ?? "Customer",
-                            currencyCode: currencyCode,
-                            clock: clock
-                        )
-                        .themedRow()
+                        row(payment)
                     }
                     if data.hasMore {
                         MoneyLoadMoreRow(shownCount: data.payments.count, noun: "payments", action: onLoadMore)
@@ -301,13 +384,26 @@ private struct PaymentsLedgerContent: View {
                     }
                 }
             } header: {
-                Text("Received")
+                Text(unappliedOnly ? "Unapplied money" : "Received")
             } footer: {
-                Text("Pending and failed card attempts show on each invoice. Refunds are counted against the payment they came from.")
+                Text(unappliedOnly
+                     ? "Received money that pays no invoice, job or membership. Apply it to one of the customer's invoices or refund it. The totals above cover every payment in the range."
+                     : "Pending and failed card attempts show on each invoice. Refunds are counted against the payment they came from.")
             }
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
+    }
+
+    private func row(_ payment: Payment) -> some View {
+        PaymentsLedgerRow(
+            payment: payment,
+            customerName: data.customers[payment.customerID]?.displayName ?? "Customer",
+            currencyCode: currencyCode,
+            clock: clock,
+            actions: actions
+        )
+        .themedRow()
     }
 }
 
@@ -341,24 +437,88 @@ private struct PaymentsLedgerRow: View {
     let customerName: String
     let currencyCode: String
     let clock: ShopClock
+    let actions: PaymentsRowActions
+
+    private var showsApply: Bool { actions.canApply && payment.canApplyToInvoice }
+    private var showsRefund: Bool { actions.canRefund && payment.isRefundable }
 
     var body: some View {
-        rowContent
+        if showsApply || showsRefund {
+            // The actions sit under the summary as their own buttons, so the
+            // summary is a plain link (a whole-row link would swallow them).
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                linkedSummary
+                AdaptiveButtonRow(spacing: Theme.Spacing.sm) {
+                    if showsApply {
+                        Button {
+                            actions.apply(payment)
+                        } label: {
+                            Label("Apply to invoice…", systemImage: "arrow.right.doc.on.clipboard")
+                        }
+                        .buttonStyle(.themeSecondaryCompact)
+                        .accessibilityLabel("Apply \(Money.format(cents: payment.applicableCents, currencyCode: currencyCode)) from \(customerName) to an invoice")
+                    }
+                    if showsRefund {
+                        Button {
+                            actions.refund(payment)
+                        } label: {
+                            Label("Refund…", systemImage: "arrow.uturn.backward")
+                        }
+                        .buttonStyle(.themeSecondaryCompact)
+                        .accessibilityLabel("Refund \(payment.methodLabel) payment of \(Money.format(cents: payment.amountCents, currencyCode: currencyCode)) from \(customerName)")
+                    }
+                }
+            }
+        } else {
+            rowContent
+        }
     }
 
+    /// The whole row opens the invoice or job it pays.
     @ViewBuilder
     private var rowContent: some View {
-        if let invoiceID = payment.invoiceID {
+        switch payment.target {
+        case .invoice(let invoiceID):
             NavigationLink(value: AppRoute.invoice(invoiceID)) {
                 rowBody
             }
-        } else if let jobID = payment.jobID {
+        case .job(let jobID):
             NavigationLink(value: AppRoute.job(jobID)) {
                 rowBody
             }
-        } else {
+        case .membership, .unapplied:
             rowBody
         }
+    }
+
+    /// The summary as its own link (with a chevron) above the actions.
+    @ViewBuilder
+    private var linkedSummary: some View {
+        switch payment.target {
+        case .invoice(let invoiceID):
+            NavigationLink(value: AppRoute.invoice(invoiceID)) {
+                chevronBody
+            }
+            .buttonStyle(.plain)
+        case .job(let jobID):
+            NavigationLink(value: AppRoute.job(jobID)) {
+                chevronBody
+            }
+            .buttonStyle(.plain)
+        case .membership, .unapplied:
+            rowBody
+        }
+    }
+
+    private var chevronBody: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            rowBody
+            Image(systemName: "chevron.right")
+                .font(Theme.Typography.footnote.weight(.semibold))
+                .foregroundStyle(Theme.textTertiary)
+                .accessibilityHidden(true)
+        }
+        .contentShape(Rectangle())
     }
 
     private var rowBody: some View {
@@ -374,6 +534,14 @@ private struct PaymentsLedgerRow: View {
                 Text(clock.dateTimeText(payment.displayDate))
                     .font(Theme.Typography.footnote)
                     .foregroundStyle(Theme.textSecondary)
+                targetLine
+                if let note = payment.note?.trimmedNonEmpty {
+                    Text(note)
+                        .font(Theme.Typography.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: Theme.Spacing.sm)
             VStack(alignment: .trailing, spacing: Theme.Spacing.xxs) {
@@ -395,5 +563,21 @@ private struct PaymentsLedgerRow: View {
         }
         .padding(.vertical, Theme.Spacing.xs)
         .accessibilityElement(children: .combine)
+    }
+
+    /// Money that pays no invoice, job or membership is flagged; a
+    /// membership payment says so (invoice and job rows open theirs).
+    @ViewBuilder
+    private var targetLine: some View {
+        switch payment.target {
+        case .unapplied:
+            StatusBadge(text: "Unapplied", tone: .warning)
+        case .membership:
+            Label("Membership", systemImage: "arrow.triangle.2.circlepath")
+                .font(Theme.Typography.footnote)
+                .foregroundStyle(Theme.textSecondary)
+        case .invoice, .job:
+            EmptyView()
+        }
     }
 }

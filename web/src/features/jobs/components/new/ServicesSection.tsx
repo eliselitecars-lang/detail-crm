@@ -33,7 +33,17 @@ export interface ServicesSectionProps {
   canPrice: boolean;
   applyMemberDiscount: boolean;
   onApplyMemberDiscount: (value: boolean) => void;
+  /**
+   * A repeating job: the server prices every visit with the member discount
+   * (create_job_series takes no discount choice), so the box shows checked
+   * and locked, and the estimate includes the discount.
+   */
+  repeating?: boolean;
 }
+
+/** Same sentence as the iPhone (DetailCore MemberDiscountChoice.repeatingNote). */
+export const REPEATING_MEMBER_DISCOUNT_NOTE =
+  'A repeating job always gets the member discount: every visit is priced with it.';
 
 export function ServicesSection({
   catalog,
@@ -43,6 +53,7 @@ export function ServicesSection({
   canPrice,
   applyMemberDiscount,
   onApplyMemberDiscount,
+  repeating = false,
 }: ServicesSectionProps) {
   const { currency } = useShop();
   const [search, setSearch] = useState('');
@@ -138,8 +149,13 @@ export function ServicesSection({
                 {suggested > 0 && (
                   <Checkbox
                     label={`Apply member discount (${formatBps(suggested)})`}
-                    description={pricing.data.memberships?.map((m) => m.plan_name).join(', ')}
-                    checked={applyMemberDiscount}
+                    description={
+                      repeating
+                        ? REPEATING_MEMBER_DISCOUNT_NOTE
+                        : pricing.data.memberships?.map((m) => m.plan_name).join(', ')
+                    }
+                    checked={repeating || applyMemberDiscount}
+                    disabled={repeating}
                     onChange={(e) => onApplyMemberDiscount(e.target.checked)}
                   />
                 )}

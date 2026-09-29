@@ -403,6 +403,7 @@ export default function NewJobPage() {
             canPrice={customer !== null && (categoryId !== '' || noSizes)}
             applyMemberDiscount={applyMemberDiscount}
             onApplyMemberDiscount={setApplyMemberDiscount}
+            repeating={repeating}
           />
           <SectionCard title="Schedule">
             <div className="flex flex-col gap-4">

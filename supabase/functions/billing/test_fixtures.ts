@@ -403,6 +403,8 @@ export interface BillingState {
   /** Owner email per shop (auth.users of the owner). */
   ownerEmails: Record<string, string | null>;
   shopNames: Record<string, string>;
+  /** Users already given the in-app trial (0120 billing_trial_grants; default none). */
+  trialUsedBy?: string[];
 }
 
 /** 0101 billing_checkout_context has_live_subscription / billing_apply_subscription v_live. */
@@ -574,7 +576,7 @@ export function installBillingRpcs(
     return count;
   });
 
-  db.onRpc("public_billing_plans", () => {
+  const publicPlans = () => {
     if (!enabled()) return [];
     return db.table("platform_plans")
       .filter((p) => p.active === true)
@@ -593,6 +595,21 @@ export function installBillingRpcs(
         max_members: p.max_members,
         features: p.features,
       }));
+  };
+  db.onRpc("public_billing_plans", () => publicPlans());
+  // 0131: the plans plus the trial of a person's first shop (once per person, 0120).
+  db.onRpc("public_billing_offer", (_a, { userId }) => {
+    const configured = Number(
+      db.table("platform_config").find((r) => r.key === "billing_trial_days")?.value ?? "0",
+    );
+    const days = enabled() ? configured : 0;
+    return {
+      plans: publicPlans(),
+      trial_days: days,
+      trial_available: userId === null
+        ? null
+        : days > 0 && !(state.trialUsedBy ?? []).includes(userId),
+    };
   });
 }
 
@@ -602,6 +619,10 @@ export function installBillingRpcs(
 
 export interface FixtureOptions {
   billingEnabled?: boolean;
+  /** platform_config billing_trial_days (default 14; null: not set). */
+  trialDays?: number | null;
+  /** Users already given the in-app trial (default: the owner, whose SHOP had it). */
+  trialUsedBy?: string[];
   /** shop_billing overrides for SHOP. */
   billing?: Partial<BillingRow>;
   plans?: Row[];
@@ -656,9 +677,12 @@ export function fixture(options: FixtureOptions = {}): Fixture {
         member("outsider", OTHER_SHOP, "owner"),
         member("inactiveOwner", SHOP, "owner", false),
       ],
-      platform_config: options.billingEnabled === false
-        ? []
-        : [{ key: "billing_enabled", value: "true" }],
+      platform_config: [
+        ...(options.billingEnabled === false ? [] : [{ key: "billing_enabled", value: "true" }]),
+        ...(options.trialDays === null
+          ? []
+          : [{ key: "billing_trial_days", value: String(options.trialDays ?? 14) }]),
+      ],
       platform_plans: options.plans ?? [
         planRow(),
         planRow({
@@ -691,6 +715,7 @@ export function fixture(options: FixtureOptions = {}): Fixture {
       [OTHER_SHOP]: "owner@other.example.com",
     },
     shopNames: { [SHOP]: "Shine Co", [OTHER_SHOP]: "Other Shop" },
+    trialUsedBy: options.trialUsedBy ?? [USERS.owner, USERS.outsider],
   };
   installBillingRpcs(db, state, () => NOW);
   const stripe = new FakePlatformStripe();

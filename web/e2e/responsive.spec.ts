@@ -115,7 +115,9 @@ test.describe('360px layouts', () => {
   };
 
   test('pricing page cards fit (signed out)', async ({ page }) => {
-    await mockSupabase(page, { rpc: { public_billing_plans: plans } });
+    await mockSupabase(page, {
+      rpc: { public_billing_offer: { plans, trial_days: 14, trial_available: null } },
+    });
     await page.goto('/pricing');
     await expect(page.getByRole('article', { name: plans[0]!.name })).toBeVisible();
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
@@ -123,7 +125,9 @@ test.describe('360px layouts', () => {
   });
 
   test('pricing coming soon fits (signed out)', async ({ page }) => {
-    await mockSupabase(page, { rpc: { public_billing_plans: [] } });
+    await mockSupabase(page, {
+      rpc: { public_billing_offer: { plans: [], trial_days: 0, trial_available: null } },
+    });
     await page.goto('/pricing');
     await expect(page.getByText('Pricing coming soon')).toBeVisible();
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);

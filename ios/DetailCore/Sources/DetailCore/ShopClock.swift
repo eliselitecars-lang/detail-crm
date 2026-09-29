@@ -80,6 +80,20 @@ public struct ShopClock: Sendable {
     /// `Calendar.firstWeekday` value for Monday: the start of a totals week.
     public static let totalsFirstWeekday = 2
 
+    /// Weekday numbers as `business_hours.weekday` stores them (0 = Sunday
+    /// … 6 = Saturday), in display order starting at `firstWeekday`
+    /// (`Calendar` numbering: 1 = Sunday, 2 = Monday; out-of-range values
+    /// are clamped).
+    public static func orderedWeekdayNumbers(firstWeekday: Int) -> [Int] {
+        let start = max(0, min(6, firstWeekday - 1))
+        return (0..<7).map { ($0 + start) % 7 }
+    }
+
+    /// The business-hours editor's order: Monday first, like the web's
+    /// BusinessHoursEditor ("Show Monday first"), whatever week the
+    /// calendar grid starts on.
+    public static let businessHoursWeekdays = orderedWeekdayNumbers(firstWeekday: totalsFirstWeekday)
+
     /// The shop-local week containing `date`, starting on `firstWeekday`.
     /// This is a *display* week (the calendar's week grid). For money and
     /// hours totals use `totalsWeekInterval(containing:)`.

@@ -79,18 +79,54 @@ Deno.test("plans: any signed-in user gets the active plans, never Stripe ids", a
     ]);
     assert(!JSON.stringify(body).includes("price_1"), "no Stripe price id");
     assert(!JSON.stringify(body).includes("prod_1"), "no Stripe product id");
-    // the plans are read as the caller (the RPC's client grant), not the service role
+    // the offer is read as the caller (the RPC's client grant), not the service role
     const rpc = f.db.requests.filter((r) =>
-      r.kind === "rpc" && r.target === "public_billing_plans"
+      r.kind === "rpc" && r.target === "public_billing_offer"
     );
     assertEquals(rpc.map((r) => [r.role, r.userId]), [["authenticated", USERS[who]]], who);
   }
 });
 
-Deno.test("plans: billing off answers billing_enabled false and no plans", async () => {
-  const f = fixture({ billingEnabled: false });
+Deno.test("plans: the trial of a person's first shop and whether the caller still gets it", async () => {
+  // 0131 public_billing_offer; the trial is once per person (0120): the owner
+  // had it on SHOP, the manager never owned a shop.
+  const f = fixture({ trialDays: 14 });
+  const owner = await responseJson<Record<string, unknown>>(
+    await f.call({ action: "plans" }, "owner"),
+  );
+  assertEquals([owner.trial_days, owner.trial_available], [14, false]);
+  const manager = await responseJson<Record<string, unknown>>(
+    await f.call({ action: "plans" }, "manager"),
+  );
+  assertEquals([manager.trial_days, manager.trial_available], [14, true]);
+  assertEquals(Object.keys(manager).sort(), [
+    "billing_enabled",
+    "plans",
+    "trial_available",
+    "trial_days",
+  ]);
+
+  // no trial configured (0 days, or never set): nobody gets one
+  for (const trialDays of [0, null]) {
+    const none = fixture({ trialDays });
+    const body = await responseJson<Record<string, unknown>>(
+      await none.call({ action: "plans" }, "manager"),
+    );
+    assertEquals([body.trial_days, body.trial_available], [0, false], String(trialDays));
+    assertEquals((body.plans as unknown[]).length, 2);
+  }
+});
+
+Deno.test("plans: billing off answers billing_enabled false, no plans and no trial", async () => {
+  const f = fixture({ billingEnabled: false, trialDays: 14 });
   const res = await f.call({ action: "plans" });
-  assertEquals(await responseJson(res), { billing_enabled: false, plans: [] });
+  assertEquals(await responseJson(res), {
+    billing_enabled: false,
+    plans: [],
+    trial_days: 0,
+    trial_available: false,
+  });
+  assertEquals(f.rpcCalls("public_billing_offer").length, 0);
   assertEquals(f.rpcCalls("public_billing_plans").length, 0);
 });
 
@@ -209,7 +245,7 @@ Deno.test("checkout: billing_link_customer 23505 — already linked elsewhere, o
 
 Deno.test("plans / checkout: platform_plans, platform_config and shop_billing are read only with the service role", async () => {
   // 0100: platform_plans has no client access at all; clients read plans
-  // through public_billing_plans() (granted to anon and authenticated).
+  // through public_billing_offer() (0131; granted to anon and authenticated).
   const f = fixture();
   assertEquals((await f.call({ action: "plans" }, "tech")).status, 200);
   assertEquals((await f.call(checkoutBody())).status, 200);
@@ -219,7 +255,7 @@ Deno.test("plans / checkout: platform_plans, platform_config and shop_billing ar
   assert(direct.length > 0);
   for (const r of direct) assertEquals(r.role, "service_role", r.target);
   assertEquals(
-    f.db.requests.filter((r) => r.target === "public_billing_plans").map((r) => r.role),
+    f.db.requests.filter((r) => r.target === "public_billing_offer").map((r) => r.role),
     ["authenticated"],
   );
 });

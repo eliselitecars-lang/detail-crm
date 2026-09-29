@@ -135,6 +135,7 @@ export const CAMPAIGN_PLACEHOLDERS: readonly { name: string; help: string }[] = 
   { name: 'shop_phone', help: 'Your shop phone' },
   { name: 'booking_page_link', help: 'Link to your online booking page' },
   { name: 'review_link', help: 'Your review link' },
+  { name: 'portal_link', help: 'Link to the client portal (visits, memberships, card)' },
   { name: 'unsubscribe_link', help: 'Email unsubscribe link (added automatically if missing)' },
 ];
 

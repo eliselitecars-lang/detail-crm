@@ -212,6 +212,47 @@ test.describe('customers', () => {
     await expect(page.getByText('No customers yet')).toHaveCount(0);
   });
 
+  test('a fleet customer’s jobs tab says how many exist and loads older ones', async ({ page }) => {
+    const job = (n: number) => ({
+      id: `40000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
+      number: 1000 - n,
+      status: 'completed',
+      scheduled_start: '2026-09-01T15:00:00Z',
+      scheduled_end: '2026-09-01T17:00:00Z',
+      vehicle_id: null,
+      total_cents: 10000,
+      created_at: '2026-09-01T15:00:00Z',
+    });
+    const all = Array.from({ length: 70 }, (_, i) => job(i));
+    const ranges: string[] = [];
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: [],
+        customers: byId([CUSTOMER]),
+        vehicles: [],
+        jobs: ({ url }) => {
+          const offset = Number(url.searchParams.get('offset') ?? 0);
+          const limit = Number(url.searchParams.get('limit') ?? all.length);
+          ranges.push(`${offset}+${limit}`);
+          return all.slice(offset, offset + limit);
+        },
+      },
+      exactCounts: { jobs: 70 },
+    });
+    await page.goto(`/app/customers/${CUSTOMER.id}`);
+    await page.getByRole('tab', { name: 'Jobs' }).click();
+    const table = page.getByRole('table', { name: 'Jobs' });
+    await expect(table.getByRole('link', { name: '#1000' }).first()).toBeVisible();
+    await expect(page.getByText('Showing the 50 most recent of 70 jobs.')).toBeVisible();
+    await page.getByRole('button', { name: 'Load 20 more' }).click();
+    await expect(page.getByText(/most recent of 70 jobs/)).toHaveCount(0);
+    await expect(table.getByRole('link', { name: '#931' }).first()).toBeAttached();
+    await expect(page.getByRole('button', { name: /Load \d+ more/ })).toHaveCount(0);
+    expect(ranges).toEqual(expect.arrayContaining(['0+50', '50+50']));
+  });
+
   test('owner creates a customer', async ({ page }) => {
     let inserted: unknown = null;
     await mockSupabase(page, {

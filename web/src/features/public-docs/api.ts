@@ -10,7 +10,7 @@ import { unwrap } from '@/lib/db';
 import { AppError, edgeFunctionError, isCheckoutOpenError, toAppError } from '@/lib/errors';
 import { publicKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
-import { createCheckout, navigation } from './shared/checkout';
+import { cancelDepositCheckout, createCheckout, navigation } from './shared/checkout';
 import {
   parseDocument,
   publicCustomerSchema,
@@ -334,6 +334,19 @@ export function useQuoteDepositCheckout(token: string) {
   });
 }
 
+/**
+ * Back from Stripe with ?canceled=1 on /q: closes the scheduled job's open
+ * deposit card page (payments deposit_checkout_cancel with the quote's
+ * self_schedule.job_token), then reads the quote again.
+ */
+export function useCancelQuoteDepositCheckout(token: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (jobToken: string) => cancelDepositCheckout({ bookingToken: jobToken }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: publicDocKeys.quote(token) }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Invoice
 // ---------------------------------------------------------------------------
@@ -499,6 +512,20 @@ export function useCancelInvoiceCheckout(token: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => cancelInvoiceCheckout(token),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: publicDocKeys.invoice(token) }),
+  });
+}
+
+/**
+ * payments `deposit_checkout_cancel` by invoice token: closes the open
+ * deposit card pages of the jobs this invoice bills (opened from the booking
+ * or quote link, which invoice_checkout_cancel leaves alone), then reads the
+ * invoice again.
+ */
+export function useCancelInvoiceDepositCheckout(token: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => cancelDepositCheckout({ invoiceToken: token }),
     onSettled: () => queryClient.invalidateQueries({ queryKey: publicDocKeys.invoice(token) }),
   });
 }

@@ -57,6 +57,8 @@ struct MembershipsView: View {
     @State private var statusFilter: MembershipStatus?
     @State private var search = ""
     @State private var activeSheet: MembershipsSheet?
+    /// A lapsed shop can't start new memberships (PT402): said up front.
+    @State private var billingNotice: ShopEntitlement.Notice?
 
     var body: some View {
         Group {
@@ -95,10 +97,20 @@ struct MembershipsView: View {
         .sheet(item: $activeSheet) { sheet in
             sheetContent(sheet)
         }
+        .billingNotice($billingNotice, shopID: appState.shop?.id)
     }
 
     private var content: some View {
         VStack(spacing: 0) {
+            if billingNotice?.pausesNewRecords == true {
+                BillingPausedNotice(
+                    notice: billingNotice,
+                    clock: appState.clock,
+                    detail: MembershipsView.pausedDetail
+                )
+                .padding(.horizontal, Theme.Spacing.gutter)
+                .padding(.top, Theme.Spacing.sm)
+            }
             Picker("Show", selection: $tab) {
                 ForEach(MembershipsTab.allCases) { option in
                     Text(option.title).tag(option)
@@ -114,6 +126,9 @@ struct MembershipsView: View {
             }
         }
     }
+
+    /// What a lapsed shop means on this screen.
+    static let pausedDetail = "Starting new memberships is paused too."
 
     // MARK: Members
 

@@ -318,9 +318,12 @@ enum ShopSettingsHours {
 
     /// Weekdays in display order starting at `firstWeekday` (1 = Sunday).
     static func orderedWeekdays(firstWeekday: Int = 1) -> [Int] {
-        let start = max(0, min(6, firstWeekday - 1))
-        return (0..<7).map { ($0 + start) % 7 }
+        ShopClock.orderedWeekdayNumbers(firstWeekday: firstWeekday)
     }
+
+    /// The hours editor lists Monday first, like the web's
+    /// BusinessHoursEditor, whatever week the calendar grid starts on.
+    static var editorWeekdays: [Int] { ShopClock.businessHoursWeekdays }
 
     /// Selectable minutes since midnight: 0, 15, … 1440 (24:00).
     static let quarterHourOptions: [Int] = Array(stride(from: 0, through: 24 * 60, by: 15))

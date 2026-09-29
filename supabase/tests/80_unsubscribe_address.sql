@@ -50,15 +50,15 @@ select tests.as_anon();
 select tests.ok(public.public_unsubscribe(tests.fx('tok')), 'the old address unsubscribes');
 select tests.ok(public.public_unsubscribe(tests.fx('tok')), 'idempotent');
 select tests.reset();
-select tests.ok(public.comms_is_suppressed(tests.fx('shop_a'), 'email', 'old-address@example.com'),
-                'the address the email went to is suppressed');
+select tests.ok(public.comms_is_marketing_suppressed(tests.fx('shop_a'), 'email', 'old-address@example.com'),
+                'the address the email went to is suppressed (0126: from marketing)');
 select tests.eq((select count(*) from public.comms_suppressions
                   where shop_id = tests.fx('shop_a') and address = 'current@example.com'), 0::bigint,
                 'an address that never unsubscribed is not suppressed');
 select tests.ok((select email_opted_out_at is null from public.customers where id = tests.fx('surv')),
                 'the survivor is not opted out by a link sent to old-address@example.com');
-select tests.ok((select email_opted_out_at is not null and not email_opt_in from public.customers where id = tests.fx('other_old')),
-                'a record whose current email is the link''s address is opted out (case-insensitive)');
+select tests.ok((select email_opted_out_at is null and not email_opt_in from public.customers where id = tests.fx('other_old')),
+                'a record whose current email is the link''s address loses marketing consent (case-insensitive)');
 select tests.ok((select email_opted_out_at is null from public.customers where id = tests.fx('surv_b'))
                 and not public.comms_is_suppressed(tests.fx('shop_b'), 'email', 'current@example.com')
                 and not public.comms_is_suppressed(tests.fx('shop_b'), 'email', 'old-address@example.com'),
@@ -76,8 +76,8 @@ select tests.reset();
 
 -- moving the survivor back to the unsubscribed address opts them out again
 update public.customers set email = 'old-address@example.com' where id = tests.fx('surv');
-select tests.ok((select email_opted_out_at is not null and not email_opt_in from public.customers where id = tests.fx('surv')),
-                'the unsubscribed address carries its opt-out to whoever uses it');
+select tests.ok((select email_opted_out_at is null and not email_opt_in from public.customers where id = tests.fx('surv')),
+                'the unsubscribed address carries its marketing opt-out to whoever uses it (0126: transactional email continues)');
 update public.customers set email = 'current@example.com' where id = tests.fx('surv');
 select tests.ok((select email_opted_out_at is null from public.customers where id = tests.fx('surv')),
                 'and moving away again drops it without suppressing the new address');
@@ -96,7 +96,7 @@ update public.customers set email = 'mover-new@example.com' where id = tests.fx(
 select tests.as_anon();
 select tests.ok(public.public_unsubscribe(tests.fx('tok2')), 'the old address unsubscribes after the change');
 select tests.reset();
-select tests.ok(public.comms_is_suppressed(tests.fx('shop_a'), 'email', 'mover-old@example.com'), 'old address suppressed');
+select tests.ok(public.comms_is_marketing_suppressed(tests.fx('shop_a'), 'email', 'mover-old@example.com'), 'old address suppressed');
 select tests.ok(not public.comms_is_suppressed(tests.fx('shop_a'), 'email', 'mover-new@example.com'), 'new address not suppressed');
 select tests.ok((select email_opted_out_at is null from public.customers where id = tests.fx('mover')),
                 'the customer at the new address is not opted out');
@@ -129,8 +129,8 @@ select tests.fx_set('tok4', (select unsubscribe_token from public.messages where
 select tests.as_anon();
 select tests.ok(public.public_unsubscribe(tests.fx('tok4')), 'unsubscribes');
 select tests.reset();
-select tests.ok((select email_opted_out_at is not null and not email_opt_in from public.customers where id = tests.fx('stayer')),
-                'a customer still at the link''s address is opted out');
+select tests.ok((select email_opted_out_at is null and not email_opt_in from public.customers where id = tests.fx('stayer')),
+                'a customer still at the link''s address loses marketing consent (0126: not transactional email)');
 select tests.eq((select status::text from public.messages where id = tests.fx('mkt4')), 'cancelled',
                 'and the queued email to it is withdrawn');
 

@@ -6,6 +6,7 @@ import { BadgeCheck, Briefcase, FileText, Receipt } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import {
+  Button,
   Card,
   EmptyState,
   ErrorState,
@@ -17,22 +18,28 @@ import {
 import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import { formatDate, formatDateTime, formatLocalDate } from '@/lib/dates';
+import { toAppError } from '@/lib/errors';
 import { formatCents } from '@/lib/money';
 import {
+  type HistoryList,
   useCustomerInvoices,
   useCustomerJobs,
   useCustomerMemberships,
   useCustomerQuotes,
   useCustomerVehicles,
 } from '../api';
-import { vehicleLabel } from '../model';
+import { loadMoreLabel, truncationNotice, vehicleLabel } from '../model';
 
-interface QueryLike<T> {
+interface HistoryQuery<T> {
   isPending: boolean;
   isError: boolean;
   error: unknown;
-  data: T | undefined;
+  data: HistoryList<T> | undefined;
   refetch: () => Promise<unknown>;
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  isFetchNextPageError: boolean;
+  fetchNextPage: () => Promise<unknown>;
 }
 
 function ListState<T>({
@@ -41,21 +48,50 @@ function ListState<T>({
   empty,
   children,
 }: {
-  query: QueryLike<T[]>;
+  query: HistoryQuery<T>;
+  /** Plural noun, e.g. "jobs". */
   label: string;
   empty: ReactNode;
   children: (rows: T[]) => ReactNode;
 }) {
+  const list = query.data;
+  const notice = list ? truncationNotice(list.rows.length, list.total, label) : null;
   return (
     <Card className="overflow-hidden">
       {query.isPending ? (
         <LoadingState variant="rows" rows={4} label={`Loading ${label}…`} />
-      ) : query.isError || !query.data ? (
+      ) : query.isError || !list ? (
         <ErrorState error={query.error} onRetry={() => void query.refetch()} />
-      ) : query.data.length === 0 ? (
+      ) : list.rows.length === 0 ? (
         empty
       ) : (
-        children(query.data)
+        <>
+          {children(list.rows)}
+          {(notice !== null || query.isFetchNextPageError) && (
+            <div className="border-line flex flex-col items-center gap-2 border-t px-4 py-3">
+              {notice !== null && (
+                <p role="status" className="text-muted text-sm">
+                  {notice}
+                </p>
+              )}
+              {query.isFetchNextPageError && (
+                <p role="alert" className="text-danger-ink text-sm">
+                  {toAppError(query.error).message}
+                </p>
+              )}
+              {query.hasNextPage && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={query.isFetchingNextPage}
+                  onClick={() => void query.fetchNextPage()}
+                >
+                  {loadMoreLabel(list.total - list.rows.length)}
+                </Button>
+              )}
+            </div>
+          )}
+        </>
       )}
     </Card>
   );
@@ -78,7 +114,7 @@ export function JobsTab({ customerId }: { customerId: string }) {
   const canCreate = useCan('jobs.manage');
   const jobs = useCustomerJobs(shopId, customerId);
   const vehicle = useVehicleLabels(customerId);
-  type JobRow = NonNullable<typeof jobs.data>[number];
+  type JobRow = NonNullable<typeof jobs.data>['rows'][number];
 
   const columns: Column<JobRow>[] = [
     { key: 'number', header: 'Job', primary: true, cell: (j) => `#${j.number}` },
@@ -144,7 +180,7 @@ export function QuotesTab({ customerId }: { customerId: string }) {
   const canView = useCan('quotes.view');
   const quotes = useCustomerQuotes(shopId, customerId, canView);
   const vehicle = useVehicleLabels(customerId);
-  type QuoteRow = NonNullable<typeof quotes.data>[number];
+  type QuoteRow = NonNullable<typeof quotes.data>['rows'][number];
 
   const columns: Column<QuoteRow>[] = [
     { key: 'number', header: 'Quote', primary: true, cell: (q) => `#${q.number}` },
@@ -210,7 +246,7 @@ export function InvoicesTab({ customerId }: { customerId: string }) {
   const { shopId, timezone, currency } = useShop();
   const canView = useCan('invoices.view');
   const invoices = useCustomerInvoices(shopId, customerId, canView);
-  type InvoiceRow = NonNullable<typeof invoices.data>[number];
+  type InvoiceRow = NonNullable<typeof invoices.data>['rows'][number];
 
   const columns: Column<InvoiceRow>[] = [
     { key: 'number', header: 'Invoice', primary: true, cell: (i) => `#${i.number}` },
@@ -278,7 +314,7 @@ export function MembershipsTab({ customerId }: { customerId: string }) {
   const canView = useCan('memberships.view');
   const memberships = useCustomerMemberships(shopId, customerId, canView);
   const vehicle = useVehicleLabels(customerId);
-  type MembershipRow = NonNullable<typeof memberships.data>[number];
+  type MembershipRow = NonNullable<typeof memberships.data>['rows'][number];
 
   const interval = (m: MembershipRow) => {
     if (!m.plan) return '';

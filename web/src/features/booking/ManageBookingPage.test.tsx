@@ -77,6 +77,52 @@ describe('ManageBookingPage', () => {
     expect(String(body.request_nonce)).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
   });
 
+  it('closes the abandoned deposit page once on the ?canceled=1 return', async () => {
+    const calls = mockRpc({ public_get_booking: { data: bookingDocFixture() } });
+    supabase.functions.invoke.mockResolvedValue({ data: { released: 1 }, error: null });
+    render(`/booking/${TOKEN}?canceled=1`);
+    expect(await screen.findByText('Payment cancelled')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+        body: { action: 'deposit_checkout_cancel', token: TOKEN },
+      }),
+    );
+    // The booking is read again afterwards, but the page is closed once per visit.
+    await waitFor(() =>
+      expect(calls.filter((c) => c.fn === 'public_get_booking').length).toBeGreaterThan(1),
+    );
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the page usable when the deposit page could not be closed', async () => {
+    mockRpc({ public_get_booking: { data: bookingDocFixture() } });
+    supabase.functions.invoke.mockResolvedValue({
+      data: null,
+      error: edgeHttpError(409, {
+        error: 'Your card payment is already going through.',
+        reason: 'payment_in_progress',
+      }),
+    });
+    render(`/booking/${TOKEN}?canceled=1`);
+    expect(await screen.findByText('Payment cancelled')).toBeInTheDocument();
+    await waitFor(() => expect(supabase.functions.invoke).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Pay $30.00 deposit' })).toBeInTheDocument();
+  });
+
+  it('does not close deposit pages on the ?paid=1 return or a plain visit', async () => {
+    mockRpc({ public_get_booking: { data: bookingDocFixture() } });
+    render(`/booking/${TOKEN}?paid=1&canceled=1`);
+    expect(
+      await screen.findByRole('heading', { name: 'Booking #1042', level: 1 }),
+    ).toBeInTheDocument();
+    expect(supabase.functions.invoke).not.toHaveBeenCalledWith(
+      'payments',
+      expect.objectContaining({
+        body: expect.objectContaining({ action: 'deposit_checkout_cancel' }),
+      }),
+    );
+  });
+
   it('never follows a non-https checkout url', async () => {
     mockRpc({ public_get_booking: { data: bookingDocFixture() } });
     const assign = vi.spyOn(navigation, 'assign').mockImplementation(() => undefined);

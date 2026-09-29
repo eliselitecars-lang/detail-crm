@@ -237,7 +237,7 @@ select tests.eq(tests.row_count($$select * from public.customer_payment_methods$
 select tests.authenticate_as(tests.fx('u_manager_b'));
 select tests.eq(tests.row_count($$select * from public.customer_payment_methods where shop_id = tests.fx('shop_a')$$), 0::bigint,
                 'B cannot read A''s cards');
-select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.as_service();   -- 0125: deletes go through erase_customer (service role)
 select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('cust_a3')$$), 1::bigint, 'a customer without money records can be deleted');
 select tests.as_superuser();
 select tests.eq((select count(*) from public.customer_payment_methods where stripe_payment_method_id = 'pm_3'), 0::bigint,

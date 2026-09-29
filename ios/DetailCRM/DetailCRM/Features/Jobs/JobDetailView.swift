@@ -5,11 +5,14 @@
 //  The job screen: status + stepper, any requirement overrides (who moved
 //  it past required checklist items / photos, when and why), customer &
 //  vehicle, schedule and crew (with the repeat rule of a recurring visit),
+//  time on the job (who is on the clock, clock in / out, the entries),
 //  job details (custom fields), services with server totals, the money
 //  picture, checklist, photos and videos, the customer job report,
 //  inspections, documents, forms, customer texts, notes and activity. Realtime changes to the job
 //  refresh it; payment changes refresh the money picture (a payment never
-//  touches the jobs row, so the jobs counter alone would leave it stale).
+//  touches the jobs row, so the jobs counter alone would leave it stale);
+//  time-entry changes (a punch here or on another phone) refresh the Time
+//  section.
 //
 //  Every section is its own view behind an AnyView seam (deep generic view
 //  types on big screens overflow the stack at runtime). Sheets are driven
@@ -112,6 +115,12 @@ struct JobDetailView: View {
             guard model.detail.value != nil else { return }
             Task { await model.loadPayment() }
         }
+        // Someone clocked in or out (here, on the Time Clock screen or on
+        // another phone): re-read who is on the clock and the entries.
+        .onChange(of: realtime.revision(.timeEntries)) { _, _ in
+            guard model.detail.value != nil else { return }
+            Task { await model.loadTime() }
+        }
     }
 
     // MARK: - Loading
@@ -154,6 +163,7 @@ struct JobDetailView: View {
                     gateOverridesSection
                     partiesSection(snapshot)
                     scheduleSection(snapshot)
+                    timeSection(snapshot)
                     customDataSection
                     servicesSection(snapshot)
                     moneySection(snapshot)
@@ -220,6 +230,27 @@ struct JobDetailView: View {
         )
     }
 
+    /// Time on this job (web TimeCard): who is on the clock, clock in /
+    /// out for an assigned member, the entries and their total. Hidden on
+    /// a closed job with no time recorded.
+    private func timeSection(_ snapshot: JobDetailSnapshot) -> AnyView {
+        let entryCount = model.time.value?.entries.count ?? 0
+        guard JobTime.showsSection(jobStatus: snapshot.job.status, entryCount: entryCount) else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(
+            JobTimeSection(
+                state: model.time,
+                snapshot: snapshot,
+                memberID: appState.member?.id,
+                clock: appState.clock,
+                seesEveryone: appState.can(.viewAllTimeEntries),
+                retry: { await model.loadTime() },
+                onPunch: { action in await punchJobTime(action) }
+            )
+        )
+    }
+
     private func servicesSection(_ snapshot: JobDetailSnapshot) -> AnyView {
         AnyView(
             JobServicesSection(
@@ -244,7 +275,8 @@ struct JobDetailView: View {
                 currencyCode: appState.currencyCode,
                 retry: { await model.loadPayment() },
                 onCreateInvoice: { await createInvoice() },
-                showsDepositFollowups: permissions.role.isManagerOrAbove
+                showsDepositFollowups: permissions.role.isManagerOrAbove,
+                customer: snapshot.customer
             )
         )
     }
@@ -450,6 +482,15 @@ struct JobDetailView: View {
             } catch {
                 toasts.showError(error)
             }
+        }
+    }
+
+    private func punchJobTime(_ action: JobTime.Action) async {
+        do {
+            let message = try await model.punchJobTime(action)
+            if !message.isEmpty { toasts.show(message) }
+        } catch {
+            toasts.showError(error)
         }
     }
 

@@ -10,8 +10,10 @@
  *   List-Unsubscribe-Post: List-Unsubscribe=One-Click
  *
  *   POST  (mailbox provider, body "List-Unsubscribe=One-Click")
- *         -> public_unsubscribe(token): the customer's email opt-out
- *            (idempotent); 200 {unsubscribed: true}, 404 for an unknown token
+ *         -> public_unsubscribe(token, source 'list_unsubscribe'): the
+ *            customer's marketing email opt-out (0126: marketing only, the
+ *            consent event records the one-click source; idempotent);
+ *            200 {unsubscribed: true}, 404 for an unknown token
  *   GET   (a mail client opening the link in a browser) -> 303 to the
  *         web /u/<token> page, which asks for confirmation. A GET never
  *         unsubscribes (link scanners and prefetchers follow GETs).
@@ -58,7 +60,10 @@ export async function unsubscribe(svc: Services, req: Request): Promise<Response
   }
   await req.body?.cancel();
 
-  const { data, error } = await svc.admin.rpc("public_unsubscribe", { p_token: token });
+  const { data, error } = await svc.admin.rpc("public_unsubscribe", {
+    p_token: token,
+    p_source: "list_unsubscribe",
+  });
   if (error) throw new DbError("public_unsubscribe", error);
   if (data !== true) throw errors.notFound("This unsubscribe link is not valid.");
   // the token is a credential: never logged

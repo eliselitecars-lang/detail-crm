@@ -37,9 +37,9 @@ select tests.eq((select array[address, message_id::text] from public.comms_unsub
                 array['dana@example.com', tests.fx('msg')::text],
                 'the token is recorded with the (normalized) address it was sent to and its message');
 
-select tests.authenticate_as(tests.fx('u_manager_a'));
+select tests.as_service();   -- 0125: erase_customer's delete (service role)
 select tests.eq(tests.row_count($$delete from public.customers where id = tests.fx('dana_new')$$), 1::bigint,
-                'a manager deletes the duplicate record');
+                'the duplicate record is deleted');
 select tests.as_superuser();
 select tests.eq((select count(*) from public.messages where id = tests.fx('msg')), 0::bigint,
                 'the customer''s messages went with them');
@@ -51,9 +51,10 @@ select tests.eq(public.public_unsubscribe(tests.fx('tok')), true,
                 'the unsubscribe link in a sent marketing email still works');
 select tests.eq(public.public_unsubscribe(tests.fx('tok')), true, 'idempotent');
 select tests.as_superuser();
-select tests.ok(public.comms_is_suppressed(tests.fx('shop_a'), 'email', 'dana@example.com'), 'address suppressed');
-select tests.ok((select email_opted_out_at is not null and not email_opt_in from public.customers where id = tests.fx('dana_old')),
-                'the remaining record with that address is opted out');
+select tests.ok(public.comms_is_marketing_suppressed(tests.fx('shop_a'), 'email', 'dana@example.com'),
+                'address suppressed (0126: from marketing)');
+select tests.ok((select email_opted_out_at is null and not email_opt_in from public.customers where id = tests.fx('dana_old')),
+                'the remaining record with that address loses marketing consent');
 select tests.ok((select email_opted_out_at is null and email_opt_in from public.customers where id = tests.fx('evan')),
                 'other recipients are untouched');
 select tests.ok((select email_opted_out_at is null and email_opt_in from public.customers where id = tests.fx('dana_b')),
@@ -63,8 +64,8 @@ select tests.ok(not public.comms_is_suppressed(tests.fx('shop_b'), 'email', 'dan
 -- the next campaign skips the address, whichever record carries it now or later
 insert into public.customers (shop_id, first_name, email, email_opt_in)
   values (tests.fx('shop_a'), 'Dana', 'dana@example.com', true) returning tests.fx_set('dana_later', id);
-select tests.ok((select email_opted_out_at is not null and not email_opt_in from public.customers where id = tests.fx('dana_later')),
-                'a record created later with the address starts out opted out');
+select tests.ok((select email_opted_out_at is null and not email_opt_in from public.customers where id = tests.fx('dana_later')),
+                'a record created later with the address starts out without marketing consent');
 select tests.authenticate_as(tests.fx('u_manager_a'));
 insert into public.campaigns (shop_id, name, channel, subject, body)
   values (tests.fx('shop_a'), 'Summer', 'email', 'Summer deals', 'Hi {{customer_first_name}}') returning tests.fx_set('camp2', id);
@@ -87,7 +88,7 @@ delete from public.customers where id = tests.fx('evan');
 select tests.as_anon();
 select tests.eq(public.public_unsubscribe(tests.fx('fu_tok')), true, 'the follow-up''s link works after the customer is gone');
 select tests.as_superuser();
-select tests.ok(public.comms_is_suppressed(tests.fx('shop_a'), 'email', 'evan@example.com'), 'Evan''s address suppressed');
+select tests.ok(public.comms_is_marketing_suppressed(tests.fx('shop_a'), 'email', 'evan@example.com'), 'Evan''s address suppressed');
 
 -- ============================================================ denial paths
 -- transactional email never gets a token (and so no credential)

@@ -2,8 +2,8 @@
  * Shop subscription billing (SPEC §4.10, docs/BILLING.md) — pure model: the
  * shapes the server returns and the rules the web shows them by. Nothing
  * about a plan (name, price, interval, team limit, features) or the trial
- * length is written here: all of it comes from `public_billing_plans()` and
- * `shop_entitlement()`; the only numbers below are UI thresholds (when a
+ * length is written here: all of it comes from `public_billing_plans()`,
+ * `public_billing_offer()` and `shop_entitlement()`; the only numbers below are UI thresholds (when a
  * trial counts as "ending soon", how long to wait for Stripe's webhook).
  */
 import { z } from 'zod';
@@ -57,6 +57,37 @@ export const planSchema = z.object({
   features: z.array(z.string()),
 });
 export type BillingPlan = z.output<typeof planSchema>;
+
+/**
+ * public_billing_offer() (0131; anon too): the plans (exactly
+ * public_billing_plans()), the in-app trial of a person's FIRST shop in days
+ * (0 while billing is off or no trial is set; the trial is once per person,
+ * 0120) and, signed in, whether a shop the caller creates now gets it (null
+ * signed out).
+ */
+export const billingOfferSchema = z.object({
+  plans: z.array(planSchema),
+  trial_days: z
+    .number()
+    .int()
+    .nonnegative()
+    .nullish()
+    .transform((v) => v ?? 0),
+  trial_available: z
+    .boolean()
+    .nullish()
+    .transform((v) => v ?? null),
+});
+export type BillingOffer = z.output<typeof billingOfferSchema>;
+
+/**
+ * The offer's trial, as "14-day free trial for your first shop" (null: no
+ * trial). The trial is once per person (0120), hence "your first shop".
+ */
+export function firstShopTrialLabel(offer: BillingOffer | null | undefined): string | null {
+  if (!offer || offer.plans.length === 0 || offer.trial_days <= 0) return null;
+  return `${offer.trial_days}-day free trial for your first shop`;
+}
 
 /** shop_billing's Stripe subscription status (0100; `none` = never subscribed). */
 export const SUBSCRIPTION_STATUSES = [

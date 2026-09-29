@@ -15,6 +15,7 @@ import {
   Pagination,
   QrCode,
   SectionCard,
+  SearchInput,
   Select,
   StatusBadge,
   statusLabel,
@@ -163,15 +164,21 @@ function SubscribersTab({
   const [params, setParams] = useSearchParams();
   const raw = params.get('status');
   const status: MembershipStatus | 'all' = MEMBERSHIP_STATUSES.find((s) => s === raw) ?? 'all';
+  const search = params.get('q') ?? '';
+  const searching = search.trim() !== '';
   const page = Math.max(1, Number(params.get('page') ?? '1') || 1);
-  const subscribers = useSubscribers({ status, page });
+  const subscribers = useSubscribers({ status, search, page });
   const [cancelling, setCancelling] = useState<SubscriberRow | null>(null);
 
-  const setFilter = (next: { status?: string; page?: number }) => {
+  const setFilter = (next: { status?: string; q?: string; page?: number }) => {
     const merged = new URLSearchParams(params);
     if (next.status !== undefined) {
       if (next.status === 'all') merged.delete('status');
       else merged.set('status', next.status);
+    }
+    if (next.q !== undefined) {
+      if (next.q) merged.set('q', next.q);
+      else merged.delete('q');
     }
     if (next.page && next.page > 1) merged.set('page', String(next.page));
     else merged.delete('page');
@@ -311,6 +318,14 @@ function SubscribersTab({
             ]}
           />
         </FormField>
+        <div className="w-full sm:w-72">
+          <SearchInput
+            label="Search memberships"
+            placeholder="Customer name, phone or email…"
+            value={search}
+            onChange={(q) => setFilter({ q })}
+          />
+        </div>
       </div>
       {subscribers.isPending ? (
         <LoadingState variant="rows" rows={5} label="Loading memberships…" />
@@ -323,14 +338,24 @@ function SubscribersTab({
       ) : subscribers.data.rows.length === 0 ? (
         <EmptyState
           icon={<Users aria-hidden="true" />}
-          title={status === 'all' ? 'No memberships yet' : 'No memberships with this status'}
+          title={
+            searching
+              ? 'No memberships match'
+              : status === 'all'
+                ? 'No memberships yet'
+                : 'No memberships with this status'
+          }
           description={
-            status === 'all'
-              ? 'Sign a customer up for a plan and send them the checkout link.'
-              : 'Try another status.'
+            searching
+              ? status === 'all'
+                ? 'Try another name, phone or email.'
+                : 'Try another search or status.'
+              : status === 'all'
+                ? 'Sign a customer up for a plan and send them the checkout link.'
+                : 'Try another status.'
           }
           action={
-            status === 'all' && canManage && onNew ? (
+            status === 'all' && !searching && canManage && onNew ? (
               <Button onClick={onNew}>New membership</Button>
             ) : undefined
           }

@@ -97,7 +97,8 @@ export const CUSTOMER_TEMPLATE_KEYS: readonly string[] = [
 
 /**
  * The variables enqueue_customer_template renders without a job
- * (comms_customer_vars, 0033). Any other placeholder would render blank.
+ * (comms_customer_vars, 0033; portal_link 0128: the client portal,
+ * APP_BASE_URL/portal?shop=<slug>). Any other placeholder would render blank.
  */
 export const CUSTOMER_TEMPLATE_VARS: ReadonlySet<string> = new Set([
   "customer_first_name",
@@ -106,6 +107,7 @@ export const CUSTOMER_TEMPLATE_VARS: ReadonlySet<string> = new Set([
   "shop_phone",
   "review_link",
   "booking_page_link",
+  "portal_link",
 ]);
 
 /**

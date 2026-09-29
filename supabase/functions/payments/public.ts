@@ -4,6 +4,11 @@
  *   invoice_checkout_cancel   /i/<token>        close the invoice's open pay links
  *                                               (back with ?canceled=1, or before a
  *                                               gift card) and release their holds
+ *   deposit_checkout_cancel   /booking/<token>  close the booking's open deposit
+ *                             (or /i/<token>)   pages (back with ?canceled=1; /q
+ *                                               passes its job token; /i closes
+ *                                               its jobs' ones before a gift
+ *                                               card) and release their holds
  *   booking_deposit_checkout  /booking/<token>  pay the booking deposit still due
  *                                               (never more than the job's
  *                                               invoice still owes)
@@ -90,6 +95,7 @@ import {
   holdJobCheckout,
   refuseUnheldInvoiceSession,
   refuseUnheldJobSession,
+  releaseDepositLinks,
   releaseInvoicePayLinks,
   releaseJobCheckouts,
 } from "./checkout_holds.ts";
@@ -282,6 +288,68 @@ export async function invoiceCheckoutCancel(
   const account = await findAccount(s.admin, invoice.shop_id);
   if (!account) return { released: 0 };
   return { released: await releaseInvoicePayLinks(s, account, invoice) };
+}
+
+// ---------------------------------------------------------------------------
+// deposit_checkout_cancel — the customer closes a booking's deposit card page
+// ---------------------------------------------------------------------------
+
+export const depositCheckoutCancelInput = z.union([
+  /** jobs.public_token (the /booking/<token> link; the /q page's self_schedule.job_token). */
+  z.object({ token: publicToken }).strict(),
+  /** invoices.public_token (the /i/<token> link): the deposit pages of the jobs it bills. */
+  z.object({ invoice_token: publicToken }).strict(),
+]);
+
+/**
+ * The customer left the deposit card page (/booking/<token>?canceled=1, or
+ * /q/<token>?canceled=1 with the quote's job token), or /i needs the deposit
+ * page of a job it bills closed before a gift card: the jobs' open deposit
+ * links are expired and their job holds released (releaseDepositLinks), so
+ * the booking is not held until Stripe expires the page (~30-40 min).
+ * Only the links booking_deposit_checkout / quote_deposit_checkout opened:
+ * never an invoice pay link, a staff PaymentSheet or a Terminal payment, and
+ * nothing is settled or charged. Nothing open (or no Stripe account): 200
+ * without any change. Repeating it is harmless (the expire calls are
+ * idempotent per session). 409 payment_in_progress when a link was just paid
+ * or its payment is going through (that link keeps its hold). Like
+ * invoice_checkout_cancel it is bounded by the unguessable token alone.
+ */
+export async function depositCheckoutCancel(
+  s: Services,
+  input: z.output<typeof depositCheckoutCancelInput>,
+): Promise<{ released: number }> {
+  let pages: { shopId: string; customerId: string; jobIds: string[] };
+  if ("invoice_token" in input) {
+    const { data, error } = await s.admin
+      .from("invoices")
+      .select(INVOICE_COLUMNS)
+      .eq("public_token", input.invoice_token)
+      .maybeSingle();
+    if (error) throw dbFailure("invoices lookup", error);
+    const invoice = data as InvoiceRow | null;
+    // Drafts are not published (same as invoice_checkout / public_get_invoice).
+    if (!invoice || invoice.status === "draft") throw errors.notFound("Invoice not found.");
+    pages = {
+      shopId: invoice.shop_id,
+      customerId: invoice.customer_id,
+      jobIds: await invoiceJobIds(s.admin, invoice),
+    };
+  } else {
+    const { data, error } = await s.admin
+      .from("jobs")
+      .select(JOB_COLUMNS)
+      .eq("public_token", input.token)
+      .maybeSingle();
+    if (error) throw dbFailure("jobs lookup", error);
+    const job = data as JobRow | null;
+    if (!job) throw errors.notFound("Booking not found.");
+    pages = { shopId: job.shop_id, customerId: job.customer_id, jobIds: [job.id] };
+  }
+  if (pages.jobIds.length === 0) return { released: 0 };
+  const account = await findAccount(s.admin, pages.shopId);
+  if (!account) return { released: 0 };
+  return { released: await releaseDepositLinks(s, account, pages) };
 }
 
 interface JobRow {
