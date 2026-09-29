@@ -246,12 +246,12 @@
 | `payment_refund_status` | p_amount, p_tip, p_refunded | authenticated | `payment_status` | 0012_money_invoices_payments.sql | 3 SQL fns |
 | `portal_claim_customers` | — | authenticated · DEFINER | `integer` | 0043_integration_portal.sql | web |
 | `portal_documents` | — | authenticated · DEFINER | `jsonb` | 0075_ops_documents.sql | web |
-| `portal_email_marketing` | — | authenticated · DEFINER | `jsonb` | 0126_comms_unsubscribe_scope_resubscribe.sql | — |
+| `portal_email_marketing` | — | authenticated · DEFINER | `jsonb` | 0126_comms_unsubscribe_scope_resubscribe.sql | web |
 | `portal_job_reports` | — | authenticated · DEFINER | `jsonb` | 0075_ops_documents.sql | web |
 | `portal_memberships` | — | authenticated · DEFINER | `jsonb` | 0069_money_memberships_referrals.sql | web |
 | `portal_overview` | — | authenticated · DEFINER | `jsonb` | 0043_integration_portal.sql | web |
 | `portal_referrals` | — | authenticated · DEFINER | `jsonb` | 0069_money_memberships_referrals.sql | web |
-| `portal_set_email_marketing` | p_customer_id, p_opt_in | authenticated · DEFINER | `boolean` | 0126_comms_unsubscribe_scope_resubscribe.sql | — |
+| `portal_set_email_marketing` | p_customer_id, p_opt_in | authenticated · DEFINER | `boolean` | 0126_comms_unsubscribe_scope_resubscribe.sql | web |
 | `postal_code_in_area` | p_postal, p_area | authenticated | `boolean` | 0040_integration_helpers_pricing.sql | 2 SQL fns |
 | `preview_campaign_audience` | p_shop_id, p_channel, p_audience? | authenticated · DEFINER | `integer` | 0035_comms_campaigns.sql | web |
 | `preview_campaign_message` | p_shop_id, p_channel, p_body, p_subject? | authenticated · DEFINER | `jsonb` | 0090_integration_comms.sql | web |
@@ -282,13 +282,13 @@
 | `public_redeem_gift_card` | p_token, p_code, p_amount_cents? | anon, authenticated · DEFINER | `jsonb` | 0066_money_gift_cards.sql | web |
 | `public_report_signature_upload_allowed` | p_name | anon, authenticated · DEFINER | `boolean` | 0072_ops_job_reports.sql | RLS (1 table) |
 | `public_respond_quote` | p_token, p_action, p_signer_name?, p_selected_optional_line_ids?, p_declined_reason?, p_option_id? | anon, authenticated · DEFINER | `jsonb` | 0014_money_public_rpcs.sql | web |
-| `public_resubscribe` | p_token | anon, authenticated · DEFINER | `boolean` | 0126_comms_unsubscribe_scope_resubscribe.sql | — |
+| `public_resubscribe` | p_token | anon, authenticated · DEFINER | `boolean` | 0126_comms_unsubscribe_scope_resubscribe.sql | web |
 | `public_schedule_quote` | p_token, p_starts_at, p_location?, p_now? | anon, authenticated · DEFINER | `jsonb` | 0067_money_quotes_v2.sql | web |
 | `public_shop_profile` | p_slug | anon, authenticated · DEFINER | `jsonb` | 0042_integration_public_booking.sql | web |
 | `public_sign_form` | p_token, p_signer_name, p_signature_path? | anon, authenticated · DEFINER | `jsonb` | 0023_field_ops_forms.sql | web |
 | `public_submit_lead` | p_token, p_payload, p_now? | anon, authenticated · DEFINER | `jsonb` | 0088_comms_custom_fields_leads_tracking.sql | web |
 | `public_unsubscribe` | p_token, p_source? | anon, authenticated · DEFINER | `boolean` | 0035_comms_campaigns.sql | web, edge:messaging |
-| `public_unsubscribe_all` | p_token | anon, authenticated · DEFINER | `boolean` | 0126_comms_unsubscribe_scope_resubscribe.sql | — |
+| `public_unsubscribe_all` | p_token | anon, authenticated · DEFINER | `boolean` | 0126_comms_unsubscribe_scope_resubscribe.sql | web |
 | `public_unsubscribe_info` | p_token | anon, authenticated · DEFINER | `jsonb` | 0090_integration_comms.sql | web |
 | `public_validate_coupon` | p_slug, p_code, p_service_ids, p_vehicle_category_id?, p_now?, p_link_token?, p_location_type?, p_vehicle_id?, p_starts_at? | anon, authenticated · DEFINER | `jsonb` | 0042_integration_public_booking.sql | web |
 | `publish_job_report` | p_job_id, p_include_inspections?, p_photo_kinds?, p_message?, p_send?, p_channel? | authenticated · DEFINER | `jsonb` | 0072_ops_job_reports.sql | web, iOS |
@@ -8367,7 +8367,8 @@ file `0126_comms_unsubscribe_scope_resubscribe.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · stable · exec: authenticated, service_role · search_path="" · file `0126_comms_unsubscribe_scope_resubscribe.sql`
 - (COMMENT ON) Client portal (0126): the signed-in client's customer records (linked, current email = their confirmed email) with their marketing email consent: [{customer_id, shop_slug, shop_name, email, email_opt_in, unsubscribed_scope, unsubscribed_at}].
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/portal/api.ts`
 
 #### `portal_set_email_marketing`
 
@@ -8375,7 +8376,8 @@ file `0126_comms_unsubscribe_scope_resubscribe.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: authenticated, service_role · search_path="" · file `0126_comms_unsubscribe_scope_resubscribe.sql`
 - (COMMENT ON) Client portal (0126): the signed-in client turns marketing email from a shop on or off for their customer record, whose email must equal their confirmed auth email (else P0002). On removes the address's email suppression (any scope) and sets email_opt_in; off records a marketing-only opt-out (source portal). Logged in customer_consent_events. Returns the new setting.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/portal/api.ts`
 
 #### `public_resubscribe`
 
@@ -8383,7 +8385,8 @@ file `0126_comms_unsubscribe_scope_resubscribe.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: anon, authenticated, service_role · search_path="" · file `0126_comms_unsubscribe_scope_resubscribe.sql`
 - (COMMENT ON) The /u/<token> page's Resubscribe (0126; POST only): the person at the address opts back in — the address's email suppression is removed (any scope) and email_opt_in turns on for the shop's customers whose current email is that address (not archived / erased), each logged in customer_consent_events. False for an unknown token or when no such customer exists (nothing changes).
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/campaigns/api.ts`
 
 #### `public_unsubscribe_all`
 
@@ -8391,7 +8394,8 @@ file `0126_comms_unsubscribe_scope_resubscribe.sql` · RLS on · realtime: no
 
 - **DEFINER** · plpgsql · volatile · exec: anon, authenticated, service_role · search_path="" · file `0126_comms_unsubscribe_scope_resubscribe.sql`
 - (COMMENT ON) The /u/<token> page's "also stop appointment and invoice email" (0126): the address opts out of ALL email from the shop (scope 'all': every customer with it is stamped email_opted_out_at). False for an unknown token.
-- Called by: no statically named web / iOS / edge-function / SQL caller in this repo
+- Called by:
+  - web: `web/src/features/campaigns/api.ts`
 
 ### Trigger functions
 

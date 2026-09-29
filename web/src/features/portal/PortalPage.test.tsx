@@ -425,4 +425,133 @@ describe('PortalPage', () => {
       expect(await screen.findByText(/Earned so far: €25\.00/)).toBeInTheDocument();
     });
   });
+
+  describe('marketing emails (portal_email_marketing / portal_set_email_marketing)', () => {
+    const STILL_SENT =
+      'booking confirmations, appointment reminders, quotes, invoices and receipts';
+    interface Row {
+      customer_id: string;
+      shop_slug: string;
+      shop_name: string;
+      email: string;
+      email_opt_in: boolean;
+      unsubscribed_scope: 'marketing' | 'all' | null;
+      unsubscribed_at: string | null;
+    }
+    const ROW: Row = {
+      customer_id: 'cust-1',
+      shop_slug: 'glacier',
+      shop_name: 'Glacier Detailing',
+      email: 'ana@example.com',
+      email_opt_in: true,
+      unsubscribed_scope: null,
+      unsubscribed_at: null,
+    };
+
+    /** A fake server: on lifts any opt-out and opts in; off is a marketing-only opt-out. */
+    function serve(row: Partial<Row> = {}, setResult?: ReturnType<typeof pgError>) {
+      const state: Row = { ...ROW, ...row };
+      return mockRpc({
+        portal_claim_customers: { data: 1 },
+        portal_overview: { data: overview() },
+        portal_email_marketing: () => ({ data: [{ ...state }] }),
+        portal_set_email_marketing: (args) => {
+          if (setResult) return setResult;
+          const on = args.p_opt_in === true;
+          Object.assign(state, {
+            email_opt_in: on,
+            unsubscribed_scope: on ? null : (state.unsubscribed_scope ?? 'marketing'),
+          });
+          return { data: on };
+        },
+      });
+    }
+
+    it('shows each shop’s choice for the signed-in address and turns it off', async () => {
+      const calls = serve();
+      const { user } = render();
+      const toggle = await screen.findByRole('switch', {
+        name: 'Marketing emails from Glacier Detailing',
+      });
+      expect(toggle).toBeChecked();
+      expect(toggle).toHaveAccessibleDescription(
+        `Campaigns, promotions and service follow-ups. You get ${STILL_SENT} either way.`,
+      );
+      expect(screen.getByText('Sent to ana@example.com')).toBeInTheDocument();
+
+      await user.click(toggle);
+      expect(
+        await screen.findByText('Marketing emails from Glacier Detailing are off'),
+      ).toBeVisible();
+      await waitFor(() => expect(toggle).not.toBeChecked());
+      expect(calls).toContainEqual({
+        fn: 'portal_set_email_marketing',
+        args: { p_customer_id: 'cust-1', p_opt_in: false },
+      });
+      // The list is read again after the change: the toggle shows the server's state.
+      expect(calls.filter((c) => c.fn === 'portal_email_marketing')).toHaveLength(2);
+    });
+
+    it('says turning marketing on also ends a stop of all emails, then does it', async () => {
+      const calls = serve({ email_opt_in: false, unsubscribed_scope: 'all' });
+      const { user } = render();
+      const toggle = await screen.findByRole('switch', {
+        name: 'Marketing emails from Glacier Detailing',
+      });
+      expect(toggle).not.toBeChecked();
+      expect(toggle).toHaveAccessibleDescription(
+        `You stopped all emails from Glacier Detailing, including ${STILL_SENT}. Turning marketing emails on turns those back on too.`,
+      );
+      await user.click(toggle);
+      expect(
+        await screen.findByText('Marketing emails from Glacier Detailing are on'),
+      ).toBeVisible();
+      await waitFor(() => expect(toggle).toBeChecked());
+      expect(toggle).toHaveAccessibleDescription(/You get booking confirmations/);
+      expect(calls).toContainEqual({
+        fn: 'portal_set_email_marketing',
+        args: { p_customer_id: 'cust-1', p_opt_in: true },
+      });
+    });
+
+    it('shows a refusal plainly and keeps the server’s state', async () => {
+      serve({}, pgError('PT429', 'too many requests'));
+      const { user } = render();
+      const toggle = await screen.findByRole('switch', {
+        name: 'Marketing emails from Glacier Detailing',
+      });
+      await user.click(toggle);
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Too many requests from your connection. Wait a minute, then try again.',
+      );
+      expect(toggle).toBeChecked();
+    });
+
+    it('explains a record that no longer matches (P0002)', async () => {
+      serve({}, pgError('P0002', 'customer not found'));
+      const { user } = render();
+      await user.click(
+        await screen.findByRole('switch', { name: 'Marketing emails from Glacier Detailing' }),
+      );
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'We couldn’t find that record any more. Reload the page and try again.',
+      );
+    });
+
+    it('stays hidden while the account’s email is unconfirmed (42501)', async () => {
+      const calls = mockRpc({
+        portal_claim_customers: { data: 1 },
+        portal_overview: { data: overview() },
+        portal_email_marketing: pgError(
+          '42501',
+          'sign in with a confirmed email to use the client portal',
+        ),
+      });
+      render();
+      await screen.findByRole('list', { name: 'Upcoming appointments' });
+      await waitFor(() => expect(calls.map((c) => c.fn)).toContain('portal_email_marketing'));
+      expect(screen.queryByRole('heading', { name: 'Marketing emails' })).toBeNull();
+      expect(screen.queryByRole('switch')).toBeNull();
+    });
+  });
 });

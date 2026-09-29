@@ -106,6 +106,13 @@ describe('PrivacyPage', () => {
       'booking confirmations, appointment reminders, quotes, invoices and receipts from the shop still arrive',
     );
     expect(text).not.toMatch(/stops all emails/i);
+    // …and the customer's own ways back (the /u page, the portal toggle).
+    expect(text).toContain('The same page lets you stop all emails from that shop as well');
+    expect(text).toContain('and opt back in later');
+    expect(text).toContain('turn each shop’s marketing emails on or off there');
+    expect(text).toContain(
+      'that choice is recorded with the time and the IP address of the device',
+    );
     expect(text).toContain('Deleting a shop’s customer');
     expect(text).toContain('the customer’s record is anonymised instead');
   });

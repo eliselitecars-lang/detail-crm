@@ -33,6 +33,7 @@ export const portalKeys = {
   documents: (userId: string) => portalKey(userId, 'documents'),
   reports: (userId: string) => portalKey(userId, 'job-reports'),
   referrals: (userId: string) => portalKey(userId, 'referrals'),
+  emailMarketing: (userId: string) => portalKey(userId, 'email-marketing'),
 };
 
 const portalShopSchema = z.object({
@@ -354,5 +355,65 @@ export function usePortalReferrals(userId: string, enabled: boolean) {
     retry: portalRetry,
     // portal_referrals may create the code on first read: never refetch in a loop.
     staleTime: 10 * 60_000,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Marketing email choice per shop (0126): portal_email_marketing /
+// portal_set_email_marketing
+// ---------------------------------------------------------------------------
+
+/**
+ * One of the signed-in client's customer records whose email is their
+ * confirmed email (never anyone else's address), with its marketing email
+ * consent and any opt-out of the address.
+ */
+export const portalEmailMarketingSchema = z.object({
+  customer_id: z.string(),
+  shop_slug: z.string(),
+  shop_name: z.string(),
+  email: z.string(),
+  email_opt_in: z.boolean(),
+  /** 'marketing' (unsubscribed from marketing) or 'all' (every email stopped); null: none. */
+  unsubscribed_scope: z
+    .enum(['marketing', 'all'])
+    .nullish()
+    .transform((v) => v ?? null),
+  unsubscribed_at: zText,
+});
+export type PortalEmailMarketing = z.output<typeof portalEmailMarketingSchema>;
+
+export function usePortalEmailMarketing(userId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: portalKeys.emailMarketing(userId),
+    queryFn: async () =>
+      parseDocument(
+        z.array(portalEmailMarketingSchema),
+        unwrap(await supabase.rpc('portal_email_marketing')) ?? [],
+      ),
+    enabled,
+    retry: portalRetry,
+  });
+}
+
+/**
+ * portal_set_email_marketing: on removes the address's opt-out with the
+ * shop, whatever its scope (so a stop of all emails ends too), and turns
+ * marketing email on; off records a marketing-only opt-out. Resolves the
+ * server's new setting, after the list is read again.
+ */
+export function useSetEmailMarketing(userId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ customerId, optIn }: { customerId: string; optIn: boolean }) =>
+      z.boolean().parse(
+        unwrap(
+          await supabase.rpc('portal_set_email_marketing', {
+            p_customer_id: customerId,
+            p_opt_in: optIn,
+          }),
+        ),
+      ),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: portalKeys.emailMarketing(userId) }),
   });
 }

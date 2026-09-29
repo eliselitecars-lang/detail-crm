@@ -137,7 +137,7 @@ Route map: `/login`, `/signup`, `/forgot-password`, `/reset-password`,
 `?embed=1`), `/join/:slug` (membership sign-up), `/gift/:slug` and
 `/gift/:slug/done` (gift card shop), `/done/:slug` (`?card=saved|canceled`,
 `?membership=active|canceled`: return from a card-setup or membership link
-staff sent), `/u/:token` (email unsubscribe),
+staff sent), `/u/:token` (email unsubscribe: marketing only, then resubscribe or stop all emails; the portal has a per-shop Marketing emails toggle),
 `/portal`, `/account` (every signed-in role: delete account), `/privacy`,
 `/terms` (public; linked under the auth pages, in the public page footer and
 on `/account`), `/pricing` (public: the platform's plans), `/app` (dashboard), `/app/{calendar,jobs,customers,quotes,

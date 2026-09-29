@@ -220,7 +220,7 @@ describe('CustomerDetailPage', () => {
       const dialog = await screen.findByRole('dialog', { name: 'Edit customer' });
       const description = within(dialog).getByText(/^Opted out of all email on /);
       expect(description).toHaveTextContent(
-        /nothing can be emailed to this address, including invoices, receipts and reminders\. Your team can’t undo this/,
+        /nothing can be emailed to this address, including invoices, receipts and reminders\. Your team can’t undo this — the customer can turn it back on from their unsubscribe link or the client portal\./,
       );
       expect(dialog).not.toHaveTextContent(/can’t be undone/);
     });
@@ -241,9 +241,8 @@ describe('CustomerDetailPage', () => {
       await user.click(within(dialog).getByRole('button', { name: 'Save changes' }));
       const alert = await within(dialog).findByRole('alert');
       expect(alert).toHaveTextContent(
-        'This email address unsubscribed from your marketing emails, so your team can’t turn marketing email back on for it. Turn off Email opt-in to save your other changes.',
+        'This email address unsubscribed from your marketing emails, so your team can’t turn marketing email back on for it — the customer can turn it back on from their unsubscribe link or the client portal. Turn off Email opt-in to save your other changes.',
       );
-      expect(alert).not.toHaveTextContent(/client portal/);
     });
   });
 

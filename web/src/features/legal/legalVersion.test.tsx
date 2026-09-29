@@ -28,10 +28,12 @@ const PUBLISHED_VERSIONS: readonly { date: string; fingerprint: string }[] = [
   // was deployed: "Deleting a shop's customer" (erase_customer: delete, or
   // anonymise when the shop's records reference the customer); the
   // unsubscribe link stops marketing email only (0126: confirmations,
-  // reminders, quotes, invoices and receipts still arrive).
+  // reminders, quotes, invoices and receipts still arrive); the customer's
+  // own choices — stop all emails, opt back in from the unsubscribe page,
+  // the portal's marketing email toggle — and the consent record (time, IP).
   {
     date: '2026-09-29',
-    fingerprint: '3c47bf93dcf619079d67bc084f49f68140d5694b333c0805a12ca5bfc3da48e1',
+    fingerprint: 'c33325c513741f0751751e5c26048093f7f7eb004d98a11d2188fe765d44e876',
   },
 ];
 

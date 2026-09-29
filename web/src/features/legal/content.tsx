@@ -145,7 +145,10 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               <Term>Customers and vehicles:</Term> names, company, email addresses, phone numbers,
               addresses, notes and tags; whether a customer agreed to marketing texts or emails, and
               any opt-outs; vehicles (year, make, model, trim, colour, VIN, license plate) and
-              notes.
+              notes. When a customer opts back in to a shop’s marketing emails from an unsubscribe
+              page, or turns them on or off in the customer portal, that choice is recorded with the
+              time and the IP address of the device (for an IPv6 address, only its network part) as
+              evidence of it; the record is deleted with the customer’s record.
             </li>
             <li>
               <Term>Jobs and documents:</Term> appointments and repeating appointments (date, time,
@@ -446,13 +449,17 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               to receive them from the shop. Marketing texts end with instructions to opt out, and
               marketing emails contain an unsubscribe link. Unsubscribing stops that shop’s
               marketing emails to your address; booking confirmations, appointment reminders,
-              quotes, invoices and receipts from the shop still arrive. After you unsubscribe, the
-              shop cannot turn its marketing emails back on for your address.
+              quotes, invoices and receipts from the shop still arrive. The same page lets you stop
+              all emails from that shop as well, and opt back in later. If you have a customer
+              portal account, you can also turn each shop’s marketing emails on or off there. The
+              shop itself cannot turn its marketing emails back on for your address after you
+              unsubscribe.
             </li>
             <li>
               Messages about your appointments and documents — such as booking confirmations,
               reminders, quotes, invoices and receipts — are sent to the contact details you gave
-              the shop, unless you have opted out of that channel.
+              the shop, unless you have opted out of all messages on that channel (by replying STOP
+              to a text, or with “Stop all emails” on a marketing email’s unsubscribe page).
             </li>
             <li>
               Account emails (confirming your address, password resets and team invitations) are
@@ -690,9 +697,10 @@ export function termsOfService(operator: LegalOperator): LegalText {
                 <Term>Consent for texts and emails:</Term> getting and keeping any consent the law
                 requires before you text or email customers, especially for marketing, and marking
                 that consent accurately in the Service. The Service stops texts to a number that
-                replied STOP and marketing emails to an address that unsubscribed (messages about
-                appointments, quotes and invoices still go to it), and sends marketing only to
-                customers marked as opted in.
+                replied STOP, marketing emails to an address that unsubscribed and every email to an
+                address that chose to stop all emails, and sends marketing only to customers marked
+                as opted in. You cannot opt such an address back in; the customer can, from their
+                unsubscribe link or the customer portal.
               </li>
               <li>
                 <Term>Texting registration:</Term> your texts are sent from a number registered for

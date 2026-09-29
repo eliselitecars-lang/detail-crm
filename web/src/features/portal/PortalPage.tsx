@@ -43,6 +43,7 @@ import {
   MembershipsSection,
   ReferralsSection,
 } from './components/SelfServiceSections';
+import { MarketingEmailsSection } from './components/MarketingEmailsSection';
 import { ReturnBanners } from './ReturnBanners';
 
 const PORTAL_BRANDING: PublicShopBranding = { name: 'My appointments' };
@@ -292,6 +293,7 @@ function PortalSections({ data, userId }: { data: PortalOverview; userId: string
       )}
 
       <ReferralsSection userId={userId} data={data} />
+      <MarketingEmailsSection userId={userId} />
 
       <SectionCard title={multiShop ? 'Your shops' : 'Your shop'} flush>
         <RowList label="Your shops">

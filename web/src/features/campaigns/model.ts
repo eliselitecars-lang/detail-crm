@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import { Constants, type Json } from '@/lib/database.types';
 import { formatLocalDate, isLocalDate } from '@/lib/dates';
+import { toAppError } from '@/lib/errors';
 
 export const CAMPAIGN_STATUSES = Constants.public.Enums.campaign_status;
 export type CampaignStatus = (typeof CAMPAIGN_STATUSES)[number];
@@ -223,18 +224,40 @@ export function isUnsubscribeToken(value: string | undefined): value is string {
 export const UNSUBSCRIBE_STILL_SENT =
   'booking confirmations, appointment reminders, quotes, invoices and receipts';
 
+/** What marketing email means on the unsubscribe page and in the portal. */
+export const MARKETING_EMAILS_ARE = 'campaigns, promotions and service follow-ups';
+
 /**
  * The /u/:token page's "You're unsubscribed" text for the address's opt-out
- * scope (public_unsubscribe_info.scope): 'marketing' from the link, 'all'
- * for an opt-out of every email (from before 0126, or recorded by the shop).
- * The page offers no way back, so the text promises none beyond giving the
- * shop another address.
+ * scope (public_unsubscribe_info): 'marketing' (the link, or the portal) or
+ * 'all' (Stop all emails, an unsubscribe from before 0126, or recorded by the
+ * shop). When nobody can resubscribe the address (no current customer of the
+ * shop has it), a different address is the only way back, and it says so.
  */
 export function unsubscribedText(
   shopName: string,
   scope: 'marketing' | 'all' | null | undefined,
+  canResubscribe: boolean,
 ): string {
-  return scope === 'all'
-    ? `This address is opted out of all emails from ${shopName}, including ${UNSUBSCRIBE_STILL_SENT}. If you want emails from ${shopName} again, give them a different email address.`
-    : `${shopName} won’t send marketing emails — campaigns, promotions and service follow-ups — to this address any more. You’ll still get ${UNSUBSCRIBE_STILL_SENT} from them.`;
+  if (scope === 'all') {
+    return `This address is opted out of all emails from ${shopName}, including ${UNSUBSCRIBE_STILL_SENT}.${
+      canResubscribe
+        ? ''
+        : ` If you want emails from ${shopName} again, give them a different email address.`
+    }`;
+  }
+  return `${shopName} won’t send marketing emails — ${MARKETING_EMAILS_ARE} — to this address any more. You’ll still get ${UNSUBSCRIBE_STILL_SENT} from them.`;
+}
+
+/**
+ * An email choice that failed (the /u page, the portal toggle), in plain
+ * words: a rate limit (HTTP 429 / PT429) says to wait; anything else is the
+ * mapped error (network, server).
+ */
+export function emailChoiceErrorMessage(error: unknown): string {
+  const appError = toAppError(error);
+  if (appError.kind === 'rate_limited' || appError.code === 'PT429' || appError.status === 429) {
+    return 'Too many requests from your connection. Wait a minute, then try again.';
+  }
+  return appError.message;
 }

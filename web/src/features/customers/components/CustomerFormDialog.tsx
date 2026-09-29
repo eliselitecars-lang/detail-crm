@@ -31,11 +31,12 @@ import { TagsEditor } from './TagsEditor';
 
 /**
  * 0126: marketing email consent for an address that unsubscribed comes back
- * only from the customer (customers_comms_guard, 42501). The server's
- * sentence names ways back the web doesn't offer, so say what staff can do.
+ * only from the customer (customers_comms_guard, 42501): from their
+ * unsubscribe link (/u/:token → Resubscribe) or the client portal's
+ * Marketing emails toggle. Say that, and what staff can do now.
  */
 const EMAIL_RESUBSCRIBE_REFUSED_MESSAGE =
-  'This email address unsubscribed from your marketing emails, so your team can’t turn marketing email back on for it. Turn off Email opt-in to save your other changes.';
+  'This email address unsubscribed from your marketing emails, so your team can’t turn marketing email back on for it — the customer can turn it back on from their unsubscribe link or the client portal. Turn off Email opt-in to save your other changes.';
 
 function isEmailResubscribeRefusal(error: AppError): boolean {
   return error.kind === 'permission' && /only the customer can opt back in/i.test(error.message);
@@ -195,7 +196,7 @@ export function CustomerFormDialog({ open, onClose, customer, onSaved }: Custome
                 label="Email opt-in"
                 description={
                   customer?.email_opted_out_at
-                    ? `Opted out of all email on ${formatDate(customer.email_opted_out_at, timezone)} — nothing can be emailed to this address, including invoices, receipts and reminders. Your team can’t undo this; to email this customer, use a different address they give you.`
+                    ? `Opted out of all email on ${formatDate(customer.email_opted_out_at, timezone)} — nothing can be emailed to this address, including invoices, receipts and reminders. Your team can’t undo this — the customer can turn it back on from their unsubscribe link or the client portal.`
                     : 'Customer agreed to receive marketing emails (campaigns and follow-ups). Appointment, quote and invoice emails don’t depend on this.'
                 }
               />

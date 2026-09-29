@@ -277,13 +277,21 @@ export function useCampaignPreview(input: CampaignPreviewInput) {
 // ---------------------------------------------------------------------------
 
 /**
- * Records the email opt-out behind a marketing email's unsubscribe link
- * (public_unsubscribe, granted to anon; the token is that email's random
- * unsubscribe token, never its message id). Since 0126 it is a
- * marketing-only opt-out (scope 'marketing'): campaigns and marketing
- * follow-ups stop, while confirmations, reminders, quotes, invoices and
- * receipts still go to the address. Resolves true when done (idempotent),
- * false for an unknown link.
+ * The /u/:token page's email choices (0126). Every RPC is granted to anon and
+ * keyed by the marketing email's random unsubscribe token (never its message
+ * id or the address); each answers false for an unknown token:
+ *   public_unsubscribe(token)      marketing only (scope 'marketing'):
+ *                                  campaigns and marketing follow-ups stop,
+ *                                  confirmations, reminders, quotes, invoices
+ *                                  and receipts still go to the address;
+ *   public_unsubscribe_all(token)  every email from the shop (scope 'all');
+ *   public_resubscribe(token)      lifts the address's opt-out, whatever its
+ *                                  scope, and turns marketing consent back on
+ *                                  for the shop's current customers with it;
+ *                                  false also when there is no such customer
+ *                                  (then nothing changes).
+ * After each change the page reads public_unsubscribe_info again, so what it
+ * shows is always the server's state.
  */
 export const unsubscribeInfoSchema = z.object({
   shop_name: z.string(),
@@ -291,23 +299,32 @@ export const unsubscribeInfoSchema = z.object({
   /** The address is already opted out of this shop's email (any scope). */
   unsubscribed: z.boolean(),
   /**
-   * 0126: 'marketing' — marketing email only (the unsubscribe link); 'all' —
-   * every email (an older unsubscribe, or an opt-out the shop recorded).
-   * Null when not unsubscribed.
+   * 'marketing' — marketing email only (the unsubscribe link, the portal);
+   * 'all' — every email (Stop all emails, an unsubscribe from before 0126,
+   * or an opt-out the shop recorded). Null when not unsubscribed.
    */
   scope: z.enum(['marketing', 'all']).nullish(),
+  /** A current customer of the shop has the address, so public_resubscribe can opt it back in. */
+  can_resubscribe: z
+    .boolean()
+    .nullish()
+    .transform((v) => v === true),
 });
-export type UnsubscribeInfo = z.infer<typeof unsubscribeInfoSchema>;
+export type UnsubscribeInfo = z.output<typeof unsubscribeInfoSchema>;
+
+export const unsubscribeKeys = {
+  info: (token: string) => ['public', 'unsubscribe', token] as const,
+};
 
 /**
  * What the unsubscribe link is for (public_unsubscribe_info, anon): the
- * shop's name and logo and whether (and from what) the address is already
- * unsubscribed. Never the address itself. An unknown link is PT404 (kind
- * not_found).
+ * shop's name and logo, whether (and from what) the address is unsubscribed
+ * and whether it can resubscribe. Never the address itself. An unknown link
+ * is PT404 (kind not_found).
  */
 export function useUnsubscribeInfo(token: string) {
   return useQuery({
-    queryKey: ['public', 'unsubscribe', token] as const,
+    queryKey: unsubscribeKeys.info(token),
     queryFn: async (): Promise<UnsubscribeInfo> =>
       unsubscribeInfoSchema.parse(
         unwrap(await supabase.rpc('public_unsubscribe_info', { p_token: token })),
@@ -316,19 +333,28 @@ export function useUnsubscribeInfo(token: string) {
   });
 }
 
-export function useUnsubscribe() {
+/** The page's three changes, each an anon RPC answering true (done) or false. */
+export type EmailChoice = 'unsubscribe' | 'unsubscribe_all' | 'resubscribe';
+
+async function runEmailChoice(choice: EmailChoice, token: string): Promise<boolean> {
+  const result =
+    choice === 'unsubscribe'
+      ? await supabase.rpc('public_unsubscribe', { p_token: token })
+      : choice === 'unsubscribe_all'
+        ? await supabase.rpc('public_unsubscribe_all', { p_token: token })
+        : await supabase.rpc('public_resubscribe', { p_token: token });
+  return z.boolean().parse(unwrap(result));
+}
+
+/**
+ * One of the page's changes. Resolves the server's answer only after the
+ * page's state has been read again (public_unsubscribe_info), so the page
+ * never shows a state the server did not confirm.
+ */
+export function useEmailChoice(token: string, choice: EmailChoice) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (token: string) => {
-      const result = await supabase.rpc('public_unsubscribe', { p_token: token });
-      return z.boolean().parse(unwrap(result));
-    },
-    onSuccess: (done, token) => {
-      if (!done) return;
-      // A marketing opt-out; an address already opted out of everything stays so.
-      queryClient.setQueryData<UnsubscribeInfo>(['public', 'unsubscribe', token], (info) =>
-        info ? { ...info, unsubscribed: true, scope: info.scope ?? 'marketing' } : info,
-      );
-    },
+    mutationFn: (): Promise<boolean> => runEmailChoice(choice, token),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: unsubscribeKeys.info(token) }),
   });
 }

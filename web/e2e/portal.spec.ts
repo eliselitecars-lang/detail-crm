@@ -193,6 +193,97 @@ test.describe('client portal', () => {
     await expect(page.getByText(/same email as this account \(ana@example\.com\)/)).toBeVisible();
   });
 
+  test('the client turns a shop’s marketing emails on and off again', async ({ page }) => {
+    const state = {
+      customer_id: '65555555-5555-4555-8555-555555555555',
+      shop_slug: 'glacier',
+      shop_name: 'Glacier Detailing',
+      email: CLIENT.email,
+      email_opt_in: false,
+      unsubscribed_scope: 'all' as 'marketing' | 'all' | null,
+      unsubscribed_at: '2026-09-01T15:00:00Z' as string | null,
+    };
+    const sets: unknown[] = [];
+    await mockSupabase(page, {
+      user: CLIENT,
+      rpc: {
+        portal_claim_customers: 1,
+        portal_overview: OVERVIEW,
+        portal_email_marketing: () => [{ ...state }],
+        portal_set_email_marketing: ({ body }) => {
+          sets.push(body);
+          const on = (body as { p_opt_in: boolean }).p_opt_in;
+          // on lifts any opt-out; off is a marketing-only opt-out (0126)
+          Object.assign(state, {
+            email_opt_in: on,
+            unsubscribed_scope: on ? null : 'marketing',
+            unsubscribed_at: on ? null : '2026-09-29T15:00:00Z',
+          });
+          return on;
+        },
+      },
+    });
+    await page.goto('/portal');
+    const toggle = page.getByRole('switch', { name: 'Marketing emails from Glacier Detailing' });
+    await expect(toggle).toHaveAttribute('aria-checked', 'false');
+    // Stopped all emails earlier: turning marketing on says it ends that too.
+    await expect(toggle).toHaveAccessibleDescription(
+      'You stopped all emails from Glacier Detailing, including booking confirmations, appointment reminders, quotes, invoices and receipts. Turning marketing emails on turns those back on too.',
+    );
+    await expect(page.getByText(`Sent to ${CLIENT.email}`)).toBeVisible();
+
+    await toggle.click();
+    await expect(page.getByText('Marketing emails from Glacier Detailing are on')).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-checked', 'true');
+    await expect(toggle).toHaveAccessibleDescription(
+      'Campaigns, promotions and service follow-ups. You get booking confirmations, appointment reminders, quotes, invoices and receipts either way.',
+    );
+
+    await toggle.click();
+    await expect(page.getByText('Marketing emails from Glacier Detailing are off')).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(sets).toEqual([
+      { p_customer_id: state.customer_id, p_opt_in: true },
+      { p_customer_id: state.customer_id, p_opt_in: false },
+    ]);
+  });
+
+  test('a failed marketing email change is shown and the toggle keeps the server’s state', async ({
+    page,
+  }) => {
+    await mockSupabase(page, {
+      user: CLIENT,
+      rpc: {
+        portal_claim_customers: 1,
+        portal_overview: OVERVIEW,
+        portal_email_marketing: [
+          {
+            customer_id: '65555555-5555-4555-8555-555555555555',
+            shop_slug: 'glacier',
+            shop_name: 'Glacier Detailing',
+            email: CLIENT.email,
+            email_opt_in: true,
+            unsubscribed_scope: null,
+            unsubscribed_at: null,
+          },
+        ],
+        portal_set_email_marketing: reply(429, {
+          code: 'PT429',
+          message: 'too many requests',
+          details: null,
+          hint: null,
+        }),
+      },
+    });
+    await page.goto('/portal');
+    const toggle = page.getByRole('switch', { name: 'Marketing emails from Glacier Detailing' });
+    await toggle.click();
+    await expect(page.getByRole('alert')).toHaveText(
+      'Too many requests from your connection. Wait a minute, then try again.',
+    );
+    await expect(toggle).toHaveAttribute('aria-checked', 'true');
+  });
+
   test('an unconfirmed email is told to confirm it', async ({ page }) => {
     await mockSupabase(page, {
       user: CLIENT,

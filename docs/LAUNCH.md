@@ -323,7 +323,11 @@ project with Stripe test keys.
        from the job; reply STOP from the customer's phone and check the
        customer shows as opted out; reply START.
 10. [ ] **Email campaign** to yourself: the unsubscribe link opens the
-        `/u/<token>` page and unsubscribes.
+        `/u/<token>` page and unsubscribes you from marketing email only
+        (invoices and reminders still arrive); on the same page try
+        Resubscribe, then Stop all emails (it asks first). Signed in to
+        `/portal` with that address, the Marketing emails toggle shows and
+        changes the same choice.
 11. [ ] Run the backend smoke checks again (the last step of deploy-backend
         or `verify_live.mjs`): still `0 failed`.
 12. [ ] **Billing** (only once it is on; best on a staging project with test
