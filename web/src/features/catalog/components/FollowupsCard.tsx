@@ -27,6 +27,9 @@ import {
   previewVars,
 } from '@/features/settings/templates/meta';
 import { placeholdersIn, renderTemplate, smsSegments } from '@/features/settings/templates/render';
+import { useShopSettings } from '@/features/settings/api';
+import { MarketingAddressNotice } from '@/features/settings/components/MarketingAddressNotice';
+import { hasMailingAddress } from '@/features/settings/marketingAddress';
 import {
   useDeleteFollowup,
   useFollowupSwitches,
@@ -59,6 +62,7 @@ export function FollowupsCard({ service, canManage }: { service: ServiceRow; can
   const switches = useFollowupSwitches();
   const toggle = useToggleFollowup(service.id);
   const remove = useDeleteFollowup(service.id);
+  const shopSettings = useShopSettings();
   const [editing, setEditing] = useState<ServiceFollowupRow | 'new' | null>(null);
   const [deleting, setDeleting] = useState<ServiceFollowupRow | null>(null);
   const rows = followups.data ?? [];
@@ -159,6 +163,13 @@ export function FollowupsCard({ service, canManage }: { service: ServiceRow; can
         )
       : [];
 
+  // 0119: these emails are marketing, never sent without the shop's mailing address.
+  const emailsWithoutAddress =
+    shopSettings.data !== undefined &&
+    !hasMailingAddress(shopSettings.data) &&
+    switches.data?.email === true &&
+    rows.some((r) => r.enabled && r.channel === 'email');
+
   return (
     <>
       <SectionCard
@@ -184,6 +195,11 @@ export function FollowupsCard({ service, canManage }: { service: ServiceRow; can
               Turn them on in Templates
             </Link>
           </p>
+        )}
+        {emailsWithoutAddress && (
+          <MarketingAddressNotice className="border-line rounded-none border-x-0 border-t-0 border-b px-4 sm:px-5">
+            The email follow-ups here are on but aren’t being sent.
+          </MarketingAddressNotice>
         )}
         {body}
       </SectionCard>

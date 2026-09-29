@@ -280,6 +280,65 @@ describe('PaymentsPage', () => {
       expect(await screen.findByText('$100.00 applied to invoice #2009')).toBeInTheDocument();
     });
 
+    it('offers to cancel an open card page when applying is refused (checkout_open), then applies', async () => {
+      const { user } = setupUnapplied();
+      let held = true;
+      supabase.rpc.mockImplementation((...args: unknown[]) => {
+        if (args[0] === 'report_payments') {
+          return createBuilder({ data: [reportRow('card', 11500, 1500, 0)] });
+        }
+        if (args[0] === 'apply_payment_to_invoice' && held) {
+          return createBuilder({
+            data: null,
+            error: {
+              code: '55000',
+              message:
+                'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+              details: null,
+              hint: 'checkout_open',
+            },
+          });
+        }
+        return createBuilder({ data: paymentRow({ id: 'pay-u', invoice_id: 'inv-9' }) });
+      });
+      supabase.functions.invoke.mockImplementation(() => {
+        held = false;
+        return Promise.resolve({
+          data: {
+            invoice_id: 'inv-9',
+            job_id: null,
+            cancelled: 0,
+            succeeded: 0,
+            in_progress: 0,
+            sessions_expired: 1,
+          },
+          error: null,
+        });
+      });
+      await user.click(
+        (await screen.findAllByRole('button', { name: /^Apply \$100\.00 from Jane Doe/ }))[0]!,
+      );
+      const dialog = await screen.findByRole('dialog', { name: 'Apply to an invoice' });
+      await user.selectOptions(await within(dialog).findByLabelText(/Invoice/), 'inv-9');
+      await user.click(within(dialog).getByRole('button', { name: 'Apply $100.00' }));
+      const notice = await within(dialog).findByRole('alert');
+      expect(notice).toHaveTextContent('A card payment page for this invoice is still open');
+      expect(supabase.functions.invoke).not.toHaveBeenCalled();
+
+      await user.click(
+        within(notice).getByRole('button', { name: 'Cancel open payments and try again' }),
+      );
+      expect(await screen.findByText('$100.00 applied to invoice #2009')).toBeInTheDocument();
+      expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+        body: { action: 'cancel_open_payments', shop_id: 'shop-1', invoice_id: 'inv-9' },
+      });
+      expect(
+        (supabase.rpc.mock.calls as unknown[][]).filter(
+          (call) => call[0] === 'apply_payment_to_invoice',
+        ),
+      ).toHaveLength(2);
+    });
+
     it('lets an owner refund a membership charge from the ledger', async () => {
       const invoke = supabase.functions.invoke;
       invoke.mockResolvedValueOnce({

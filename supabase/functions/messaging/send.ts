@@ -121,8 +121,13 @@ export const LINK_VARS: Readonly<Record<string, string>> = {
   invoice_link: "This job has no issued invoice to link to.",
 };
 
-/** Mirrors comms_is_marketing_key (0033): needs the channel's marketing opt-in. */
-export const MARKETING_TEMPLATE_KEYS: readonly string[] = ["follow_up"];
+/**
+ * Mirrors comms_is_marketing_key (0033 / 0083): needs the channel's
+ * marketing opt-in, and a marketing email also needs the shop's postal
+ * address on file (0119). Only follow_up is sendable by hand; the per-
+ * service follow-up (service_followup) is sent by its automation.
+ */
+export const MARKETING_TEMPLATE_KEYS: readonly string[] = ["follow_up", "service_followup"];
 
 /** Mirrors comms_is_appointment_key (0033): refused once the job is cancelled / no-show. */
 export const APPOINTMENT_TEMPLATE_KEYS: readonly string[] = [
@@ -221,6 +226,7 @@ export type RefusalReason =
   | "no_marketing_consent"
   | "appointment_closed"
   | "missing_link"
+  | "postal_address_required"
   | "empty_message"
   | "job_customer_mismatch"
   | "job_required"
@@ -242,6 +248,8 @@ const REFUSAL_MESSAGES: Record<RefusalReason, (channel: Channel) => string> = {
   appointment_closed: () =>
     "This appointment is cancelled or was a no-show; its appointment messages can no longer be sent.",
   missing_link: () => "This message would go out with a blank link.",
+  postal_address_required: () =>
+    "Add your shop's mailing address (Settings → Business profile) before sending marketing email: the law requires it in every marketing email.",
   empty_message: () => "The template produced an empty message.",
   job_customer_mismatch: () => "The job belongs to a different customer.",
   job_required: () => "This message is about a job: choose the job to send it for.",
@@ -318,6 +326,16 @@ async function diagnose(
       (channel === "sms" ? row.sms_opt_in : row.email_opt_in) !== true
     ) {
       return "no_marketing_consent";
+    }
+    if (channel === "email" && MARKETING_TEMPLATE_KEYS.includes(templateKey)) {
+      // 0119 messages_02_marketing_postal_address: a marketing email is not
+      // queued while the shop has no street line and city on file.
+      const { data: address, error: addressError } = await admin.rpc(
+        "comms_shop_postal_address",
+        { p_shop_id: shopId },
+      );
+      if (addressError) throw new DbError("comms_shop_postal_address", addressError);
+      if (typeof address !== "string" || address.trim() === "") return "postal_address_required";
     }
     return "empty_message";
   }

@@ -443,6 +443,48 @@ describe('InvoicePage — parity', () => {
     expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(2);
   });
 
+  it('explains a deposit page it cannot close instead of offering to close it again', async () => {
+    // A deposit page from the booking link holds the job: invoice_checkout_cancel
+    // leaves it alone (200 {released: 0}), so the redemption stays refused.
+    const calls = mockRpc({
+      public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },
+      public_redeem_gift_card: {
+        data: null,
+        error: {
+          code: '55000',
+          message:
+            'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+          details: null,
+          hint: 'checkout_open',
+        },
+      },
+    });
+    supabase.functions.invoke.mockResolvedValue({ data: { released: 0 }, error: null });
+    const { user } = renderInvoice();
+    await user.type(await screen.findByLabelText(/Gift card code/), 'ABCD-EFGH');
+    await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
+    await user.click(await screen.findByRole('button', { name: 'Close it and use the gift card' }));
+
+    expect(
+      await screen.findByText(
+        'A card page for this booking’s deposit is still open (until 3:40 PM). It was opened from the booking link and can’t be closed from here: finish paying the deposit there, or use your gift card after that page expires.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText('The booking’s deposit page is still open')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Close it and use the gift card' }),
+    ).not.toBeInTheDocument();
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(1);
+    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(2);
+
+    // Trying the code again by hand later starts over (the page may have expired).
+    await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
+    expect(
+      await screen.findByRole('button', { name: 'Close it and use the gift card' }),
+    ).toBeInTheDocument();
+    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(3);
+  });
+
   it('says why the card page could not be closed (e.g. it was just paid)', async () => {
     mockRpc({
       public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },

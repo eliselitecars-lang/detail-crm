@@ -4,9 +4,11 @@
  * §5; deletion: the `account` and `storage-purge` functions and the
  * `payments` delete_shop action). When the product changes what it collects,
  * who receives it or how deletion works, change this file in the same
- * commit and bump LEGAL_LAST_UPDATED (operator.ts). Operator details come
- * only from the build-time VITE_LEGAL_* values; nothing is made up when they
- * are missing. The operator reviews the text with counsel (docs/LAUNCH.md).
+ * commit and bump LEGAL_LAST_UPDATED (operator.ts); legalVersion.test.tsx
+ * holds a fingerprint of the wording per date and fails until both are done.
+ * Operator details come only from the build-time VITE_LEGAL_* values; nothing
+ * is made up when they are missing. The operator reviews the text with
+ * counsel (docs/LAUNCH.md).
  */
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
@@ -189,6 +191,11 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               keep each shop’s subscription status, plan, trial and billing-period dates, and
               Stripe’s reference IDs for the shop’s billing customer and subscription. The owner
               enters the card on Stripe’s checkout page; the Service never receives or stores it.
+              Because each person gets one free trial, when a shop starts a trial we also record who
+              it was given to: the owner’s account, a scrambled (hashed) form of their email address
+              — not the address itself — the shop and when the trial ends. This record is kept after
+              the shop or the account is deleted (deleting the account removes the link to it), so
+              the same email address does not get a second trial.
             </li>
             <li>
               <Term>Time tracking:</Term> when staff clock in and out, the job the time belongs to,
@@ -214,15 +221,21 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               the person made; those choices are applied to a customer record the sign-up created
               only once the first membership payment goes through. The record is used to limit the
               number of sign-ups from one connection, and each time the shop receives another online
-              sign-up attempt, these records older than seven days are deleted. Gift card purchases
-              record the buyer’s and recipient’s names and email addresses, the gift message and the
-              IP address of the buyer’s device; gift card codes are stored only in a scrambled form
-              (plus their last four characters, so staff can find a card) and are emailed to the
-              recipient. When someone enters a gift card code that does not work on an invoice
-              payment page, the IP address of the device is recorded with the failed attempt to stop
-              codes being guessed. A shop can embed its booking page or contact form in its own
-              website: the form then appears inside that website, and the embed script sets no
-              cookies and tells the website only how tall the form is.
+              sign-up attempt, these records older than seven days are deleted. When someone checks
+              a coupon code on a shop’s booking page, the check is recorded with the IP address of
+              the device (for an IPv6 address, only its network part), a scrambled form of the code
+              (not the code itself), whether the shop has such a code and the time, so the number of
+              codes one connection can try is limited and a booking can use only a code that was
+              checked; each time the shop receives another check, these records older than two days
+              are deleted. Gift card purchases record the buyer’s and recipient’s names and email
+              addresses, the gift message and the IP address of the buyer’s device; gift card codes
+              are stored only in a scrambled form (plus their last four characters, so staff can
+              find a card) and are emailed to the recipient. When someone enters a gift card code
+              that does not work on an invoice payment page, the IP address of the device is
+              recorded with the failed attempt to stop codes being guessed. A shop can embed its
+              booking page or contact form in its own website: the form then appears inside that
+              website, and the embed script sets no cookies and tells the website only how tall the
+              form is.
             </li>
             <li>
               <Term>Customer portal:</Term> customers who create a portal account sign in with an
@@ -460,7 +473,10 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               iPhone app under More › Your account. This permanently deletes your sign-in and
               profile, removes you from every shop team and unlinks your customer portal. Records
               that shops keep for their business, such as appointments, invoices and payments, stay
-              with those shops. A shop owner must first transfer ownership of the shop or delete it.
+              with those shops. If you were given a free trial, the record of it (with a scrambled
+              form of your email address, described under “Shop subscriptions”) is kept without the
+              link to your account. A shop owner must first transfer ownership of the shop or delete
+              it.
             </p>
             <LegalSubheading>Deleting a shop</LegalSubheading>
             <p>
@@ -750,7 +766,9 @@ export function termsOfService(operator: LegalOperator): LegalText {
               </li>
               <li>
                 <Term>Trial:</Term> a shop may start with a free trial of the length shown in the
-                app, without entering a card. A shop gets one trial. If the owner subscribes with at
+                app, without entering a card. Each person gets one free trial: a shop created by an
+                owner who already had one, on any shop (including a deleted one), starts without a
+                trial and needs a subscription to add new work. If the owner subscribes with at
                 least two days of the trial left, the first payment is due when the trial ends;
                 otherwise it is due when the subscription starts.
               </li>

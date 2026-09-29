@@ -68,5 +68,9 @@ export function operatorNameStart(operator: LegalOperator): string {
   return operator.entityName ?? 'The operator of this service';
 }
 
-/** When the text was last changed (update together with the wording in content.tsx). */
-export const LEGAL_LAST_UPDATED = { iso: '2026-09-28', label: 'September 28, 2026' } as const;
+/**
+ * When the text was last changed (update together with the wording in
+ * content.tsx). legalVersion.test.tsx fails when the rendered wording changes
+ * without a new, later date here.
+ */
+export const LEGAL_LAST_UPDATED = { iso: '2026-09-29', label: 'September 29, 2026' } as const;

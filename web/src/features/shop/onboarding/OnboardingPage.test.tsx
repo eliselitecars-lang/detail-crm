@@ -152,6 +152,67 @@ describe('OnboardingPage', () => {
     ).toBeInTheDocument();
   });
 
+  it('sends an owner whose trial was already used to Billing (a second shop starts without one)', async () => {
+    mockRpc({
+      public_billing_plans: {
+        data: [
+          {
+            id: 'plan-1',
+            name: 'Solo',
+            description: null,
+            amount_cents: 4900,
+            currency: 'usd',
+            interval: 'month',
+            interval_count: 1,
+            max_members: 1,
+            features: [],
+          },
+        ],
+      },
+      create_shop: { data: { id: 'shop-new', name: 'Glacier Detailing' } },
+      replace_business_hours: { data: [] },
+      shop_entitlement: {
+        data: {
+          billing_enabled: true,
+          state: 'lapsed',
+          reason: 'no_subscription',
+          plan_name: null,
+          trial_ends_at: null,
+          current_period_end: null,
+          cancel_at_period_end: false,
+          max_members: null,
+          members_used: 1,
+          can_write: false,
+          is_owner: true,
+        },
+      },
+    });
+    const { user } = renderRoute(<OnboardingPage />, {
+      routePath: '/app/onboarding',
+      path: '/app/onboarding',
+      auth: signedInAuth('owner@example.com', 'user-1'),
+      shop: shopValue({ membership: null }),
+      routes: [
+        { path: '/app', element: <p>Dashboard home</p> },
+        { path: '/app/settings/billing', element: <p>Billing settings</p> },
+      ],
+    });
+    await user.type(await screen.findByLabelText(/Shop name/), 'Glacier Detailing');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Contact & location' });
+    await user.selectOptions(screen.getByLabelText(/Time zone/), 'America/Chicago');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Taxes & hours' });
+    await user.click(screen.getByRole('button', { name: 'Create shop' }));
+    expect(await screen.findByText('Billing settings')).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        'The free trial was already used, so choose a plan to start adding customers and jobs.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Dashboard home')).not.toBeInTheDocument();
+  });
+
   it('shows no pricing link or trial while billing is off', async () => {
     mockRpc({ public_billing_plans: { data: [] } });
     setup();

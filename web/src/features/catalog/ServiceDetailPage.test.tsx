@@ -290,6 +290,45 @@ describe('ServiceDetailPage', () => {
     });
   });
 
+  it('says email follow-ups aren’t sent while the shop has no mailing address (0119)', async () => {
+    results.message_templates = {
+      data: [
+        { channel: 'sms', enabled: true },
+        { channel: 'email', enabled: true },
+      ],
+    };
+    const followup = {
+      id: 'fu-2',
+      shop_id: 'shop-1',
+      service_id: 'pkg-1',
+      channel: 'email',
+      offset_days: 180,
+      subject: 'Coating check-up',
+      body: 'Time for a check-up: {{rebook_link}}',
+      enabled: true,
+      sort: 0,
+      created_at: '',
+      updated_at: '',
+    };
+    results.service_followups = { data: [followup] };
+    results.shops = { data: [{ id: 'shop-1', address_line1: null, city: 'Birmingham' }] };
+    const first = renderAs('manager');
+    let card = await screen.findByRole('region', { name: 'Follow-up messages' });
+    const notice = await within(card).findByRole('status', {
+      name: 'Marketing email needs your mailing address',
+    });
+    expect(notice).toHaveTextContent('The email follow-ups here are on but aren’t being sent.');
+    // Managers can't edit the business profile: they're told who can.
+    expect(notice).toHaveTextContent('Ask an owner or admin to add it');
+    first.unmount();
+
+    results.shops = { data: [{ id: 'shop-1', address_line1: '1 Main St', city: 'Birmingham' }] };
+    renderAs('owner');
+    card = await screen.findByRole('region', { name: 'Follow-up messages' });
+    expect(await within(card).findByText('6 months after the visit')).toBeInTheDocument();
+    expect(within(card).queryByText(/aren’t being sent/)).not.toBeInTheDocument();
+  });
+
   it('lists the materials a service uses (managers)', async () => {
     results.products = {
       data: [

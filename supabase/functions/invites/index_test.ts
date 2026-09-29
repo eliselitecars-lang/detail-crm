@@ -5,10 +5,13 @@ import { FakeRpcError, FakeSupabase, type Row } from "../_shared/testing/fake_su
 import { memoryLogger } from "../_shared/testing/logger.ts";
 import { jsonRequest, responseJson } from "../_shared/testing/requests.ts";
 import {
+  carriesInviteLink,
   formatPhone,
+  INVITE_EMAIL_INTERVAL_MS,
   INVITE_TTL_MS,
   inviteEmailKey,
   type InviteResponse,
+  INVITES_PER_DAY,
   isFreshInvite,
   makeHandler,
   REUSE_WINDOW_MS,
@@ -105,6 +108,7 @@ function setup(
       role: args.p_role,
       invited_by: ctx.userId,
       expires_at: "2026-10-04T15:00:00.000Z",
+      created_at: NOW.toISOString(),
     });
     ctx.db.seed("shop_invites", [...rows, row]);
     return row;
@@ -457,7 +461,7 @@ Deno.test("resend_invite: re-emails a pending invite with the same link", async 
   assertEquals((call?.json as { to: string[] }).to, ["newtech@example.com"]);
   assertEquals(
     call?.headers.get("idempotency-key"),
-    `invite-${pending.id}-resend-${Math.floor(NOW.getTime() / 60_000)}`,
+    `invite-${pending.id}-email-${Math.floor(NOW.getTime() / (5 * 60_000))}`,
   );
   assertEquals(call?.headers.get("idempotency-key"), inviteEmailKey(String(pending.id), NOW));
   assertEquals(db.requests.some((r) => r.target === "invite_member"), false);
@@ -592,4 +596,113 @@ Deno.test("formatPhone mirrors SQL format_phone", () => {
   assertEquals(formatPhone("+12055550101"), "(205) 555-0101");
   assertEquals(formatPhone("+442071234567"), "+442071234567");
   assertEquals(formatPhone(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// the platform's sending address is not an open relay
+// ---------------------------------------------------------------------------
+
+Deno.test("send_invite: a custom template without {{invite_link}} sends the default wording", async () => {
+  const { db, handler } = setup({
+    templates: [{
+      shop_id: SHOP,
+      key: "invite",
+      channel: "email",
+      subject: "Your account is locked",
+      body: "Your account is suspended. Verify now at https://evil.example/login",
+      enabled: true,
+    }],
+  });
+  const out = await responseJson<InviteResponse>(
+    await handler(sendInvite("tok-owner", { email: "victim@example.com", role: "technician" })),
+  );
+  const email = db.http.callsTo("POST", RESEND_URL)[0]?.json as Record<string, unknown>;
+  assertEquals(email.subject, "You are invited to join Shine Auto Spa");
+  assert(!String(email.text).includes("evil.example"));
+  assert(String(email.text).includes(out.invite_url));
+});
+
+Deno.test("carriesInviteLink: the link placeholder, spaces allowed", () => {
+  assertEquals(carriesInviteLink("Join: {{invite_link}}"), true);
+  assertEquals(carriesInviteLink("Join: {{ invite_link }}"), true);
+  assertEquals(carriesInviteLink("Join us at {{shop_name}}"), false);
+  assertEquals(carriesInviteLink("invite_link"), false);
+});
+
+function recentInvites(count: number, overrides: Row = {}): Row[] {
+  return Array.from({ length: count }, (_, i) =>
+    invite({
+      email: `person${i}@example.com`,
+      // revoked / accepted rows count too: re-inviting does not reset the cap
+      ...(i % 3 === 0 ? { revoked_at: NOW.toISOString() } : {}),
+      created_at: new Date(NOW.getTime() - (23 * 60 - i) * 60_000).toISOString(),
+      ...overrides,
+    }));
+}
+
+Deno.test("send_invite: a shop that issued the day's invites is 429 rate_limited; nothing is created or emailed", async () => {
+  const { db, handler } = setup({ invites: recentInvites(INVITES_PER_DAY) });
+  const res = await handler(
+    sendInvite("tok-owner", { email: "one-more@example.com", role: "technician" }),
+  );
+  const body = await expectError(res, 429, "rate_limited");
+  assertEquals((body.details as Record<string, unknown>).reason, "invite_limit");
+  // the oldest counted invite (23 h old) leaves the window in an hour
+  assertEquals(res.headers.get("retry-after"), "3600");
+  assertEquals(db.requests.filter((r) => r.target === "invite_member").length, 0);
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+  assertEquals(db.table("shop_invites").length, INVITES_PER_DAY);
+});
+
+Deno.test("send_invite: invites older than 24 hours and other shops' invites do not count", async () => {
+  const old = recentInvites(INVITES_PER_DAY, {
+    created_at: new Date(NOW.getTime() - 25 * 60 * 60_000).toISOString(),
+  });
+  const elsewhere = recentInvites(INVITES_PER_DAY, { shop_id: OTHER_SHOP });
+  const { handler } = setup({
+    invites: [...old, ...elsewhere, ...recentInvites(INVITES_PER_DAY - 1)],
+  });
+  const res = await handler(
+    sendInvite("tok-owner", { email: "last@example.com", role: "manager" }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals((await responseJson<InviteResponse>(res)).email_sent, true);
+});
+
+Deno.test("resend_invite: re-issuing a stale invite counts toward the daily cap", async () => {
+  const stale = invite({
+    email: "late@example.com",
+    expires_at: EXPIRING_SOON,
+    created_at: new Date(NOW.getTime() - 25 * 60 * 60_000).toISOString(),
+  });
+  const { db, handler } = setup({ invites: [stale, ...recentInvites(INVITES_PER_DAY)] });
+  await expectError(
+    await handler(resendInvite("tok-owner", String(stale.id))),
+    429,
+    "rate_limited",
+  );
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+});
+
+Deno.test("resend_invite: repeated resends of a fresh invite share one email per interval", async () => {
+  const pending = invite();
+  const { db, handler } = setup({ invites: [pending] });
+  for (let i = 0; i < 3; i++) {
+    const res = await handler(resendInvite("tok-owner", String(pending.id)));
+    assertEquals(res.status, 200);
+    await res.body?.cancel();
+  }
+  const keys = db.http.callsTo("POST", RESEND_URL).map((c) => c.headers.get("idempotency-key"));
+  assertEquals(new Set(keys).size, 1);
+});
+
+Deno.test("inviteEmailKey: one key per invite per INVITE_EMAIL_INTERVAL_MS", () => {
+  const start = new Date(
+    Math.floor(NOW.getTime() / INVITE_EMAIL_INTERVAL_MS) * INVITE_EMAIL_INTERVAL_MS,
+  );
+  const later = new Date(start.getTime() + INVITE_EMAIL_INTERVAL_MS - 1);
+  const next = new Date(start.getTime() + INVITE_EMAIL_INTERVAL_MS);
+  assertEquals(inviteEmailKey("i1", start), inviteEmailKey("i1", later));
+  assert(inviteEmailKey("i1", start) !== inviteEmailKey("i1", next));
+  assert(inviteEmailKey("i1", start) !== inviteEmailKey("i2", start));
 });

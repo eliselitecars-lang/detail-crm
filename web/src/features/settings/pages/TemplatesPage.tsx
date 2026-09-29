@@ -12,9 +12,15 @@ import {
   type MessageTemplate,
   type TemplateKey,
 } from '../api';
+import { MarketingAddressNotice } from '../components/MarketingAddressNotice';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
 import { TemplateEditorDialog } from '../components/TemplateEditorDialog';
 import { bookingUrl } from '../links';
+import {
+  blockedMarketingEmailText,
+  hasMailingAddress,
+  MARKETING_EMAIL_KEYS,
+} from '../marketingAddress';
 import { reminderOffsetsOf } from '../templates/drafts';
 import {
   CHANNEL_LABELS,
@@ -59,6 +65,9 @@ export default function TemplatesPage() {
       }),
     [shopSettings.data, shop.name, shop.slug],
   );
+  // 0119: marketing email (rebooking / maintenance follow-ups) is never sent
+  // without the shop's mailing address. Unknown until the shop row loads.
+  const noMailingAddress = shopSettings.data ? !hasMailingAddress(shopSettings.data) : false;
 
   return (
     <SettingsSectionLayout section="templates" readOnly={readOnly}>
@@ -67,8 +76,18 @@ export default function TemplatesPage() {
         {(templates) => {
           const byKey = new Map<TemplateKey, MessageTemplate[]>();
           for (const t of templates) byKey.set(t.key, [...(byKey.get(t.key) ?? []), t]);
+          const blocked = noMailingAddress
+            ? blockedMarketingEmailText(
+                templates
+                  .filter(
+                    (t) => t.channel === 'email' && t.enabled && MARKETING_EMAIL_KEYS.has(t.key),
+                  )
+                  .map((t) => t.key),
+              )
+            : null;
           return (
             <>
+              {blocked && <MarketingAddressNotice>{blocked}</MarketingAddressNotice>}
               <p className="text-muted text-sm">
                 Automatic messages go out on every channel that’s on. Texts need an SMS number
                 (Settings → SMS) and a customer who hasn’t opted out.
@@ -82,6 +101,7 @@ export default function TemplatesPage() {
                         meta={meta}
                         rows={byKey.get(meta.key) ?? []}
                         canEdit={canEdit}
+                        emailNeedsAddress={noMailingAddress && MARKETING_EMAIL_KEYS.has(meta.key)}
                         onOpen={() => setEditing(meta.key)}
                       />
                     ))}
@@ -109,11 +129,14 @@ function TemplateRow({
   meta,
   rows,
   canEdit,
+  emailNeedsAddress,
   onOpen,
 }: {
   meta: TemplateKeyMeta;
   rows: MessageTemplate[];
   canEdit: boolean;
+  /** Marketing email with no shop mailing address on file: never sent (0119). */
+  emailNeedsAddress: boolean;
   onOpen: () => void;
 }) {
   const toast = useToast();
@@ -134,6 +157,12 @@ function TemplateRow({
           </p>
         )}
         {meta.timingNote && <p className="text-muted mt-1 text-xs">{meta.timingNote}</p>}
+        {emailNeedsAddress && rows.some((r) => r.channel === 'email') && (
+          <p className="text-warning-ink mt-1 text-xs">
+            Emails aren’t sent until the shop’s mailing address is on file (Settings → Business
+            profile).
+          </p>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         {meta.channels.map((channel) => {

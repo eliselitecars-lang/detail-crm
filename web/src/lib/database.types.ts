@@ -19,6 +19,33 @@ export type Database = {
   }
   public: {
     Tables: {
+      billing_trial_grants: {
+        Row: {
+          created_at: string
+          email_key: string | null
+          id: string
+          trial_ends_at: string
+          trial_shop_id: string | null
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          email_key?: string | null
+          id?: string
+          trial_ends_at: string
+          trial_shop_id?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          email_key?: string | null
+          id?: string
+          trial_ends_at?: string
+          trial_shop_id?: string | null
+          user_id?: string | null
+        }
+        Relationships: []
+      }
       blocked_times: {
         Row: {
           affects_capacity: boolean | null
@@ -609,6 +636,41 @@ export type Database = {
           },
           {
             foreignKeyName: "comms_unsubscribe_tokens_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      coupon_code_attempts: {
+        Row: {
+          client_scope: unknown
+          code_hash: string
+          created_at: string
+          found: boolean
+          id: string
+          shop_id: string
+        }
+        Insert: {
+          client_scope?: unknown
+          code_hash: string
+          created_at?: string
+          found: boolean
+          id?: string
+          shop_id: string
+        }
+        Update: {
+          client_scope?: unknown
+          code_hash?: string
+          created_at?: string
+          found?: boolean
+          id?: string
+          shop_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "coupon_code_attempts_shop_id_fkey"
             columns: ["shop_id"]
             isOneToOne: false
             referencedRelation: "shops"
@@ -6454,6 +6516,10 @@ export type Database = {
         Args: { p_event_created: string; p_stripe_customer_id: string }
         Returns: undefined
       }
+      billing_record_trial_grant: {
+        Args: { p_shop_id: string; p_trial_ends_at: string; p_user_id: string }
+        Returns: undefined
+      }
       billing_seats_message: { Args: { p_max: number }; Returns: string }
       billing_seats_used: {
         Args: {
@@ -6478,7 +6544,12 @@ export type Database = {
         }
         Returns: Record<string, unknown>
       }
+      billing_trial_already_given: {
+        Args: { p_user_id: string }
+        Returns: boolean
+      }
       billing_trial_days: { Args: Record<PropertyKey, never>; Returns: number }
+      billing_trial_email_key: { Args: { p_email: string }; Returns: string }
       billing_upsert_plan: {
         Args: {
           p_active: boolean
@@ -7404,6 +7475,31 @@ export type Database = {
       coupon_booking_refused_message: {
         Args: Record<PropertyKey, never>
         Returns: string
+      }
+      coupon_code_attempt_hash: {
+        Args: { p_code: string; p_shop_id: string }
+        Returns: string
+      }
+      coupon_code_attempts_message: {
+        Args: Record<PropertyKey, never>
+        Returns: string
+      }
+      coupon_code_checked_by: {
+        Args: { p_hash: string; p_scope: unknown; p_shop_id: string }
+        Returns: boolean
+      }
+      coupon_code_log_attempt: {
+        Args: {
+          p_found: boolean
+          p_hash: string
+          p_scope: unknown
+          p_shop_id: string
+        }
+        Returns: undefined
+      }
+      coupon_code_lookup_allowed: {
+        Args: { p_hash: string; p_scope: unknown; p_shop_id: string }
+        Returns: boolean
       }
       coupon_customer_reason: {
         Args: {

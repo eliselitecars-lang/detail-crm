@@ -407,6 +407,50 @@ describe('MessagesPage', () => {
     );
   });
 
+  it('links to the business settings when a follow-up email needs the mailing address', async () => {
+    mockInbox({ first: [] });
+    setTableResult('messages', { data: [message({ read_at: '2026-03-10T15:00:00Z' })] });
+    setTableResult('customers', {
+      data: { ...casey, phone: null, email: 'casey@example.com', email_opt_in: true },
+    });
+    setTableResult('message_templates', {
+      data: [
+        {
+          id: 't4',
+          key: 'follow_up',
+          channel: 'email',
+          subject: 'Time for another detail?',
+          body: 'Book again: {{booking_link}}',
+          enabled: true,
+        },
+      ],
+    });
+    invoke().mockResolvedValueOnce({
+      data: null,
+      error: edgeHttpError(422, {
+        error:
+          "Add your shop's mailing address (Settings → Business profile) before sending marketing email: the law requires it in every marketing email.",
+        code: 'unprocessable',
+        details: { reason: 'postal_address_required' },
+      }),
+    });
+    const { user } = renderRoute(<MessagesPage />, {
+      path: '/app/messages?customer=c1',
+      routePath: '/app/messages',
+    });
+    await user.selectOptions(
+      await screen.findByRole('combobox', { name: 'Template' }),
+      'follow_up',
+    );
+    await user.click(screen.getByRole('button', { name: 'Send template' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Add your shop's mailing address");
+    expect(within(alert).getByRole('link', { name: 'Add the mailing address' })).toHaveAttribute(
+      'href',
+      '/app/settings/business',
+    );
+  });
+
   it('keeps the draft and shows why an appointment message was refused', async () => {
     mockInbox({ first: [] });
     setTableResult('messages', { data: [message({ read_at: '2026-03-10T15:00:00Z' })] });

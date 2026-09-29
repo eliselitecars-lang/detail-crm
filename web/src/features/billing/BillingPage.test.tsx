@@ -180,6 +180,49 @@ describe('Settings > Billing', () => {
     expect(screen.queryByRole('button', { name: /Choose/ })).not.toBeInTheDocument();
   });
 
+  it('keeps Manage billing for a past-due owner when the subscription row fails to load', async () => {
+    backend(
+      entitlement({
+        state: 'past_due',
+        reason: 'past_due',
+        plan_name: 'Plan A',
+        trial_ends_at: null,
+        current_period_end: '2099-02-01T18:00:00Z',
+      }),
+    );
+    setTableResult('shop_billing', { error: { code: '57014', message: 'timeout' } });
+    const { user } = renderSettings('/app/settings/billing');
+    expect(await screen.findByText('Couldn’t load the subscription details')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Manage billing' })).toBeVisible();
+    expect(
+      screen.getByText(
+        'Update the payment method there; Stripe retries the payment automatically.',
+      ),
+    ).toBeVisible();
+    // Never a new checkout on a guess.
+    expect(screen.queryByRole('button', { name: /Choose/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Choose a plan' })).not.toBeInTheDocument();
+
+    // Try again reads the row and shows the normal page.
+    setTableResult('shop_billing', {
+      data: [billingRow({ status: 'past_due', plan_id: PLAN.id, trial_ends_at: null })],
+    });
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() =>
+      expect(screen.queryByText('Couldn’t load the subscription details')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('button', { name: 'Manage billing' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Choose/ })).not.toBeInTheDocument();
+  });
+
+  it('shows an error, not the plans, when a never-subscribed shop’s row fails to load', async () => {
+    backend(entitlement({ state: 'lapsed', reason: 'trial_ended', trial_ends_at: null }));
+    setTableResult('shop_billing', { error: { code: '57014', message: 'timeout' } });
+    renderSettings('/app/settings/billing');
+    expect(await screen.findByText('Couldn’t load the subscription details')).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Choose|Manage billing/ })).not.toBeInTheDocument();
+  });
+
   it('shows managers the standing read-only', async () => {
     backend(entitlement({ state: 'lapsed', reason: 'trial_ended', can_write: false }));
     renderSettings('/app/settings/billing', { role: 'manager' });

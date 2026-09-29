@@ -88,8 +88,8 @@ import { settleInvoice, settleJob } from "./settle.ts";
 import {
   holdInvoiceCheckout,
   holdJobCheckout,
-  refuseClosedJobSession,
   refuseUnheldInvoiceSession,
+  refuseUnheldJobSession,
   releaseInvoicePayLinks,
   releaseJobCheckouts,
 } from "./checkout_holds.ts";
@@ -516,9 +516,13 @@ async function depositCheckout(
   );
   // 0106: held before the URL is handed out, so the customer's online cancel
   // waits for this page; a job that closed meanwhile gets no deposit link.
-  if (await holdJobCheckout(s, shop.id, job.id, session) === "closed") {
-    await refuseClosedJobSession(s, account, session.id);
-  }
+  // 0118: the database re-reads the deposit due under the invoice lock that
+  // cash takes, so money recorded while the session was being created
+  // either refuses this page (deposit_not_due / balance_changed: the session
+  // is expired, the customer reloads and sees the new amount) or waits for
+  // this hold (checkout_open).
+  const held = await holdJobCheckout(s, shop.id, job.id, session, due);
+  if (held !== "held") await refuseUnheldJobSession(s, account, session.id, held);
   // One live deposit link per job (whichever page opened it).
   await expireOpenSessions(
     s,

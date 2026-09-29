@@ -236,6 +236,20 @@ What the trial does:
   subscription starts and is charged right away.
 - A shop gets its trial once: a shop that already had a trial on a
   subscription does not get a new one.
+- **A person gets the trial once**, not once per shop. The app remembers
+  whom it gave a trial to (their account and a one-way hash of their email
+  address, with any `+tag` ignored; the address itself is not stored). A
+  new shop created by someone who already had a trial starts **without**
+  one: it can be viewed but not used for new work until the owner picks a
+  plan in Settings -> Billing, and Checkout carries no trial. Deleting the
+  old shop, re-creating it under the same web address, or deleting the
+  account and signing up again with the same email does not give a new
+  trial. Someone who signs up with a different email address does get one:
+  if you see that, comp or contact the shop.
+- To let someone have another trial (for example a genuine second
+  business), delete their record in the Supabase SQL editor, then have them
+  create the shop again (or set a trial on the shop yourself):
+  `delete from public.billing_trial_grants where user_id = (select id from auth.users where email = '<their email>');`
 - **When you turn billing on, every existing shop that never subscribed gets
   a trial of `BILLING_TRIAL_DAYS` days from that moment.** With `0` days,
   those shops lapse **immediately**. Comp your pilot shops first (section 7)

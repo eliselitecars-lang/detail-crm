@@ -59,27 +59,53 @@ function holdUntil(session: { expires_at?: number | null }): string {
 }
 
 /**
+ * Why payments_hold_job_checkout would not hold a job's page (55000):
+ *  - booking_closed: the job was cancelled, marked no-show or completed;
+ *  - deposit_not_due (0118, deposit pages only): nothing is due any more
+ *    (cash, a gift card or another page covered the deposit meanwhile);
+ *  - balance_changed (0118, deposit pages only): less is due than the
+ *    session charges (`amountCents`), e.g. part of the deposit was taken in
+ *    cash while the session was being created.
+ */
+export type JobHoldRefusal = "booking_closed" | "deposit_not_due" | "balance_changed";
+
+const JOB_HOLD_REFUSALS: ReadonlyArray<JobHoldRefusal> = [
+  "booking_closed",
+  "deposit_not_due",
+  "balance_changed",
+];
+
+/**
  * Records `session` (just created, still open) as paying toward `jobId`
- * until Stripe expires it. Call it BEFORE handing the URL out. "closed" when
- * the job was cancelled, marked no-show or completed meanwhile (55000 HINT
- * booking_closed): nothing is recorded, and a deposit caller must expire the
- * session and refuse (a closed job cannot be cancelled online, so an invoice
- * pay link needs no JOB hold; its invoice hold is holdInvoiceCheckout's).
+ * until Stripe expires it. Call it BEFORE handing the URL out. Anything but
+ * "held" is the database's refusal (JobHoldRefusal): nothing is recorded,
+ * and a deposit caller must expire the session and refuse
+ * (refuseUnheldJobSession). A deposit page passes `amountCents` (what the
+ * session charges): the database re-reads the deposit still due under the
+ * lock every manual payment takes (0118) and refuses a session that would
+ * charge more. An /i pay link's session was already held (and re-checked)
+ * for its invoice, so its job hold is only the cancel guard: it passes no
+ * amount (a closed job cannot be cancelled online, so "booking_closed"
+ * needs no job hold there; the invoice hold still guards its money).
  */
 export async function holdJobCheckout(
   s: Services,
   shopId: string,
   jobId: string,
   session: { id: string; expires_at?: number | null },
-): Promise<"held" | "closed"> {
+  amountCents?: number,
+): Promise<"held" | JobHoldRefusal> {
   const { error } = await s.admin.rpc("payments_hold_job_checkout", {
     p_shop_id: shopId,
     p_job_id: jobId,
     p_session_id: session.id,
     p_expires_at: holdUntil(session),
+    ...(amountCents === undefined ? {} : { p_amount_cents: amountCents }),
   });
   if (!error) return "held";
-  if (refusedWith(error, "55000", "booking_closed")) return "closed";
+  for (const reason of JOB_HOLD_REFUSALS) {
+    if (refusedWith(error, "55000", reason)) return reason;
+  }
   throw dbFailure("payments_hold_job_checkout", error);
 }
 
@@ -147,20 +173,26 @@ export async function refuseUnheldInvoiceSession(
   throw errors.conflict(INVOICE_HOLD_MESSAGES[reason], { reason });
 }
 
+const JOB_HOLD_MESSAGES: Record<JobHoldRefusal, string> = {
+  booking_closed: "This booking is no longer taking deposits.",
+  deposit_not_due: "No deposit is due for this booking.",
+  balance_changed: "This booking's deposit just changed. Refresh the page and try again.",
+};
+
 /**
- * A job deposit link that could not be held: the job closed while the
- * session was being created. The session is expired (nobody has its URL)
- * and the caller answers 409 booking_closed.
+ * A job deposit link the database would not hold: the job closed, or the
+ * deposit due changed, while the session was being created. The session is
+ * expired (nobody has its URL) and the caller answers 409 with the refusal
+ * as `reason` (409 payment_in_progress when it was somehow paid already).
  */
-export async function refuseClosedJobSession(
+export async function refuseUnheldJobSession(
   s: Services,
   account: AccountRow,
   sessionId: string,
+  reason: JobHoldRefusal,
 ): Promise<never> {
   if (await closeSession(s, account, sessionId) === "complete") throw paymentInProgress();
-  throw errors.conflict("This booking is no longer taking deposits.", {
-    reason: "booking_closed",
-  });
+  throw errors.conflict(JOB_HOLD_MESSAGES[reason], { reason });
 }
 
 /**
@@ -272,11 +304,14 @@ async function releaseHeldPages(
     })
     : [];
   const released = [...expired];
+  let paid = false;
   for (const sessionId of await liveHolds(s, pages.shopId, pages.jobIds, pages.invoiceId)) {
     if (released.includes(sessionId)) continue;
     const outcome = await closeSession(s, account, sessionId);
     if (outcome === "complete") {
-      if (options.refuseCompleted) throw paymentInProgress();
+      // Keeps its hold (its payment row releases it); the others are still
+      // closed and released below before the refusal.
+      paid = true;
       continue;
     }
     if (outcome === "expired") expired.push(sessionId);
@@ -304,6 +339,7 @@ async function releaseHeldPages(
       if (error) throw dbFailure("payments_release_invoice_checkouts", error);
     }
   }
+  if (paid && options.refuseCompleted) throw paymentInProgress();
   return expired;
 }
 
@@ -364,6 +400,37 @@ export async function releaseInvoiceCheckouts(
     },
     match,
     { refuseCompleted: false },
+  );
+}
+
+/**
+ * Before a staff card attempt charges the invoice (charge_saved_card,
+ * payment_sheet, terminal_payment_intent): every page that could still pay
+ * the same balance is expired and released — the invoice customer's open
+ * pay links and its jobs' deposit links (`match`), and every live hold of
+ * the invoice and of the jobs it bills. The holds are the database's record
+ * of every open page (the ones money_refuse_open_checkout refuses cash
+ * for), so this also closes a page Stripe lists under another Stripe
+ * customer: one opened before the invoice moved to this customer (a
+ * customer merge keeps the survivor's Stripe customer), or before the
+ * customer got a new one. 409 payment_in_progress when one of them was
+ * already paid (the pages that could still be closed are closed first).
+ * Returns the sessions this call expired.
+ */
+export async function supersedeInvoicePages(
+  s: Services,
+  account: AccountRow,
+  invoice: { id: string; shop_id: string },
+  jobIds: ReadonlyArray<string>,
+  stripeCustomer: string | null,
+  match: SessionMatch,
+): Promise<string[]> {
+  return await releaseHeldPages(
+    s,
+    account,
+    { shopId: invoice.shop_id, stripeCustomer, jobIds, invoiceId: invoice.id },
+    match,
+    { refuseCompleted: true },
   );
 }
 

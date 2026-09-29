@@ -247,6 +247,59 @@ Deno.test("send: a marketing follow_up email goes out with one-click unsubscribe
   });
 });
 
+Deno.test("send: a follow_up email while the shop has no mailing address says so (0119), not 'empty message'", async () => {
+  const { db, handler } = setup();
+  useTemplate(db, "follow_up", "email", "Time for a refresh?", "Come back soon");
+  db.seed(
+    "shops",
+    db.table("shops").map((s) => s.id === SHOP ? { ...s, address_line1: " ", city: null } : s),
+  );
+  const refused = await expectError(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "email",
+        template_key: "follow_up",
+      }),
+    ),
+    422,
+    "unprocessable",
+  );
+  assertEquals(refused.details, { reason: "postal_address_required" });
+  assertEquals(
+    refused.error,
+    "Add your shop's mailing address (Settings → Business profile) before sending marketing email: the law requires it in every marketing email.",
+  );
+  assertEquals(db.table("messages").filter((m) => m.template_key === "follow_up"), []);
+  // Consent is still reported first; SMS and transactional email need no address.
+  db.seed(
+    "customers",
+    db.table("customers").map((c) => c.id === CUSTOMER ? { ...c, email_opt_in: false } : c),
+  );
+  const consent = await expectError(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "email",
+        template_key: "follow_up",
+      }),
+    ),
+    422,
+    "unprocessable",
+  );
+  assertEquals(consent.details, { reason: "no_marketing_consent" });
+  const sms = await responseJson<SendResponse>(
+    await handler(
+      sendRequest("tok-manager", {
+        customer_id: CUSTOMER,
+        channel: "sms",
+        template_key: "follow_up",
+      }),
+    ),
+  );
+  assertEquals(sms.status, "sent");
+});
+
 /** Replaces (or adds) the shop's template for (key, channel). */
 function useTemplate(
   db: ReturnType<typeof setup>["db"],

@@ -584,7 +584,7 @@ export function buildPayload(
 // ---------------------------------------------------------------------------
 
 export type BookingErrorKind =
-  'slot_taken' | 'closed' | 'rate_limited' | 'not_found' | 'field' | 'other';
+  'slot_taken' | 'closed' | 'rate_limited' | 'not_found' | 'field' | 'coupon_not_checked' | 'other';
 
 export interface ClassifiedBookingError {
   kind: BookingErrorKind;
@@ -594,7 +594,8 @@ export interface ClassifiedBookingError {
 
 /**
  * create_online_booking error codes (0042 header): 23P01, 55000, PT429,
- * PT404 (unknown shop or saved vehicle; older servers raised P0002), 22023.
+ * PT404 (unknown shop or saved vehicle; older servers raised P0002), 22023
+ * (HINT coupon_not_checked, 0122: the coupon must be applied again).
  */
 export function classifyBookingError(
   error: unknown,
@@ -628,6 +629,18 @@ export function classifyBookingError(
   if (code === 'PT404' || code === 'P0002') return { kind: 'not_found', message, step: null };
   if (code === '23514' && /booking question|is required/i.test(message)) {
     return { kind: 'field', message, step: 'details' };
+  }
+  if (
+    code === '22023' &&
+    (appError.cause as { hint?: unknown } | undefined)?.hint === 'coupon_not_checked'
+  ) {
+    // 0122: the code wasn't looked up from this connection in the last 24
+    // hours (e.g. the page stayed open overnight): apply it again.
+    return {
+      kind: 'coupon_not_checked',
+      message: 'Please apply your coupon code again, or book without it.',
+      step: 'details',
+    };
   }
   if (code === '22023') {
     const text = message.toLowerCase();

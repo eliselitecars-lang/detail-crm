@@ -101,6 +101,8 @@ export function Composer({ customer, timeZone, defaultChannel }: ComposerProps) 
       : null;
   const needsReviewLink =
     refusal?.reason === 'missing_link' && refusalVariables(refusal).includes('review_link');
+  // A marketing email (rebooking follow-up) needs the shop's mailing address (0119).
+  const needsMailingAddress = refusal?.reason === 'postal_address_required';
   const jobOnly = templateKey !== '' && JOB_TEMPLATE_KEYS.has(templateKey);
 
   const max = channel === 'sms' ? SMS_MAX_LENGTH : EMAIL_MAX_LENGTH;
@@ -312,6 +314,20 @@ export function Composer({ customer, timeZone, defaultChannel }: ComposerProps) 
             ) : (
               <p className="text-muted mt-1">
                 Ask an owner or admin to add the shop’s review link in Settings.
+              </p>
+            ))}
+          {needsMailingAddress &&
+            (canEditSettings ? (
+              <Link
+                to="/app/settings/business"
+                className="text-primary-ink mt-1 inline-block font-medium hover:underline"
+              >
+                Add the mailing address
+              </Link>
+            ) : (
+              <p className="text-muted mt-1">
+                Ask an owner or admin to add the shop’s mailing address in Settings → Business
+                profile.
               </p>
             ))}
         </div>

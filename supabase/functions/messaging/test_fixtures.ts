@@ -57,7 +57,7 @@ const APPOINTMENT_KEYS = [
   "on_the_way",
   "job_started",
 ];
-const MARKETING_KEYS = ["follow_up"];
+const MARKETING_KEYS = ["follow_up", "service_followup"];
 export const APP_BASE = "https://app.example.com";
 
 function member(id: string, userId: string, role: string, shopId = SHOP): Row {
@@ -206,6 +206,20 @@ function documentVars(db: FakeSupabase, quoteId: unknown, invoiceId: unknown): R
 }
 
 /** Emulates enqueue_customer_template's consent/address checks; returns the new id or null. */
+/** Mirrors comms_shop_postal_address (0119): null without a street line and city. */
+function postalAddress(shop: Row | undefined): string | null {
+  const text = (value: unknown) => typeof value === "string" ? value.trim() : "";
+  if (!shop || text(shop.address_line1) === "" || text(shop.city) === "") return null;
+  const regionPostal = [text(shop.region), text(shop.postal_code)].filter((p) => p).join(" ");
+  return [
+    text(shop.address_line1),
+    text(shop.address_line2),
+    text(shop.city),
+    regionPostal,
+    shop.country && shop.country !== "US" ? String(shop.country) : "",
+  ].filter((p) => p !== "").join(", ");
+}
+
 function enqueueTemplate(
   db: FakeSupabase,
   shopId: string,
@@ -263,6 +277,9 @@ function enqueueTemplate(
   for (const [name, value] of Object.entries(options.vars ?? {})) {
     body = body.replaceAll(`{{${name}}}`, value === null ? "" : String(value));
   }
+  // 0119 messages_02_marketing_postal_address: without the shop's street
+  // line and city a non-campaign marketing email is not inserted (null).
+  if (unsubscribeToken && postalAddress(shop) === null) return null;
   const row = insertMessage(db, {
     shop_id: shopId,
     customer_id: customerId,
@@ -323,6 +340,11 @@ export function setup(
           sms_from_number: SHOP_NUMBER,
           slug: "shine",
           review_url: "https://g.page/r/shine/review",
+          address_line1: "100 Main St",
+          city: "Birmingham",
+          region: "AL",
+          postal_code: "35203",
+          country: "US",
         },
         { id: OTHER_SHOP, name: "Other", email: null, phone: null, sms_from_number: null },
       ],
@@ -753,6 +775,11 @@ export function setup(
       (args.p_sent_by as string | undefined) ?? null,
       { nonce: args.p_request_nonce },
     );
+  });
+
+  db.onRpc("comms_shop_postal_address", (args, ctx) => {
+    if (ctx.role !== "service_role") throw new FakeRpcError("42501", "permission denied");
+    return postalAddress(ctx.db.table("shops").find((s) => s.id === args.p_shop_id));
   });
 
   db.onRpc("comms_document_vars", (args, ctx) => {

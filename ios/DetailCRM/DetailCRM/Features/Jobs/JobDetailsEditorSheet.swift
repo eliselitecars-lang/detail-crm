@@ -41,6 +41,9 @@ struct JobDetailsEditorSheet: View {
     /// Why the pending edit can only be saved on this visit (a new date or
     /// deposit), or nil when "this and following" is offered too.
     @State private var seriesFollowingLimit: String?
+    /// A deposit cut refused while the deposit page is open (0118): asks
+    /// before releasing it (`checkoutReleaseRequest`).
+    @State private var confirmation: ConfirmationRequest?
 
     init(model: JobDetailModel, targetStatus: JobStatus? = nil) {
         self.model = model
@@ -111,6 +114,7 @@ struct JobDetailsEditorSheet: View {
                 }
             }
             .onAppear { prefill() }
+            .confirmation($confirmation)
             .jobsSeriesScopeDialog(
                 isPresented: $asksSeriesScope,
                 followingLimit: seriesFollowingLimit,
@@ -299,13 +303,35 @@ struct JobDetailsEditorSheet: View {
     private func apply(_ patch: JobDetailsPatch) async {
         do {
             try await model.saveDetails(patch)
-            if let targetStatus {
-                toasts.show("Job is now \(targetStatus.displayName.lowercased()).")
-            } else {
-                toasts.show("Job updated")
-            }
-            dismiss()
+            finishSaved()
         } catch {
+            showSaveError(error, patch: patch, onSaved: finishSaved)
+        }
+    }
+
+    private func finishSaved() {
+        if let targetStatus {
+            toasts.show("Job is now \(targetStatus.displayName.lowercased()).")
+        } else {
+            toasts.show("Job updated")
+        }
+        dismiss()
+    }
+
+    /// A deposit cut refused while the job's deposit page is open (0118)
+    /// asks whether to cancel the open payments first; the change is saved
+    /// again only if no payment came in meanwhile. Other errors show inline.
+    private func showSaveError(_ error: Error, patch: JobDetailsPatch, onSaved: @escaping () -> Void) {
+        let model = self.model
+        if let request = model.checkoutReleaseRequest(
+            for: error,
+            saveAgain: { try await model.saveDetails(patch) },
+            onSaved: onSaved,
+            onProblem: { message in errorMessage = message }
+        ) {
+            errorMessage = nil
+            confirmation = request
+        } else {
             errorMessage = ErrorText.message(for: error)
         }
     }
@@ -320,11 +346,21 @@ struct JobDetailsEditorSheet: View {
     private func applyFollowing(_ patch: JobDetailsPatch) async {
         do {
             let outcome = try await model.updateSeriesFollowing(patch, clock: appState.clock)
-            if !model.jobRemoved {
-                try await model.saveDetails(patch)
+            let finish = {
+                toasts.show(outcome.text(verb: "updated"), style: .info, duration: .seconds(6))
+                dismiss()
             }
-            toasts.show(outcome.text(verb: "updated"), style: .info, duration: .seconds(6))
-            dismiss()
+            if !model.jobRemoved {
+                do {
+                    try await model.saveDetails(patch)
+                } catch {
+                    // The following visits are updated; only this one's
+                    // own save is left (and asks first on 0118).
+                    showSaveError(error, patch: patch, onSaved: finish)
+                    return
+                }
+            }
+            finish()
         } catch {
             errorMessage = ErrorText.message(for: error)
         }

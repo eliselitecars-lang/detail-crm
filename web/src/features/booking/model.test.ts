@@ -245,6 +245,18 @@ describe('buildPayload', () => {
 describe('classifyBookingError', () => {
   const err = (code: string, message: string) => new AppError(message, { code });
 
+  it('sends a coupon the server did not see checked back to the details step (0122)', () => {
+    const refused = new AppError(
+      'enter the coupon code again on the booking page, or book without it',
+      { code: '22023', cause: { code: '22023', hint: 'coupon_not_checked' } },
+    );
+    expect(classifyBookingError(refused)).toEqual({
+      kind: 'coupon_not_checked',
+      message: 'Please apply your coupon code again, or book without it.',
+      step: 'details',
+    });
+  });
+
   it('maps the create_online_booking error codes', () => {
     expect(classifyBookingError(err('23P01', 'That time is no longer available.'))).toMatchObject({
       kind: 'slot_taken',

@@ -175,6 +175,31 @@ describe('BusinessProfilePage', () => {
   });
 });
 
+describe('BusinessProfilePage: mailing address for marketing email (0119)', () => {
+  it('says marketing email stops while the street address or city is blank', async () => {
+    const { user } = renderSettings('/app/settings/business');
+    const line1 = await screen.findByLabelText('Address line 1');
+    expect(
+      screen.getByText(/Without a street address and city, marketing email isn’t sent/),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Marketing emails \(campaigns, rebooking and maintenance/),
+    ).toBeVisible();
+
+    await user.type(line1, '1 Main St');
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Without a street address and city, marketing email isn’t sent/),
+      ).not.toBeInTheDocument(),
+    );
+    // Clearing the city warns again before anything is saved.
+    await user.clear(screen.getByLabelText('City'));
+    expect(
+      await screen.findByText(/Without a street address and city, marketing email isn’t sent/),
+    ).toBeVisible();
+  });
+});
+
 describe('BookingSettingsPage', () => {
   beforeEach(() => {
     setTableResult('booking_settings', {
@@ -320,6 +345,54 @@ describe('TemplatesPage', () => {
         p_template_id: 'sms-1',
       }),
     );
+  });
+});
+
+describe('TemplatesPage: marketing email without a mailing address (0119)', () => {
+  const marketing = () => [
+    template({ id: 'fu-sms', key: 'follow_up', offset_minutes: 43200 }),
+    template({ id: 'fu-email', key: 'follow_up', channel: 'email', offset_minutes: 43200 }),
+    template({ id: 'sf-email', key: 'service_followup', channel: 'email', offset_minutes: null }),
+  ];
+
+  it('says switched-on follow-up emails aren’t sent and links to the Business profile', async () => {
+    setTableResult('message_templates', { data: marketing() });
+    renderSettings('/app/settings/templates');
+    const notice = await screen.findByRole('status', {
+      name: 'Marketing email needs your mailing address',
+    });
+    expect(notice).toHaveTextContent(
+      'Rebooking and maintenance follow-up emails are on but aren’t being sent.',
+    );
+    expect(within(notice).getByRole('link', { name: 'Add the mailing address' })).toHaveAttribute(
+      'href',
+      '/app/settings/business',
+    );
+    expect(
+      screen.getAllByText(/Emails aren’t sent until the shop’s mailing address is on file/),
+    ).toHaveLength(2);
+  });
+
+  it('shows nothing once the address is on file, or while those emails are off', async () => {
+    setTableResult('shops', { data: { ...SHOP, address_line1: '1 Main St' } });
+    setTableResult('message_templates', { data: marketing() });
+    const first = renderSettings('/app/settings/templates');
+    expect(
+      await screen.findByRole('switch', { name: /^Rebooking follow-up: email/i }),
+    ).toBeVisible();
+    expect(screen.queryByText(/aren’t being sent/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/mailing address is on file/)).not.toBeInTheDocument();
+    first.unmount();
+
+    setTableResult('shops', { data: SHOP });
+    setTableResult('message_templates', {
+      data: marketing().map((t) => (t.channel === 'email' ? { ...t, enabled: false } : t)),
+    });
+    renderSettings('/app/settings/templates');
+    expect(
+      await screen.findByRole('switch', { name: /^Rebooking follow-up: email/i }),
+    ).toBeVisible();
+    expect(screen.queryByText(/aren’t being sent/)).not.toBeInTheDocument();
   });
 });
 

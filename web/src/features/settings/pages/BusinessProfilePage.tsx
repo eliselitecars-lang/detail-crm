@@ -16,6 +16,11 @@ import { formatPhone } from '@/lib/phone';
 import { useShopSettings, useUpdateShop, type ShopSettings } from '../api';
 import { FormActions } from '../components/FormActions';
 import { LogoCard } from '../components/LogoCard';
+import {
+  hasMailingAddress,
+  MAILING_ADDRESS_MISSING,
+  MAILING_ADDRESS_USE,
+} from '../marketingAddress';
 import { QueryView, SettingsSectionLayout } from '../components/SettingsSectionLayout';
 import { businessSchema, HEX_COLOR_RE, type BusinessInput, type BusinessValues } from '../schemas';
 import { useSettingsAccess } from '../useSettingsAccess';
@@ -82,6 +87,8 @@ function BusinessForm({ shop, canEdit }: { shop: ShopSettings; canEdit: boolean 
     defaultValues: toInput(shop),
   });
   const brandColor = useWatch({ control, name: 'brandColor' });
+  const [addressLine1, city] = useWatch({ control, name: ['addressLine1', 'city'] });
+  const mailingAddress = hasMailingAddress({ address_line1: addressLine1, city });
 
   const onSubmit = handleSubmit(async (values) => {
     try {
@@ -164,9 +171,17 @@ function BusinessForm({ shop, canEdit }: { shop: ShopSettings; canEdit: boolean 
 
         <SectionCard
           title="Address & time zone"
-          description="Your time zone controls every date and time customers and staff see."
+          description={`${MAILING_ADDRESS_USE} Your time zone controls every date and time customers and staff see.`}
         >
           <div className="grid gap-4 sm:grid-cols-2">
+            {!mailingAddress && (
+              <p
+                role="status"
+                className="rounded-control bg-warning-soft text-warning-ink px-3 py-2 text-sm sm:col-span-2"
+              >
+                {MAILING_ADDRESS_MISSING}
+              </p>
+            )}
             <FormField
               label="Address line 1"
               error={errors.addressLine1?.message}

@@ -605,17 +605,31 @@ final class JobDetailModel {
             && (role.isManagerOrAbove || permissions.isAssigned)
     }
 
-    /// A price or deposit cut refused while a deposit payment page is open
-    /// (0118 `checkout_open`): release the job's open payments and try once
-    /// more (collectors only; see JobService.releasingOpenCheckout).
-    private func releasingOpenCheckout<T>(_ write: () async throws -> T) async throws -> T {
+    /// True when `error` is 0118's refusal of a price or deposit cut (a
+    /// deposit payment page of the job can still be paid) and this member
+    /// may release the job's payments. The screen then ASKS before
+    /// releasing (`checkoutReleaseRequest`): releasing closes the page the
+    /// customer may be paying on. Others see the refusal as it is.
+    func offersCheckoutRelease(for error: Error) -> Bool {
+        canReleasePayments && JobService.isOpenCheckoutRefusal(error)
+    }
+
+    /// Staff confirmed: releases the job's open payments, then runs
+    /// `saveAgain` only when no payment went through or is still processing
+    /// meanwhile. When one did, the cut is NOT saved (the job would end up
+    /// overpaid, which 0118 exists to prevent) and the job, its lines and
+    /// money are re-read so the screen shows what was paid.
+    func releaseOpenCheckoutThenSave<T>(_ saveAgain: () async throws -> T) async throws -> OpenCheckoutEditOutcome<T> {
         let shopID = try requireShop()
-        return try await JobService.releasingOpenCheckout(
-            shopID: shopID,
-            jobID: jobID,
-            canRelease: canReleasePayments,
-            write
+        let jobID = self.jobID
+        let outcome = try await OpenCheckoutRefusal.releaseThenSaveAgain(
+            release: { try await JobService.releaseForEdit(shopID: shopID, jobID: jobID) },
+            write: saveAgain
         )
+        if case .notSaved = outcome {
+            await refreshJobAndLines()
+        }
+        return outcome
     }
 
     /// Moves the job to `status`. Before cancelling or marking a no-show,
@@ -677,12 +691,12 @@ final class JobDetailModel {
         replaceJob(updated)
     }
 
+    /// A deposit cut refused by 0118 (`checkout_open`) is thrown as it is;
+    /// the screen offers to release the page (`checkoutReleaseRequest`).
     func saveDetails(_ patch: JobDetailsPatch) async throws {
         let shopID = try requireShop()
         let jobID = self.jobID
-        let updated = try await releasingOpenCheckout {
-            try await JobService.updateDetails(shopID: shopID, jobID: jobID, patch: patch)
-        }
+        let updated = try await JobService.updateDetails(shopID: shopID, jobID: jobID, patch: patch)
         replaceJob(updated)
         if patch.status != nil {
             // A status change can void or revive forms.
@@ -752,19 +766,18 @@ final class JobDetailModel {
         await refreshJobAndLines()
     }
 
+    /// Line edits, removals and the discount: a cut refused by 0118
+    /// (`checkout_open`) is thrown as it is; the screen offers to release
+    /// the page (`checkoutReleaseRequest`), never this model on its own.
     func updateLine(_ lineID: UUID, draft: JobLineDraft) async throws {
         let shopID = try requireShop()
-        try await releasingOpenCheckout {
-            try await JobService.updateLine(shopID: shopID, lineID: lineID, draft: draft)
-        }
+        try await JobService.updateLine(shopID: shopID, lineID: lineID, draft: draft)
         await refreshJobAndLines()
     }
 
     func deleteLine(_ lineID: UUID) async throws {
         let shopID = try requireShop()
-        try await releasingOpenCheckout {
-            try await JobService.deleteLine(shopID: shopID, lineID: lineID)
-        }
+        try await JobService.deleteLine(shopID: shopID, lineID: lineID)
         await refreshJobAndLines()
     }
 
@@ -786,9 +799,7 @@ final class JobDetailModel {
     func updateDiscount(kind: JobDiscountKind, value: Int) async throws {
         let shopID = try requireShop()
         let jobID = self.jobID
-        let updated = try await releasingOpenCheckout {
-            try await JobService.updateDiscount(shopID: shopID, jobID: jobID, kind: kind, value: value)
-        }
+        let updated = try await JobService.updateDiscount(shopID: shopID, jobID: jobID, kind: kind, value: value)
         replaceJob(updated)
         await loadPayment()
     }

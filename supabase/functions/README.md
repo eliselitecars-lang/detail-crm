@@ -417,11 +417,16 @@ them.
 200: `{url, expires_at, amount_cents, tip_cents: 0, currency}`. Returns to
 `/booking/<token>?paid=1` or `?canceled=1`. A new deposit link expires the
 job's open deposit and invoice pay links. The session is held for the job
-before the URL is returned; when the job closed while it was being created
-the session is expired and the answer is `409 booking_closed`.
+before the URL is returned, with the amount it charges: the database
+re-reads the deposit due under the invoice lock cash takes (0118). When the
+job closed while the session was being created (`409 booking_closed`), or
+money recorded meanwhile covered the deposit (`409 deposit_not_due`) or
+part of it (`409 balance_changed`: reload the page for the new amount), the
+session is expired and its URL never handed out.
 
 Errors: `404 not_found` (unknown token), `409 conflict` reasons
 `booking_closed` (job cancelled / no-show / completed), `deposit_not_due`,
+`balance_changed` (less is due than a moment ago: reload),
 `payment_in_progress` (a payment of the job is on its way, including an ACH
 debit still processing: `deposit.payment_pending`), `checkout_superseded`,
 `422 unprocessable` reasons `amount_out_of_range`, `stripe_not_connected`,
@@ -638,7 +643,11 @@ default `STRIPE_API_VERSION`.
 Technicians get no `customer_id`/`ephemeral_key_secret`: their sheet takes a
 new card and cannot see saved cards. A pending payment row is recorded on the
 invoice. Earlier open sheets and reader intents on the invoice are cancelled
-(latest attempt wins) and its open pay/deposit links are expired. **Call
+(latest attempt wins) and its open pay/deposit links are expired: the
+customer's sessions Stripe lists and every page the database holds for the
+invoice or the jobs it bills (a page opened for a customer since merged into
+this one too), exactly the pages cash is refused for; `409
+payment_in_progress` when one of them was just paid. **Call
 `cancel_open_payments` when the sheet is dismissed without paying**;
 otherwise the cron sweep releases it after 30 minutes. "Balance" here and in
 `terminal_payment_intent` / `charge_saved_card` means the balance less ACH
@@ -751,7 +760,9 @@ customer it is attached to (`customer_payment_methods.stripe_customer_id`:
 a card moved by a customer merge keeps the duplicate's Stripe customer),
 else the customer's own. `amount_cents` defaults to the balance.
 No tip. Off-session, confirmed immediately. **Send a `request_nonce`**: a
-retry with the same nonce can never charge twice.
+retry with the same nonce can never charge twice. The invoice's open pay
+and deposit pages are expired first, as for `payment_sheet` (held pages of
+a merged-away customer included).
 
 200: `{payment_id, payment_intent_id, status, amount_cents, card_brand, card_last4}`.
 `status` is `"succeeded"` or `"processing"`. `payment_id` is the `payments`
@@ -1065,6 +1076,10 @@ Errors: `403 forbidden` (role, technician rules, not assigned),
 - `sms_not_configured`
 - `template_disabled`
 - `no_marketing_consent` (`follow_up`)
+- `postal_address_required` (a `follow_up` email while the shop has no
+  street line and city on file: marketing email must show the shop's
+  mailing address, 0119; `error` sends the owner to Settings → Business
+  profile)
 - `appointment_closed` (the job is cancelled / no-show)
 - `missing_link` (a link placeholder would be blank; `details.variables`;
   `error` says what to set up; also when the platform has no customer app
@@ -1149,12 +1164,23 @@ Both actions return:
 | action | body | notes |
 |---|---|---|
 | `send_invite` | `{shop_id, email, role}` | `role`: `admin` \| `manager` \| `technician` (ownership moves only via `transfer_ownership`). `email` is trimmed, at most 320 characters. A fresh (issued within 15 min) pending invite for the same email and role is reused and re-emailed with the same link, so retries are safe. Otherwise a new invite replaces the pending one. |
-| `resend_invite` | `{invite_id}` | Re-emails a pending invite. If the invite is expired or older than 15 minutes, a new one is issued (new token, full 7 days) and the response has `reissued: true`. |
+| `resend_invite` | `{invite_id}` | Re-emails a pending invite. If the invite is expired or older than 15 minutes, a new one is issued (new token, full 7 days) and the response has `reissued: true`. One invite is emailed at most once per 5 minutes: a repeat within that interval answers as usual but sends nothing new. |
+
+The email uses the shop's `invite` email template only while it is enabled
+and its body contains `{{invite_link}}`; otherwise the default wording goes
+out. Invite emails leave from the platform's sending domain outside the
+messaging queue, so a shop may issue at most **20 new invites in any 24
+hours** (every `shop_invites` row counts, revoked or accepted ones too, and
+a re-issue by `resend_invite` is a new invite).
 
 Errors: `send_invite` can return `409 conflict` (already a member, or just
 invited with another role) and `422 unprocessable` (the invite cannot be
 created). `resend_invite` can return `404 not_found` (invite), `409 conflict`
-(already accepted) and `410 gone` (revoked). Both can return `403 forbidden`.
+(already accepted) and `410 gone` (revoked). Both can return `403 forbidden`,
+`402 payment_required` (reason `seat_limit` or `subscription_inactive`) and
+`429 rate_limited` with `details {reason: "invite_limit", limit,
+retry_after_seconds}` and a `Retry-After` header (the day's invites were
+issued: show `error`).
 
 ### `account` (any signed-in user, own account only; `verify_jwt = true`)
 

@@ -33,7 +33,11 @@ import {
 } from "../_shared/auth.ts";
 import { errors, HttpError } from "../_shared/errors.ts";
 import { links, withQuery } from "../_shared/links.ts";
-import { releaseInvoiceCheckouts, releaseJobCheckouts } from "./checkout_holds.ts";
+import {
+  releaseInvoiceCheckouts,
+  releaseJobCheckouts,
+  supersedeInvoicePages,
+} from "./checkout_holds.ts";
 import { nonNegativeCents, positiveCents, requestNonce, uuid } from "../_shared/schemas.ts";
 import { idempotencyKey, onAccount, type Stripe, STRIPE_API_VERSION } from "../_shared/stripe.ts";
 import { isStripeError } from "../_shared/stripe_errors.ts";
@@ -45,7 +49,6 @@ import {
   dbFailure,
   ensureStripeCustomer,
   ephemeralKey,
-  expireOpenSessions,
   findAccount,
   IDEMPOTENCY_WINDOW_MS,
   invoiceJobIds,
@@ -235,11 +238,14 @@ async function recordStripePayment(
 }
 
 /**
- * Expires the invoice's open Checkout pay links, and its job's open deposit
+ * Expires the invoice's open Checkout pay links, and its jobs' open deposit
  * links, before a staff attempt charges it (one live payment instrument per
  * invoice: a deposit payment is attached to the job's invoice, so a deposit
- * link paid after the balance was collected would overpay it). 409 when one
- * of them was paid in the meantime.
+ * link paid after the balance was collected would overpay it). Both the
+ * customer's sessions Stripe lists and every live hold the database has for
+ * the invoice and its jobs (supersedeInvoicePages: also a page opened for a
+ * customer merged into this one) are closed, the same set cash is refused
+ * for. 409 when one of them was paid in the meantime.
  */
 async function supersedePayLinks(
   s: Services,
@@ -249,14 +255,14 @@ async function supersedePayLinks(
 ): Promise<void> {
   const customerId = stripeCustomer ??
     (await loadCustomer(s.admin, invoice.shop_id, invoice.customer_id)).stripe_customer_id;
-  if (!customerId) return; // no pay link was ever created for this customer
-  await expireOpenSessions(
+  const jobIds = await invoiceJobIds(s.admin, invoice);
+  await supersedeInvoicePages(
     s,
     account,
+    invoice,
+    jobIds,
     customerId,
-    sessionFor.invoiceOrDeposit(invoice.shop_id, invoice, await invoiceJobIds(s.admin, invoice)),
-    undefined,
-    { refuseCompleted: true },
+    sessionFor.invoiceOrDeposit(invoice.shop_id, invoice, jobIds),
   );
 }
 

@@ -586,32 +586,34 @@ enum JobService {
         }
     }
 
-    /// Runs a job edit that may lower the job's total or deposit (line
-    /// edits and removals, the discount, the deposit). While a deposit
-    /// payment page of the job can still be paid the database refuses such
-    /// a cut (0118: 55000 HINT `checkout_open`), so the page can't charge
-    /// more than the job now asks. This releases the job's open payments
-    /// (`cancel_open_payments` with `job_id`) and tries once more; a page
-    /// already processing stays open and the server's message (it names
-    /// when the page closes) is shown. Only for members who may release
-    /// payments (`canRelease`); others get the refusal as it is.
-    static func releasingOpenCheckout<T>(
-        shopID: UUID,
-        jobID: UUID,
-        canRelease: Bool,
-        _ write: () async throws -> T
-    ) async throws -> T {
-        guard canRelease else { return try await write() }
-        return try await OpenCheckoutRefusal.retryingAfterRelease(
-            isRefusal: { error in
-                guard let postgrest = error as? PostgrestError else { return false }
-                return OpenCheckoutRefusal.matches(code: postgrest.code, hint: postgrest.hint)
-            },
-            release: {
-                _ = try await releaseOpenPayments(shopID: shopID, jobID: jobID)
-            },
-            write: write
-        )
+    /// True for 0118's refusal of a job edit that lowers the job's total or
+    /// deposit (line edits and removals, the discount, the deposit) while a
+    /// deposit payment page of the job can still be paid (55000 HINT
+    /// `checkout_open`). The screen then asks before releasing the page;
+    /// the edit is never retried on its own (see `releaseForEdit`).
+    static func isOpenCheckoutRefusal(_ error: Error) -> Bool {
+        guard let postgrest = error as? PostgrestError else { return false }
+        return OpenCheckoutRefusal.matches(code: postgrest.code, hint: postgrest.hint)
+    }
+
+    /// After staff confirmed releasing the job's open payments for a refused
+    /// price or deposit cut: `cancel_open_payments` with `job_id`, reported
+    /// in full. Unlike `releaseOpenPayments` it does not throw for a payment
+    /// still processing: that comes back as `inProgress`, so the edit stops
+    /// with a notice (`OpenCheckoutRefusal.releaseThenSaveAgain`) instead of
+    /// being saved over money that may still land.
+    static func releaseForEdit(shopID: UUID, jobID: UUID) async throws -> OpenPaymentsRelease {
+        do {
+            let release = try await PaymentService.cancelOpenPayments(shopID: shopID, jobID: jobID)
+            return OpenPaymentsRelease(
+                cancelled: release.cancelled,
+                succeeded: release.succeeded,
+                inProgress: release.inProgress,
+                sessionsExpired: release.sessionsExpired
+            )
+        } catch let error as EdgeFunctionError where error.reason == "payment_in_progress" {
+            return OpenPaymentsRelease(inProgress: 1)
+        }
     }
 
     // MARK: - New job: customers

@@ -351,7 +351,8 @@ does ([App Review Guidelines](https://developer.apple.com/app-store/review/guide
       ([DEPLOY.md section 2](DEPLOY.md#2-settings-reference)) so the pages name you;
       without them they say "the operator of this service". When the product
       changes what it collects or who receives it, update the text and its
-      "Last updated" date (`LEGAL_LAST_UPDATED`) in the same change.
+      "Last updated" date (`LEGAL_LAST_UPDATED`) in the same change (the web
+      unit test `legalVersion.test.tsx` fails until both are done).
 - [ ] **Privacy policy URL** in App Store Connect (App Information -> Privacy
       Policy URL): `<APP_BASE_URL>/privacy`, e.g.
       `https://app.yourdomain.com/privacy`.
@@ -505,7 +506,12 @@ From SPEC section 9 (parity roadmap, 2026-09-27) and this launch review:
   Document follow-ups and service follow-ups are seeded off in every shop:
   a shop turns them on in Settings -> Follow-ups and Settings -> Messages &
   automations (service follow-ups are then written per service in the
-  catalog). Bank debits and pay-later appear at checkout only when those
+  catalog). Follow-up and service follow-up **emails** are marketing email:
+  they go out only while the shop has a street address and city on file
+  (Settings -> Business profile; 0119). Without one they are not sent (an
+  automation's run is logged as skipped) and a hand-sent Follow-up email is
+  refused with `postal_address_required`; tell mobile-only shops to add a
+  mailing address before turning them on. Bank debits and pay-later appear at checkout only when those
   payment methods are enabled for the shop's connected Stripe account
   (Stripe's payment method settings). Embedding the booking page or
   a lead form on a shop's website needs `WEB_EMBED_PATHS=/book/*,/lead/*`

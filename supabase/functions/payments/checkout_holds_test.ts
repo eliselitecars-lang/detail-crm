@@ -122,6 +122,8 @@ Deno.test("booking_deposit_checkout: the session is held for the job before its 
     p_job_id: JOB,
     p_session_id: "cs_test_1",
     p_expires_at: HOLD_UNTIL,
+    // 0118: the database re-checks the deposit due against what the page charges
+    p_amount_cents: 5_000,
   }]);
   assertEquals(f.db.table("job_checkout_holds").map((h) => h.stripe_checkout_session_id), [
     "cs_test_1",
@@ -144,6 +146,49 @@ Deno.test("booking_deposit_checkout: a job closed while the session was created 
   assertEquals([status, code, details], [409, "conflict", { reason: "booking_closed" }]);
   assertEquals(expiredIds(f), ["cs_test_1"]);
   assertEquals(f.created.cs_test_1?.status, "expired");
+});
+
+Deno.test("booking_deposit_checkout: part of the deposit taken in cash while the page was created gets no link (409 balance_changed, session expired)", async () => {
+  // The edge read $50 due; $20 cash landed on the job's invoice before the
+  // hold, so the database has $30 due under the invoice lock (0118).
+  const f = fixture({ depositDueAtHold: 3_000 });
+  const res = await f.call({ action: "booking_deposit_checkout", token: JOB_TOKEN });
+  const [status, code, details] = await errorOf(res);
+  assertEquals([status, code, details], [409, "conflict", { reason: "balance_changed" }]);
+  assertEquals(expiredIds(f), ["cs_test_1"]);
+  assertEquals(f.created.cs_test_1?.status, "expired");
+  assertEquals(f.db.table("job_checkout_holds"), []);
+});
+
+Deno.test("booking_deposit_checkout: a deposit paid in cash while the page was created is 409 deposit_not_due, never a 500 with an open page", async () => {
+  const f = fixture({ depositDueAtHold: 0 });
+  const res = await f.call({ action: "booking_deposit_checkout", token: JOB_TOKEN });
+  const [status, code, details] = await errorOf(res);
+  assertEquals([status, code, details], [409, "conflict", { reason: "deposit_not_due" }]);
+  assertEquals(expiredIds(f), ["cs_test_1"]);
+  assertEquals(f.created.cs_test_1?.status, "expired");
+  assertEquals(f.db.table("job_checkout_holds"), []);
+});
+
+Deno.test("booking_deposit_checkout: the amount re-checked is the capped amount the page charges", async () => {
+  // The job's invoice owes only $40 of the $50 deposit: the page charges
+  // $40 and that is what the hold re-checks (still due: accepted).
+  const f = fixture({ invoice: { balance_cents: 4_000 }, depositDueAtHold: 4_000 });
+  const res = await f.call({ action: "booking_deposit_checkout", token: JOB_TOKEN });
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).amount_cents, 4_000);
+  const held = f.rpcCalls.filter((c) => c.name === "payments_hold_job_checkout");
+  assertEquals(held.map((c) => c.args.p_amount_cents), [4_000]);
+});
+
+Deno.test("invoice_checkout: the job hold of an /i link carries no amount (its invoice hold re-checked the balance)", async () => {
+  const f = fixture({ depositDueAtHold: 0 });
+  const res = await f.call({ action: "invoice_checkout", token: INVOICE_TOKEN });
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+  const held = f.rpcCalls.filter((c) => c.name === "payments_hold_job_checkout");
+  assertEquals(held.length, 1);
+  assertEquals("p_amount_cents" in (held[0]?.args ?? {}), false);
 });
 
 Deno.test("booking_deposit_checkout: a failed hold is a 500, never a link the cancel cannot see", async () => {
@@ -605,4 +650,74 @@ Deno.test("charge_saved_card: the held pay page it expires loses its holds", asy
   await res.body?.cancel();
   assertEquals(expiredIds(f), ["cs_1Invoice"]);
   assertEquals(heldIds(f), { job: [], invoice: [] });
+});
+
+Deno.test("charge_saved_card: a held page opened for a merged-away customer is expired and released first", async () => {
+  // The invoice moved to this customer in a merge (0074): its /i page was
+  // opened for the duplicate's Stripe customer, which the survivor's list
+  // does not show. The database's holds still name it.
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    sessions: [
+      openSession("cs_1Merged", { invoice_id: INVOICE, job_id: JOB, kind: "payment" }, {
+        customer: "cus_1Duplicate",
+      }),
+    ],
+    holds: [hold("cs_1Merged")],
+    invoiceHolds: [invoiceHold("cs_1Merged")],
+  });
+  const res = await f.call(
+    { action: "charge_saved_card", shop_id: SHOP, invoice_id: INVOICE },
+    "manager",
+  );
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+  assertEquals(f.sessions.find((x) => x.id === "cs_1Merged")?.status, "expired");
+  assertEquals(heldIds(f), { job: [], invoice: [] });
+});
+
+Deno.test("payment_sheet: a held deposit page of the job opened for another customer is expired too", async () => {
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    sessions: [
+      openSession("cs_1OldDeposit", { job_id: JOB, kind: "deposit" }, {
+        customer: "cus_1Duplicate",
+      }),
+    ],
+    holds: [hold("cs_1OldDeposit")],
+  });
+  const sheet = await f.call(
+    { action: "payment_sheet", shop_id: SHOP, invoice_id: INVOICE },
+    "manager",
+  );
+  assertEquals(sheet.status, 200);
+  await sheet.body?.cancel();
+  assertEquals(f.sessions.find((x) => x.id === "cs_1OldDeposit")?.status, "expired");
+  assertEquals(heldIds(f), { job: [], invoice: [] });
+});
+
+Deno.test("payment_sheet: a held page of another Stripe customer that was already paid is 409, and no intent is created", async () => {
+  const f = fixture({
+    customer: { stripe_customer_id: "cus_1Saved" },
+    sessions: [
+      openSession("cs_1Paid", { invoice_id: INVOICE, kind: "payment" }, {
+        customer: "cus_1Duplicate",
+        status: "complete",
+      }),
+      openSession("cs_1Open", { invoice_id: INVOICE, kind: "payment" }, {
+        customer: "cus_1Duplicate",
+      }),
+    ],
+    invoiceHolds: [invoiceHold("cs_1Paid"), invoiceHold("cs_1Open")],
+  });
+  const sheet = await f.call(
+    { action: "payment_sheet", shop_id: SHOP, invoice_id: INVOICE },
+    "manager",
+  );
+  const [status, code, details] = await errorOf(sheet);
+  assertEquals([status, code, details], [409, "conflict", { reason: "payment_in_progress" }]);
+  assertEquals(f.stripe("POST", "/payment_intents").length, 0);
+  // the page that could still be paid was closed; the paid one keeps its hold
+  assertEquals(f.sessions.find((x) => x.id === "cs_1Open")?.status, "expired");
+  assertEquals(heldIds(f), { job: [], invoice: ["cs_1Paid"] });
 });

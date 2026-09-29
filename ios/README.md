@@ -247,10 +247,18 @@ ios/
 * **Job price / deposit cuts** (line edits and removals, the discount, the
   deposit) are refused by the database while a deposit payment page of the
   job can still be paid (0118: 55000 HINT `checkout_open`). For members who
-  may release payments, `JobService.releasingOpenCheckout` releases the
-  job's open payments (`cancel_open_payments` with `job_id`) and retries
-  once (DetailCore `OpenCheckoutRefusal`, as for manual invoice payments);
-  otherwise the server's message says when the page closes.
+  may release payments, the job screens ASK first
+  (`JobDetailModel.checkoutReleaseRequest`: "Cancel open payments"), since
+  releasing closes the page the customer may be paying on. After the
+  release (`JobService.releaseForEdit`: `cancel_open_payments` with
+  `job_id`) the change is saved again only when no payment went through or
+  is still processing (DetailCore `OpenCheckoutRefusal.releaseThenSaveAgain`);
+  otherwise it is not saved, the job's money is re-read and
+  `OpenCheckoutRefusal.releaseSummary` says what came in, like the web's
+  job edit toast. Nothing re-checks a cut against what was paid, so it is
+  never retried blindly (manual invoice payments are, because the server
+  checks those against the balance again). Other members see the server's
+  message, which says when the page closes.
 * **Status reasons** (cancel reason, completion-gate override) are checked
   against the server's 500-character limit (DetailCore
   `Validation.statusReasonMaxLength`, counted like Postgres `char_length`)

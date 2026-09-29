@@ -244,6 +244,63 @@ describe('BookingPage', () => {
     expect(screen.getByText('This address is outside our service area.')).toBeInTheDocument();
   });
 
+  it('asks for the coupon again when the server did not see it checked (coupon_not_checked)', async () => {
+    let refused = true;
+    const { calls, user } = setup({
+      create_online_booking: () => {
+        if (refused) {
+          refused = false;
+          return {
+            data: null,
+            error: {
+              code: '22023',
+              message: 'enter the coupon code again on the booking page, or book without it',
+              details: null,
+              hint: 'coupon_not_checked',
+            },
+          };
+        }
+        return {
+          data: {
+            job_token: TOKEN,
+            job_number: 1042,
+            status: 'requested',
+            total_cents: 17100,
+            deposit_required_cents: 0,
+          },
+        };
+      },
+    });
+    await completeVehicleAndServices(user);
+    await pickFirstTime(user);
+    await fillDetails(user);
+    await user.type(screen.getByLabelText('Coupon code'), 'SPRING10');
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(await screen.findByText(/\$19\.00 off/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Review and book' });
+    await user.click(screen.getByRole('button', { name: 'Request appointment' }));
+
+    // Back on the details step: the code is off the booking, still in the input.
+    expect(await screen.findByRole('heading', { name: 'Your details' })).toBeInTheDocument();
+    expect(
+      screen.getByText('Please apply your coupon code again, or book without it.'),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Coupon code')).toHaveValue('SPRING10');
+    const checks = () => calls.filter((c) => c.fn === 'public_validate_coupon').length;
+    const before = checks();
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(await screen.findByText(/\$19\.00 off/)).toBeInTheDocument();
+    expect(checks()).toBeGreaterThan(before);
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: 'Review and book' });
+    await user.click(screen.getByRole('button', { name: 'Request appointment' }));
+    expect(await screen.findByRole('heading', { name: 'Request received' })).toBeInTheDocument();
+    const creates = calls.filter((c) => c.fn === 'create_online_booking');
+    expect(creates).toHaveLength(2);
+    expect((creates[1]?.args.p_payload as Record<string, unknown>).coupon_code).toBe('SPRING10');
+  }, 20_000);
+
   it('validates required vehicle fields before continuing', async () => {
     const { user } = setup();
     await screen.findByRole('heading', { name: 'Tell us about your vehicle' });

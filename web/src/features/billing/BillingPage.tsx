@@ -30,6 +30,7 @@ import {
   checkoutReturn,
   daysLeft,
   daysLeftText,
+  entitlementShowsSubscription,
   hasLiveSubscription,
   LAPSED_AUTOMATIONS,
   LAPSED_PAUSED,
@@ -146,6 +147,15 @@ export default function BillingPage() {
               entitlement={entitlement.data}
               status={status.data ?? null}
               statusLoading={status.isPending}
+              statusError={
+                status.isError && status.data === undefined
+                  ? {
+                      error: status.error,
+                      retry: () => void status.refetch(),
+                      retrying: status.isRefetching,
+                    }
+                  : null
+              }
             />
           ) : (
             <p role="note" className="text-muted text-sm">
@@ -292,20 +302,36 @@ function StandingCard({
   );
 }
 
+/** The shop's billing row couldn't be read (and no earlier read is cached). */
+interface StatusError {
+  error: unknown;
+  retry: () => void;
+  retrying: boolean;
+}
+
 function OwnerBilling({
   entitlement,
   status,
   statusLoading,
+  statusError,
 }: {
   entitlement: Entitlement;
   status: ShopBilling | null;
   statusLoading: boolean;
+  statusError: StatusError | null;
 }) {
   const { shopId } = useShop();
   const toast = useToast();
   const portal = useOpenBillingPortal(shopId);
-  const live = status !== null && hasLiveSubscription(status.status);
-  const hadSubscription = status !== null && status.status !== 'none';
+  // Without the billing row, the entitlement's reason still says whether a
+  // subscription exists: keep the portal (a past-due owner's only way to fix
+  // the card) and never offer a new checkout on a guess.
+  const hadSubscription = statusError
+    ? entitlementShowsSubscription(entitlement)
+    : status !== null && status.status !== 'none';
+  const live = statusError
+    ? entitlementShowsSubscription(entitlement, { liveOnly: true })
+    : status !== null && hasLiveSubscription(status.status);
 
   const openPortal = () =>
     portal.mutate(undefined, {
@@ -342,7 +368,19 @@ function OwnerBilling({
           </div>
         </SectionCard>
       )}
-      {!statusLoading && !live && <PlanPicker entitlement={entitlement} status={status} />}
+      {statusError ? (
+        <Card>
+          <ErrorState
+            compact
+            title="Couldn’t load the subscription details"
+            error={statusError.error}
+            onRetry={statusError.retry}
+            retrying={statusError.retrying}
+          />
+        </Card>
+      ) : (
+        !statusLoading && !live && <PlanPicker entitlement={entitlement} status={status} />
+      )}
     </>
   );
 }

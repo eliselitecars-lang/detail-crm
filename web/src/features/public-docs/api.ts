@@ -452,6 +452,11 @@ const redeemResponseSchema = invoiceDocumentSchema.extend({
   gift_card_result: giftCardResultSchema,
 });
 
+/** The "(until 3:45 PM)" of a checkout_open refusal (shop time), or null. */
+export function checkoutOpenUntil(error: unknown): string | null {
+  return /\(until ([^)]+)\)/.exec(toAppError(error).message)?.[1] ?? null;
+}
+
 /**
  * public_redeem_gift_card's checkout_open refusal is worded for staff
  * ("cancel the open payments first"). The customer's way out is to finish
@@ -459,7 +464,7 @@ const redeemResponseSchema = invoiceDocumentSchema.extend({
  * which the gift card panel offers next to this message).
  */
 export function checkoutOpenForCustomer(error: unknown): AppError {
-  const until = /\(until ([^)]+)\)/.exec(toAppError(error).message)?.[1];
+  const until = checkoutOpenUntil(error);
   return new AppError(
     `A card payment page for this invoice is still open${
       until ? ` (until ${until})` : ''

@@ -7,8 +7,9 @@
  *                  caller (RLS/role checks apply), then emails
  *                  APP_BASE_URL/invite/<token> via Resend
  *   resend_invite  { invite_id }             -> re-emails a pending invite
- *                  issued within REUSE_WINDOW_MS; an older (or expired) one
- *                  is re-issued (new token, a full 7 days)
+ *                  issued within REUSE_WINDOW_MS (at most once per
+ *                  INVITE_EMAIL_INTERVAL_MS); an older (or expired) one is
+ *                  re-issued (new token, a full 7 days)
  *
  * Every invite email says the link lasts 7 days, so an email only ever
  * carries a link with (almost) all of its INVITE_TTL_MS left: an invite is
@@ -21,15 +22,24 @@
  * earlier or concurrent identical request) it is reused and re-emailed with
  * the same link. A concurrent request that loses the race to insert (unique
  * pending-invite index, 23505) reuses the winner's invite. Every invite
- * email is keyed per invite and minute (inviteEmailKey), so a double submit
- * also sends one email. A different role, or an invite older than the
+ * email is keyed per invite and INVITE_EMAIL_INTERVAL_MS (inviteEmailKey),
+ * so a double submit also sends one email. A different role, or an invite older than the
  * reuse window, issues a new link.
  *
- * The email uses the shop's `invite` email template when enabled (else the
- * default wording) and is sent from EMAIL_FROM relabelled with the shop
- * name, reply-to the shop email. A failed email does not undo the invite:
- * the response says `email_sent: false` and carries `invite_url` so the
- * admin can share the link another way or resend.
+ * The email uses the shop's `invite` email template when it is enabled and
+ * its body carries {{invite_link}} (else the default wording: an invite
+ * email always is an invitation, never free text) and is sent from
+ * EMAIL_FROM relabelled with the shop name, reply-to the shop email. A
+ * failed email does not undo the invite: the response says `email_sent:
+ * false` and carries `invite_url` so the admin can share the link another
+ * way or resend.
+ *
+ * Volume: these emails leave from the platform's own sending domain outside
+ * the messaging queue, so they are capped. A shop issues at most
+ * INVITES_PER_DAY new invites (shop_invites rows, whatever became of them)
+ * in any 24 hours: the next is `429 rate_limited`, reason `invite_limit`,
+ * with Retry-After. Re-emailing one invite is keyed per INVITE_EMAIL_INTERVAL_MS
+ * (inviteEmailKey), so a resend within that interval sends nothing new.
  */
 import { z } from "zod";
 import { createActionRouter, jsonAction } from "../_shared/actions.ts";
@@ -44,7 +54,7 @@ import type { Logger } from "../_shared/log.ts";
 import { sendEmail } from "../_shared/resend.ts";
 import { email, uuid } from "../_shared/schemas.ts";
 import { adminClient, type SupabaseClient, userClient } from "../_shared/supabase.ts";
-import { renderTemplate, textToHtml } from "../_shared/templates.ts";
+import { placeholdersIn, renderTemplate, textToHtml } from "../_shared/templates.ts";
 
 export interface Deps {
   env?: Env;
@@ -156,7 +166,53 @@ async function inviteTemplate(
   const row = data as { subject: string | null; body: string; enabled: boolean } | null;
   // Disabling the invite template cannot disable invites; use the default wording.
   if (!row?.enabled || !row.subject?.trim() || !row.body.trim()) return DEFAULT_INVITE_TEMPLATE;
+  // An invite email is an invitation: wording without the link would let
+  // the platform's sending address carry any text a shop admin writes.
+  if (!carriesInviteLink(row.body)) return DEFAULT_INVITE_TEMPLATE;
   return { subject: row.subject, body: row.body };
+}
+
+/** Whether a template body renders the invite link ({{invite_link}}, spaces allowed). */
+export function carriesInviteLink(body: string): boolean {
+  return placeholdersIn(body).includes("invite_link");
+}
+
+/**
+ * New invites (shop_invites rows) a shop may issue in any 24 hours. Every
+ * one of them is emailed from the platform's sending domain, and a trial
+ * shop has no seat limit (0102 billing_max_members is null without a plan),
+ * so this is what bounds the mail a self-serve admin can send this way.
+ */
+export const INVITES_PER_DAY = 20;
+export const INVITE_LIMIT_WINDOW_MS = 24 * 60 * 60_000;
+
+/**
+ * 429 rate_limited (reason invite_limit) when the shop already issued
+ * INVITES_PER_DAY invites in the last 24 hours; Retry-After is when the
+ * oldest of them leaves the window. Counts every row (revoked, accepted,
+ * expired too), so revoking and re-inviting does not reset it.
+ */
+async function assertInviteQuota(admin: SupabaseClient, shopId: string, at: Date): Promise<void> {
+  const since = new Date(at.getTime() - INVITE_LIMIT_WINDOW_MS).toISOString();
+  const { data, error } = await admin.from("shop_invites").select("created_at")
+    .eq("shop_id", shopId).gte("created_at", since)
+    .order("created_at", { ascending: true }).limit(INVITES_PER_DAY);
+  if (error) throw dbFailure("shop_invites quota lookup", error);
+  const rows = (Array.isArray(data) ? data : []) as Array<{ created_at: string }>;
+  if (rows.length < INVITES_PER_DAY) return;
+  const oldest = Date.parse(rows[0]?.created_at ?? "");
+  const waitMs = Number.isFinite(oldest)
+    ? oldest + INVITE_LIMIT_WINDOW_MS - at.getTime()
+    : INVITE_LIMIT_WINDOW_MS;
+  const retryAfter = Math.max(60, Math.ceil(waitMs / 1000));
+  throw new HttpError(
+    "rate_limited",
+    `This shop has sent ${INVITES_PER_DAY} invitations in the last 24 hours. Try again later.`,
+    {
+      details: { reason: "invite_limit", limit: INVITES_PER_DAY, retry_after_seconds: retryAfter },
+      headers: { "Retry-After": String(retryAfter) },
+    },
+  );
 }
 
 export interface InviteEmail {
@@ -194,13 +250,16 @@ export function buildInviteEmail(
   };
 }
 
+/** How often one invite may be emailed again (resend_invite of a fresh invite). */
+export const INVITE_EMAIL_INTERVAL_MS = 5 * 60_000;
+
 /**
- * Resend idempotency key for an invite email: one per invite per minute, so a
- * double submit / retry sends one email while a deliberate resend a minute
- * later goes out again.
+ * Resend idempotency key for an invite email: one per invite per
+ * INVITE_EMAIL_INTERVAL_MS, so a double submit / retry / repeated resend
+ * sends one email while a resend in a later interval goes out again.
  */
 export function inviteEmailKey(inviteId: string, at: Date): string {
-  return `invite-${inviteId}-resend-${Math.floor(at.getTime() / 60_000)}`;
+  return `invite-${inviteId}-email-${Math.floor(at.getTime() / INVITE_EMAIL_INTERVAL_MS)}`;
 }
 
 /** Invite lifetime: shop_invites.expires_at default (0002), and what the email promises. */
@@ -276,10 +335,13 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
   async function createInvite(
     req: Request,
     env: Env,
+    admin: SupabaseClient,
     shopId: string,
     address: string,
     role: InviteRole,
   ): Promise<InviteRow> {
+    // Every new invite is emailed from the platform's domain: capped per shop.
+    await assertInviteQuota(admin, shopId, now());
     // As the caller, so invite_member's own admin check (and RLS) applies.
     const user = userClient(req, { env, fetch: deps.fetch });
     const { data, error } = await user.rpc("invite_member", {
@@ -315,7 +377,7 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
       return { invite: existing, reused: true };
     }
     try {
-      return { invite: await createInvite(req, env, shopId, address, role), reused: false };
+      return { invite: await createInvite(req, env, admin, shopId, address, role), reused: false };
     } catch (err) {
       if (!(err instanceof HttpError) || err.code !== "conflict") throw err;
       const winner = await pendingInvite(admin, shopId, address, now());

@@ -18,7 +18,12 @@ import {
 import { useAuth } from '@/features/auth/authContext';
 import { FormAlert } from '@/features/auth/FormAlert';
 import { billingKeys, fetchShopEntitlement, useBillingPlans } from '@/features/billing/api';
-import { newShopTrialText, PRICING_PATH } from '@/features/billing/model';
+import {
+  BILLING_PATH,
+  newShopTrialText,
+  PRICING_PATH,
+  type Entitlement,
+} from '@/features/billing/model';
 import { cn } from '@/lib/cn';
 import { browserTimeZone, listTimeZones } from '@/lib/dates';
 import { toAppError, type AppError } from '@/lib/errors';
@@ -103,24 +108,35 @@ export default function OnboardingPage() {
   const plans = useBillingPlans();
   const billingOn = (plans.data?.length ?? 0) > 0;
 
-  /** The new shop's trial ("Your free trial runs until …"), or null (billing off / unknown). */
-  const trialText = async (shopId: string, timezone: string): Promise<string | null> => {
+  /** The new shop's standing, or null (unknown: Settings > Billing shows it). */
+  const newShopEntitlement = async (shopId: string): Promise<Entitlement | null> => {
     try {
-      const entitlement = await queryClient.fetchQuery({
+      return await queryClient.fetchQuery({
         queryKey: billingKeys.entitlement(shopId),
         queryFn: () => fetchShopEntitlement(shopId),
       });
-      return newShopTrialText(entitlement, timezone);
     } catch {
-      return null; // Settings > Billing shows it; never block finishing setup
+      return null; // never block finishing setup
     }
   };
 
   const finish = async (shopId: string, timezone: string) => {
-    const trial = await trialText(shopId, timezone);
+    const entitlement = await newShopEntitlement(shopId);
     switchShop(shopId);
     await queryClient.invalidateQueries({ queryKey: shellKeys.memberships(user?.id ?? '') });
     await refetch();
+    if (entitlement?.billing_enabled && entitlement.state === 'lapsed') {
+      // The free trial is once per person (0120): a second shop starts
+      // without one, so new work waits for a plan. Go straight to choosing
+      // one instead of meeting "subscription is inactive" on every screen.
+      toast.success(
+        'Your shop is ready',
+        'The free trial was already used, so choose a plan to start adding customers and jobs.',
+      );
+      await navigate(BILLING_PATH, { replace: true });
+      return;
+    }
+    const trial = newShopTrialText(entitlement, timezone);
     toast.success(
       'Your shop is ready',
       trial

@@ -10,8 +10,10 @@ import {
   Select,
   useToast,
 } from '@/components/ui';
+import { isCheckoutOpenError } from '@/lib/errors';
 import { formatCents } from '@/lib/money';
 import { useApplicableInvoices, useApplyPaymentToInvoice } from '@/features/invoices/api';
+import { CheckoutOpenNotice } from '@/features/invoices/components/CheckoutOpenNotice';
 
 /** What applying a payment needs (a ledger row or a customer's unapplied payment). */
 export interface ApplicablePayment {
@@ -30,7 +32,9 @@ export interface ApplyPaymentDialogProps {
 /**
  * Manager+: put an unapplied payment on one of the same customer's open
  * invoices (apply_payment_to_invoice). The server moves the whole payment
- * row (tip and refunds stay with it) and refuses a target it would overpay.
+ * row (tip and refunds stay with it) and refuses a target it would overpay,
+ * or one with a card payment page still open (55000 checkout_open, 0121):
+ * then the dialog offers to cancel the open payments and apply again.
  */
 export function ApplyPaymentDialog({ payment, onClose, currency }: ApplyPaymentDialogProps) {
   return (
@@ -59,6 +63,8 @@ function ApplyForm({
   const invoices = useApplicableInvoices(payment.customer_id, true);
   const apply = useApplyPaymentToInvoice();
   const [invoiceId, setInvoiceId] = useState('');
+  /** The chosen invoice's checkout_open refusal (a card page is still open). */
+  const [held, setHeld] = useState<{ invoiceId: string; error: unknown } | null>(null);
   const money = (cents: number) => formatCents(cents, { currency });
   // Tips never count toward an invoice (payment_net_amount).
   const net = Math.max(
@@ -100,14 +106,25 @@ function ApplyForm({
       ? `Invoice #${chosen.number} has ${money(chosen.balance_cents)} due, less than this payment. Choose another invoice or refund the payment.`
       : undefined;
 
+  /** Applies to `target`; throws the server's refusal. */
+  const applyTo = async (target: { id: string; number: number }) => {
+    await apply.mutateAsync({ paymentId: payment.id, invoiceId: target.id });
+    setHeld(null);
+    toast.success(`${money(net)} applied to invoice #${target.number}`);
+    onClose();
+  };
+
   const submit = async () => {
     if (!chosen || error) return;
     try {
-      await apply.mutateAsync({ paymentId: payment.id, invoiceId: chosen.id });
-      toast.success(`${money(net)} applied to invoice #${chosen.number}`);
-      onClose();
+      await applyTo(chosen);
     } catch (err) {
-      toast.error(err);
+      if (isCheckoutOpenError(err)) {
+        setHeld({ invoiceId: chosen.id, error: err });
+      } else {
+        setHeld(null);
+        toast.error(err);
+      }
     }
   };
 
@@ -141,6 +158,13 @@ function ApplyForm({
             Open invoice #{chosen.number}
           </Link>
         </p>
+      )}
+      {chosen && held?.invoiceId === chosen.id && (
+        <CheckoutOpenNotice
+          invoiceId={chosen.id}
+          error={held.error}
+          onRetry={() => applyTo(chosen)}
+        />
       )}
       <div className="flex flex-wrap justify-end gap-2">
         <Button variant="secondary" onClick={onClose} disabled={apply.isPending}>

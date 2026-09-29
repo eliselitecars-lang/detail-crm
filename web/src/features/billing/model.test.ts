@@ -5,6 +5,7 @@ import {
   daysLeft,
   daysLeftText,
   entitlementSchema,
+  entitlementShowsSubscription,
   featureLabel,
   formatPlanAmount,
   hasLiveSubscription,
@@ -201,6 +202,28 @@ describe('subscription status helpers', () => {
     expect(isStripeUrl('http://checkout.stripe.com/x')).toBe(false);
     expect(isStripeUrl('https://stripe.com.evil.example/x')).toBe(false);
     expect(isStripeUrl('javascript:alert(1)')).toBe(false);
+  });
+});
+
+describe('entitlementShowsSubscription (billing row unreadable)', () => {
+  it('reads a live subscription from the reason', () => {
+    for (const reason of ['subscribed', 'subscription_trial', 'past_due', 'unpaid', 'paused']) {
+      expect(entitlementShowsSubscription(entitlement({ reason }))).toBe(true);
+      expect(entitlementShowsSubscription(entitlement({ reason }), { liveOnly: true })).toBe(true);
+    }
+  });
+
+  it('counts an ended subscription only without liveOnly', () => {
+    for (const reason of ['period_remaining', 'incomplete', 'incomplete_expired', 'canceled']) {
+      expect(entitlementShowsSubscription(entitlement({ reason }))).toBe(true);
+      expect(entitlementShowsSubscription(entitlement({ reason }), { liveOnly: true })).toBe(false);
+    }
+  });
+
+  it('sees no subscription for a trial, comp or a shop that never subscribed', () => {
+    for (const reason of ['billing_off', 'comped', 'trial', 'trial_ended', 'no_subscription']) {
+      expect(entitlementShowsSubscription(entitlement({ reason }))).toBe(false);
+    }
   });
 });
 

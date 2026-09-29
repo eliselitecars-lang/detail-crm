@@ -68,6 +68,12 @@ export interface FixtureOptions {
   membership?: Row;
   cards?: Row[];
   depositDue?: number;
+  /**
+   * comms_deposit_due_cents when payments_hold_job_checkout runs (0118): what
+   * is still due under the invoice lock (default depositDue). Lower it to
+   * model cash recorded while the deposit session was being created.
+   */
+  depositDueAtHold?: number;
   /** Extra payments rows (e.g. pending PaymentSheet rows). */
   payments?: Row[];
   /** Checkout Sessions on the connected account (GET list / expire). */
@@ -388,6 +394,35 @@ export function fixture(options: FixtureOptions = {}): Fixture {
           throw new FakeRpcError("55000", "this booking is no longer taking payments", {
             hint: "booking_closed",
           });
+        }
+        // 0118: a deposit page (not held for an invoice first, not already
+        // held for this job) re-checks the deposit still due
+        const invoiceHeld = ctx.db.table("invoice_checkout_holds").some((h) =>
+          h.stripe_checkout_session_id === args.p_session_id && h.shop_id === args.p_shop_id
+        );
+        const jobHeld = ctx.db.table("job_checkout_holds").some((h) =>
+          h.stripe_checkout_session_id === args.p_session_id && h.shop_id === args.p_shop_id &&
+          h.job_id === args.p_job_id
+        );
+        if (!invoiceHeld && !jobHeld) {
+          const due = options.depositDueAtHold ?? depositDue;
+          if (due <= 0) {
+            throw new FakeRpcError("55000", "no deposit is due for this booking any more", {
+              hint: "deposit_not_due",
+            });
+          }
+          if (
+            args.p_amount_cents !== undefined && args.p_amount_cents !== null &&
+            Number(args.p_amount_cents) > due
+          ) {
+            throw new FakeRpcError(
+              "55000",
+              "this booking's deposit changed; reload it and try again",
+              {
+                hint: "balance_changed",
+              },
+            );
+          }
         }
         const holds = ctx.db.table("job_checkout_holds")
           .filter((h) => h.stripe_checkout_session_id !== args.p_session_id);

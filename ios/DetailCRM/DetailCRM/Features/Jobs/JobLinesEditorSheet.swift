@@ -175,6 +175,8 @@ struct JobDiscountEditor: View {
     @State private var kind: JobDiscountKind = .none
     @State private var valueText = ""
     @State private var didPrefill = false
+    /// A discount refused while the deposit page is open (0118).
+    @State private var confirmation: ConfirmationRequest?
 
     var body: some View {
         if job.couponID != nil {
@@ -211,6 +213,7 @@ struct JobDiscountEditor: View {
             }
         }
         .padding(.vertical, Theme.Spacing.xs)
+        .confirmation($confirmation)
         .onAppear {
             guard !didPrefill else { return }
             didPrefill = true
@@ -245,7 +248,21 @@ struct JobDiscountEditor: View {
         do {
             try await model.updateDiscount(kind: kind, value: value)
         } catch {
-            onError(ErrorText.message(for: error))
+            // A bigger discount while the deposit page is open (0118):
+            // ask before closing the customer's page.
+            let model = self.model
+            let onError = self.onError
+            let kind = self.kind
+            if let request = model.checkoutReleaseRequest(
+                for: error,
+                saveAgain: { try await model.updateDiscount(kind: kind, value: value) },
+                onSaved: {},
+                onProblem: { message in onError(message) }
+            ) {
+                confirmation = request
+            } else {
+                onError(ErrorText.message(for: error))
+            }
         }
     }
 }
@@ -379,6 +396,29 @@ struct JobLineFormView: View {
             }
             onDone()
         } catch {
+            if let line {
+                showWriteError(error) { [model] in
+                    try await model.updateLine(line.id, draft: draft)
+                }
+            } else {
+                errorMessage = ErrorText.message(for: error)
+            }
+        }
+    }
+
+    /// A line cut refused while the job's deposit page is open (0118):
+    /// asks whether to cancel the open payments first, and saves again only
+    /// if no payment came in meanwhile. Other errors show inline.
+    private func showWriteError(_ error: Error, saveAgain: @escaping () async throws -> Void) {
+        if let request = model.checkoutReleaseRequest(
+            for: error,
+            saveAgain: saveAgain,
+            onSaved: onDone,
+            onProblem: { message in errorMessage = message }
+        ) {
+            errorMessage = nil
+            confirmation = request
+        } else {
             errorMessage = ErrorText.message(for: error)
         }
     }
@@ -395,7 +435,9 @@ struct JobLineFormView: View {
                 try await model.deleteLine(line.id)
                 onDone()
             } catch {
-                errorMessage = ErrorText.message(for: error)
+                showWriteError(error) { [model] in
+                    try await model.deleteLine(line.id)
+                }
             }
         }
     }

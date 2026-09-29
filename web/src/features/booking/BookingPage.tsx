@@ -473,6 +473,15 @@ function BookingWizard({
           if (classified.kind === 'slot_taken') {
             setState((prev) => ({ ...prev, slot: null }));
           }
+          if (classified.kind === 'coupon_not_checked') {
+            // Take the code off the booking and leave it in the code input,
+            // so Apply checks it again (or the customer removes it).
+            setState((prev) => ({
+              ...prev,
+              couponPrefill: prev.details.couponCode,
+              details: { ...prev.details, couponCode: '' },
+            }));
+          }
           if (classified.step) {
             goTo(classified.step);
             setNotice({ step: classified.step, message: classified.message });

@@ -100,6 +100,39 @@ export function hasLiveSubscription(status: SubscriptionStatus): boolean {
   );
 }
 
+/** billing_state's reasons (0101) read from a live Stripe subscription (hasLiveSubscription). */
+const LIVE_SUBSCRIPTION_REASONS: readonly string[] = [
+  'subscribed',
+  'subscription_trial',
+  'past_due',
+  'unpaid',
+  'paused',
+];
+/** …and from one that has stopped or never completed (the portal still shows its invoices). */
+const ENDED_SUBSCRIPTION_REASONS: readonly string[] = [
+  'period_remaining',
+  'incomplete',
+  'incomplete_expired',
+  'canceled',
+];
+
+/**
+ * The entitlement's reason says this shop has (or, without `liveOnly`, had)
+ * a Stripe subscription (billing_state in 0101). Used only when the shop's
+ * own billing row can't be read, so the owner keeps the way to the billing
+ * portal (e.g. to fix a past-due card) instead of being offered a new
+ * checkout. A comped shop's reason hides any subscription: false.
+ */
+export function entitlementShowsSubscription(
+  entitlement: Entitlement,
+  { liveOnly = false }: { liveOnly?: boolean } = {},
+): boolean {
+  if (entitlement.state === 'past_due' || LIVE_SUBSCRIPTION_REASONS.includes(entitlement.reason)) {
+    return true;
+  }
+  return !liveOnly && ENDED_SUBSCRIPTION_REASONS.includes(entitlement.reason);
+}
+
 /** Stripe's webhook has confirmed a subscription (what ?checkout=success waits for). */
 export function subscriptionConfirmed(status: SubscriptionStatus): boolean {
   return status === 'trialing' || status === 'active' || status === 'past_due';
