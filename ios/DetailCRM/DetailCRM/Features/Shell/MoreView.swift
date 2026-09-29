@@ -102,7 +102,8 @@ struct MoreView: View {
             itemSection("Work", items: MoreItem.workItems)
             itemSection("Shop", items: MoreItem.shopItems)
             Section {
-                // Every role: profile, and deleting the account (App Store 5.1.1(v)).
+                // Every role: profile, leaving a shop (Your shops), and deleting
+                // the account (App Store 5.1.1(v)).
                 NavigationLink {
                     SettingsAccountView()
                 } label: {

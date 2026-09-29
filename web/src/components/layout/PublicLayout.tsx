@@ -4,6 +4,7 @@ import { cn } from '@/lib/cn';
 import { shopAssetUrl } from '@/lib/supabase';
 import { brandStyle } from './brand';
 import { formatPhone } from '@/lib/phone';
+import { publicPageTitle, useDocumentTitle } from '@/lib/useDocumentTitle';
 import { CUSTOMER_PORTAL_PATH } from '@/features/portal/paths';
 import { LegalLinks } from './LegalLinks';
 
@@ -21,6 +22,13 @@ export interface PublicShopBranding {
 export interface PublicLayoutProps {
   /** Shop branding from the page's public RPC; null while loading/unknown. */
   shop: PublicShopBranding | null;
+  /**
+   * What this page is ("Book online", "Invoice INV-1004"): the tab title
+   * becomes "<title> · <shop name>" (publicPageTitle). Every public page
+   * sets one, so a customer with several of a shop's links open can tell the
+   * tabs apart and no staff page's title is left behind.
+   */
+  title?: string | null;
   /**
    * Replaces the shop mark in the header (pages that belong to the service,
    * not to a shop: /privacy, /terms).
@@ -55,6 +63,7 @@ export interface PublicLayoutProps {
  */
 export function PublicLayout({
   shop,
+  title,
   brand,
   children,
   width = 'narrow',
@@ -62,6 +71,7 @@ export function PublicLayout({
   fullPageLinks = false,
   accountLink,
 }: PublicLayoutProps) {
+  useDocumentTitle(publicPageTitle(title, shop?.name));
   const logoUrl = shopAssetUrl(shop?.logoPath);
   const showAccountLink = accountLink ?? !brand;
   const footerLink = 'rounded-control hover:text-ink underline-offset-2 hover:underline';

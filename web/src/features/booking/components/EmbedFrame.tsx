@@ -1,6 +1,7 @@
 import { useRef, type ReactNode } from 'react';
 import { brandStyle } from '@/components/layout/brand';
 import { PRIVACY_PATH, TERMS_PATH } from '@/features/legal/paths';
+import { publicPageTitle, useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useEmbedHeight, useTransparentBackground } from '../embed';
 
 /**
@@ -10,12 +11,18 @@ import { useEmbedHeight, useTransparentBackground } from '../embed';
  */
 export function EmbedFrame({
   brandColor,
+  title,
+  shopName,
   children,
 }: {
   brandColor?: string | null;
+  /** As PublicLayout's `title` (the frame document's title). */
+  title?: string | null;
+  shopName?: string | null;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  useDocumentTitle(publicPageTitle(title, shopName));
   useTransparentBackground();
   useEmbedHeight(ref);
   const link = 'hover:text-ink underline-offset-2 hover:underline';

@@ -1,7 +1,8 @@
 import { ChevronLeft } from 'lucide-react';
-import { useEffect, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { cn } from '@/lib/cn';
+import { appTitle, useDocumentTitle } from '@/lib/useDocumentTitle';
 
 export interface PageHeaderProps {
   title: string;
@@ -26,9 +27,7 @@ export function PageHeader({
   setDocumentTitle = true,
   className,
 }: PageHeaderProps) {
-  useEffect(() => {
-    if (setDocumentTitle) document.title = `${title} · Detail CRM`;
-  }, [title, setDocumentTitle]);
+  useDocumentTitle(setDocumentTitle ? appTitle(title) : null);
 
   return (
     <header className={cn('mb-5 flex flex-col gap-3 sm:mb-6', className)}>

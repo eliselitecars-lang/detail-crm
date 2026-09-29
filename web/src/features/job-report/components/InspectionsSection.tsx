@@ -112,7 +112,7 @@ function InspectionCard({
                       : undefined;
                     return (
                       <li key={mark.id} className="flex items-start gap-2 text-sm">
-                        <span className="bg-danger text-primary-fg flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold">
+                        <span className="bg-danger-solid text-danger-fg flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold">
                           {mark.number}
                         </span>
                         <div className="min-w-0 flex-1">

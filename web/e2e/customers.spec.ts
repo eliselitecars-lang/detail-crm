@@ -131,6 +131,31 @@ test.describe('customers', () => {
     });
   });
 
+  test('signing out from a customer leaves no customer name in the tab title (WCAG 2.4.2)', async ({
+    page,
+  }) => {
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: {
+        shop_members: [membershipRow(OWNER, 'owner')],
+        notifications: [],
+        customers: byId([CUSTOMER, OTHER]),
+        vehicles: [],
+      },
+    });
+    await page.goto(`/app/customers/${CUSTOMER.id}`);
+    await expect(page.getByRole('heading', { name: 'Jane Doe', level: 1 })).toBeVisible();
+    await expect(page).toHaveTitle('Jane Doe · Detail CRM');
+
+    await page.getByRole('button', { name: /^Account menu for / }).click();
+    await page.getByRole('menuitem', { name: 'Sign out' }).click();
+    // The session ends first, so RequireAuth may get there (?next=) before
+    // the menu's own navigation: either way the sign-in page names itself.
+    await expect(page).toHaveURL(/\/login(\?|$)/);
+    await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+    await expect(page).toHaveTitle('Sign in · Detail CRM');
+  });
+
   test('a pause after a space keeps multi-word search intact', async ({ page }) => {
     const searches: string[][] = [];
     await mockSupabase(page, {

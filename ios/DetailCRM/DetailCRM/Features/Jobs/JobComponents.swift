@@ -140,7 +140,7 @@ struct JobIconButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(Theme.Typography.callout.weight(.semibold))
-                .foregroundStyle(Theme.glacier)
+                .foregroundStyle(Theme.glacierInk)
                 .frame(width: side, height: side)
                 .background(Circle().fill(Theme.glacier.opacity(0.12)))
         }

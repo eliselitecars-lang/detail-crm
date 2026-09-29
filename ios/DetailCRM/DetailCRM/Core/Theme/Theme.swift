@@ -54,7 +54,30 @@ enum Theme {
         endPoint: .bottomTrailing
     )
 
-    /// Text/icon color placed on a solid Glacier/success/danger fill.
+    // MARK: - Solid fills behind white text
+
+    // White (`onAccent`) text or icons need a fill that is dark enough in
+    // both modes: the fill colors above are tuned to read on the canvas, and
+    // in dark mode they are too light for white on top (white on the dark
+    // Glacier #4C8DF6 is 3.26:1, on dark danger #F06464 3.13:1). Every solid
+    // chip, badge, bubble or button that carries `onAccent` fills with one of
+    // these; each gives white at least 4.5:1 (WCAG AA for normal text) in
+    // both modes. `scripts/swift_sanity.py` rejects `onAccent` over the
+    // plain fill colors and Glacier text on a Glacier tint.
+
+    /// Primary buttons, selected chips, sent message bubbles, today's date.
+    /// White: 4.63:1 light, 5.05:1 dark.
+    static let glacierSolid = Color(light: 0x1F6FEB, dark: 0x2B6AD8)
+    /// Destructive buttons and damage markers. White: 5.47:1 / 5.23:1.
+    static let dangerSolid = Color(light: 0xC53030, dark: 0xC43A3A)
+    /// Completed-step markers. White: 5.38:1 / 5.02:1.
+    static let successSolid = Color(light: 0x167A45, dark: 0x1A7F4B)
+    /// Neutral markers (a step not reached, a stop without a location).
+    /// White: 5.44:1 / 6.13:1.
+    static let neutralSolid = Color(light: 0x5E6A82, dark: 0x55627C)
+
+    /// Text/icon color placed on a solid fill: the `…Solid` tokens above,
+    /// the brand gradient or a scrim (never the plain fill colors).
     static let onAccent = Color.white
     /// Text/icon color placed on a solid Amber fill (dark ink for contrast).
     static let onAmber = Color(light: 0x0B1220, dark: 0x0B1220)
@@ -147,6 +170,9 @@ enum Theme {
         static let avatarSmall: CGFloat = 32
         static let avatarMedium: CGFloat = 44
         static let avatarLarge: CGFloat = 64
+        /// Apple's minimum tap target for an icon-only control (44×44 pt at
+        /// the default text size; `iconTapTarget()` grows it with Dynamic Type).
+        static let iconTapTarget: CGFloat = 44
         static let hairline: CGFloat = 1
         /// Readable max width for forms on large phones.
         static let formMaxWidth: CGFloat = 560
@@ -299,7 +325,27 @@ private struct InputFieldModifier: ViewModifier {
     }
 }
 
+/// The tappable box of an icon-only Menu/Button label: at least 44×44 pt,
+/// scaled with Dynamic Type so the glyph never outgrows it at accessibility
+/// sizes. The whole box is hit-testable.
+private struct IconTapTargetModifier: ViewModifier {
+    @ScaledMetric(relativeTo: .body) private var side: CGFloat = Theme.Size.iconTapTarget
+
+    func body(content: Content) -> some View {
+        content
+            .frame(minWidth: side, minHeight: side)
+            .contentShape(Rectangle())
+    }
+}
+
 extension View {
+    /// Hit area for an icon-only control ("…" menus, trash, done toggles):
+    /// 44 pt minimum, growing with Dynamic Type. Use it instead of a fixed
+    /// small `.frame(width:height:)` (`swift_sanity.py` checks).
+    func iconTapTarget() -> some View {
+        modifier(IconTapTargetModifier())
+    }
+
     /// Standard card: surface fill, 12-pt corners, hairline border.
     func cardStyle(padding: CGFloat = Theme.Spacing.lg) -> some View {
         modifier(CardModifier(padding: padding))
@@ -384,9 +430,10 @@ private struct ThemeButtonBody: View {
 
     private var fill: Color {
         switch variant {
-        case .primary: return Theme.glacier
+        // white labels: the solid fills that keep 4.5:1 in dark mode too
+        case .primary: return Theme.glacierSolid
         case .money: return Theme.amber
-        case .destructive: return Theme.danger
+        case .destructive: return Theme.dangerSolid
         case .secondary: return Theme.surface
         case .plain: return Color.clear
         }

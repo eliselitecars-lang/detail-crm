@@ -59,7 +59,7 @@ export default function PortalPage() {
   const claimRefused = claim.isError && toAppError(claim.error).kind === 'permission';
 
   return (
-    <PublicLayout shop={branding} accountLink={false}>
+    <PublicLayout shop={branding} title="My account" accountLink={false}>
       <div className="flex flex-col gap-4 sm:gap-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">

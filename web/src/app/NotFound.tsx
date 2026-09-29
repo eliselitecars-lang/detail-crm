@@ -1,7 +1,7 @@
 import { Compass } from 'lucide-react';
-import { useEffect } from 'react';
 import { Link } from 'react-router';
 import { buttonClasses, EmptyState } from '@/components/ui';
+import { appTitle, useDocumentTitle } from '@/lib/useDocumentTitle';
 
 export function NotFoundContent({
   homeTo = '/',
@@ -10,9 +10,7 @@ export function NotFoundContent({
   homeTo?: string;
   homeLabel?: string;
 }) {
-  useEffect(() => {
-    document.title = 'Page not found · Detail CRM';
-  }, []);
+  useDocumentTitle(appTitle('Page not found'));
   return (
     <EmptyState
       icon={<Compass aria-hidden="true" />}

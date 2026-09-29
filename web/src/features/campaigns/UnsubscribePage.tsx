@@ -4,6 +4,7 @@ import { useParams } from 'react-router';
 import { Button, Card, ErrorState, LoadingState } from '@/components/ui';
 import { toAppError } from '@/lib/errors';
 import { shopAssetUrl } from '@/lib/supabase';
+import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useUnsubscribe, useUnsubscribeInfo, type UnsubscribeInfo } from './api';
 import { isUnsubscribeToken } from './model';
 
@@ -15,9 +16,7 @@ import { isUnsubscribeToken } from './model';
  */
 export default function UnsubscribePage() {
   const { token } = useParams();
-  useEffect(() => {
-    document.title = 'Unsubscribe';
-  }, []);
+  useDocumentTitle('Unsubscribe');
   return (
     <div className="bg-canvas flex min-h-dvh flex-col items-center justify-center px-4 py-10">
       <main className="w-full max-w-md">

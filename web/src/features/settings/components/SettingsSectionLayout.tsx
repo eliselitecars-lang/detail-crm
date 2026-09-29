@@ -1,7 +1,8 @@
 import { Eye } from 'lucide-react';
-import { useEffect, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { Card, ErrorState, LoadingState } from '@/components/ui';
+import { appTitle, useDocumentTitle } from '@/lib/useDocumentTitle';
 import { sectionByPath, type SettingsSectionPath } from '../sections';
 
 export interface SettingsSectionLayoutProps {
@@ -21,9 +22,7 @@ export function SettingsSectionLayout({
   children,
 }: SettingsSectionLayoutProps) {
   const meta = sectionByPath(section);
-  useEffect(() => {
-    document.title = `${meta.label} · Settings · Detail CRM`;
-  }, [meta.label]);
+  useDocumentTitle(appTitle(`${meta.label} · Settings`));
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex flex-wrap items-start justify-between gap-3">

@@ -23,7 +23,7 @@ insert into public.membership_plans (shop_id, name, price_cents) values (tests.f
 select tests.fx_set('mem_b', (public.create_membership(tests.fx('plan_b'), tests.fx('cust_b'))).id);
 select tests.as_service();
 select public.sync_stripe_subscription(tests.fx('shop_b'), 'sub_b1', 'active', '2030-01-01', false, tests.fx('mem_b'));
-select tests.authenticate_as(tests.fx('u_owner_b'));
+select tests.as_service();  -- payments delete_shop (0117)
 select tests.throws_like($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', '%not cancelled%',
                          'a shop whose memberships bill cannot be deleted (cancel them in Stripe first)');
 select tests.as_superuser();
@@ -32,8 +32,8 @@ select tests.eq((select count(*) from public.sms_number_releases where phone_num
 select tests.ok(exists (select 1 from public.shop_sms_numbers where phone_number = '+12055550200'), 'and kept the binding');
 
 -- ------------------------------------------------------------ deleting a shop logs every bound number
-select tests.authenticate_as(tests.fx('u_owner_a'));
-select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_a')$$), 1::bigint, 'the owner deletes shop A');
+select tests.as_service();  -- payments delete_shop (0117)
+select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_a')$$), 1::bigint, 'shop A is deleted');
 select tests.as_superuser();
 select tests.eq((select jsonb_agg(jsonb_build_object('number', phone_number, 'shop', shop_id = tests.fx('shop_a'), 'name', shop_name)
                                   order by phone_number, released_at)

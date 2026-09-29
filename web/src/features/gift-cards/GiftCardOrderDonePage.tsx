@@ -55,7 +55,7 @@ function OrderView({ slug, token }: { slug: string; token: string }) {
   const recipient = data.recipient_name ?? 'the recipient';
 
   return (
-    <PublicLayout shop={branding}>
+    <PublicLayout shop={branding} title="Gift card order">
       <Card padded className="flex flex-col gap-4">
         {data.status === 'paid' && (
           <EmptyState

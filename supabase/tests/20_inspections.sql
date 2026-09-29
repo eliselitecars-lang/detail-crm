@@ -263,9 +263,9 @@ select tests.eq((select vehicle_id from public.inspections where id = tests.fx('
                 'A''s signed inspection still names its vehicle');
 
 -- deleting the whole shop still cascades through signed, vehicle-bound inspections
-select tests.authenticate_as(tests.fx('u_owner_b'));
+select tests.as_service();  -- payments delete_shop (0117)
 select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 1::bigint,
-                'the owner deletes shop B with a signed inspection on a vehicle');
+                'shop B is deleted with a signed inspection on a vehicle');
 select tests.as_superuser();
 select tests.eq((select count(*) from public.inspections where shop_id = tests.fx('shop_b')), 0::bigint,
                 'shop B''s inspections are gone');

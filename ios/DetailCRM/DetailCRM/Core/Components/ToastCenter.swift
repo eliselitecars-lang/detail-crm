@@ -110,7 +110,7 @@ private struct ToastBanner: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 28, height: 28)
+                    .iconTapTarget()
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Dismiss")

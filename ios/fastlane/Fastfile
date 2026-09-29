@@ -186,6 +186,9 @@ end
 
 # Config.plist holds only YOUR_... placeholders in git (ios/README.md). Write
 # the real values for this build and put the committed file back afterwards.
+# WEB_APP_URL (= APP_BASE_URL) is baked into the build: after a change of the
+# web app's domain, installed builds keep the old origin until a new build
+# ships (docs/DEPLOY.md 4.4).
 def with_app_config
   original = File.read(CONFIG_PLIST)
   values = {

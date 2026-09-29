@@ -12,6 +12,7 @@
 
 import Foundation
 import Supabase
+import DetailCore
 
 enum DashboardService {
 
@@ -143,12 +144,17 @@ enum DashboardService {
 
     /// Declines an online booking: `requested` -> `cancelled` with a reason.
     /// `cancel_reason` is customer-facing (the public booking page shows
-    /// it), so callers must present it as a message to the customer.
+    /// it), so callers must present it as a message to the customer. It is
+    /// sent whole: over the column's 1,000 characters the decline is
+    /// refused (`Validation.declineReasonProblem`), never cut short.
     static func declineBooking(shopID: UUID, jobID: UUID, reason: String?) async throws {
         let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, let problem = Validation.declineReasonProblem(trimmed) {
+            throw AppError.invalidInput(problem)
+        }
         let change = CancelChange(
             status: "cancelled",
-            cancel_reason: (trimmed?.isEmpty ?? true) ? nil : String((trimmed ?? "").prefix(1000))
+            cancel_reason: (trimmed?.isEmpty ?? true) ? nil : trimmed
         )
         let rows: [UpdatedJobRow] = try await Supa.client
             .from("jobs")

@@ -221,7 +221,7 @@ function InspectionPanel({ job, inspection }: { job: JobDetail; inspection: Insp
         <ol className="flex flex-col gap-2">
           {inView.map((m) => (
             <li key={m.id} className="flex items-start gap-3 text-sm">
-              <span className="bg-danger flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white">
+              <span className="bg-danger-solid text-danger-fg flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold">
                 {m.number}
               </span>
               <div className="min-w-0 flex-1">

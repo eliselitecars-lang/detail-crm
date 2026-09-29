@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Card } from '@/components/ui';
+import { appTitle, useDocumentTitle } from '@/lib/useDocumentTitle';
 import { LegalLinks } from './LegalLinks';
 import { Logo } from './Logo';
 
@@ -12,8 +13,12 @@ export interface AuthLayoutProps {
   footer?: ReactNode;
 }
 
-/** Centered card layout for sign-in, sign-up, password and invite pages. */
+/**
+ * Centered card layout for sign-in, sign-up, password and invite pages. The
+ * card title is also the tab title ("Sign in · Detail CRM").
+ */
 export function AuthLayout({ title, description, children, footer }: AuthLayoutProps) {
+  useDocumentTitle(appTitle(title));
   return (
     <div className="bg-canvas flex min-h-dvh flex-col items-center justify-center px-4 py-10">
       <main className="w-full max-w-sm">

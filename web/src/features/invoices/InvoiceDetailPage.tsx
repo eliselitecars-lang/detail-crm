@@ -48,6 +48,7 @@ import {
   collectibleCents,
   inFlightCents,
   isCardAttemptInFlight,
+  isCheckoutOpenError,
   isInvoiceOverdue,
   isPaymentInProgressError,
   processingCents,
@@ -65,6 +66,7 @@ import {
   type InvoiceRow,
 } from './api';
 import { ChargeCardDialog } from './components/ChargeCardDialog';
+import { CheckoutOpenNotice } from './components/CheckoutOpenNotice';
 import { InvoiceDetailsCard } from './components/InvoiceDetailsCard';
 import { InvoicePaymentsCard } from './components/InvoicePaymentsCard';
 import { RecordPaymentDialog } from './components/RecordPaymentDialog';
@@ -127,6 +129,8 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   const [voidReason, setVoidReason] = useState('');
   /** The server refused a change because a card payment is in flight. */
   const [heldByPayment, setHeldByPayment] = useState(false);
+  /** Void refused while a card payment page is open (55000 checkout_open, 0116). */
+  const [voidHeld, setVoidHeld] = useState<unknown>(null);
 
   const today = shopToday(timezone);
   const label = `Invoice #${invoice.number}`;
@@ -168,14 +172,29 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
   const canCancelOpen = canManage && !isVoid;
   const showHold = canCancelOpen && (paymentInFlight || heldByPayment);
 
-  /** Runs a change and, when an in-flight payment blocked it, offers to release the hold. */
+  /**
+   * Runs a change and, when an in-flight payment or an open card payment page
+   * blocked it (line amounts, discount and tax are frozen while one is open:
+   * 55000 checkout_open, 0116), offers to release the hold.
+   */
   const holdAware = async <T,>(work: Promise<T>): Promise<T> => {
     try {
       return await work;
     } catch (error) {
-      if (isPaymentInProgressError(error)) setHeldByPayment(true);
+      if (isPaymentInProgressError(error) || isCheckoutOpenError(error)) setHeldByPayment(true);
       throw error;
     }
+  };
+
+  const closeVoid = () => {
+    setPending(null);
+    setVoidHeld(null);
+  };
+  const runVoid = async () => {
+    await voidInvoice.mutateAsync(voidReason.trim() || null);
+    toast.success(`${label} voided`);
+    closeVoid();
+    setVoidReason('');
   };
 
   const runCancelOpen = async () => {
@@ -473,7 +492,7 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
       )}
       <ConfirmDialog
         open={pending === 'void'}
-        onClose={() => setPending(null)}
+        onClose={closeVoid}
         loading={voidInvoice.isPending}
         tone="danger"
         title={`Void ${label.toLowerCase()}?`}
@@ -481,12 +500,13 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
         confirmLabel="Void invoice"
         onConfirm={async () => {
           try {
-            await voidInvoice.mutateAsync(voidReason.trim() || null);
-            toast.success(`${label} voided`);
-            setPending(null);
-            setVoidReason('');
+            await runVoid();
           } catch (error) {
-            if (canCancelOpen && isPaymentInProgressError(error)) {
+            if (canCancelOpen && isCheckoutOpenError(error)) {
+              // A pay page is still open: offer to cancel it and void again,
+              // right here (CheckoutOpenNotice).
+              setVoidHeld(error);
+            } else if (canCancelOpen && isPaymentInProgressError(error)) {
               setHeldByPayment(true);
               setPending(null);
               toast.show({
@@ -501,6 +521,9 @@ function InvoiceView({ invoice, lines }: { invoice: InvoiceRow; lines: DocLine[]
           }
         }}
       >
+        {voidHeld !== null && (
+          <CheckoutOpenNotice invoiceId={invoice.id} error={voidHeld} onRetry={runVoid} />
+        )}
         <FormField
           label="Reason"
           help="Optional."

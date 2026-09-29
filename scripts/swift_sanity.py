@@ -20,7 +20,16 @@ mechanical mistakes that would otherwise burn a macOS CI run:
     observers in one file
   * accessibility: a tone *fill* color (`Theme.amber/success/warning/
     danger`) used as text via `foregroundStyle`/`foregroundColor` (too
-    light to read in light mode — use the matching `…Ink` token), and two
+    light to read in light mode — use the matching `…Ink` token); white
+    `Theme.onAccent` text over a plain fill color (`Theme.glacier/danger/
+    success/warning/amber/textTertiary` — white on the dark-mode Glacier is
+    3.26:1; use the `…Solid` fill), and Glacier text on a Glacier tint
+    (`Theme.fill(for: .info)`, `Theme.glacier.opacity(…)`: 3.85:1 in light
+    mode — use `Theme.glacierInk`) or on a white chip (3.26:1 in dark mode —
+    use `Theme.glacierSolid`), paired within a few lines; an icon-only
+    Button/Menu label with a fixed `.frame(width:height:)` under 44 pt (below
+    Apple's minimum, and it does not grow with Dynamic Type — use
+    `.iconTapTarget()`); and two
     or more theme buttons side by side in a bare `HStack` (labels
     truncate at accessibility text sizes — use `AdaptiveButtonRow`)
   * auth: a `SupabaseClient(` built without `flowType: .implicit` (the
@@ -312,6 +321,82 @@ FORBIDDEN = [
 FILL_AS_TEXT = re.compile(r"\.foreground(?:Style|Color)\(.*\bTheme\.(amber|success|warning|danger)\b")
 INK_FOR = {"amber": "moneyInk", "success": "successInk", "warning": "warningInk", "danger": "dangerInk"}
 URL_FORCE = re.compile(r"URL\(string:[^)]*\)\s*!")
+# Text/background pairs that fail WCAG AA 4.5:1 (Theme.swift values): the
+# foreground is set by .foregroundStyle/.foregroundColor, the background by
+# a .fill(...) or .background(...) a few lines away in the same chain.
+FOREGROUND_CALL = re.compile(r"\.foreground(?:Style|Color)\((.*)")
+BACKGROUND_CALL = re.compile(r"\.(?:fill|background)\((.*)")
+THEME_TOKEN = re.compile(
+    r"Theme\.fill\(for:\s*\.(\w+)\)|Theme\.accent\(for:\s*\.(\w+)\)(\.opacity\()?|Theme\.(\w+)(\.opacity\()?")
+TONE_FILL = {"info": "glacier", "success": "success", "warning": "warning", "danger": "danger", "money": "amber",
+             "neutral": "textSecondary"}
+PAIR_WINDOW = 8
+# (text token, background token) -> the fix
+BAD_PAIRS = {
+    **{("onAccent", fill): f"white text on Theme.{fill} fails contrast (3.1-4.4:1) — fill with Theme.{fix}"
+       for fill, fix in (("glacier", "glacierSolid"), ("danger", "dangerSolid"), ("success", "successSolid"),
+                         ("warning", "a darker solid token"), ("amber", "Theme.onAmber text"),
+                         ("textTertiary", "neutralSolid"), ("textSecondary", "neutralSolid"))},
+    ("glacier", "tint:glacier"): "Glacier text on a Glacier tint is 3.85:1 — use Theme.glacierInk",
+    ("glacier", "onAccent"): "Glacier text on a white fill is 3.26:1 in dark mode — use Theme.glacierSolid",
+}
+
+
+# An icon-only control's label sized with a fixed small square.
+FIXED_FRAME = re.compile(r"\.frame\(\s*width:\s*(\d+(?:\.\d+)?)\s*,\s*height:\s*(\d+(?:\.\d+)?)\s*\)")
+CONTROL_LABEL = re.compile(r"label:\s*\{|\bButton\s*(?:\(|\{)")
+MIN_TAP = 44
+
+
+def check_icon_targets(path: Path, code_lines: list[str], report: Report) -> None:
+    for index, text in enumerate(code_lines):
+        match = FIXED_FRAME.search(text)
+        if not match or (float(match.group(1)) >= MIN_TAP and float(match.group(2)) >= MIN_TAP):
+            continue
+        icon = "\n".join(code_lines[max(0, index - 3):index + 1])
+        control = "\n".join(code_lines[max(0, index - 6):index + 1])
+        if "Image(systemName:" in icon and CONTROL_LABEL.search(control):
+            report.error(path, index + 1, f"icon-only control with a fixed {match.group(1)}x{match.group(2)} pt hit "
+                                          f"area (under {MIN_TAP} pt, and it does not grow with Dynamic Type) — "
+                                          "use .iconTapTarget()")
+
+
+def theme_tokens(text: str) -> set[str]:
+    """Theme colors named in `text`; tints (a fill at an opacity) as `tint:<fill>`."""
+    tokens: set[str] = set()
+    for tone_fill, accent, accent_opacity, name, opacity in THEME_TOKEN.findall(text):
+        if tone_fill:
+            tokens.add("tint:" + TONE_FILL.get(tone_fill, tone_fill))
+        elif accent:
+            base = TONE_FILL.get(accent, accent)
+            tokens.add(("tint:" if accent_opacity else "") + base)
+        elif name:
+            tokens.add(("tint:" if opacity else "") + name)
+    return tokens
+
+
+def check_contrast_pairs(path: Path, code_lines: list[str], report: Report) -> None:
+    backgrounds: list[set[str]] = []
+    for text in code_lines:
+        found: set[str] = set()
+        for match in BACKGROUND_CALL.finditer(text):
+            found |= theme_tokens(match.group(1))
+        backgrounds.append(found)
+    for index, text in enumerate(code_lines):
+        match = FOREGROUND_CALL.search(text)
+        if not match:
+            continue
+        foreground = theme_tokens(match.group(1))
+        if not foreground:
+            continue
+        nearby: set[str] = set()
+        for other in range(max(0, index - PAIR_WINDOW), min(len(code_lines), index + PAIR_WINDOW + 1)):
+            nearby |= backgrounds[other]
+        for fg in sorted(foreground):
+            for bg in sorted(nearby):
+                message = BAD_PAIRS.get((fg, bg))
+                if message:
+                    report.error(path, index + 1, message)
 HARD_COLOR = re.compile(r"\b(?:UIColor|Color)\((?:red:|white:|hue:|\.sRGB|light:|hex:)")
 
 
@@ -329,6 +414,9 @@ def check_forbidden(path: Path, code_lines: list[str], source: str, report: Repo
         if fill and name != "Theme.swift":
             report.error(path, index + 1, f"Theme.{fill.group(1)} is a fill color and fails contrast as text — "
                                           f"use Theme.{INK_FOR[fill.group(1)]}")
+    if name != "Theme.swift":
+        check_contrast_pairs(path, code_lines, report)
+        check_icon_targets(path, code_lines, report)
     code = "\n".join(code_lines)
     if re.search(r"\bSupabaseClient\(", code) and not re.search(r"\bflowType:\s*\.implicit\b", code):
         report.error(path, None, "SupabaseClient built without `flowType: .implicit` — password-reset and "
@@ -813,6 +901,44 @@ def self_test() -> int:
         "let v = Circle().fill(Theme.danger)\n").errors)
     expect("fill colors allowed as text inside Theme.swift", not run_swift(
         "let v = Text(a).foregroundStyle(Theme.amber)\n", filename="Theme.swift").errors)
+    expect("white text on the plain Glacier fill detected", any("glacierSolid" in e for e in run_swift(
+        "let v = Text(a)\n    .foregroundStyle(isOn ? Theme.onAccent : Theme.textPrimary)\n"
+        "    .background(RoundedRectangle(cornerRadius: 8).fill(isOn ? Theme.glacier : Theme.surfaceMuted))\n").errors))
+    expect("white text on the plain danger fill detected", any("dangerSolid" in e for e in run_swift(
+        "let v = Text(a)\n    .foregroundStyle(Theme.onAccent)\n    .frame(width: 20)\n"
+        "    .background(Circle().fill(Theme.danger))\n").errors))
+    expect("white text on a solid fill passes", not run_swift(
+        "let v = Text(a)\n    .foregroundStyle(Theme.onAccent)\n"
+        "    .background(Capsule().fill(Theme.glacierSolid))\n").errors)
+    expect("Glacier text on a Glacier tint detected", any("glacierInk" in e for e in run_swift(
+        "let v = Label(t, systemImage: i)\n    .foregroundStyle(Theme.glacier)\n    .background(\n"
+        "        RoundedRectangle(cornerRadius: 4)\n            .fill(Theme.fill(for: .info))\n    )\n").errors))
+    expect("Glacier text on an opacity tint detected", any("glacierInk" in e for e in run_swift(
+        "let v = Image(systemName: i)\n    .foregroundStyle(Theme.glacier)\n"
+        "    .background(Circle().fill(Theme.glacier.opacity(0.12)))\n").errors))
+    expect("Glacier ink on a Glacier tint passes", not run_swift(
+        "let v = Text(t)\n    .foregroundStyle(Theme.glacierInk)\n    .background(Capsule().fill(Theme.fill(for: .info)))\n").errors)
+    expect("Glacier text on a white chip detected", any("glacierSolid" in e for e in run_swift(
+        "let v = Text(n)\n    .foregroundStyle(sel ? Theme.glacier : Theme.onAccent)\n"
+        "    .background(Capsule().fill(sel ? Theme.onAccent : Theme.dangerSolid))\n").errors))
+    expect("far-apart colors are not paired", not run_swift(
+        "let v = Text(a).foregroundStyle(Theme.onAccent)\n" + "let x = 1\n" * 12 + "let w = Circle().fill(Theme.glacier)\n").errors)
+    expect("contrast pairs allowed inside Theme.swift", not run_swift(
+        "let v = Text(a)\n    .foregroundStyle(Theme.onAccent)\n    .background(Capsule().fill(Theme.glacier))\n",
+        filename="Theme.swift").errors)
+    expect("fixed small icon menu label detected", any("iconTapTarget" in e for e in run_swift(
+        "let v = Menu {\n    Button(\"Remove\", role: .destructive) { f() }\n} label: {\n"
+        "    Image(systemName: \"ellipsis\")\n        .foregroundStyle(Theme.textTertiary)\n"
+        "        .frame(width: 32, height: 32)\n        .contentShape(Rectangle())\n}\n").errors))
+    expect("fixed small icon button detected", any("iconTapTarget" in e for e in run_swift(
+        "let v = Button(action: f) {\n    Image(systemName: \"xmark\")\n        .frame(width: 28, height: 28)\n}\n").errors))
+    expect("scaled icon target passes", not run_swift(
+        "let v = Menu {\n    Button(\"A\") { f() }\n} label: {\n    Image(systemName: \"ellipsis\")\n"
+        "        .iconTapTarget()\n}\n").errors)
+    expect("44-pt icon frame passes", not run_swift(
+        "let v = Button(action: f) {\n    Image(systemName: \"xmark\")\n        .frame(width: 44, height: 44)\n}\n").errors)
+    expect("small decorative icon outside a control passes", not run_swift(
+        "let v = HStack {\n    Image(systemName: \"star\")\n        .frame(width: 20, height: 20)\n}\n").errors)
     expect("theme buttons in a bare HStack detected", any("AdaptiveButtonRow" in e for e in run_swift(
         "let v = HStack(spacing: 8) {\n  Button(\"A\") {}\n    .buttonStyle(.themePrimaryCompact)\n"
         "  Button(\"B\") { f() }\n    .buttonStyle(.themeSecondaryCompact)\n}\n").errors))

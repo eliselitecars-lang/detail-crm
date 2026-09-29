@@ -85,7 +85,7 @@ struct JobsDayMapView: View {
                         .font(Theme.Typography.captionEmphasis)
                         .foregroundStyle(Theme.onAccent)
                         .frame(width: 28, height: 28)
-                        .background(Circle().fill(Theme.glacier))
+                        .background(Circle().fill(Theme.glacierSolid))
                         .overlay(Circle().strokeBorder(Theme.surface, lineWidth: 2))
                         .accessibilityLabel("Stop \(number), \(stop.title)")
                 }
@@ -171,7 +171,7 @@ struct JobsDayMapView: View {
                 .font(Theme.Typography.captionEmphasis)
                 .foregroundStyle(Theme.onAccent)
                 .frame(width: 24, height: 24)
-                .background(Circle().fill(stop.hasLocation ? Theme.glacier : Theme.textTertiary))
+                .background(Circle().fill(stop.hasLocation ? Theme.glacierSolid : Theme.neutralSolid))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 Text(stop.title)

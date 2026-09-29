@@ -401,6 +401,28 @@ final class AppState {
         activate(membership)
     }
 
+    /// Leaves a shop's team (Your account > Your shops). The shop is
+    /// forgotten as the remembered one; leaving the active shop opens the
+    /// user's only other shop, or the shop picker. The other memberships
+    /// are re-read; when that read fails the left shop is still dropped
+    /// from the list: the server has already removed it.
+    func leaveShop(_ shopID: UUID) async throws {
+        try await ShopService.leaveShop(shopID: shopID)
+        if let userID, storedShopID() == shopID {
+            defaults.removeObject(forKey: Self.selectedShopKeyPrefix + userID.uuidString)
+        }
+        try? await fetchProfileAndMemberships()
+        memberships.removeAll { $0.shop.id == shopID }
+        if let current, current.shop.id != shopID {
+            if let fresh = memberships.first(where: { $0.shop.id == current.shop.id }) {
+                self.current = fresh
+            }
+        } else if current != nil {
+            current = nil
+            chooseShop(preferred: nil)
+        }
+    }
+
     /// Re-reads the active shop row (e.g. after settings change it). Keeps
     /// the current screen when the reload fails; throws so the caller can
     /// tell the user.

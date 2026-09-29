@@ -123,9 +123,20 @@ function BookingFrame({
   children: ReactNode;
 }) {
   const tracking = useTrackingActive();
-  if (embed) return <EmbedFrame brandColor={profile?.brand_color}>{children}</EmbedFrame>;
+  if (embed) {
+    return (
+      <EmbedFrame brandColor={profile?.brand_color} title="Book online" shopName={profile?.name}>
+        {children}
+      </EmbedFrame>
+    );
+  }
   return (
-    <PublicLayout shop={profile ? toBranding(profile) : null} width="wide" fullPageLinks={tracking}>
+    <PublicLayout
+      shop={profile ? toBranding(profile) : null}
+      title="Book online"
+      width="wide"
+      fullPageLinks={tracking}
+    >
       {children}
     </PublicLayout>
   );

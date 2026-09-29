@@ -143,6 +143,25 @@ public enum Validation {
     public static func statusReasonCounter(_ input: String) -> String {
         "\(serverLength(input)) / \(statusReasonMaxLength)"
     }
+
+    /// Longest reason for declining an online booking request: it is
+    /// written straight to `jobs.cancel_reason` (0006 column check
+    /// `char_length(cancel_reason) <= 1000`) and shown to the customer on
+    /// their booking page. Web: RequestsCard's 1,000-character limit.
+    public static let declineReasonMaxLength = 1000
+
+    /// The message to show when a decline reason is too long, else nil.
+    /// The reason is never cut short: the customer reads what was typed.
+    public static func declineReasonProblem(_ input: String) -> String? {
+        let length = serverLength(input)
+        guard length > declineReasonMaxLength else { return nil }
+        return "Keep the reason to 1,000 characters or fewer (it's \(length) now)."
+    }
+
+    /// "123 / 1000" counter text for the decline reason field.
+    public static func declineReasonCounter(_ input: String) -> String {
+        "\(serverLength(input)) / \(declineReasonMaxLength)"
+    }
 }
 
 extension Character {

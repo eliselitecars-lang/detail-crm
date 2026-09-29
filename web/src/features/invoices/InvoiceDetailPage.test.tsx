@@ -447,6 +447,60 @@ describe('InvoiceDetailPage', () => {
     expect(toastAction.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('a void refused while a card payment page is open (0116): cancel the open payments, then it is voided', async () => {
+    const OPEN = {
+      code: '55000',
+      message:
+        'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+      details: null,
+      hint: 'checkout_open',
+    };
+    let refused = true;
+    supabase.rpc.mockImplementation((...args: unknown[]) => {
+      if (args[0] !== 'void_invoice') return createBuilder({ data: null });
+      return createBuilder(
+        refused ? { data: null, error: OPEN } : { data: invoiceRow({ status: 'void' }) },
+      );
+    });
+    invoke.mockImplementation(() => {
+      refused = false; // the edge expired the page and released the hold
+      return Promise.resolve({
+        data: {
+          invoice_id: 'inv-1',
+          cancelled: 0,
+          succeeded: 0,
+          in_progress: 0,
+          sessions_expired: 1,
+        },
+        error: null,
+      });
+    });
+    const { user } = setup();
+    await user.click(await screen.findByRole('button', { name: 'More invoice actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /Void invoice/ }));
+    const dialog = await screen.findByRole('alertdialog');
+    await user.type(within(dialog).getByLabelText(/^Reason/), 'Duplicate');
+    await user.click(within(dialog).getByRole('button', { name: 'Void invoice' }));
+    expect(
+      await within(dialog).findByText('A card payment page for this invoice is still open'),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/Cancel the open payments first, or wait until then/i),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Cancel open payments and try again' }),
+    );
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('payments', {
+        body: { action: 'cancel_open_payments', shop_id: 'shop-1', invoice_id: 'inv-1' },
+      }),
+    );
+    expect(await screen.findByText('Invoice #2001 voided')).toBeInTheDocument();
+    const voids = (supabase.rpc.mock.calls as unknown[][]).filter((c) => c[0] === 'void_invoice');
+    expect(voids).toHaveLength(2);
+    expect(voids[1]?.[1]).toEqual({ p_invoice_id: 'inv-1', p_reason: 'Duplicate' });
+  });
+
   it('managers get a Cancel open payments action on an open invoice', async () => {
     const { user } = setup({ role: 'manager' });
     await user.click(await screen.findByRole('button', { name: 'More invoice actions' }));

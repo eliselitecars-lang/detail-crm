@@ -451,16 +451,16 @@ struct JobInspectionViewPicker: View {
                 if count > 0 {
                     Text("\(count)")
                         .font(Theme.Typography.captionEmphasis)
-                        .foregroundStyle(isSelected ? Theme.glacier : Theme.onAccent)
+                        .foregroundStyle(isSelected ? Theme.glacierSolid : Theme.onAccent)
                         .padding(.horizontal, Theme.Spacing.xs)
-                        .background(Capsule().fill(isSelected ? Theme.onAccent : Theme.danger))
+                        .background(Capsule().fill(isSelected ? Theme.onAccent : Theme.dangerSolid))
                 }
             }
             .font(Theme.Typography.footnote.weight(.semibold))
             .foregroundStyle(isSelected ? Theme.onAccent : Theme.textPrimary)
             .padding(.horizontal, Theme.Spacing.md)
             .frame(minHeight: Theme.Size.compactControlHeight)
-            .background(Capsule().fill(isSelected ? Theme.glacier : Theme.surfaceMuted))
+            .background(Capsule().fill(isSelected ? Theme.glacierSolid : Theme.surfaceMuted))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(view.displayName), \(count) marks")
@@ -487,7 +487,7 @@ struct JobMarkRow: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .frame(width: badgeSide, height: badgeSide)
-                .background(Circle().fill(Theme.danger))
+                .background(Circle().fill(Theme.dangerSolid))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 Text(mark.damage.displayName)
@@ -515,7 +515,7 @@ struct JobMarkRow: View {
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash")
                         .foregroundStyle(Theme.dangerInk)
-                        .frame(width: 32, height: 32)
+                        .iconTapTarget()
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Remove mark \(number)")
@@ -655,7 +655,7 @@ struct JobMarkEditorSheet: View {
                 .frame(maxWidth: .infinity, minHeight: Theme.Size.compactControlHeight)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                        .fill(isSelected ? Theme.glacier : Theme.surfaceMuted)
+                        .fill(isSelected ? Theme.glacierSolid : Theme.surfaceMuted)
                 )
         }
         .buttonStyle(.plain)

@@ -99,7 +99,7 @@ struct MoneyFilterChip: View {
                 .padding(.horizontal, Theme.Spacing.md)
                 .frame(minHeight: Theme.Size.compactControlHeight)
                 .background(
-                    Capsule().fill(isSelected ? Theme.glacier : Theme.surfaceMuted)
+                    Capsule().fill(isSelected ? Theme.glacierSolid : Theme.surfaceMuted)
                 )
         }
         .buttonStyle(.plain)

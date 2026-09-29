@@ -220,9 +220,9 @@ The nine steps, in order:
    per `[functions.<name>]` in `config.toml`, with `--no-verify-jwt` exactly
    where `verify_jwt = false` (`payments`, `stripe-webhook`, `messaging`,
    `storage-purge`, `billing`, `billing-webhook`, ...: Stripe, Twilio and
-   pg_cron send no Supabase JWT);
-   `stripe-connect` and `invites` keep the gateway JWT check. Afterwards the
-   deployed list is read back and every function's `verify_jwt` must match.
+   pg_cron send no Supabase JWT); `stripe-connect`, `invites` and `account`
+   (`verify_jwt = true`) keep the gateway JWT check. Afterwards the deployed
+   list is read back and every function's `verify_jwt` must match.
    `SUPABASE_FUNCTIONS_BUNDLER=docker` bundles locally with Docker instead of
    `--use-api`.
 8. **Production Auth** - Management API `PATCH /v1/projects/{ref}/config/auth`
@@ -604,8 +604,24 @@ receive.
 
 Cloudflare -> Workers & Pages -> the project -> Custom domains -> add
 `app.yourdomain.com` ([docs](https://developers.cloudflare.com/pages/configuration/custom-domains/)).
-`APP_BASE_URL` must be exactly that origin; re-run the backend deploy after
-changing it (function secret, Auth `site_url`, `platform_config`).
+`APP_BASE_URL` must be exactly that origin. Changing it later takes two
+deploys, because only the web app reads its origin at run time:
+
+1. Re-run the backend deploy (function secret, Auth `site_url`,
+   `platform_config`).
+2. Ship a new iPhone build (ios-testflight, then release it on the App
+   Store). The Fastfile writes `APP_BASE_URL` into `Config.plist` as
+   `WEB_APP_URL` when it archives, so every installed build keeps the old
+   origin for the booking and invite links it shares, its Privacy/Terms rows
+   and the `redirect_to` of its password-reset and sign-up emails (3.4) until
+   the person updates the app.
+
+Until the old builds are gone, keep the old domain attached as a second
+custom domain of the same Pages project and add `https://<old domain>/**` to
+`AUTH_ADDITIONAL_REDIRECT_URLS` (then re-run the backend deploy). Otherwise
+an old build's reset link is refused by the allow-list and Supabase falls
+back to the Site URL, which signs the person in but shows no new-password
+form, and the links it shared stop opening.
 
 ### 4.5 Other static hosts
 
@@ -731,7 +747,8 @@ fixing the cause.
   `supabase functions deploy <name> --project-ref <ref> --use-api`
   (add `--no-verify-jwt` for every function with `verify_jwt = false` in
   `config.toml`: `payments`, `stripe-webhook`, `messaging`, `storage-purge`,
-  `billing`, `billing-webhook`, ...). Do not run the full deploy from an older commit: `db push`
+  `billing`, `billing-webhook`, ...; not for `stripe-connect`, `invites` and
+  `account`, which keep the gateway JWT check). Do not run the full deploy from an older commit: `db push`
   refuses because the database has newer migrations than that commit.
 - **Secrets**: re-run the deploy with the previous values.
 - **Web**: Cloudflare -> the Pages project -> Deployments -> an earlier

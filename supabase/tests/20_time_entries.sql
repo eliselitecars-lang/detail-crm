@@ -167,8 +167,8 @@ select tests.eq(tests.row_count($$select 1 from public.time_entries$$), 0::bigin
 select tests.authenticate_as(tests.fx('u_admin_a'));
 select tests.throws($$delete from public.shop_members where id = tests.fx('m_tech2_a')$$, '23503',
                     'a member with time entries cannot be deleted');
-select tests.authenticate_as(tests.fx('u_owner_b'));
-select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 1::bigint, 'the owner deletes shop B');
+select tests.as_service();  -- payments delete_shop (0117)
+select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 1::bigint, 'shop B is deleted');
 select tests.as_superuser();
 select tests.eq((select count(*) from public.time_entries where shop_id = tests.fx('shop_b')), 0::bigint, 'its time entries go with it');
 select tests.ok(not has_table_privilege('anon', 'public.time_entries', 'select'), 'anon has no time entry access');

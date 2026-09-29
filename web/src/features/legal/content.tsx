@@ -198,23 +198,31 @@ export function privacyPolicy(operator: LegalOperator): LegalText {
               tracked in between. Clocking in or out in the web app records no location.
             </li>
             <li>
-              <Term>Online booking and contact forms:</Term> what a customer enters when booking
-              (name, email, phone, vehicle, service address, notes, answers to the shop’s booking
-              questions, the chosen services and time, a coupon or referral code and marketing
-              choices) or when filling in a shop’s contact form (name, email, phone, vehicle,
-              message, answers and marketing choices, plus the IP address of the device, used to
-              limit abuse). When an online booking is accepted, the IP address of the device (and,
-              if the customer is signed in, their account) is also recorded with the time, so the
-              number of online bookings from one device or account can be limited; each time the
-              shop receives another online booking, these records older than two days are deleted.
-              Gift card purchases record the buyer’s and recipient’s names and email addresses, the
-              gift message and the IP address of the buyer’s device; gift card codes are stored only
-              in a scrambled form (plus their last four characters, so staff can find a card) and
-              are emailed to the recipient. When someone enters a gift card code that does not work
-              on an invoice payment page, the IP address of the device is recorded with the failed
-              attempt to stop codes being guessed. A shop can embed its booking page or contact form
-              in its own website: the form then appears inside that website, and the embed script
-              sets no cookies and tells the website only how tall the form is.
+              <Term>Online booking, membership sign-up and contact forms:</Term> what a customer
+              enters when booking (name, email, phone, vehicle, service address, notes, answers to
+              the shop’s booking questions, the chosen services and time, a coupon or referral code
+              and marketing choices) or when filling in a shop’s contact form (name, email, phone,
+              vehicle, message, answers and marketing choices, plus the IP address of the device,
+              used to limit abuse). When an online booking is accepted, the IP address of the device
+              (and, if the customer is signed in, their account) is also recorded with the time, so
+              the number of online bookings from one device or account can be limited; each time the
+              shop receives another online booking, these records older than two days are deleted. A
+              membership sign-up on a shop’s online join page records what the person enters (name,
+              email, phone, vehicle and marketing choices). When someone starts a membership
+              sign-up, the IP address of the device is recorded with the attempt, together with the
+              membership, the customer record it belongs to and the email and text-message choices
+              the person made; those choices are applied to a customer record the sign-up created
+              only once the first membership payment goes through. The record is used to limit the
+              number of sign-ups from one connection, and each time the shop receives another online
+              sign-up attempt, these records older than seven days are deleted. Gift card purchases
+              record the buyer’s and recipient’s names and email addresses, the gift message and the
+              IP address of the buyer’s device; gift card codes are stored only in a scrambled form
+              (plus their last four characters, so staff can find a card) and are emailed to the
+              recipient. When someone enters a gift card code that does not work on an invoice
+              payment page, the IP address of the device is recorded with the failed attempt to stop
+              codes being guessed. A shop can embed its booking page or contact form in its own
+              website: the form then appears inside that website, and the embed script sets no
+              cookies and tells the website only how tall the form is.
             </li>
             <li>
               <Term>Customer portal:</Term> customers who create a portal account sign in with an

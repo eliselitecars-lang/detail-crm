@@ -1,5 +1,4 @@
 import { Tags } from 'lucide-react';
-import { useEffect } from 'react';
 import { Link } from 'react-router';
 import { Logo } from '@/components/layout/Logo';
 import { PublicLayout } from '@/components/layout/PublicLayout';
@@ -17,13 +16,11 @@ const ctaClass =
  */
 export default function PricingPage() {
   const plans = useBillingPlans();
-  useEffect(() => {
-    document.title = 'Pricing · Detail CRM';
-  }, []);
 
   return (
     <PublicLayout
       shop={null}
+      title="Pricing"
       width="wide"
       brand={
         <Link to="/" className="rounded-control flex w-fit" aria-label="Detail CRM home">

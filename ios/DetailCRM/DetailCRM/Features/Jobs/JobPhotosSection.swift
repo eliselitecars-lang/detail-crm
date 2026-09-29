@@ -140,7 +140,7 @@ struct JobPhotosSection: View {
                             Button("Discard this video", role: .destructive) { confirmDiscard(upload) }
                         } label: {
                             Image(systemName: "ellipsis")
-                                .frame(width: 32, height: 32)
+                                .iconTapTarget()
                         }
                         .accessibilityLabel("More for this upload")
                     }

@@ -55,7 +55,7 @@ struct MoneyTapToPayEducationView: View {
                                 .font(Theme.Typography.captionEmphasis)
                                 .foregroundStyle(Theme.onAccent)
                                 .frame(width: 24, height: 24)
-                                .background(Circle().fill(Theme.glacier))
+                                .background(Circle().fill(Theme.glacierSolid))
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                                 Text(step.title)

@@ -59,7 +59,7 @@ function ReportBody({ token, report }: { token: string; report: JobReport }) {
   const vehicle = vehicleText(report.vehicle);
 
   return (
-    <PublicLayout shop={branding(report)}>
+    <PublicLayout shop={branding(report)} title="Your job report">
       <div className="flex flex-col gap-4 sm:gap-5">
         <DocumentTitle
           title="Your job report"

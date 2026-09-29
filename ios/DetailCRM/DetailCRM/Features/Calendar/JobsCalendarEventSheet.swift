@@ -7,8 +7,14 @@
 //  another event — all day or timed, optionally repeating, and whether it
 //  takes booking capacity. Stored in `blocked_times`; the server validates
 //  the combination (time off needs a member, closed is shop-wide, only
-//  consultations and reminders name a customer). Editing a repeating event
-//  changes every repeat; deleting removes them all.
+//  consultations and reminders name a customer).
+//
+//  A repeating event opens on the occurrence that was tapped. A change or a
+//  delete applies to only that occurrence (its date is skipped in the series,
+//  `recurrence.except_dates`, 0115, and a change becomes a one-off event that
+//  day), to it and every later one (the series ends the day before; a change
+//  starts a new series), or to every occurrence — the same choices as the
+//  web's event dialog (DetailCore `RepeatOccurrence`).
 //
 
 import SwiftUI
@@ -20,12 +26,14 @@ struct JobsCalendarEventSheet: View {
     /// What the sheet opens on.
     enum Target: Identifiable, Hashable {
         case new(start: Date)
-        case edit(UUID)
+        /// An event, opened on one occurrence (its start as the calendar
+        /// shows it; a one-off event's own start).
+        case edit(UUID, occurrenceStart: Date)
 
         var id: String {
             switch self {
             case .new(let start): return "new-\(start.timeIntervalSince1970)"
-            case .edit(let id): return "edit-" + id.uuidString
+            case .edit(let id, let occurrence): return "edit-\(id.uuidString)-\(occurrence.timeIntervalSince1970)"
             }
         }
     }
@@ -61,11 +69,26 @@ struct JobsCalendarEventSheet: View {
     @State private var team: [CalendarTeamMember] = []
     @State private var errorMessage: String?
     @State private var confirmation: ConfirmationRequest?
+    /// Editing a repeating event: its rule as stored and the opened
+    /// occurrence (its dates, and its start as shown).
+    @State private var seriesRule: JobsBlockedTimeRecurrence?
+    @State private var occurrence: RepeatOccurrence?
+    @State private var occurrenceStart: Date?
+    /// Which occurrences a save changes.
+    @State private var scope: OccurrenceScope = .all
+    /// "Every occurrence": send `except_dates: []` to bring skipped dates back.
+    @State private var restoreSkipped = false
+    @State private var choosingDeleteScope = false
 
     private var clock: ShopClock { appState.clock }
     private var isEditing: Bool {
         if case .edit = target { return true }
         return false
+    }
+    /// "Only this one" of a repeating event: the change is a one-off event.
+    private var changesOnlyThis: Bool { occurrence != nil && scope == .this }
+    private var occurrenceDayText: String {
+        occurrenceStart.map { clock.shortDayText($0) } ?? ""
     }
 
     var body: some View {
@@ -85,6 +108,20 @@ struct JobsCalendarEventSheet: View {
                 }
             }
             .confirmation($confirmation)
+            .confirmationDialog(
+                "Delete this event?",
+                isPresented: $choosingDeleteScope,
+                titleVisibility: .visible
+            ) {
+                ForEach(occurrence?.deleteScopes ?? [], id: \.self) { choice in
+                    Button(deleteTitle(choice), role: .destructive) {
+                        Task { await delete(choice) }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("It repeats. Choose which occurrences to delete.")
+            }
         }
         .task { await load() }
     }
@@ -93,9 +130,8 @@ struct JobsCalendarEventSheet: View {
 
     private var form: some View {
         FormScreen {
-            if let errorMessage {
-                InlineMessage(text: errorMessage, kind: .error)
-            }
+            // (AnyView seam: keeps the form's generic type shallow)
+            AnyView(header)
             FormRow("Type") {
                 Picker("Type", selection: kindBinding) {
                     ForEach(JobsCalendarEvent.Kind.allCases) { item in
@@ -123,7 +159,9 @@ struct JobsCalendarEventSheet: View {
                     .tint(Theme.glacier)
                     .disabled(kind == .closed)
             }
-            repeatFields
+            if !changesOnlyThis {
+                repeatFields
+            }
             FormRow("Notes", hint: "Up to 500 characters.") {
                 TextField("Notes", text: $notes, axis: .vertical)
                     .lineLimit(2...6)
@@ -133,6 +171,81 @@ struct JobsCalendarEventSheet: View {
                 Button("Delete event", role: .destructive) { confirmDelete() }
                     .buttonStyle(.themeDestructive)
             }
+        }
+    }
+
+    /// The save error, and for a repeating event the scope choice.
+    @ViewBuilder
+    private var header: some View {
+        if let errorMessage {
+            InlineMessage(text: errorMessage, kind: .error)
+        }
+        if let occurrence, let seriesRule {
+            scopeFields(occurrence, rule: seriesRule)
+        }
+    }
+
+    /// "Repeats: Every week on Mon · 1 date skipped" and which occurrences
+    /// the change applies to.
+    private func scopeFields(_ occurrence: RepeatOccurrence, rule: JobsBlockedTimeRecurrence) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            Text("Repeats: " + rule.summary)
+                .font(Theme.Typography.body)
+                .foregroundStyle(Theme.textPrimary)
+            Picker("Change", selection: $scope) {
+                ForEach(occurrence.changeScopes, id: \.self) { choice in
+                    Text(changeTitle(choice)).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("Change which occurrences")
+            switch scope {
+            case .this:
+                scopeCaption("The series skips \(occurrenceDayText); your changes become a one-off event that day.")
+            case .following:
+                scopeCaption("The series ends before \(occurrenceDayText); from then on it follows these details.")
+            case .all:
+                if let limit = occurrence.followingChangeLimit {
+                    scopeCaption(limit)
+                }
+                if !occurrence.skipped.isEmpty {
+                    Toggle(
+                        occurrence.skipped.count == 1
+                            ? "Bring back the skipped date"
+                            : "Bring back the \(occurrence.skipped.count) skipped dates",
+                        isOn: $restoreSkipped
+                    )
+                    .tint(Theme.glacier)
+                    .font(Theme.Typography.body)
+                    .foregroundStyle(Theme.textPrimary)
+                }
+            }
+        }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.control).fill(Theme.surfaceMuted))
+    }
+
+    private func scopeCaption(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.Typography.caption)
+            .foregroundStyle(Theme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func changeTitle(_ choice: OccurrenceScope) -> String {
+        switch choice {
+        case .this: return "Only this one"
+        case .all: return "Every one"
+        case .following: return "This & later"
+        }
+    }
+
+    private func deleteTitle(_ choice: OccurrenceScope) -> String {
+        switch choice {
+        case .this: return "Only this one (\(occurrenceDayText))"
+        case .following: return "This and later occurrences"
+        case .all: return "Every occurrence"
         }
     }
 
@@ -289,17 +402,12 @@ struct JobsCalendarEventSheet: View {
                 }
                 .pickerStyle(.segmented)
                 if repeatEnd == 1 {
-                    DatePicker("Last repeat on", selection: $untilDay, in: start..., displayedComponents: [.date])
+                    DatePicker("Last repeat on", selection: $untilDay, in: repeatFloor..., displayedComponents: [.date])
                         .environment(\.timeZone, clock.timeZone)
                 } else if repeatEnd == 2 {
                     Stepper(value: $repeatCount, in: 1...500) {
                         Text(repeatCount == 1 ? "Once" : "\(repeatCount) times")
                     }
-                }
-                if isEditing {
-                    Text("Changes apply to every repeat of this event.")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.textTertiary)
                 }
             }
         }
@@ -322,7 +430,7 @@ struct JobsCalendarEventSheet: View {
                         .font(Theme.Typography.captionEmphasis)
                         .frame(maxWidth: .infinity, minHeight: Theme.Size.compactControlHeight)
                         .foregroundStyle(isOn ? Theme.onAccent : Theme.textPrimary)
-                        .background(RoundedRectangle(cornerRadius: Theme.Radius.control).fill(isOn ? Theme.glacier : Theme.surfaceMuted))
+                        .background(RoundedRectangle(cornerRadius: Theme.Radius.control).fill(isOn ? Theme.glacierSolid : Theme.surfaceMuted))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(JobsSeriesDraft.Rule.weekdayLongNames[day])
@@ -386,6 +494,13 @@ struct JobsCalendarEventSheet: View {
         )
     }
 
+    /// The earliest "Last repeat on" day: the series' own start when every
+    /// occurrence changes (it moves with the edited one), else the start.
+    private var repeatFloor: Date {
+        guard scope == .all, let occurrence else { return start }
+        return clock.startOfDay(clock.addingDays(occurrence.daysToSeriesStart, to: start))
+    }
+
     private var dayCount: Int {
         max(1, clock.days(from: start, to: end).count)
     }
@@ -407,13 +522,13 @@ struct JobsCalendarEventSheet: View {
             untilDay = clock.addingDays(30, to: suggested)
             recurrence.weekdays = [clock.calendar.component(.weekday, from: suggested) - 1]
             loadState = .loaded(true)
-        case .edit(let id):
+        case .edit(let id, let opened):
             let result = await LoadState<JobsCalendarEvent>.result {
                 try await CalendarService.calendarEvent(shopID: shopID, id: id)
             }
             switch result {
             case .loaded(let event):
-                await prefill(event, shopID: shopID)
+                await prefill(event, occurrenceStart: opened, shopID: shopID)
                 loadState = .loaded(true)
             case .failed(let message):
                 loadState = .failed(message)
@@ -423,12 +538,27 @@ struct JobsCalendarEventSheet: View {
         }
     }
 
-    private func prefill(_ event: JobsCalendarEvent, shopID: UUID) async {
+    private func prefill(_ event: JobsCalendarEvent, occurrenceStart opened: Date, shopID: UUID) async {
         kind = event.kind
         title = event.title ?? ""
-        start = event.startsAt
-        end = event.endsAt
-        allDay = clock.startOfDay(event.startsAt) == event.startsAt && clock.startOfDay(event.endsAt) == event.endsAt
+        // A repeating event shows the occurrence that was opened, not the
+        // series' first date: the series' times, moved to that day.
+        let seriesDay = clock.dateString(event.startsAt)
+        let openedDay = clock.dateString(opened)
+        let shift = event.recurrence == nil ? 0 : (LocalDate.days(from: seriesDay, to: openedDay) ?? 0)
+        start = clock.addingDays(shift, to: event.startsAt)
+        end = clock.addingDays(shift, to: event.endsAt)
+        allDay = clock.startOfDay(start) == start && clock.startOfDay(end) == end
+        if let rule = event.recurrence {
+            seriesRule = rule
+            occurrenceStart = start
+            occurrence = RepeatOccurrence(
+                seriesDate: seriesDay,
+                occurrenceDate: clock.dateString(start),
+                count: rule.count,
+                skipped: rule.skippedDates
+            )
+        }
         memberID = event.memberID
         affectsCapacity = event.affectsCapacity
         capacityEdited = true
@@ -436,6 +566,9 @@ struct JobsCalendarEventSheet: View {
         if let rule = event.recurrence {
             repeats = true
             recurrence = rule
+            // Series-wide saves leave the key out (the server keeps the
+            // skipped dates, moved with the start); see save().
+            recurrence.exceptDates = nil
             if rule.weekdays.isEmpty {
                 recurrence.weekdays = [clock.calendar.component(.weekday, from: event.startsAt) - 1]
             }
@@ -517,23 +650,29 @@ struct JobsCalendarEventSheet: View {
             "affects_capacity": .bool(kind == .closed ? true : affectsCapacity),
             "reason": notes.trimmedNonEmpty.map { AnyJSON.string($0) } ?? .null,
         ]
-        if repeats {
+        var rule: JobsBlockedTimeRecurrence?
+        if repeats && !changesOnlyThis {
             if recurrence.frequency == .week && recurrence.weekdays.isEmpty {
                 errorMessage = "Pick at least one day of the week to repeat on."
                 return
             }
-            var rule = recurrence
-            rule.untilDate = repeatEnd == 1 ? clock.dateString(untilDay) : nil
-            rule.count = repeatEnd == 2 ? repeatCount : nil
-            fields["recurrence"] = rule.json
-        } else {
-            fields["recurrence"] = .null
+            var edited = recurrence
+            edited.untilDate = repeatEnd == 1 ? clock.dateString(untilDay) : nil
+            edited.count = repeatEnd == 2 ? repeatCount : nil
+            edited.exceptDates = nil
+            rule = edited
         }
+        fields["recurrence"] = rule?.json ?? .null
         let id: UUID?
-        if case .edit(let existing) = target { id = existing } else { id = nil }
+        if case .edit(let existing, _) = target { id = existing } else { id = nil }
         do {
-            try await CalendarService.saveCalendarEvent(shopID: shopID, id: id, fields: fields)
-            toasts.show(isEditing ? "Event updated" : "Event added")
+            if let id, let occurrence, let seriesRule {
+                try await saveOccurrence(shopID: shopID, id: id, occurrence: occurrence,
+                                         seriesRule: seriesRule, rule: rule, fields: fields)
+            } else {
+                try await CalendarService.saveCalendarEvent(shopID: shopID, id: id, fields: fields)
+                toasts.show(isEditing ? "Event updated" : "Event added")
+            }
             onChange()
             dismiss()
         } catch {
@@ -541,22 +680,104 @@ struct JobsCalendarEventSheet: View {
         }
     }
 
+    /// Saves an edit of a repeating event for the chosen scope.
+    private func saveOccurrence(
+        shopID: UUID,
+        id: UUID,
+        occurrence: RepeatOccurrence,
+        seriesRule: JobsBlockedTimeRecurrence,
+        rule: JobsBlockedTimeRecurrence?,
+        fields: [String: AnyJSON]
+    ) async throws {
+        var fields = fields
+        switch scope {
+        case .this:
+            // A one-off event with the changes; the series skips this date.
+            var skipping = seriesRule
+            skipping.exceptDates = occurrence.skippingThis
+            fields["recurrence"] = .null
+            try await CalendarService.splitCalendarEvent(
+                shopID: shopID, id: id, seriesRecurrence: skipping, fields: fields
+            )
+            toasts.show("This occurrence was changed")
+        case .following where occurrence.canChangeFollowing:
+            guard let ended = endedBefore(seriesRule, occurrence) else { throw AppError.notFound("That occurrence") }
+            // The new series keeps the skipped dates from here on, moved with it.
+            if var next = rule {
+                let moved = LocalDate.days(from: occurrence.occurrenceDate, to: clock.dateString(start)) ?? 0
+                let later = occurrence.skippedFromThis(movedBy: moved)
+                next.exceptDates = later.isEmpty ? nil : later
+                fields["recurrence"] = next.json
+            }
+            try await CalendarService.splitCalendarEvent(
+                shopID: shopID, id: id, seriesRecurrence: ended, fields: fields
+            )
+            toasts.show("Event changed from this date on")
+        case .following, .all:
+            // Every occurrence: the series moves by as many days as this one moved.
+            let back = occurrence.daysToSeriesStart
+            fields["starts_at"] = .string(Supa.iso(clock.addingDays(back, to: start)))
+            fields["ends_at"] = .string(Supa.iso(clock.addingDays(back, to: end)))
+            // Without the key the server keeps the skipped dates (moved with
+            // the series, 0115); an empty list brings them all back.
+            if var every = rule, restoreSkipped {
+                every.exceptDates = []
+                fields["recurrence"] = every.json
+            }
+            try await CalendarService.saveCalendarEvent(shopID: shopID, id: id, fields: fields)
+            toasts.show("Event updated")
+        }
+    }
+
+    /// The series' rule ended the day before the opened occurrence (a count
+    /// becomes a last date), keeping only the skipped dates before it.
+    private func endedBefore(_ rule: JobsBlockedTimeRecurrence, _ occurrence: RepeatOccurrence) -> JobsBlockedTimeRecurrence? {
+        guard let dayBefore = occurrence.dayBefore else { return nil }
+        var ended = rule
+        ended.count = nil
+        ended.untilDate = dayBefore
+        // written out: an omitted key would carry every skipped date over
+        if rule.exceptDates != nil { ended.exceptDates = occurrence.skippedBefore }
+        return ended
+    }
+
     private func confirmDelete() {
-        guard case .edit(let id) = target, let shopID = appState.shop?.id else { return }
+        guard isEditing else { return }
+        if occurrence != nil {
+            choosingDeleteScope = true
+            return
+        }
         confirmation = ConfirmationRequest(
-            title: repeats ? "Delete every repeat of this event?" : "Delete this event?",
+            title: "Delete this event?",
             message: nil,
             confirmTitle: "Delete",
             isDestructive: true
         ) {
-            do {
+            await delete(.all)
+        }
+    }
+
+    /// Deletes the opened occurrence, it and every later one, or the event.
+    private func delete(_ choice: OccurrenceScope) async {
+        guard case .edit(let id, _) = target, let shopID = appState.shop?.id else { return }
+        do {
+            if let occurrence, let seriesRule, choice == .this, !occurrence.onlyThisDeletesEvent {
+                var skipping = seriesRule
+                skipping.exceptDates = occurrence.skippingThis
+                try await CalendarService.updateCalendarEventRecurrence(shopID: shopID, id: id, recurrence: skipping)
+                toasts.show("This occurrence was deleted")
+            } else if let occurrence, let seriesRule, choice == .following, !occurrence.isFirst,
+                      let ended = endedBefore(seriesRule, occurrence) {
+                try await CalendarService.updateCalendarEventRecurrence(shopID: shopID, id: id, recurrence: ended)
+                toasts.show("Deleted from \(occurrenceDayText) on")
+            } else {
                 try await CalendarService.deleteCalendarEvent(shopID: shopID, id: id)
                 toasts.show("Event deleted")
-                onChange()
-                dismiss()
-            } catch {
-                toasts.showError(error)
             }
+            onChange()
+            dismiss()
+        } catch {
+            toasts.showError(error)
         }
     }
 }

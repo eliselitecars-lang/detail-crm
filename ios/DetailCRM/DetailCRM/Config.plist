@@ -12,8 +12,12 @@
 	<string>YOUR_SUPABASE_URL</string>
 	<key>SUPABASE_ANON_KEY</key>
 	<string>YOUR_SUPABASE_ANON_KEY</string>
-	<!-- Web app base URL used for shareable links (booking pages, invites)
-	     and the Privacy Policy / Terms of Service rows (<url>/privacy, /terms). -->
+	<!-- Web app base URL used for shareable links (booking pages, invites),
+	     the Privacy Policy / Terms of Service rows (<url>/privacy, /terms)
+	     and the redirect of password-reset and sign-up emails. Written at
+	     archive time from APP_BASE_URL (fastlane with_app_config): a build
+	     keeps this origin for as long as it is installed, so changing the
+	     web app's domain needs a new build too (docs/DEPLOY.md 4.4). -->
 	<key>WEB_APP_URL</key>
 	<string>YOUR_WEB_APP_URL</string>
 	<!-- In-person card payments ship switched off. TAP_TO_PAY_ENABLED needs

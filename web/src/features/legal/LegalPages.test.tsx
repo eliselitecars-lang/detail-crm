@@ -119,6 +119,17 @@ describe('PrivacyPage', () => {
     expect(text).toContain('these records older than two days are deleted');
   });
 
+  it('discloses the IP address and consent recorded with each online membership sign-up (0110)', () => {
+    renderPage('privacy', UNSET);
+    const text = (document.body.textContent ?? '').replace(/\s+/g, ' ');
+    expect(text).toContain(
+      'When someone starts a membership sign-up, the IP address of the device is recorded with the attempt',
+    );
+    expect(text).toContain('the email and text-message choices the person made');
+    expect(text).toContain('only once the first membership payment goes through');
+    expect(text).toContain('these records older than seven days are deleted');
+  });
+
   it('says the operator’s Stripe account receives the shop’s subscription billing details', () => {
     renderPage('privacy', UNSET);
     const text = document.body.textContent ?? '';

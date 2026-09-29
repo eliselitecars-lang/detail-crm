@@ -366,7 +366,7 @@ template also refreshes the quote / invoice follow-up status cards
 
   ```html
   <div data-detailcrm-book="<slug>"></div>
-  <!-- optional: data-link="<private link token>" | data-lead="<lead form token>" | data-title="…" -->
+  <!-- optional: data-link="<private link token>" | data-lead="<lead form token>" | data-title="…" | data-theme="dark|auto" -->
   <script src="https://<app origin>/embed.js" async></script>
   ```
 
@@ -378,8 +378,13 @@ template also refreshes the quote / invoice follow-up status cards
   the top window, and it posts only `{type:'detailcrm:height', height}` and
   `{type:'detailcrm:scroll-top'}` to its parent (`src/features/booking/embed.ts`);
   embed.js applies them only for its own frames and only from the app's
-  origin (min 320 px). A plain iframe of the same URL works without the
-  script. Only `/book/*` and `/lead/*` render inside a frame
+  origin (min 320 px). The embedded page is light whatever the visitor's
+  device theme or saved preference (`src/app/embedTheme.ts`, mirrored in the
+  `index.html` boot script); `data-theme="dark"` (`&theme=dark`) makes it
+  dark and `"auto"` follows the device, and embed.js gives the iframe the
+  matching `color-scheme` so the browser paints no opaque canvas behind the
+  transparent page. A plain iframe of the same URL (snippet style
+  `color-scheme:light`) works without the script. Only `/book/*` and `/lead/*` render inside a frame
   (`src/app/RootLayout.tsx` + `src/app/framing.ts`); the deploy must set
   `WEB_EMBED_PATHS=/book/*,/lead/*` for the headers to allow it
   (docs/DEPLOY.md 4.3). E2E: `e2e/booking-embed.spec.ts` embeds both on a

@@ -33,8 +33,9 @@ select tests.eq(public.account_deletion_blockers() -> 'owned_shops' -> 0 ->> 'na
 select tests.as_superuser();
 select tests.throws_like($$delete from auth.users where id = tests.fx('u_owner_a')$$, '23514', '%owner membership%',
                          'the database agrees: an owner (of shop C) cannot be deleted');
-select tests.authenticate_as(tests.fx('u_owner_a'));
+select tests.as_service();  -- payments delete_shop (0117)
 delete from public.shops where id = tests.fx('shop_c');
+select tests.authenticate_as(tests.fx('u_owner_a'));
 select tests.eq(public.account_deletion_blockers(), '{"owned_shops": []}'::jsonb, 'no blockers once the last owned shop is deleted');
 select tests.as_superuser();
 select tests.lives($$delete from auth.users where id = tests.fx('u_owner_a')$$, 'then the account can be deleted');

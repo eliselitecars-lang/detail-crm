@@ -102,7 +102,9 @@ struct CalendarHomeView: View {
     /// Managers open calendar events to edit them.
     private var openEvent: ((CalendarEvent) -> Void)? {
         guard appState.can(.editJobs) else { return nil }
-        return { event in eventSheet = .edit(event.id) }
+        // open the tapped occurrence (a repeating event comes back once per
+        // occurrence with the series' id), not the series' first date
+        return { event in eventSheet = .edit(event.id, occurrenceStart: event.startsAt) }
     }
 
     // MARK: - Content (AnyView seam: the mode views are large generic trees)

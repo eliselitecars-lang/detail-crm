@@ -129,7 +129,8 @@ struct TodayDeclineSheet: View {
                 // page shows it in the "This booking was cancelled" banner.
                 FormRow(
                     "Reason for the customer (optional)",
-                    hint: "The customer sees this on their booking page. Don't include internal notes."
+                    hint: "The customer sees this on their booking page. Don't include internal notes. \(Validation.declineReasonCounter(reason))",
+                    error: Validation.declineReasonProblem(reason)
                 ) {
                     TextField("e.g. We're fully booked that day", text: $reason, axis: .vertical)
                         .lineLimit(3...6)
@@ -145,6 +146,7 @@ struct TodayDeclineSheet: View {
                         dismiss()
                     }
                 }
+                .disabled(Validation.declineReasonProblem(reason) != nil)
             }
             .navigationTitle("Decline booking")
             .navigationBarTitleDisplayMode(.inline)

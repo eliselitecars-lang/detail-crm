@@ -138,7 +138,7 @@ function QuoteDocumentView({
     });
 
   return (
-    <PublicLayout shop={toBranding(shop)}>
+    <PublicLayout shop={toBranding(shop)} title={`Quote #${quote.number}`}>
       {/* Printable: actions/banners are print:hidden; every option prints. */}
       <div className="flex flex-col gap-4 sm:gap-5 print:gap-3 print:text-black print:[&_*]:shadow-none print:[&>*]:break-inside-avoid">
         <DocumentTitle

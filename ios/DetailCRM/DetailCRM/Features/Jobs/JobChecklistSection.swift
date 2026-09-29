@@ -247,8 +247,7 @@ struct JobChecklistRow: View {
                 } label: {
                     Image(systemName: "ellipsis")
                         .foregroundStyle(Theme.textTertiary)
-                        .frame(width: 32, height: 32)
-                        .contentShape(Rectangle())
+                        .iconTapTarget()
                 }
                 .accessibilityLabel("More for \(item.label)")
             }

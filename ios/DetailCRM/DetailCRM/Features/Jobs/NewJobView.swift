@@ -183,16 +183,16 @@ struct NewJobStepHeader: View {
             HStack(spacing: Theme.Spacing.xs) {
                 Text("\(step.rawValue + 1)")
                     .font(Theme.Typography.captionEmphasis.monospacedDigit())
-                    .foregroundStyle(isCurrent ? Theme.glacier : Theme.onAccent)
+                    .foregroundStyle(isCurrent ? Theme.glacierSolid : Theme.onAccent)
                     .frame(width: 20, height: 20)
-                    .background(Circle().fill(isCurrent ? Theme.onAccent : (isDone ? Theme.success : Theme.textTertiary)))
+                    .background(Circle().fill(isCurrent ? Theme.onAccent : (isDone ? Theme.successSolid : Theme.neutralSolid)))
                 Text(step.title)
                     .font(Theme.Typography.footnote.weight(.semibold))
                     .foregroundStyle(isCurrent ? Theme.onAccent : Theme.textPrimary)
             }
             .padding(.horizontal, Theme.Spacing.sm)
             .frame(minHeight: Theme.Size.compactControlHeight)
-            .background(Capsule().fill(isCurrent ? Theme.glacier : Theme.surfaceMuted))
+            .background(Capsule().fill(isCurrent ? Theme.glacierSolid : Theme.surfaceMuted))
         }
         .buttonStyle(.plain)
         // `.disabled` (not just hit testing) so VoiceOver can't activate a

@@ -9,6 +9,9 @@
  *   data-link="<token>"   a private booking link (only its services)
  *   data-lead="<token>"   a contact / lead form instead of the booking page
  *   data-title="…"        the frame's accessible title
+ *   data-theme="dark"     the frame's colours: "light" (default), "dark" for
+ *                         a dark website, or "auto" to follow the visitor's
+ *                         device theme (for a website that does the same)
  * Or put data-slug (and data-link / data-lead) on the <script> tag itself:
  * the frame is inserted right after it.
  *
@@ -50,17 +53,24 @@
 
   var frames = [];
 
-  function frameUrl(slug, link, lead) {
-    if (lead) return origin + '/lead/' + encodeURIComponent(lead) + '?embed=1';
-    var url = origin + '/book/' + encodeURIComponent(slug) + '?embed=1';
-    return link ? url + '&link=' + encodeURIComponent(link) : url;
+  function frameUrl(slug, link, lead, theme) {
+    var url = lead
+      ? origin + '/lead/' + encodeURIComponent(lead) + '?embed=1'
+      : origin + '/book/' + encodeURIComponent(slug) + '?embed=1';
+    if (!lead && link) url += '&link=' + encodeURIComponent(link);
+    return theme === 'light' ? url : url + '&theme=' + theme;
   }
 
-  function createFrame(slug, link, lead, title) {
+  // The frame's page is transparent. Its colour scheme and the iframe
+  // element's must match, or the browser paints an opaque canvas behind it.
+  var COLOR_SCHEMES = { light: 'light', dark: 'dark', auto: 'light dark' };
+
+  function createFrame(slug, link, lead, title, theme) {
     if (lead ? !TOKEN_RE.test(lead) : !SLUG_RE.test(slug || '')) return null;
     if (link && !TOKEN_RE.test(link)) link = null;
+    theme = theme === 'dark' || theme === 'auto' ? theme : 'light';
     var iframe = document.createElement('iframe');
-    iframe.src = frameUrl(slug, link, lead);
+    iframe.src = frameUrl(slug, link, lead, theme);
     iframe.title = title || (lead ? 'Contact form' : 'Book an appointment');
     iframe.loading = 'lazy';
     iframe.setAttribute('scrolling', 'no');
@@ -69,7 +79,7 @@
     iframe.style.display = 'block';
     iframe.style.minHeight = MIN_HEIGHT + 'px';
     iframe.style.height = '720px';
-    iframe.style.colorScheme = 'normal';
+    iframe.style.colorScheme = COLOR_SCHEMES[theme];
     frames.push(iframe);
     return iframe;
   }
@@ -84,6 +94,7 @@
         el.getAttribute('data-link'),
         el.getAttribute('data-lead'),
         el.getAttribute('data-title'),
+        el.getAttribute('data-theme'),
       );
       if (frame) el.appendChild(frame);
     }
@@ -96,6 +107,7 @@
         script.getAttribute('data-link'),
         ownLead,
         script.getAttribute('data-title'),
+        script.getAttribute('data-theme'),
       );
       if (own && script.parentNode) script.parentNode.insertBefore(own, script.nextSibling);
     }

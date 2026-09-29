@@ -4,7 +4,9 @@
 //
 //  The signed-in user's own details: profile name and mobile number
 //  (shared across shops) and the name teammates see in this shop, the
-//  personal calendar subscription (P-19), the Privacy Policy and Terms of Service (web pages), and deleting the
+//  personal calendar subscription (P-19), the shop teams they belong to
+//  with "Leave…" for each (SettingsYourShopsSection, `leave_shop`), the
+//  Privacy Policy and Terms of Service (web pages), and deleting the
 //  account (every role; App Store guideline 5.1.1(v)) on AccountDeletionView,
 //  where an owner can also delete the shop or see how to hand it over first.
 //  Signing out lives in the More tab.
@@ -81,10 +83,11 @@ struct SettingsAccountView: View {
                 .font(Theme.Typography.footnote)
                 .foregroundStyle(Theme.textTertiary)
             OpsCalendarFeedRow()
+            SettingsYourShopsSection()
             SettingsLegalSection()
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 SectionHeader(title: "Delete account")
-                Text("Permanently deletes your sign-in and profile and removes you from every shop. The shops' customers, jobs and payments stay with the shops. If you own a shop, you can delete it or make someone else the owner first.")
+                Text("Permanently deletes your sign-in and profile and removes you from every shop. To leave just one shop, use Leave under Your shops. The shops' customers, jobs and payments stay with the shops. If you own a shop, you can delete it or make someone else the owner first.")
                     .font(Theme.Typography.footnote)
                     .foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)

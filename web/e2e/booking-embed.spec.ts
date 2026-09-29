@@ -333,6 +333,77 @@ test.describe('booking v2', () => {
     ).toBeVisible();
   });
 
+  test('an embedded booking page stays light and transparent on a device in dark mode', async ({
+    page,
+    baseURL,
+  }) => {
+    await setup(page);
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.route('**/__shop-site-light', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `<!doctype html><title>Shop site</title>
+<body style="background:#fff">
+<h1>Our shop</h1>
+<div data-detailcrm-book="${SLUG}"></div>
+<div data-detailcrm-book="${SLUG}" data-theme="dark" data-title="Book (dark site)"></div>
+<script src="${baseURL}/embed.js" async></script>
+</body>`,
+      }),
+    );
+    await page.goto('/__shop-site-light');
+    const light = page.frameLocator('iframe[title="Book an appointment"]');
+    await expect(light.getByRole('heading', { name: 'Book with Glacier Detailing' })).toBeVisible();
+    const lightFrame = page.locator('iframe[title="Book an appointment"]');
+    await expect(lightFrame).toHaveAttribute('src', `${baseURL}/book/${SLUG}?embed=1`);
+    // The iframe element and its page agree on the colour scheme, so the
+    // browser paints no opaque canvas: the page is see-through and light.
+    expect(await lightFrame.evaluate((el) => (el as HTMLIFrameElement).style.colorScheme)).toBe(
+      'light',
+    );
+    const inside = async (title: string) => {
+      const frame = page.frame({
+        url: (u) => u.pathname === `/book/${SLUG}` && u.search.includes(title),
+      });
+      if (!frame) throw new Error(`no frame for ${title}`);
+      return frame.evaluate(() => {
+        const root = document.documentElement;
+        const style = getComputedStyle(root);
+        return {
+          theme: root.dataset.theme,
+          colorScheme: style.colorScheme,
+          background: style.backgroundColor,
+          muted: style.getPropertyValue('--dc-muted').trim().toLowerCase(),
+          title: document.title,
+        };
+      });
+    };
+    await expect.poll(async () => (await inside('embed=1')).theme).toBe('light');
+    expect(await inside('embed=1')).toMatchObject({
+      theme: 'light',
+      colorScheme: 'light',
+      background: 'rgba(0, 0, 0, 0)',
+      muted: '#566175',
+      title: 'Book online · Glacier Detailing',
+    });
+
+    // A dark website opts in with data-theme="dark": dark tokens, a matching
+    // iframe colour scheme.
+    const darkFrame = page.locator('iframe[title="Book (dark site)"]');
+    await expect(darkFrame).toHaveAttribute('src', `${baseURL}/book/${SLUG}?embed=1&theme=dark`);
+    expect(await darkFrame.evaluate((el) => (el as HTMLIFrameElement).style.colorScheme)).toBe(
+      'dark',
+    );
+    await expect.poll(async () => (await inside('theme=dark')).theme).toBe('dark');
+    expect(await inside('theme=dark')).toMatchObject({ colorScheme: 'dark' });
+
+    // The same page opened directly (not embedded) still follows the device.
+    await page.goto(`/book/${SLUG}`);
+    await expect(page.getByRole('heading', { name: 'Book with Glacier Detailing' })).toBeVisible();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  });
+
   test('embed.js brings the frame’s top into view when the booking moves to the next step', async ({
     page,
     baseURL,

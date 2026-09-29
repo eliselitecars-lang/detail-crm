@@ -164,7 +164,7 @@ select public.upsert_stripe_payment(tests.fx('shop_b'), 'pi_bach', 'processing',
                                     p_customer_id => tests.fx('cust_b'));
 select tests.as_superuser();
 update public.payments set created_at = now() - interval '4 days' where stripe_payment_intent_id = 'pi_bach';
-select tests.authenticate_as(tests.fx('u_owner_b'));
+select tests.as_service();  -- payments delete_shop (0117)
 select tests.throws_like($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', '%in progress%',
                          'a shop with a bank payment still clearing cannot be deleted');
 

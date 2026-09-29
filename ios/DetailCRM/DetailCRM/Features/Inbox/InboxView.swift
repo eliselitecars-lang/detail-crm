@@ -365,7 +365,7 @@ private struct InboxThreadListRow: View {
                             .foregroundStyle(Theme.onAccent)
                             .padding(.horizontal, Theme.Spacing.sm)
                             .padding(.vertical, Theme.Spacing.xxs)
-                            .background(Capsule().fill(Theme.glacier))
+                            .background(Capsule().fill(Theme.glacierSolid))
                             .accessibilityLabel("\(thread.unreadCount) unread")
                     }
                 }

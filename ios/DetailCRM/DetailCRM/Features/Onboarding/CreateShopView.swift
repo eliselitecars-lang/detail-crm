@@ -273,13 +273,13 @@ private struct BusinessTypeOption: View {
             HStack(spacing: Theme.Spacing.md) {
                 Image(systemName: type.systemImage)
                     .frame(width: Theme.Size.rowIcon)
-                    .foregroundStyle(isSelected ? Theme.glacier : Theme.textSecondary)
+                    .foregroundStyle(isSelected ? Theme.glacierInk : Theme.textSecondary)
                 Text(type.displayName)
                     .font(Theme.Typography.body)
                     .foregroundStyle(Theme.textPrimary)
                 Spacer()
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Theme.glacier : Theme.textTertiary)
+                    .foregroundStyle(isSelected ? Theme.glacierInk : Theme.textTertiary)
             }
             .padding(.horizontal, Theme.Spacing.md)
             .frame(minHeight: Theme.Size.controlHeight)

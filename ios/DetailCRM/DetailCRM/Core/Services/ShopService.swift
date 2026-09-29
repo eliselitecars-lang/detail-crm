@@ -122,6 +122,19 @@ enum ShopService {
         return !a.isEmpty && a.compare(b, options: [.caseInsensitive]) == .orderedSame
     }
 
+    // MARK: - Leave a shop
+
+    /// Leaves a shop's team (`leave_shop`, 0002): deactivates the caller's
+    /// own membership, so they lose access, stop counting as a seat, stop
+    /// being assignable and stop getting its notifications. Any role but
+    /// the owner (23514 "transfer ownership first"). Other shops are not
+    /// affected; coming back needs a new invite.
+    static func leaveShop(shopID: UUID) async throws {
+        try await Supa.client
+            .rpc("leave_shop", params: ["p_shop_id": shopID.uuidString])
+            .execute()
+    }
+
     // MARK: - Invites
 
     /// Extracts an invite token from a pasted link (`…/invite/<uuid>`) or a

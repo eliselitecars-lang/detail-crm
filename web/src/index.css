@@ -11,6 +11,11 @@
  *   Glacier  (primary)  #1F6FEB  interaction / selection
  *   Amber    (money)    #E8A23A  money & primary money actions ONLY
  *   success #1F9D55 · warning #D98A0B · danger #D93F3F
+ *
+ * Fills that carry a label use the *-fg token on the fill (primary /
+ * primary-hover, danger-solid / danger-solid-hover, money / money-hover):
+ * those pairs reach 4.5:1 in both themes (e2e/contrast.spec.ts). --dc-danger
+ * itself is for icons, dots, borders and chart marks, never behind text.
  *   ink #0B1220 · canvas #F6F8FB
  */
 
@@ -49,9 +54,12 @@
   --dc-warning-soft: #fcf1de;
   --dc-warning-ink: #8f5a05;
   --dc-danger: #d93f3f;
-  --dc-danger-hover: #c23434;
   --dc-danger-soft: #fbe7e7;
   --dc-danger-ink: #a82e2e;
+  /* Destructive buttons / count pills: white on these is 5.1:1 and 6.4:1. */
+  --dc-danger-solid: #c93a3a;
+  --dc-danger-solid-hover: #b02e2e;
+  --dc-danger-fg: #ffffff;
 
   --dc-shadow: 0 1px 2px rgb(11 18 32 / 0.06), 0 1px 3px rgb(11 18 32 / 0.08);
   --dc-shadow-lg: 0 12px 32px rgb(11 18 32 / 0.18), 0 2px 6px rgb(11 18 32 / 0.08);
@@ -76,7 +84,8 @@
   --dc-overlay: rgb(3 6 12 / 0.65);
 
   --dc-primary: #1f6feb;
-  --dc-primary-hover: #3b82f6;
+  /* White on the hover fill must stay >= 4.5:1 (#3b82f6 was 3.7:1). */
+  --dc-primary-hover: #185fcc;
   --dc-primary-fg: #ffffff;
   --dc-primary-soft: rgb(31 111 235 / 0.2);
   --dc-primary-ink: #7fb0ff;
@@ -94,9 +103,12 @@
   --dc-warning-soft: rgb(217 138 11 / 0.18);
   --dc-warning-ink: #f3bc5e;
   --dc-danger: #e05252;
-  --dc-danger-hover: #ea6a6a;
   --dc-danger-soft: rgb(217 63 63 / 0.18);
   --dc-danger-ink: #f28b8b;
+  /* A lighter red would drop white text under 4.5:1, so hover darkens here too. */
+  --dc-danger-solid: #c93a3a;
+  --dc-danger-solid-hover: #b02e2e;
+  --dc-danger-fg: #ffffff;
 
   --dc-shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   --dc-shadow-lg: 0 16px 40px rgb(0 0 0 / 0.55);
@@ -137,9 +149,11 @@
   --color-warning-soft: var(--dc-warning-soft);
   --color-warning-ink: var(--dc-warning-ink);
   --color-danger: var(--dc-danger);
-  --color-danger-hover: var(--dc-danger-hover);
   --color-danger-soft: var(--dc-danger-soft);
   --color-danger-ink: var(--dc-danger-ink);
+  --color-danger-solid: var(--dc-danger-solid);
+  --color-danger-solid-hover: var(--dc-danger-solid-hover);
+  --color-danger-fg: var(--dc-danger-fg);
 
   --color-brand: var(--dc-brand);
   --color-brand-fg: var(--dc-brand-fg);

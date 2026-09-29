@@ -216,8 +216,16 @@ next backend deploy. Both are listed in [DEPLOY.md](DEPLOY.md).
       (added after the first web deploy; Cloudflare shows the CNAME to create,
       or creates it when the domain's DNS is on Cloudflare)
       ([custom domains](https://developers.cloudflare.com/pages/configuration/custom-domains/)).
-      This exact origin is your `APP_BASE_URL`; changing it later means
-      re-running the backend deploy.
+      This exact origin is your `APP_BASE_URL`. Pick it before the first
+      TestFlight build: changing it later means re-running the backend deploy
+      **and** shipping a new iPhone build (ios-testflight, then an App Store
+      release). Each iPhone build has the origin built in (`WEB_APP_URL` in
+      `Config.plist`) for the booking and invite links it shares, the
+      Privacy/Terms rows and its password-reset and sign-up email links, so
+      installed copies keep using the old one until they update. Until then,
+      keep the old domain attached to the web app and list it in
+      `AUTH_ADDITIONAL_REDIRECT_URLS` (`https://old.example.com/**`) — see
+      DEPLOY.md 4.4.
 - [ ] **Email**: the Resend records from 1.4 (SPF, DKIM; DMARC recommended).
 - [ ] Supabase stays on `https://<ref>.supabase.co`. A custom API domain is a
       paid Supabase add-on; if you add one later, Stripe, Twilio and the apps

@@ -213,6 +213,22 @@ final class ValidationTests: XCTestCase {
         XCTAssertEqual(Validation.statusReasonCounter("abc "), "3 / 500")
     }
 
+    /// Declining a booking request writes jobs.cancel_reason (≤ 1000,
+    /// char_length): too long is refused, never cut short.
+    func testDeclineReasonLimitMatchesColumn() {
+        XCTAssertEqual(Validation.declineReasonMaxLength, 1000)
+        XCTAssertNil(Validation.declineReasonProblem(""))
+        XCTAssertNil(Validation.declineReasonProblem(String(repeating: "a", count: 1000)))
+        XCTAssertNil(Validation.declineReasonProblem(" " + String(repeating: "a", count: 1000) + "\n"))
+        XCTAssertEqual(
+            Validation.declineReasonProblem(String(repeating: "a", count: 1001)),
+            "Keep the reason to 1,000 characters or fewer (it's 1001 now)."
+        )
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
+        XCTAssertNotNil(Validation.declineReasonProblem(String(repeating: family, count: 143)))
+        XCTAssertEqual(Validation.declineReasonCounter(" ab "), "2 / 1000")
+    }
+
     func testEmails() {
         XCTAssertTrue(Validation.isValidEmail("ana@example.com"))
         XCTAssertTrue(Validation.isValidEmail(" first.last+tag@sub.example.co "))

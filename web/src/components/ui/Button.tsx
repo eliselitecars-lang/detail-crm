@@ -12,7 +12,7 @@ const variants: Record<ButtonVariant, string> = {
   primary: 'bg-primary text-primary-fg shadow-card hover:bg-primary-hover',
   secondary: 'border border-line-strong bg-surface text-ink shadow-card hover:bg-surface-2',
   ghost: 'text-ink hover:bg-surface-2',
-  danger: 'bg-danger text-white shadow-card hover:bg-danger-hover',
+  danger: 'bg-danger-solid text-danger-fg shadow-card hover:bg-danger-solid-hover',
   // Amber is reserved for money actions (collect payment, pay invoice…).
   money: 'bg-money text-money-fg shadow-card hover:bg-money-hover',
 };

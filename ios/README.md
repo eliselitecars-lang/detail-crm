@@ -68,8 +68,10 @@ ios/
   Membership API: `refreshMemberships()` (re-read the list, never changes the
   active shop or phase), `activateShop(_:)` (after create/join),
   `refreshCurrentShop()` (after settings edits), `selectShop(_:)`,
-  `beginSwitchingShop()` / `cancelSwitchingShop()`. The async ones throw so
-  the screen can show the error.
+  `beginSwitchingShop()` / `cancelSwitchingShop()`, `leaveShop(_:)`
+  (`leave_shop` from Your account > Your shops, any role but owner; leaving
+  the active shop forgets it and opens the only other shop or the picker).
+  The async ones throw so the screen can show the error.
 * **Push notifications (APNs).** `JobsAppDelegate` (via
   `@UIApplicationDelegateAdaptor`) receives the device token and taps.
   `JobsPushRegistrar` asks for permission the first time the main tabs
@@ -292,6 +294,11 @@ verification, geostamped clock-in, the day map), Bluetooth (card readers).
    `successInk`, `warningInk`, `dangerInk`, `glacierInk`, or
    `Theme.color(for: tone)`), which meets WCAG AA 4.5:1 in both modes.
    `swift_sanity.py` rejects a fill color passed to `foregroundStyle`.
+   White text (`Theme.onAccent`) sits only on the solid fills
+   (`glacierSolid`, `dangerSolid`, `successSolid`, `neutralSolid`: at least
+   4.5:1 in both modes; white on the dark-mode Glacier is 3.26:1), and
+   Glacier text on a Glacier tint (`Theme.fill(for: .info)`,
+   `Theme.glacier.opacity(…)`) uses `glacierInk`; both are checked too.
    Theme buttons wrap their labels at accessibility text sizes; put two or
    more side by side in `AdaptiveButtonRow` (it stacks them at AX sizes),
    never a bare `HStack` (also checked). Anything drawn for pointing only

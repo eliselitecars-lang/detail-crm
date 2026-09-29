@@ -5,10 +5,14 @@ import { Card, EmptyState, ErrorState, LoadingState } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { toAppError } from '@/lib/errors';
 
-/** Loading frame for a public page (branding unknown yet). */
+/** Loading frame for a public page (branding unknown yet); the label is the tab title. */
 export function PublicLoading({ label, width }: { label: string; width?: 'narrow' | 'wide' }) {
   return (
-    <PublicLayout shop={null} {...(width ? { width } : {})}>
+    <PublicLayout
+      shop={null}
+      title={label.replace(/(…|\.\.\.)$/, '')}
+      {...(width ? { width } : {})}
+    >
       <Card>
         <LoadingState label={label} />
       </Card>
@@ -37,8 +41,12 @@ export function PublicError({
   width?: 'narrow' | 'wide';
 }) {
   const kind = error === null ? 'not_found' : toAppError(error).kind;
+  const title =
+    kind === 'not_found'
+      ? `${what.charAt(0).toUpperCase()}${what.slice(1)} not found`
+      : `Couldn’t load this ${what}`;
   return (
-    <PublicLayout shop={shop} {...(width ? { width } : {})}>
+    <PublicLayout shop={shop} title={title} {...(width ? { width } : {})}>
       <Card>
         {kind === 'not_found' ? (
           <EmptyState

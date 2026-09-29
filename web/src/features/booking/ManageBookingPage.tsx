@@ -151,7 +151,11 @@ function BookingDocumentView({
   ];
 
   return (
-    <PublicLayout shop={toBranding(shop)} fullPageLinks={tracking}>
+    <PublicLayout
+      shop={toBranding(shop)}
+      title={`Booking #${booking.number}`}
+      fullPageLinks={tracking}
+    >
       <div className="flex flex-col gap-4 sm:gap-5">
         <DocumentTitle
           title={`Booking #${booking.number}`}

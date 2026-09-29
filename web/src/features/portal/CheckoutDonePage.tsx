@@ -43,7 +43,7 @@ function DoneView({ slug, outcome }: { slug: string; outcome: CheckoutOutcome })
   const who = shopName ?? 'the shop';
 
   return (
-    <PublicLayout shop={shop ? toBranding(shop) : null} width="narrow">
+    <PublicLayout shop={shop ? toBranding(shop) : null} title={notice.title} width="narrow">
       <Card padded className="flex flex-col gap-4">
         <Banner tone={notice.tone} title={notice.title} />
         {done ? (

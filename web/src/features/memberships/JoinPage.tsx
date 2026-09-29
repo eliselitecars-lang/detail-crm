@@ -63,7 +63,7 @@ function JoinContent({ slug, data }: { slug: string; data: PublicPlans }) {
   const branding = toBranding({ ...data.shop });
 
   return (
-    <PublicLayout shop={branding}>
+    <PublicLayout shop={branding} title="Memberships">
       <div className="flex flex-col gap-4 sm:gap-5">
         <div>
           <h1 className="text-ink text-xl font-semibold sm:text-2xl">Memberships</h1>

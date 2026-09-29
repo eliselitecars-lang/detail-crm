@@ -224,22 +224,20 @@ select tests.throws($$insert into public.membership_plans (shop_id, name, price_
 -- charging customers with nothing recorded and no way to cancel it. So the
 -- delete is refused (in every context) while a membership is not cancelled
 -- or a card payment is in flight.
-select tests.authenticate_as(tests.fx('u_owner_b'));
-select tests.throws_like($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', '%membership(s) that are not cancelled%',
-                         'a shop with a membership still billing in Stripe (sub_secb) cannot be deleted');
+-- (0117: only the payments edge delete_shop deletes a shop, as service_role)
 select tests.as_service();
-select tests.throws($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', 'not by service_role either');
+select tests.throws_like($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', '%membership(s) that are not cancelled%',
+                         'a shop with a membership still billing in Stripe (sub_secb) cannot be deleted, not by service_role either');
 select tests.as_superuser();
 select tests.throws($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', 'nor from a direct database session');
 select tests.ok((select count(*) = 1 from public.memberships where shop_id = tests.fx('shop_b') and status = 'active'),
                 'the membership is still there to be cancelled');
 select tests.authenticate_as(tests.fx('u_owner_a'));
-select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 0::bigint,
-                'another shop''s owner still cannot delete it (RLS, no state revealed)');
+select tests.throws($$delete from public.shops where id = tests.fx('shop_b')$$, '42501',
+                    'another shop''s owner still cannot delete it (no DELETE grant, no state revealed)');
 -- a past_due membership bills (Stripe retries) as well
 select tests.as_service();
 select public.sync_stripe_subscription(tests.fx('shop_b'), 'sub_secb', 'past_due', null, false, null, '2025-07-01Z');
-select tests.authenticate_as(tests.fx('u_owner_b'));
 select tests.throws($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', 'nor with a past_due membership');
 -- membership_cancel stops the subscription; the webhook records the cancellation
 select tests.as_service();
@@ -249,14 +247,13 @@ select tests.authenticate_as(tests.fx('u_manager_b'));
 insert into public.membership_plans (shop_id, name, price_cents) values (tests.fx('shop_b'), 'Yearly', 30000)
   returning tests.fx_set('plan_b_yearly', id);
 select tests.fx_set('mem_b_new', (public.create_membership(tests.fx('plan_b_yearly'), tests.fx('cust_b'))).id);
-select tests.authenticate_as(tests.fx('u_owner_b'));
+select tests.as_service();
 select tests.throws_like($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', '%1 membership(s)%',
                          'nor with an incomplete membership (its checkout link could start a subscription)');
 select tests.as_service();
 update public.memberships set status = 'cancelled' where id = tests.fx('mem_b_new') and status = 'incomplete';
 -- a card payment being confirmed (PaymentSheet) would move unrecorded money
 select public.upsert_stripe_payment(tests.fx('shop_b'), 'pi_secfly', 'pending', 500, p_customer_id => tests.fx('cust_b'));
-select tests.authenticate_as(tests.fx('u_owner_b'));
 select tests.throws_like($$delete from public.shops where id = tests.fx('shop_b')$$, '55000', '%card payment is in progress%',
                          'a shop with a card payment in flight cannot be deleted');
 select tests.as_service();
@@ -269,8 +266,8 @@ insert into public.payments (shop_id, customer_id, method, status, amount_cents,
 select tests.ok((select count(*) = 1 from public.memberships where shop_id = tests.fx('shop_a') and status = 'active'),
                 'shop A still has a billing membership');
 
--- ------------------------------------------------------------ the owner can then delete a shop full of money records
-select tests.authenticate_as(tests.fx('u_owner_b'));
+-- ------------------------------------------------------------ the shop full of money records can then be deleted
+select tests.as_service();  -- payments delete_shop (0117)
 select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 1::bigint,
                 'deleting a shop cascades through quotes, invoices, payments, memberships and cards');
 select tests.as_superuser();

@@ -1,10 +1,14 @@
 import { useState } from 'react';
+import { isHexColor, readableTextOn } from '@/components/layout/brand';
 import { cn } from '@/lib/cn';
 
 export interface AvatarProps {
   name: string | null | undefined;
   src?: string | null;
-  /** Background colour (e.g. shop_members.calendar_color). */
+  /**
+   * Background colour (e.g. shop_members.calendar_color, any "#RRGGBB" a
+   * member picks). The initials take white or ink, whichever is readable.
+   */
   color?: string | null;
   size?: 'xs' | 'sm' | 'md' | 'lg';
   className?: string;
@@ -17,16 +21,17 @@ const sizes = {
   lg: 'size-14 text-lg',
 } as const;
 
-const PALETTE = [
+/** Fallback colours; white initials reach 4.5:1 on each (Avatar.test.tsx). */
+export const AVATAR_PALETTE = [
   '#1F6FEB',
-  '#1F9D55',
-  '#7A5AF8',
-  '#0E9384',
+  '#177A42',
+  '#6941C6',
+  '#107569',
   '#C4320A',
-  '#DD2590',
+  '#C11574',
   '#475467',
   '#B54708',
-];
+] as const;
 
 export function initials(name: string | null | undefined): string {
   const parts = (name ?? '').trim().split(/\s+/).filter(Boolean);
@@ -39,7 +44,7 @@ export function initials(name: string | null | undefined): string {
 function colorFor(name: string): string {
   let hash = 0;
   for (let i = 0; i < name.length; i += 1) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
-  return PALETTE[hash % PALETTE.length] ?? '#1F6FEB';
+  return AVATAR_PALETTE[hash % AVATAR_PALETTE.length] ?? '#1F6FEB';
 }
 
 export function Avatar({ name, src, color, size = 'md', className }: AvatarProps) {
@@ -55,13 +60,14 @@ export function Avatar({ name, src, color, size = 'md', className }: AvatarProps
       />
     );
   }
+  const background = isHexColor(color) ? color : colorFor(label);
   return (
     <span
       role="img"
       aria-label={label}
-      style={{ backgroundColor: color ?? colorFor(label) }}
+      style={{ backgroundColor: background, color: readableTextOn(background) }}
       className={cn(
-        'inline-flex shrink-0 items-center justify-center rounded-full font-semibold text-white select-none',
+        'inline-flex shrink-0 items-center justify-center rounded-full font-semibold select-none',
         sizes[size],
         className,
       )}

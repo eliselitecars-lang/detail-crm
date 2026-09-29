@@ -258,7 +258,7 @@ struct JobMarkPin: View {
             .lineLimit(1)
             .minimumScaleFactor(0.6)
             .frame(width: side, height: side)
-            .background(Circle().fill(Theme.danger))
+            .background(Circle().fill(Theme.dangerSolid))
             .overlay(
                 Circle().strokeBorder(Theme.surface, lineWidth: isSelected ? 3 : 2)
             )

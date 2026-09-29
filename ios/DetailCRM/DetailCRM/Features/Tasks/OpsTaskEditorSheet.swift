@@ -46,7 +46,10 @@ struct OpsTaskEditorSheet: View {
     @State private var draft = OpsTask.Draft()
     @State private var hasDue = false
     @State private var due = Date()
-    @State private var team: [TeamDirectoryEntry] = []
+    /// The team read here when the list passed none (it failed to load
+    /// there, or is still loading): shown as an error with a retry, never as
+    /// a picker that only offers "Nobody in particular".
+    @State private var team: LoadState<[TeamDirectoryEntry]> = .idle
     @State private var customerName: String?
     @State private var jobs: LoadState<[CustomerJobSummary]> = .idle
     @State private var showValidation = false
@@ -167,16 +170,38 @@ struct OpsTaskEditorSheet: View {
     @ViewBuilder
     private var assigneeSection: some View {
         if isManager {
-            FormRow("For", hint: "They get a notification when you assign it.") {
-                Picker("For", selection: $draft.assigneeMemberID) {
-                    Text("Nobody in particular").tag(UUID?.none)
-                    ForEach(assignableMembers) { member in
-                        Text(member.memberID == appState.member?.id ? "\(member.displayName) (you)" : member.displayName)
-                            .tag(UUID?.some(member.memberID))
+            FormRow("For", hint: assigneeHint, error: team.errorMessage.map { _ in
+                "Couldn't load the team list, so no one can be chosen yet."
+            }) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    Picker("For", selection: $draft.assigneeMemberID) {
+                        Text("Nobody in particular").tag(UUID?.none)
+                        ForEach(assignableMembers) { member in
+                            Text(member.memberID == appState.member?.id ? "\(member.displayName) (you)" : member.displayName)
+                                .tag(UUID?.some(member.memberID))
+                        }
+                        // The saved assignee stays selectable (and shown)
+                        // while the team list is unavailable.
+                        if let id = draft.assigneeMemberID, !assignableMembers.contains(where: { $0.memberID == id }) {
+                            Text(id == appState.member?.id ? "You" : "Current assignee").tag(UUID?.some(id))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(Theme.glacier)
+                    .disabled(team.isLoading)
+                    if team.isLoading {
+                        HStack(spacing: Theme.Spacing.xs) {
+                            ProgressView()
+                            Text("Loading the team…")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    } else if team.errorMessage != nil {
+                        AsyncButton("Try again", style: .themeSecondaryCompact) {
+                            await loadTeam()
+                        }
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(Theme.glacier)
             }
         } else if existing == nil {
             FormRow("For") {
@@ -191,15 +216,25 @@ struct OpsTaskEditorSheet: View {
         }
     }
 
+    /// The team: as passed in, else as loaded here.
+    private var directory: [TeamDirectoryEntry] {
+        members.isEmpty ? (team.value ?? []) : members
+    }
+
     /// Active members, plus the current assignee if they were deactivated.
     private var assignableMembers: [TeamDirectoryEntry] {
-        let all = team.isEmpty ? members : team
-        return all.filter { $0.active || $0.memberID == draft.assigneeMemberID }
+        directory.filter { $0.active || $0.memberID == draft.assigneeMemberID }
+    }
+
+    private var assigneeHint: String? {
+        if members.isEmpty && team.value == nil { return nil }
+        if assignableMembers.isEmpty { return "No one is on the team yet. Invite people from More > Team." }
+        return "They get a notification when you assign it."
     }
 
     private var assigneeName: String? {
         guard let id = draft.assigneeMemberID else { return nil }
-        let all = team.isEmpty ? members : team
+        let all = directory
         if id == appState.member?.id { return "You" }
         return all.first { $0.memberID == id }?.displayName ?? "A former team member"
     }
@@ -235,7 +270,7 @@ struct OpsTaskEditorSheet: View {
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
                                     .foregroundStyle(Theme.textTertiary)
-                                    .frame(width: 32, height: 32)
+                                    .iconTapTarget()
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Remove the customer")
@@ -339,13 +374,25 @@ struct OpsTaskEditorSheet: View {
 
     private func loadReferences() async {
         guard let shopID = appState.shop?.id else { return }
-        if members.isEmpty, let loaded = try? await TeamService.directory(shopID: shopID) {
-            team = loaded
+        if members.isEmpty {
+            await loadTeam()
         }
         if let customerID = draft.customerID ?? existing?.customerID, customerName == nil,
            let names = try? await OpsTaskService.customerNames(shopID: shopID, ids: [customerID]) {
             customerName = names[customerID]
         }
+    }
+
+    /// Reads the team for the "For" picker when the list passed none; a
+    /// failure is shown with a retry.
+    private func loadTeam() async {
+        guard let shopID = appState.shop?.id else { return }
+        team = .loading
+        let result = await LoadState<[TeamDirectoryEntry]>.result {
+            try await TeamService.directory(shopID: shopID)
+        }
+        // (cancelled: back to idle, so nothing claims the team is empty)
+        team = result
     }
 
     private func loadJobs() async {

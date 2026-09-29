@@ -537,12 +537,18 @@ struct InvoiceVoidSheet: View {
     private func submit() async {
         errorText = nil
         do {
+            let shopID = try appState.requireShopID()
             if hasOpenCardAttempt {
                 // void_invoice refuses while a card attempt is in flight.
-                let shopID = try appState.requireShopID()
                 try await PaymentService.cancelOpenPayments(shopID: shopID, invoiceID: invoice.id)
             }
-            try await InvoiceService.void(invoiceID: invoice.id, reason: reason)
+            // It also refuses (0116: 55000 HINT checkout_open) while a card
+            // payment page of the invoice or its job can still be paid: the
+            // pages are released and the void tried once more; a page that
+            // is already processing keeps it refused with the server's text.
+            _ = try await PaymentService.releasingOpenCheckouts(shopID: shopID, invoiceID: invoice.id) {
+                try await InvoiceService.void(invoiceID: invoice.id, reason: reason)
+            }
             await onFinished()
             toasts.show("\(invoice.title) voided")
             dismiss()

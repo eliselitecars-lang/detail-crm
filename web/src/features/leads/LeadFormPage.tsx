@@ -39,7 +39,7 @@ export default function LeadFormPage() {
   const embed = isEmbedMode(params);
   if (!isLinkToken(token)) {
     return (
-      <LeadFrame form={null} embed={embed}>
+      <LeadFrame form={null} title="Form not available" embed={embed}>
         <NotFound />
       </LeadFrame>
     );
@@ -50,15 +50,28 @@ export default function LeadFormPage() {
 /** PublicLayout, or the chrome-less frame when embedded in a shop's website. */
 function LeadFrame({
   form,
+  title,
   embed,
   children,
 }: {
   form: LeadForm | null;
+  /** Tab title (publicPageTitle adds the shop name). */
+  title: string;
   embed: boolean;
   children: ReactNode;
 }) {
-  if (embed) return <EmbedFrame brandColor={form?.shop.brand_color}>{children}</EmbedFrame>;
-  return <PublicLayout shop={form ? toBranding(form.shop) : null}>{children}</PublicLayout>;
+  if (embed) {
+    return (
+      <EmbedFrame brandColor={form?.shop.brand_color} title={title} shopName={form?.shop.name}>
+        {children}
+      </EmbedFrame>
+    );
+  }
+  return (
+    <PublicLayout shop={form ? toBranding(form.shop) : null} title={title}>
+      {children}
+    </PublicLayout>
+  );
 }
 
 function NotFound() {
@@ -77,7 +90,7 @@ function LeadFormView({ token, embed }: { token: string; embed: boolean }) {
   const form = useLeadForm(token);
   if (form.isPending) {
     return (
-      <LeadFrame form={null} embed={embed}>
+      <LeadFrame form={null} title="Loading the form" embed={embed}>
         <Card>
           <LoadingState label="Loading the form…" />
         </Card>
@@ -86,7 +99,15 @@ function LeadFormView({ token, embed }: { token: string; embed: boolean }) {
   }
   if (form.isError) {
     return (
-      <LeadFrame form={null} embed={embed}>
+      <LeadFrame
+        form={null}
+        title={
+          toAppError(form.error).kind === 'not_found'
+            ? 'Form not available'
+            : 'Couldn’t load the form'
+        }
+        embed={embed}
+      >
         {toAppError(form.error).kind === 'not_found' ? (
           <NotFound />
         ) : (
@@ -103,7 +124,11 @@ function LeadFormView({ token, embed }: { token: string; embed: boolean }) {
     );
   }
   return (
-    <LeadFrame form={form.data} embed={embed}>
+    <LeadFrame
+      form={form.data}
+      title={form.data.form.headline ?? form.data.form.name}
+      embed={embed}
+    >
       <LeadFormBody token={token} form={form.data} embed={embed} />
     </LeadFrame>
   );

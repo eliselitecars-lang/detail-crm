@@ -32,12 +32,12 @@ struct CustomerTagChip: View {
                 .accessibilityLabel("Remove tag \(text)")
             }
         }
-        .foregroundStyle(isSelected ? Theme.onAccent : Theme.glacier)
+        .foregroundStyle(isSelected ? Theme.onAccent : Theme.glacierInk)
         .padding(.horizontal, Theme.Spacing.sm)
         .padding(.vertical, Theme.Spacing.xs)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.badge, style: .continuous)
-                .fill(isSelected ? Theme.glacier : Theme.fill(for: .info))
+                .fill(isSelected ? Theme.glacierSolid : Theme.fill(for: .info))
         )
     }
 }
@@ -247,7 +247,7 @@ struct CustomerContactButton: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
-            .foregroundStyle(Theme.glacier)
+            .foregroundStyle(Theme.glacierInk)
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
         }

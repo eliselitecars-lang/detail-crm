@@ -62,7 +62,7 @@ function GiftShopContent({ slug, shop }: { slug: string; shop: GiftShop }) {
   const currency = shop.currency;
 
   return (
-    <PublicLayout shop={branding}>
+    <PublicLayout shop={branding} title="Gift cards">
       <div className="flex flex-col gap-4 sm:gap-5">
         <div>
           <h1 className="text-ink text-xl font-semibold sm:text-2xl">Gift cards</h1>

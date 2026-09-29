@@ -16,6 +16,19 @@ test.describe('sign in', () => {
     await expect(page.getByRole('alert')).toContainText('Email or password is incorrect.');
   });
 
+  test('each sign-in page names itself in the tab title (WCAG 2.4.2)', async ({ page }) => {
+    await mockSupabase(page, { accounts: [OWNER] });
+    for (const [path, title] of [
+      ['/login', 'Sign in · Detail CRM'],
+      ['/signup', 'Create your account · Detail CRM'],
+      ['/forgot-password', 'Reset your password · Detail CRM'],
+    ] as const) {
+      await page.goto(path);
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      await expect(page).toHaveTitle(title);
+    }
+  });
+
   test('signing in lands on the dashboard of the user’s shop', async ({ page }) => {
     await mockSupabase(page, {
       accounts: [OWNER],

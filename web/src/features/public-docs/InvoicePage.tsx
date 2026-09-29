@@ -121,7 +121,7 @@ function InvoiceDocumentView({
   ];
 
   return (
-    <PublicLayout shop={toBranding(shop)}>
+    <PublicLayout shop={toBranding(shop)} title={`Invoice #${invoice.number}`}>
       {/* Printable: actions/banners are print:hidden; cards print flat and unsplit. */}
       <div className="flex flex-col gap-4 sm:gap-5 print:gap-3 print:text-black print:[&_*]:shadow-none print:[&>*]:break-inside-avoid">
         <DocumentTitle

@@ -198,8 +198,8 @@ select tests.lives(format($$insert into storage.objects (bucket_id, name, owner,
   'and a car photo');
 insert into public.inspections (shop_id, job_id, kind, customer_signature_path, signed_by_name)
   values (tests.fx('shop_b'), tests.fx('job_b'), 'pre', tests.fx('shop_b') || '/sig/customer.png', 'Bob Burns');
-select tests.authenticate_as(tests.fx('u_owner_b'));
-select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 1::bigint, 'owner deletes shop B');
+select tests.as_service();  -- payments delete_shop (0117)
+select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 1::bigint, 'shop B is deleted');
 select tests.as_superuser();
 select tests.eq((select array_agg(bucket_id || ' ' || path || ' ' || reason order by bucket_id)
                    from public.storage_purge_requests where shop_id = tests.fx('shop_b')),

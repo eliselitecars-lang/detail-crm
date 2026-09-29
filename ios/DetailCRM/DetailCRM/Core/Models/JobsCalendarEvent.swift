@@ -17,6 +17,7 @@
 
 import Foundation
 import Supabase
+import DetailCore
 
 // table: blocked_times
 struct JobsCalendarEvent: Codable, Identifiable, Hashable, Sendable {
@@ -99,8 +100,9 @@ struct JobsCalendarEvent: Codable, Identifiable, Hashable, Sendable {
 }
 
 /// A repeat rule on a calendar event: every N days / weeks (on chosen
-/// weekdays) / months, until a date or for a number of times. Stored as
-/// JSON in `blocked_times.recurrence`; keys absent when unused.
+/// weekdays) / months, until a date or for a number of times, with the
+/// dates of skipped occurrences (0115). Stored as JSON in
+/// `blocked_times.recurrence`; keys absent when unused.
 struct JobsBlockedTimeRecurrence: Codable, Hashable, Sendable {
     enum Frequency: String, CaseIterable, Hashable, Sendable {
         case day
@@ -119,14 +121,31 @@ struct JobsBlockedTimeRecurrence: Codable, Hashable, Sendable {
     var untilDate: String?
     /// Number of occurrences (1…500), or nil. Never together with a date.
     var count: Int?
+    /// `except_dates` (0115): shop-local start dates (`YYYY-MM-DD`) of the
+    /// occurrences that are skipped (they still count towards `count`).
+    /// nil = the key is left out of a write, so the server keeps the dates
+    /// the row already skips (moved with its start date); `[]` brings every
+    /// skipped occurrence back.
+    var exceptDates: [String]?
 
-    init(frequency: Frequency, interval: Int = 1, weekdays: [Int] = [], untilDate: String? = nil, count: Int? = nil) {
+    init(
+        frequency: Frequency,
+        interval: Int = 1,
+        weekdays: [Int] = [],
+        untilDate: String? = nil,
+        count: Int? = nil,
+        exceptDates: [String]? = nil
+    ) {
         self.frequency = frequency
         self.interval = interval
         self.weekdays = weekdays
         self.untilDate = untilDate
         self.count = count
+        self.exceptDates = exceptDates
     }
+
+    /// The skipped dates (none when the key is absent).
+    var skippedDates: [String] { exceptDates ?? [] }
 
     /// JSON keys of the stored object (not a table: no CodingKeys).
     private enum Field: String, CodingKey {
@@ -135,6 +154,7 @@ struct JobsBlockedTimeRecurrence: Codable, Hashable, Sendable {
         case byWeekday = "by_weekday"
         case untilDate = "until_date"
         case count
+        case exceptDates = "except_dates"
     }
 
     init(from decoder: Decoder) throws {
@@ -145,6 +165,7 @@ struct JobsBlockedTimeRecurrence: Codable, Hashable, Sendable {
         weekdays = try c.decodeIfPresent([Int].self, forKey: .byWeekday) ?? []
         untilDate = try c.decodeIfPresent(String.self, forKey: .untilDate)
         count = try c.decodeIfPresent(Int.self, forKey: .count)
+        exceptDates = try c.decodeIfPresent([String].self, forKey: .exceptDates)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -158,6 +179,9 @@ struct JobsBlockedTimeRecurrence: Codable, Hashable, Sendable {
             try c.encode(untilDate, forKey: .untilDate)
         } else if let count {
             try c.encode(max(1, min(500, count)), forKey: .count)
+        }
+        if let exceptDates {
+            try c.encode(Array(Set(exceptDates)).sorted(), forKey: .exceptDates)
         }
     }
 
@@ -175,10 +199,14 @@ struct JobsBlockedTimeRecurrence: Codable, Hashable, Sendable {
         } else if let count {
             object["count"] = .integer(max(1, min(500, count)))
         }
+        if let exceptDates {
+            object["except_dates"] = .array(Array(Set(exceptDates)).sorted().map { AnyJSON.string($0) })
+        }
         return .object(object)
     }
 
-    /// "Every week on Mon, Wed until Jun 30, 2026", "Every 2 days, 10 times".
+    /// "Every week on Mon, Wed until Jun 30, 2026", "Every 2 days, 10 times",
+    /// "Every week on Mon, 10 times · 2 dates skipped".
     var summary: String {
         let unit = frequency.unitName
         var text = interval == 1 ? "Every \(unit)" : "Every \(interval) \(unit)s"
@@ -191,6 +219,6 @@ struct JobsBlockedTimeRecurrence: Codable, Hashable, Sendable {
         } else if let count {
             text += count == 1 ? ", once" : ", \(count) times"
         }
-        return text
+        return text + RepeatOccurrence.skippedSuffix(skippedDates.count)
     }
 }

@@ -62,8 +62,7 @@ struct OpsTaskRow: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(Theme.textTertiary)
-                    .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
+                    .iconTapTarget()
             }
             .accessibilityLabel("More for \(task.title)")
         }
@@ -81,8 +80,7 @@ struct OpsTaskRow: View {
                     .tint(Theme.glacier)
                     .opacity(isSaving ? 1 : 0)
             }
-            .frame(width: 32, height: 32)
-            .contentShape(Rectangle())
+            .iconTapTarget()
         }
         .buttonStyle(.plain)
         .disabled(isSaving)
@@ -139,7 +137,7 @@ struct OpsTaskRow: View {
     private func chip(_ title: String, systemImage: String) -> some View {
         Label(title, systemImage: systemImage)
             .font(Theme.Typography.captionEmphasis)
-            .foregroundStyle(Theme.glacier)
+            .foregroundStyle(Theme.glacierInk)
             .lineLimit(1)
             .padding(.horizontal, Theme.Spacing.sm)
             .padding(.vertical, Theme.Spacing.xs)

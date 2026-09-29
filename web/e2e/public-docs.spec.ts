@@ -199,6 +199,8 @@ test.describe('public quote', () => {
     });
     await page.goto(`/q/${QUOTE_TOKEN}`);
     await expect(page.getByRole('heading', { name: 'Quote #301', level: 1 })).toBeVisible();
+    // Each of a shop's links names itself in the tab (WCAG 2.4.2).
+    await expect(page).toHaveTitle(/^Quote #301 · \S/);
     await expect(page.getByText('$580.00').last()).toBeVisible();
     const optional = page.getByRole('list', { name: 'Optional add-ons' });
     await optional.getByRole('checkbox', { name: /Wheel coating/ }).check();
@@ -275,6 +277,7 @@ test.describe('public links that no longer exist (PT404)', () => {
     await mockSupabase(page, { rpc: { public_get_quote: notFound('quote not found') } });
     await page.goto(`/q/${QUOTE_TOKEN}`);
     await expect(page.getByText('We couldn’t find this quote')).toBeVisible();
+    await expect(page).toHaveTitle('Quote not found · Detail CRM');
     await expect(page.getByRole('button', { name: 'Approve quote' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Try again/ })).toHaveCount(0);
   });
@@ -298,6 +301,7 @@ test.describe('public invoice', () => {
     await mockStripeCheckout(page);
     await page.goto(`/i/${INVOICE_TOKEN}`);
     await expect(page.getByRole('heading', { name: 'Invoice #2001', level: 1 })).toBeVisible();
+    await expect(page).toHaveTitle(/^Invoice #2001 · \S/);
     await expect(page.getByText('Visa •••• 4242')).toBeVisible();
     await page.getByText('20%', { exact: true }).click();
     await page.getByRole('button', { name: 'Pay $200.00 + $40.00 tip' }).click();

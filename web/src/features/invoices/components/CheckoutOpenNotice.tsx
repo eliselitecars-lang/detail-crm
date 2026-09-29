@@ -8,15 +8,16 @@ export interface CheckoutOpenNoticeProps {
   invoiceId: string;
   /** The server's checkout_open refusal (its message says until when). */
   error: unknown;
-  /** Runs the refused payment again once the open pages are released. */
+  /** Runs the refused payment (or void) again once the open pages are released. */
   onRetry: () => Promise<void>;
 }
 
 /**
- * A manual payment / gift card / store credit was refused because a card
- * payment page for the invoice is still open (55000 checkout_open). Offers
- * to cancel the open payments (payments.cancel_open_payments: expires the
- * Stripe pages, releases the hold) and then records the same payment again.
+ * A manual payment / gift card / store credit, or voiding the invoice (0116),
+ * was refused because a card payment page for the invoice is still open
+ * (55000 checkout_open). Offers to cancel the open payments
+ * (payments.cancel_open_payments: expires the Stripe pages, releases the
+ * hold) and then runs the same action again.
  * A payment the bank is already processing is never cancelled: then nothing
  * is retried and the notice says so.
  */
@@ -31,7 +32,7 @@ export function CheckoutOpenNotice({ invoiceId, error, onRetry }: CheckoutOpenNo
     try {
       const result = await cancelOpen.mutateAsync();
       if (result.in_progress > 0 || result.succeeded > 0) {
-        // Money moved or is moving: don't record on top of it.
+        // Money moved or is moving: don't record (or void) on top of it.
         const summary = cancelOpenPaymentsSummary(result);
         setProblem([summary.title, summary.description].filter(Boolean).join('. '));
         return;

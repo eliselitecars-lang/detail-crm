@@ -44,7 +44,7 @@ function FormDocumentView({ token, doc }: { token: string; doc: FormDocument }) 
   const { shop, form, job } = doc;
   const tz = shop.timezone;
   return (
-    <PublicLayout shop={toBranding(shop)}>
+    <PublicLayout shop={toBranding(shop)} title={form.title}>
       <div className="flex flex-col gap-4 sm:gap-5">
         <DocumentTitle
           title={form.title}

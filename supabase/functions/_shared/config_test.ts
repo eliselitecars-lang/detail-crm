@@ -88,3 +88,56 @@ Deno.test("deno.json: remote dependencies are pinned to exact versions", async (
     );
   }
 });
+
+/**
+ * The runbooks name the functions that keep the gateway JWT check in plain
+ * text (an operator deploys, rolls back and reads the deployed verify_jwt
+ * back against them). Each marker phrase must be preceded, within its own
+ * clause, by exactly the verify_jwt = true functions of config.toml.
+ */
+const JWT_DOC_MARKERS: { file: URL; marker: string; count: number }[] = [
+  {
+    file: new URL("../../../docs/DEPLOY.md", import.meta.url),
+    marker: "keep the gateway JWT check",
+    count: 2,
+  },
+  {
+    file: new URL("../README.md", import.meta.url),
+    marker: "require a Supabase JWT at the gateway",
+    count: 1,
+  },
+  {
+    file: new URL("../README.md", import.meta.url),
+    marker: "(`verify_jwt = true`) the Supabase gateway",
+    count: 1,
+  },
+];
+
+/** Function names in backticks between the clause start (`;`, `. `, a blank line) and `end`. */
+function functionsNamedBefore(text: string, end: number, known: Set<string>): string[] {
+  const head = text.slice(0, end);
+  const start = Math.max(head.lastIndexOf(";"), head.lastIndexOf(". "), head.lastIndexOf("\n\n"));
+  const clause = head.slice(start + 1);
+  return [...clause.matchAll(/`([a-z0-9-]+)`/g)].map((m) => m[1] ?? "").filter((n) => known.has(n));
+}
+
+Deno.test("docs: the functions said to keep the gateway JWT check are exactly the verify_jwt = true ones", async () => {
+  const config = await loadConfig();
+  const functions = (config.functions ?? {}) as Record<string, FunctionConfig>;
+  const known = new Set(Object.keys(functions));
+  const gated = Object.keys(functions).filter((n) => functions[n]?.verify_jwt === true).sort();
+  assert(gated.length > 0, "config.toml has verify_jwt = true functions");
+  for (const { file, marker, count } of JWT_DOC_MARKERS) {
+    const text = (await Deno.readTextFile(file)).replace(
+      /\s+/g,
+      (ws) => (ws.includes("\n\n") ? "\n\n" : " "),
+    );
+    const hits: number[] = [];
+    for (let i = text.indexOf(marker); i >= 0; i = text.indexOf(marker, i + 1)) hits.push(i);
+    const where = `${file.pathname.split("/").slice(-2).join("/")} '${marker}'`;
+    assertEquals(hits.length, count, `${where}: occurrences`);
+    for (const at of hits) {
+      assertEquals(functionsNamedBefore(text, at, known).sort(), gated, where);
+    }
+  }
+});

@@ -17,12 +17,26 @@ export function relativeLuminance(hex: string): number {
   return 0.2126 * channel(hex, 1) + 0.7152 * channel(hex, 3) + 0.0722 * channel(hex, 5);
 }
 
-/** Readable text colour (white or ink) on top of `hex` (WCAG contrast). */
-export function readableTextOn(hex: string): '#FFFFFF' | '#0B1220' {
-  const l = relativeLuminance(hex);
-  const contrastWhite = 1.05 / (l + 0.05);
-  const contrastInk = (l + 0.05) / (relativeLuminance('#0B1220') + 0.05);
-  return contrastWhite >= contrastInk ? '#FFFFFF' : '#0B1220';
+/** WCAG contrast ratio between two "#RRGGBB" colours. */
+export function contrastRatio(a: string, b: string): number {
+  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x) as [
+    number,
+    number,
+  ];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * Readable text colour on top of `hex`: white or ink, whichever contrasts
+ * more. For mid-tones where even the better of the two stays under 4.5:1
+ * (luminance about 0.18-0.20, at best 4.3:1), pure black, which reaches
+ * at least 4.6:1 there.
+ */
+export function readableTextOn(hex: string): '#FFFFFF' | '#0B1220' | '#000000' {
+  const contrastWhite = contrastRatio(hex, '#FFFFFF');
+  const contrastInk = contrastRatio(hex, '#0B1220');
+  const best = contrastWhite >= contrastInk ? '#FFFFFF' : '#0B1220';
+  return Math.max(contrastWhite, contrastInk) >= 4.5 ? best : '#000000';
 }
 
 /** Inline CSS variables that re-point `--dc-brand` for a subtree. */

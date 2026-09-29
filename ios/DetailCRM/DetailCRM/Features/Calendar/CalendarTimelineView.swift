@@ -128,7 +128,7 @@ private struct CalendarWeekHeaderDay: View {
                     .minimumScaleFactor(0.6)
                     .padding(Theme.Spacing.xxs)
                     .frame(minWidth: 26, minHeight: 26)
-                    .background(Capsule().fill(isToday ? Theme.glacier : Color.clear))
+                    .background(Capsule().fill(isToday ? Theme.glacierSolid : Color.clear))
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())

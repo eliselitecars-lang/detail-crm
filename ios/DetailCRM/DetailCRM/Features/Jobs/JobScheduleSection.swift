@@ -102,8 +102,8 @@ struct JobScheduleSection: View {
                     Button("End the series after this visit", role: .destructive, action: onEndSeries)
                 } label: {
                     Image(systemName: "ellipsis.circle")
-                        .foregroundStyle(Theme.glacier)
-                        .frame(width: 32, height: 32)
+                        .foregroundStyle(Theme.glacierInk)
+                        .iconTapTarget()
                 }
                 .accessibilityLabel("Repeating job options")
             }

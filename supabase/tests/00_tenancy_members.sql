@@ -145,7 +145,7 @@ select tests.eq((select role::text from public.shop_members where id = tests.fx(
 select tests.eq((select count(*) from public.shop_members where shop_id = tests.fx('shop_a') and role = 'owner'), 1::bigint,
                 'still exactly one owner');
 select tests.throws($$select public.transfer_ownership(tests.fx('shop_a'), tests.fx('m_owner_a'))$$, '42501', 'former owner can no longer transfer');
-select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_a')$$), 0::bigint, 'former owner (now admin) cannot delete the shop');
+select tests.throws($$delete from public.shops where id = tests.fx('shop_a')$$, '42501', 'former owner (now admin) cannot delete the shop');
 
 -- ------------------------------------------------------------ leave_shop
 select tests.authenticate_as(tests.fx('u_manager_a'));  -- now the owner

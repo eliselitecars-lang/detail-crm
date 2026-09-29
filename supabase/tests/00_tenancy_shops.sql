@@ -110,7 +110,7 @@ select tests.eq(tests.row_count($$update public.shops set name = 'Tech was here'
 select tests.authenticate_as(tests.fx('u_manager_a'));
 select tests.eq(tests.row_count($$update public.shops set tax_rate_bps = 1 where id = tests.fx('shop_a')$$), 0::bigint,
                 'manager cannot update shop settings (read only)');
-select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_a')$$), 0::bigint, 'manager cannot delete shop');
+select tests.throws($$delete from public.shops where id = tests.fx('shop_a')$$, '42501', 'manager cannot delete shop');
 select tests.as_superuser();
 -- the platform binds the shop's SMS number first (comms, 0033), when that range is applied
 do $$ begin
@@ -129,7 +129,7 @@ select tests.throws($$update public.shops set lat = 91, lng = 0 where id = tests
 select tests.throws($$update public.shops set lat = 10 where id = tests.fx('shop_a')$$, '23514', 'lat without lng');
 select tests.lives($$update public.shops set created_by = auth.uid() where id = tests.fx('shop_a')$$);
 select tests.eq((select created_by from public.shops where id = tests.fx('shop_a')), tests.fx('u_owner_a'), 'created_by is immutable');
-select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_a')$$), 0::bigint, 'admin cannot delete shop');
+select tests.throws($$delete from public.shops where id = tests.fx('shop_a')$$, '42501', 'admin cannot delete shop');
 select tests.eq(tests.row_count($$update public.shops set name = 'Pwned' where id = tests.fx('shop_b')$$), 0::bigint,
                 'admin of A cannot update shop B');
 select tests.eq(tests.row_count($$select 1 from public.shops where id = tests.fx('shop_b')$$), 0::bigint, 'admin of A cannot see shop B');
@@ -139,9 +139,19 @@ select tests.eq(tests.row_count('select * from public.shops'), 0::bigint, 'outsi
 select tests.ok(not public.is_shop_member(tests.fx('shop_a')), 'outsider is not a member');
 select tests.ok(public.shop_role_of(tests.fx('shop_a')) is null, 'outsider has no role');
 
--- owner deletes the whole shop; everything cascades
+-- 0117: not even the owner deletes the shop row directly (payments
+-- delete_shop first stops the platform subscription and expires pay links,
+-- then deletes as service_role); everything cascades
 select tests.authenticate_as(tests.fx('u_owner_b'));
-select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 1::bigint, 'owner deletes shop');
+select tests.throws($$delete from public.shops where id = tests.fx('shop_b')$$, '42501',
+                    'the owner cannot delete the shop through the API (only payments delete_shop)');
+select tests.ok(not has_table_privilege('authenticated', 'public.shops', 'DELETE')
+                and not has_table_privilege('anon', 'public.shops', 'DELETE'), 'clients have no DELETE on shops');
+select tests.ok(not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'shops' and cmd = 'DELETE'),
+                'and no delete policy');
+select tests.as_service();
+select tests.eq(tests.row_count($$delete from public.shops where id = tests.fx('shop_b')$$), 1::bigint,
+                'the payments edge (service role) deletes the shop');
 select tests.as_superuser();
 select tests.eq((select count(*) from public.shop_members where shop_id = tests.fx('shop_b')), 0::bigint, 'members cascade');
 select tests.eq((select count(*) from public.jobs where shop_id = tests.fx('shop_b')), 0::bigint, 'jobs cascade');

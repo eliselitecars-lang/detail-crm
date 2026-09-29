@@ -105,6 +105,39 @@ enum CalendarService {
             .value
     }
 
+    /// Rewrites only a repeating event's rule: skips one occurrence
+    /// (`except_dates`, 0115) or ends the series before one. This is how
+    /// one occurrence, or one and every later one, is deleted.
+    static func updateCalendarEventRecurrence(shopID: UUID, id: UUID, recurrence: JobsBlockedTimeRecurrence) async throws {
+        try await Supa.client
+            .from("blocked_times")
+            .update(["recurrence": recurrence.json])
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("id", value: id.uuidString)
+            .execute()
+    }
+
+    /// Changes part of a repeating event: writes `fields` as a new event
+    /// (a one-off for "only this one", a new series for "this and later
+    /// ones"), then gives the original series `seriesRecurrence` (the
+    /// occurrence skipped, or the rule ended before it). When the second
+    /// write fails the new event is deleted again, so the calendar never
+    /// shows the occurrence twice.
+    static func splitCalendarEvent(
+        shopID: UUID,
+        id: UUID,
+        seriesRecurrence: JobsBlockedTimeRecurrence,
+        fields: [String: AnyJSON]
+    ) async throws {
+        let created = try await saveCalendarEvent(shopID: shopID, id: nil, fields: fields)
+        do {
+            try await updateCalendarEventRecurrence(shopID: shopID, id: id, recurrence: seriesRecurrence)
+        } catch {
+            try? await deleteCalendarEvent(shopID: shopID, id: created.id)
+            throw error
+        }
+    }
+
     /// Deletes an event (every occurrence of a repeating one).
     static func deleteCalendarEvent(shopID: UUID, id: UUID) async throws {
         try await Supa.client

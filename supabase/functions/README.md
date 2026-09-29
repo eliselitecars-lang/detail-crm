@@ -1730,15 +1730,35 @@ automates steps 1-3 for a hosted project):
 2. **Re-run `supabase/setup/cron.sql`** (with the private values) after any
    release that adds or changes a scheduled job. It is idempotent: every job
    is unscheduled and scheduled again, and the app URL and Vault secrets are
-   upserted. Jobs today: `process_queue` (every minute), automations (every
-   5 min: reminders, follow-ups, document follow-ups, task reminders), quote
-   expiry (daily), `sweep_payment_sheets` (every 10 min), `storage-purge`
-   (every 15 min), `push` (every minute), `webhooks` (every minute),
-   `sms-provisioning` `refresh_status` (every 30 min) and `release_worklist`
-   (daily 06:50 UTC), `generate_series_jobs()` (daily 07:15 UTC), `billing`
-   `sync_plans` (daily 06:35 UTC) and `billing` `sync_customers` (daily
-   06:20 UTC). cron.sql is https-only on purpose: local
-   stacks use `scripts/stack/sql/setup_local.sql` instead, and
+   upserted. Jobs today (the `jobname`s in `cron.job`; the header of
+   cron.sql describes each):
+   - `detail-crm-process-queue` - `messaging` `process_queue`, every minute
+   - `detail-crm-run-automations` - `enqueue_due_automations()`, every 5 min
+     (reminders, follow-ups, document follow-ups, task reminders)
+   - `detail-crm-expire-quotes` - `expire_quotes()`, daily 06:05 UTC
+   - `detail-crm-sweep-payment-sheets` - `payments` `sweep_payment_sheets`,
+     every 10 min
+   - `detail-crm-storage-purge` - `storage-purge` `purge`, every 15 min
+   - `detail-crm-push` - `push` `process_queue`, every minute
+   - `detail-crm-webhooks` - `webhooks` `deliver`, every minute
+   - `detail-crm-sms-status` - `sms-provisioning` `refresh_status`, every
+     30 min
+   - `detail-crm-sms-releases` - `sms-provisioning` `release_worklist`,
+     daily 06:50 UTC
+   - `detail-crm-generate-series` - `generate_series_jobs()`, daily 07:15 UTC
+   - `detail-crm-billing-sync-plans` - `billing` `sync_plans`, daily
+     06:35 UTC
+   - `detail-crm-billing-sync-customers` - `billing` `sync_customers`, daily
+     06:20 UTC
+   - `detail-crm-prune-cron-history` - daily 04:41 UTC, SQL only: deletes
+     `cron.job_run_details` rows older than 7 days of the `detail-crm-*`
+     jobs and of jobs no longer scheduled (pg_cron never clears its run
+     log); other jobs' history is left alone.
+
+   Any other `detail-crm-*` name in `cron.job` is left over from an older
+   release that cron.sql no longer schedules: unschedule it by hand.
+   cron.sql is https-only on purpose: local stacks use
+   `scripts/stack/sql/setup_local.sql` instead, and
    `scripts/stack/verify_stack.mjs` exercises the scheduled actions there.
 3. **Stripe:** the Connect endpoint (`stripe-webhook`, "Events on Connected
    accounts") must be subscribed to **every** event in

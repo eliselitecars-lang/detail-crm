@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Logo } from '@/components/layout/Logo';
 import { PublicLayout } from '@/components/layout/PublicLayout';
@@ -35,13 +35,11 @@ const OTHER_PAGE = {
  */
 export function LegalDocument({ title, intro, sections, seeAlso: other }: LegalDocumentProps) {
   const seeAlso = OTHER_PAGE[other];
-  useEffect(() => {
-    document.title = `${title} · Detail CRM`;
-  }, [title]);
 
   return (
     <PublicLayout
       shop={null}
+      title={title}
       brand={
         <Link to="/" className="rounded-control flex w-fit" aria-label="Detail CRM home">
           <Logo />

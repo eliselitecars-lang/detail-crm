@@ -369,7 +369,10 @@ enum InvoiceService {
     }
 
     /// Owner/admin: voids the invoice (`void_invoice`). Job payments are
-    /// detached back to the job; refused while a payment is in flight.
+    /// detached back to the job; refused while a payment is in flight
+    /// (22023) and, 0116, while a card payment page of the invoice or its
+    /// job is still open (55000 HINT `checkout_open`: the void sheet runs it
+    /// through `PaymentService.releasingOpenCheckouts`).
     @discardableResult
     static func void(invoiceID: UUID, reason: String?) async throws -> Invoice {
         let params: [String: AnyJSON] = [

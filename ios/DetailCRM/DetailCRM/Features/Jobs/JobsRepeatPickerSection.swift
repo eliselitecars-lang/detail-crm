@@ -86,7 +86,7 @@ struct JobsRepeatPickerSection: View {
                         .foregroundStyle(isOn ? Theme.onAccent : Theme.textPrimary)
                         .background(
                             RoundedRectangle(cornerRadius: Theme.Radius.control)
-                                .fill(isOn ? Theme.glacier : Theme.surfaceMuted)
+                                .fill(isOn ? Theme.glacierSolid : Theme.surfaceMuted)
                         )
                 }
                 .buttonStyle(.plain)

@@ -1,5 +1,5 @@
 import { ArrowLeft, FileText, LogOut, Shield, Store, Trash2 } from 'lucide-react';
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent } from 'react';
 import { Link, useLocation } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
@@ -46,9 +46,6 @@ export default function AccountPage() {
   const { user } = useAuth();
   const location = useLocation();
   const back = backTarget(location.state);
-  useEffect(() => {
-    document.title = 'Your account';
-  }, []);
 
   return (
     <PublicLayout shop={{ name: 'Your account' }} accountLink={false}>

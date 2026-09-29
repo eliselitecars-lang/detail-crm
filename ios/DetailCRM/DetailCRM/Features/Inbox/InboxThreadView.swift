@@ -428,7 +428,7 @@ private struct InboxMessageBubble: View {
         .padding(.vertical, Theme.Spacing.sm)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                .fill(isOutbound ? Theme.glacier : Theme.surface)
+                .fill(isOutbound ? Theme.glacierSolid : Theme.surface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)

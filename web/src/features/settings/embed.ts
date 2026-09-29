@@ -46,5 +46,7 @@ export function embedIframeSnippet(
   title: string,
   origin: string = window.location.origin,
 ): string {
-  return `<iframe src="${escapeAttr(embedPageUrl(target, origin))}" title="${escapeAttr(title)}" style="width:100%;min-height:720px;border:0" loading="lazy"></iframe>`;
+  // color-scheme:light matches the (light, transparent) embedded page, so a
+  // dark website never gets an opaque canvas behind the frame.
+  return `<iframe src="${escapeAttr(embedPageUrl(target, origin))}" title="${escapeAttr(title)}" style="width:100%;min-height:720px;border:0;color-scheme:light" loading="lazy"></iframe>`;
 }
