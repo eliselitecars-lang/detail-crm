@@ -238,7 +238,9 @@ What the trial does:
   subscription does not get a new one.
 - **A person gets the trial once**, not once per shop. The app remembers
   whom it gave a trial to (their account and a one-way hash of their email
-  address, with any `+tag` ignored; the address itself is not stored). A
+  address, with any `+tag` ignored and, for Gmail, dots ignored and
+  `googlemail.com` counted as `gmail.com`; the address itself is not
+  stored). A
   new shop created by someone who already had a trial starts **without**
   one: it can be viewed but not used for new work until the owner picks a
   plan in Settings -> Billing, and Checkout carries no trial. Deleting the
@@ -414,7 +416,9 @@ Paused:
   Store credit a referral earns when a job is completed, and refunds back
   onto an existing gift card, keep working;
 - automations and campaign sends (reminders, follow-ups, document
-  follow-ups).
+  follow-ups);
+- **inviting team members**: no new invites, and no invite emails (new or
+  resent). An invite that was already sent can still be accepted.
 
 Customers on the public pages never see the subscription sentence below:
 they get the page's usual "not available" answer.
@@ -430,6 +434,12 @@ Team size: on a plan with `max_members`, inviting or adding (or
 re-activating) a member beyond the limit is refused with "This shop's plan
 allows N team members." (active members and pending invites count, the owner
 included). Accepting an invite that was already sent always works.
+
+Invite emails leave from the platform's own sending address, so they are
+limited for every shop, whatever its plan: 20 new invites and 30 invite
+emails a day per shop and per person, and a shop on its free trial sends
+the standard invitation wording rather than its own `invite` template
+(`docs/SPEC.md` §5, `invites`).
 
 ### 8.1 Deleting a shop ends its subscription
 

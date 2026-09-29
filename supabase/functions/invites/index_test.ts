@@ -1,4 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
+import { SUBSCRIPTION_INACTIVE_MESSAGE } from "../_shared/errors.ts";
 import type { ErrorBody } from "../_shared/http.ts";
 import { jsonResponse } from "../_shared/testing/fake_fetch.ts";
 import { FakeRpcError, FakeSupabase, type Row } from "../_shared/testing/fake_supabase.ts";
@@ -8,6 +9,7 @@ import {
   carriesInviteLink,
   formatPhone,
   INVITE_EMAIL_INTERVAL_MS,
+  INVITE_EMAILS_PER_DAY,
   INVITE_TTL_MS,
   inviteEmailKey,
   type InviteResponse,
@@ -58,8 +60,73 @@ function invite(overrides: Row = {}): Row {
   };
 }
 
+/** A shop's billing standing as invite_email_permit sees it (0101 billing_state). */
+type Standing = "active" | "trialing" | "lapsed";
+
+const DAY_MS = 24 * 60 * 60_000;
+
+/**
+ * invite_email_permit (0124) over the fake's shop_invite_emails table: a
+ * lapsed shop is refused, a known key is allowed again without counting,
+ * INVITE_EMAILS_PER_DAY per shop and per person in 24 hours, custom wording
+ * only outside a trial.
+ */
+function fakeEmailPermit(standing: () => Standing) {
+  return (args: Record<string, unknown>, ctx: { role: string; db: FakeSupabase }) => {
+    if (ctx.role !== "service_role") throw new FakeRpcError("42501", "permission denied");
+    if (standing() === "lapsed") {
+      return {
+        allowed: false,
+        reason: "subscription_inactive",
+        message: SUBSCRIPTION_INACTIVE_MESSAGE,
+      };
+    }
+    const custom = standing() !== "trialing";
+    const rows = ctx.db.table("shop_invite_emails");
+    const key = args.p_email_key as string | null;
+    if (key && rows.some((r) => r.email_key === key)) {
+      return { allowed: true, custom_wording: custom };
+    }
+    const recent = (match: (r: Row) => boolean) =>
+      rows.filter((r) => match(r) && Date.parse(String(r.created_at)) > NOW.getTime() - DAY_MS);
+    for (
+      const [scope, match] of [
+        ["shop", (r: Row) => r.shop_id === args.p_shop_id],
+        ["user", (r: Row) => r.sent_by === args.p_user_id],
+      ] as const
+    ) {
+      const counted = recent(match);
+      if (counted.length >= INVITE_EMAILS_PER_DAY) {
+        const oldest = Math.min(...counted.map((r) => Date.parse(String(r.created_at))));
+        return {
+          allowed: false,
+          reason: "invite_limit",
+          scope,
+          limit: INVITE_EMAILS_PER_DAY,
+          retry_after_seconds: Math.max(60, Math.ceil((oldest + DAY_MS - NOW.getTime()) / 1000)),
+        };
+      }
+    }
+    if (key) {
+      ctx.db.seed("shop_invite_emails", [...rows, {
+        shop_id: args.p_shop_id,
+        sent_by: args.p_user_id,
+        email_key: key,
+        created_at: NOW.toISOString(),
+      }]);
+    }
+    return { allowed: true, custom_wording: custom };
+  };
+}
+
 function setup(
-  options: { invites?: Row[]; templates?: Row[]; providerTimeoutMs?: number } = {},
+  options: {
+    invites?: Row[];
+    templates?: Row[];
+    emails?: Row[];
+    standing?: Standing;
+    providerTimeoutMs?: number;
+  } = {},
 ) {
   const db = new FakeSupabase({
     users: {
@@ -83,8 +150,11 @@ function setup(
       ],
       shop_invites: options.invites ?? [],
       message_templates: options.templates ?? [],
+      shop_invite_emails: options.emails ?? [],
     },
   });
+  const billing = { standing: options.standing ?? "active" as Standing };
+  db.onRpc("invite_email_permit", fakeEmailPermit(() => billing.standing));
   db.onRpc("invite_member", (args, ctx) => {
     if (ctx.role !== "authenticated") throw new FakeRpcError("42501", "must be a user");
     const role = ctx.db.table("shop_members").find((m) =>
@@ -123,7 +193,7 @@ function setup(
     now: () => NOW,
     providerTimeoutMs: options.providerTimeoutMs,
   });
-  return { db, handler, logs };
+  return { db, handler, logs, billing };
 }
 
 const sendInvite = (token: string | null, body: Record<string, unknown>) =>
@@ -705,4 +775,219 @@ Deno.test("inviteEmailKey: one key per invite per INVITE_EMAIL_INTERVAL_MS", () 
   assertEquals(inviteEmailKey("i1", start), inviteEmailKey("i1", later));
   assert(inviteEmailKey("i1", start) !== inviteEmailKey("i1", next));
   assert(inviteEmailKey("i1", start) !== inviteEmailKey("i2", start));
+});
+
+// ---------------------------------------------------------------------------
+// round 10: every invite email is counted in the database (0124)
+// ---------------------------------------------------------------------------
+
+/** Pending invites created a few minutes ago straight through invite_member (PostgREST). */
+function directInvites(count: number, overrides: Row = {}): Row[] {
+  return Array.from({ length: count }, (_, i) =>
+    invite({
+      email: `target${i}@victim.example`,
+      created_at: "2026-09-27T14:55:00.000Z",
+      ...overrides,
+    }));
+}
+
+async function resendAll(
+  handler: (req: Request) => Promise<Response>,
+  rows: Row[],
+  token = "tok-owner",
+) {
+  const statuses: number[] = [];
+  for (const row of rows) {
+    const res = await handler(resendInvite(token, String(row.id)));
+    statuses.push(res.status);
+    await res.body?.cancel();
+  }
+  return statuses;
+}
+
+Deno.test("resend_invite: invites created by RPC cannot be emailed past the daily email limit", async () => {
+  const rows = directInvites(INVITES_PER_DAY * 3);
+  const { db, handler } = setup({ invites: rows });
+  const statuses = await resendAll(handler, rows);
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, INVITE_EMAILS_PER_DAY);
+  assertEquals(statuses.filter((s) => s === 200).length, INVITE_EMAILS_PER_DAY);
+  assertEquals(statuses.filter((s) => s === 429).length, rows.length - INVITE_EMAILS_PER_DAY);
+  assertEquals(db.table("shop_invite_emails").length, INVITE_EMAILS_PER_DAY);
+
+  const res = await handler(resendInvite("tok-owner", String(rows[rows.length - 1]?.id)));
+  const body = await expectError(res, 429, "rate_limited");
+  assertEquals(body.details, {
+    reason: "invite_limit",
+    limit: INVITE_EMAILS_PER_DAY,
+    retry_after_seconds: 86400,
+  });
+  assertEquals(res.headers.get("retry-after"), "86400");
+  assertEquals(
+    body.error,
+    "This shop has sent 30 invitation emails in the last 24 hours. Try again later.",
+  );
+});
+
+Deno.test("send_invite: reusing an RPC-created fresh invite counts as an email too", async () => {
+  const rows = directInvites(INVITE_EMAILS_PER_DAY + 1);
+  const { db, handler } = setup({ invites: rows });
+  for (const row of rows.slice(0, INVITE_EMAILS_PER_DAY)) {
+    const res = await handler(sendInvite("tok-owner", { email: row.email, role: row.role }));
+    assertEquals(res.status, 200);
+    await res.body?.cancel();
+  }
+  const last = rows[INVITE_EMAILS_PER_DAY];
+  await expectError(
+    await handler(sendInvite("tok-owner", { email: last?.email, role: last?.role })),
+    429,
+    "rate_limited",
+  );
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, INVITE_EMAILS_PER_DAY);
+  assertEquals(db.requests.some((r) => r.target === "invite_member"), false);
+});
+
+Deno.test("send_invite: past the email limit no new invite is created", async () => {
+  const emails = Array.from({ length: INVITE_EMAILS_PER_DAY }, () => ({
+    shop_id: SHOP,
+    sent_by: ADMIN,
+    email_key: `invite-${crypto.randomUUID()}-email-1`,
+    created_at: new Date(NOW.getTime() - 60 * 60_000).toISOString(),
+  }));
+  const { db, handler } = setup({ emails });
+  const res = await handler(sendInvite("tok-owner", { email: "new@example.com", role: "manager" }));
+  await expectError(res, 429, "rate_limited");
+  // the oldest counted email (an hour old) leaves the window in 23 hours
+  assertEquals(res.headers.get("retry-after"), String(23 * 60 * 60));
+  assertEquals(db.requests.some((r) => r.target === "invite_member"), false);
+  assertEquals(db.table("shop_invites").length, 0);
+});
+
+Deno.test("send_invite: one person's email limit spans all their shops", async () => {
+  const emails = Array.from({ length: INVITE_EMAILS_PER_DAY }, () => ({
+    shop_id: crypto.randomUUID(), // their throwaway shops
+    sent_by: OWNER,
+    email_key: `invite-${crypto.randomUUID()}-email-1`,
+    created_at: NOW.toISOString(),
+  }));
+  const { db, handler } = setup({ emails });
+  const body = await expectError(
+    await handler(sendInvite("tok-owner", { email: "new@example.com", role: "manager" })),
+    429,
+    "rate_limited",
+  );
+  assertEquals(
+    body.error,
+    "You have sent 30 invitation emails in the last 24 hours. Try again later.",
+  );
+  // another admin of this shop is not affected
+  const res = await handler(sendInvite("tok-admin", { email: "new@example.com", role: "manager" }));
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 1);
+});
+
+Deno.test("send_invite / resend_invite: a double submit is one email and counts once", async () => {
+  const { db, handler } = setup();
+  const body = { email: "x@example.com", role: "manager" };
+  const first = await responseJson<InviteResponse>(await handler(sendInvite("tok-owner", body)));
+  await (await handler(sendInvite("tok-owner", body))).body?.cancel();
+  await (await handler(resendInvite("tok-owner", first.invite.id))).body?.cancel();
+  assertEquals(db.table("shop_invite_emails").map((r) => r.email_key), [
+    inviteEmailKey(first.invite.id, NOW),
+  ]);
+  assertEquals(db.table("shop_invite_emails")[0]?.sent_by, OWNER);
+});
+
+Deno.test("a lapsed shop sends no invite emails: 402 subscription_inactive", async () => {
+  const pending = invite();
+  const { db, handler } = setup({ invites: [pending], standing: "lapsed" });
+  const fresh = await expectError(
+    await handler(resendInvite("tok-owner", String(pending.id))),
+    402,
+    "payment_required",
+  );
+  assertEquals([fresh.error, fresh.details], [SUBSCRIPTION_INACTIVE_MESSAGE, {
+    reason: "subscription_inactive",
+  }]);
+  const created = await expectError(
+    await handler(sendInvite("tok-owner", { email: "new@example.com", role: "manager" })),
+    402,
+    "payment_required",
+  );
+  assertEquals(created.details, { reason: "subscription_inactive" });
+  // the reuse path is refused too (same address and role as the pending invite)
+  await expectError(
+    await handler(sendInvite("tok-owner", { email: pending.email, role: pending.role })),
+    402,
+    "payment_required",
+  );
+  assertEquals(db.requests.some((r) => r.target === "invite_member"), false);
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+});
+
+Deno.test("send_invite: a shop on a free trial sends the default wording, not its own", async () => {
+  const templates = [{
+    shop_id: SHOP,
+    key: "invite",
+    channel: "email",
+    subject: "Your account is locked",
+    body: "Verify now at https://evil.example/login or lose access. {{invite_link}}",
+    enabled: true,
+  }];
+  const { db, handler, billing } = setup({ templates, standing: "trialing" });
+  const out = await responseJson<InviteResponse>(
+    await handler(sendInvite("tok-owner", { email: "victim@example.com", role: "technician" })),
+  );
+  const trial = db.http.callsTo("POST", RESEND_URL)[0]?.json as Record<string, unknown>;
+  assertEquals(trial.subject, "You are invited to join Shine Auto Spa");
+  assert(!String(trial.text).includes("evil.example"));
+  assert(String(trial.text).includes(out.invite_url));
+
+  // once the shop pays, its own wording is used
+  billing.standing = "active";
+  await (await handler(sendInvite("tok-owner", { email: "crew@example.com", role: "manager" })))
+    .body?.cancel();
+  const paid = db.http.callsTo("POST", RESEND_URL)[1]?.json as Record<string, unknown>;
+  assertEquals(paid.subject, "Your account is locked");
+});
+
+Deno.test("send_invite: the database's invite limit (PT429) is 429 invite_limit with Retry-After", async () => {
+  const { db, handler } = setup();
+  db.onRpc("invite_member", () => {
+    throw new FakeRpcError(
+      "PT429",
+      "You have sent 20 invitations in the last 24 hours. Try again later.",
+      { status: 429, hint: "invite_limit", details: "5400" },
+    );
+  });
+  const res = await handler(sendInvite("tok-owner", { email: "x@example.com", role: "manager" }));
+  const body = await expectError(res, 429, "rate_limited");
+  assertEquals(body.error, "You have sent 20 invitations in the last 24 hours. Try again later.");
+  assertEquals(body.details, {
+    reason: "invite_limit",
+    limit: INVITES_PER_DAY,
+    retry_after_seconds: 5400,
+  });
+  assertEquals(res.headers.get("retry-after"), "5400");
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
+});
+
+Deno.test("invite emails fail closed when the permit cannot be read", async () => {
+  const { db, handler } = setup({ invites: [invite()] });
+  db.onRpc("invite_email_permit", () => {
+    throw new FakeRpcError("XX000", "boom");
+  });
+  const pending = db.table("shop_invites")[0];
+  await expectError(
+    await handler(resendInvite("tok-owner", String(pending?.id))),
+    500,
+    "internal_error",
+  );
+  db.onRpc("invite_email_permit", () => ({ something: "else" }));
+  await expectError(
+    await handler(resendInvite("tok-owner", String(pending?.id))),
+    500,
+    "internal_error",
+  );
+  assertEquals(db.http.callsTo("POST", RESEND_URL).length, 0);
 });

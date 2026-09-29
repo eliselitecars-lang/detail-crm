@@ -162,6 +162,7 @@ describe('CustomerDetailPage', () => {
     await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'New job' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Messages' })).not.toBeInTheDocument();
     const tabs = screen.getAllByRole('tab').map((t) => t.textContent);
@@ -186,6 +187,55 @@ describe('CustomerDetailPage', () => {
         ),
       ).toBe(true),
     );
+  });
+
+  it('deletes the customer after a danger confirmation and returns to the list', async () => {
+    setTableResult('customer_payment_methods', { data: null, count: 0 });
+    const { user, router } = setup('manager');
+    await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+    // The delete returns the deleted row's id (RLS would hide a refused one).
+    setTableResult('customers', { data: [{ id: 'c-1' }] });
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
+    expect(dialog).toHaveTextContent(/can’t be undone/);
+    expect(dialog).toHaveTextContent(/archive them instead/);
+    await user.click(within(dialog).getByRole('button', { name: 'Delete customer' }));
+    await waitFor(() => expect(router.state.location.pathname).toBe('/app/customers'));
+    const deleted = builders.customers?.find((b) => b.delete.mock.calls.length > 0);
+    expect(deleted?.eq).toHaveBeenCalledWith('shop_id', 'shop-1');
+    expect(deleted?.eq).toHaveBeenCalledWith('id', 'c-1');
+    expect(await screen.findByText('Jane Doe deleted')).toBeInTheDocument();
+  });
+
+  it('explains why a customer with jobs or invoices can’t be deleted (23503)', async () => {
+    setTableResult('customer_payment_methods', { data: null, count: 0 });
+    const { user, router } = setup();
+    await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+    setTableResult(
+      'customers',
+      pgError(
+        '23503',
+        'update or delete on table "customers" violates foreign key constraint "jobs_customer_fk" on table "jobs"',
+      ),
+    );
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Delete customer' }));
+    expect(
+      await screen.findByText(/has jobs, invoices, payments or a membership on file/),
+    ).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe('/app/customers/c-1');
+  });
+
+  it('asks for saved cards to be removed first (so Stripe drops them too)', async () => {
+    setTableResult('customer_payment_methods', { data: null, count: 1 });
+    const { user } = setup();
+    await screen.findByRole('heading', { name: 'Jane Doe', level: 1 });
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jane Doe?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Delete customer' }));
+    expect(await screen.findByText(/Remove this customer’s saved cards first/)).toBeInTheDocument();
+    expect(builders.customers?.some((b) => b.delete.mock.calls.length > 0)).toBe(false);
   });
 
   it('adds a vehicle using VIN decode', async () => {

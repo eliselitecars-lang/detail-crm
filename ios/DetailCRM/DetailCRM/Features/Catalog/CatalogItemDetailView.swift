@@ -6,7 +6,8 @@
 //  no category) and, for managers and above, two simple editors — the
 //  item's basics and its prices. Prices are entered by staff and stored
 //  as integer cents; the server prices jobs from these rows. Managers also
-//  see the item's maintenance follow-ups (P-4, read-only).
+//  see the item's maintenance follow-ups (P-4, read-only), with a warning
+//  when the email ones aren't sent for want of a mailing address (0119).
 //
 
 import SwiftUI
@@ -22,6 +23,9 @@ struct CatalogItemDetailView: View {
     @State private var editingBasics = false
     @State private var editingPrices = false
     @State private var followups: LoadState<[OpsServiceFollowup]> = .idle
+    /// The shop's street address and city are on file (re-read with the
+    /// follow-ups: the address may have been changed on the web).
+    @State private var mailingAddressOnFile: Bool?
 
     init(itemID: UUID, snapshot: CatalogSnapshot?, onChanged: @escaping () async -> Void) {
         self.itemID = itemID
@@ -43,6 +47,8 @@ struct CatalogItemDetailView: View {
                     canEdit: appState.can(.editCatalog),
                     showsFollowups: showsFollowups(item),
                     followups: followups,
+                    mailingAddressOnFile: mailingAddressOnFile,
+                    canEditBusinessProfile: appState.can(.editShopSettings),
                     retryFollowups: { await loadFollowups() },
                     editBasics: { editingBasics = true },
                     editPrices: { editingPrices = true }
@@ -86,6 +92,16 @@ struct CatalogItemDetailView: View {
     private func loadFollowups() async {
         guard appState.role?.isManagerOrAbove ?? false else { return }
         await OpsServiceFollowupsSection.load(into: $followups, shopID: appState.shop?.id, serviceID: itemID)
+        mailingAddressOnFile = await currentMailingAddressOnFile()
+    }
+
+    /// Marketing email needs the shop's street address and city (0119).
+    /// Read fresh; the signed-in shop's copy when that fails, nil without
+    /// either (no warning rather than a wrong one).
+    private func currentMailingAddressOnFile() async -> Bool? {
+        guard let cached = appState.shop else { return nil }
+        let shop = (try? await SettingsService.shop(shopID: cached.id)) ?? cached
+        return MarketingAddress.isOnFile(addressLine1: shop.addressLine1, city: shop.city)
     }
 
     private func load() async {
@@ -117,6 +133,8 @@ private struct CatalogItemDetailList: View {
     /// Maintenance follow-ups (P-4): managers+, services / packages / add-ons.
     let showsFollowups: Bool
     let followups: LoadState<[OpsServiceFollowup]>
+    let mailingAddressOnFile: Bool?
+    let canEditBusinessProfile: Bool
     let retryFollowups: () async -> Void
     let editBasics: () -> Void
     let editPrices: () -> Void
@@ -162,7 +180,12 @@ private struct CatalogItemDetailList: View {
             }
             CatalogPricesSection(item: item, snapshot: snapshot, currencyCode: currencyCode, canEdit: canEdit, editPrices: editPrices)
             if showsFollowups {
-                OpsServiceFollowupsSection(state: followups, retry: retryFollowups)
+                OpsServiceFollowupsSection(
+                    state: followups,
+                    addressOnFile: mailingAddressOnFile,
+                    canEditBusinessProfile: canEditBusinessProfile,
+                    retry: retryFollowups
+                )
             }
             Section {
                 CatalogWebNote(canEdit: canEdit)

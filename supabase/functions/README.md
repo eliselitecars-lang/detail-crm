@@ -1166,21 +1166,33 @@ Both actions return:
 | `send_invite` | `{shop_id, email, role}` | `role`: `admin` \| `manager` \| `technician` (ownership moves only via `transfer_ownership`). `email` is trimmed, at most 320 characters. A fresh (issued within 15 min) pending invite for the same email and role is reused and re-emailed with the same link, so retries are safe. Otherwise a new invite replaces the pending one. |
 | `resend_invite` | `{invite_id}` | Re-emails a pending invite. If the invite is expired or older than 15 minutes, a new one is issued (new token, full 7 days) and the response has `reissued: true`. One invite is emailed at most once per 5 minutes: a repeat within that interval answers as usual but sends nothing new. |
 
-The email uses the shop's `invite` email template only while it is enabled
-and its body contains `{{invite_link}}`; otherwise the default wording goes
-out. Invite emails leave from the platform's sending domain outside the
-messaging queue, so a shop may issue at most **20 new invites in any 24
-hours** (every `shop_invites` row counts, revoked or accepted ones too, and
-a re-issue by `resend_invite` is a new invite).
+The email uses the shop's `invite` email template only while it is
+enabled, its body contains `{{invite_link}}` and the shop is not on a free
+trial; otherwise the default wording goes out. Invite emails leave from the
+platform's sending domain outside the messaging queue, so the database
+limits them (migration 0124), however the invite was created (this
+function, or `invite_member` called directly):
+
+- **new invites**: at most **20 per shop and 20 per inviting person** (all
+  their shops together) in any 24 hours. Every `shop_invites` row counts,
+  revoked or accepted ones too, and a re-issue by `resend_invite` is a new
+  invite. `invite_member` itself answers PT429 (HTTP 429) past that.
+- **invite emails**: at most **30 per shop and 30 per person** in any 24
+  hours, counting every email this function sends: new invites, re-issues
+  and resends of a fresh invite. A retry or double submit within the same
+  5 minutes is the same email and counts once.
+- a shop whose subscription is inactive (lapsed) sends none and creates no
+  invites.
 
 Errors: `send_invite` can return `409 conflict` (already a member, or just
 invited with another role) and `422 unprocessable` (the invite cannot be
 created). `resend_invite` can return `404 not_found` (invite), `409 conflict`
 (already accepted) and `410 gone` (revoked). Both can return `403 forbidden`,
-`402 payment_required` (reason `seat_limit` or `subscription_inactive`) and
-`429 rate_limited` with `details {reason: "invite_limit", limit,
-retry_after_seconds}` and a `Retry-After` header (the day's invites were
-issued: show `error`).
+`402 payment_required` (reason `seat_limit`, or `subscription_inactive` for
+a lapsed shop — also for a resend) and `429 rate_limited` with `details
+{reason: "invite_limit", limit, retry_after_seconds}` and a `Retry-After`
+header (the day's invites or invite emails were used up: show `error`,
+which says whether the shop's or the person's limit was reached).
 
 ### `account` (any signed-in user, own account only; `verify_jwt = true`)
 

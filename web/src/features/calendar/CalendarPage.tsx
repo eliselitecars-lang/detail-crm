@@ -123,7 +123,7 @@ export default function CalendarPage() {
   const resources = useResources();
   const reschedule = useReschedule();
 
-  const rows = useMemo(() => events.data ?? [], [events.data]);
+  const rows = useMemo(() => events.data?.rows ?? [], [events.data]);
   const rowsById = useMemo(() => new Map(rows.map((r) => [r.id, r])), [rows]);
   const eventInputs = useMemo(
     () => toEventInputs(rows, filters, canManage, canManageEvents),
@@ -439,6 +439,12 @@ export default function CalendarPage() {
             onRetry={() => void events.refetch()}
             retrying={events.isRefetching}
           />
+        )}
+        {events.data?.truncated && (
+          <p role="status" className="text-warning-ink px-4 pt-3 text-sm">
+            This range has more events than the calendar can show at once, so the latest ones are
+            missing. Switch to the week or day view to see them all.
+          </p>
         )}
         {events.isPending && activeRange !== null && (
           <p role="status" className="text-muted px-4 pt-3 text-sm">

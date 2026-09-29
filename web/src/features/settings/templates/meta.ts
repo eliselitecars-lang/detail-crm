@@ -5,6 +5,7 @@
  */
 import type { TemplateChannel, TemplateKey } from '../api';
 import { UNIT_MINUTES, type DurationUnit } from '../schemas';
+import { placeholdersIn } from './render';
 
 export interface TemplateKeyMeta {
   key: TemplateKey;
@@ -28,6 +29,18 @@ export interface TemplateKeyMeta {
   switchOnly?: boolean;
   /** Where the timing is set when it isn't in the template (document follow-ups). */
   timingNote?: string;
+  /**
+   * The message is sent whatever the switch says; the switch only chooses the
+   * shop's wording over the default (invite: invites/index.ts always emails
+   * an invitation, with DEFAULT_INVITE_TEMPLATE while the row is off).
+   */
+  alwaysSent?: boolean;
+  /**
+   * Placeholders the shop's wording must contain to be used at all; without
+   * them the server sends the default wording (invite: {{invite_link}},
+   * invites/index.ts carriesInviteLink).
+   */
+  requiredPlaceholders?: readonly string[];
 }
 
 export interface TemplateGroup {
@@ -237,9 +250,12 @@ export const TEMPLATE_GROUPS: readonly TemplateGroup[] = [
       {
         key: 'invite',
         label: 'Team invitation',
-        description: 'Emailed to people you invite to join your team.',
+        description:
+          'Emailed to people you invite to join your team. Invitations are always sent: your wording is used while it’s on and includes the invitation link, otherwise the default wording is.',
         channels: ['email'],
         audience: 'staff',
+        alwaysSent: true,
+        requiredPlaceholders: ['invite_link'],
       },
     ],
   },
@@ -251,6 +267,23 @@ export function templateMeta(key: TemplateKey): TemplateKeyMeta {
   const meta = TEMPLATE_KEYS.find((m) => m.key === key);
   if (!meta) throw new Error(`Unknown template key ${key}`);
   return meta;
+}
+
+/**
+ * Required placeholders (meta.requiredPlaceholders) that `body` leaves out;
+ * while any is missing the server ignores the wording and sends the default.
+ */
+export function missingRequiredPlaceholders(meta: TemplateKeyMeta, body: string): string[] {
+  const used = new Set(placeholdersIn(body));
+  return (meta.requiredPlaceholders ?? []).filter((name) => !used.has(name));
+}
+
+/** Whether the shop's own wording in `row` is what actually goes out. */
+export function wordingInUse(
+  meta: TemplateKeyMeta,
+  row: { enabled: boolean; body: string },
+): boolean {
+  return row.enabled && missingRequiredPlaceholders(meta, row.body).length === 0;
 }
 
 export const CHANNEL_LABELS: Record<TemplateChannel, string> = {

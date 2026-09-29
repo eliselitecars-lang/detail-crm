@@ -4,7 +4,12 @@
  */
 import type { MessageTemplate, TemplateChannel, TemplatePatch } from '../api';
 import { splitMinutes, type DurationUnit } from '../schemas';
-import { BODY_LIMITS, offsetFromInput, type TemplateKeyMeta } from './meta';
+import {
+  BODY_LIMITS,
+  missingRequiredPlaceholders,
+  offsetFromInput,
+  type TemplateKeyMeta,
+} from './meta';
 
 /** Most appointment reminders per appointment (comms_reminder_offsets_valid). */
 export const MAX_REMINDERS = 3;
@@ -37,11 +42,23 @@ export interface DraftErrors {
   body?: string;
 }
 
-export function validateDraft(channel: TemplateChannel, draft: ChannelDraft): DraftErrors {
+/**
+ * `meta` adds its required placeholders (invite: {{invite_link}}): wording
+ * that is on but leaves one out would be saved and shown as in use while the
+ * server sends the default wording instead, so it is refused here.
+ */
+export function validateDraft(
+  channel: TemplateChannel,
+  draft: ChannelDraft,
+  meta?: TemplateKeyMeta,
+): DraftErrors {
   const errors: DraftErrors = {};
+  const missing = meta && draft.enabled ? missingRequiredPlaceholders(meta, draft.body) : [];
   if (draft.body.trim().length === 0) errors.body = 'Write the message.';
   else if (draft.body.length > BODY_LIMITS[channel]) {
     errors.body = `Keep it to ${BODY_LIMITS[channel].toLocaleString('en-US')} characters or fewer.`;
+  } else if (missing.length > 0) {
+    errors.body = requiredPlaceholderText(missing);
   }
   if (channel === 'email') {
     const subject = draft.subject.trim();
@@ -49,6 +66,14 @@ export function validateDraft(channel: TemplateChannel, draft: ChannelDraft): Dr
     else if (subject.length > 200) errors.subject = 'Keep the subject to 200 characters or fewer.';
   }
   return errors;
+}
+
+/** Why wording without `missing` is not used (shown in the editor and on the list). */
+export function requiredPlaceholderText(missing: readonly string[]): string {
+  const names = missing.map((n) => `{{${n}}}`).join(', ');
+  return missing.includes('invite_link')
+    ? `Include the invitation link (${names}). Without it, invitations are sent with the default wording.`
+    : `Include ${names}. Without it, the default wording is sent.`;
 }
 
 export function offsetError(meta: TemplateKeyMeta, draft: OffsetDraft): string | undefined {

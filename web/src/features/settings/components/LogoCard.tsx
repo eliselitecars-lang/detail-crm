@@ -1,6 +1,6 @@
 import { ImageUp, Trash2 } from 'lucide-react';
 import { useId, useRef, useState, type ChangeEvent } from 'react';
-import { Button, SectionCard, useToast } from '@/components/ui';
+import { Button, ConfirmDialog, SectionCard, useToast } from '@/components/ui';
 import { shopAssetUrl } from '@/lib/supabase';
 import { logoFileProblem, useSaveLogo, type ShopSettings } from '../api';
 
@@ -11,6 +11,9 @@ export function LogoCard({ shop, canEdit }: { shop: ShopSettings; canEdit: boole
   const toast = useToast();
   const save = useSaveLogo();
   const [problem, setProblem] = useState<string | null>(null);
+  // The stored file is deleted and every customer-facing page loses the logo:
+  // ask first, like a service image.
+  const [confirmRemove, setConfirmRemove] = useState(false);
   // Same path after re-upload → bust the browser cache with the row version.
   const url = shop.logo_path
     ? `${shopAssetUrl(shop.logo_path) ?? ''}?v=${encodeURIComponent(shop.updated_at)}`
@@ -32,14 +35,15 @@ export function LogoCard({ shop, canEdit }: { shop: ShopSettings; canEdit: boole
     );
   };
 
-  const remove = () =>
-    save.mutate(
-      { file: null, previousPath: shop.logo_path },
-      {
-        onSuccess: () => toast.success('Logo removed'),
-        onError: (error) => toast.error(error),
-      },
-    );
+  const remove = async () => {
+    try {
+      await save.mutateAsync({ file: null, previousPath: shop.logo_path });
+      toast.success('Logo removed');
+      setConfirmRemove(false);
+    } catch (error) {
+      toast.error(error);
+    }
+  };
 
   return (
     <SectionCard
@@ -79,7 +83,7 @@ export function LogoCard({ shop, canEdit }: { shop: ShopSettings; canEdit: boole
                 variant="ghost"
                 leadingIcon={<Trash2 className="size-4" aria-hidden="true" />}
                 disabled={save.isPending}
-                onClick={remove}
+                onClick={() => setConfirmRemove(true)}
               >
                 Remove
               </Button>
@@ -96,6 +100,16 @@ export function LogoCard({ shop, canEdit }: { shop: ShopSettings; canEdit: boole
           {problem}
         </p>
       )}
+      <ConfirmDialog
+        open={confirmRemove}
+        onClose={() => setConfirmRemove(false)}
+        title="Remove your logo?"
+        description="The logo file is deleted and disappears from your booking page, quotes, invoices and customer emails. This can’t be undone; upload the file again to bring it back."
+        confirmLabel="Remove logo"
+        tone="danger"
+        loading={save.isPending}
+        onConfirm={remove}
+      />
     </SectionCard>
   );
 }

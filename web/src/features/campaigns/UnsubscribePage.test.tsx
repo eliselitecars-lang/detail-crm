@@ -45,6 +45,10 @@ describe('UnsubscribePage', () => {
         level: 1,
       }),
     ).toBeInTheDocument();
+    // Before the click: it stops every email, receipts included, for good.
+    expect(
+      screen.getByText(/stops all of their emails, including receipts, invoices/),
+    ).toBeInTheDocument();
     // Opening the link alone never unsubscribes (link scanners follow GETs).
     expect(calls.map((c) => c.fn)).toEqual(['public_unsubscribe_info']);
     expect(calls[0]?.args).toEqual({ p_token: TOKEN });
@@ -53,6 +57,10 @@ describe('UnsubscribePage', () => {
     const done = await screen.findByRole('heading', { name: 'You’re unsubscribed' });
     expect(done).toHaveFocus();
     expect(screen.getByText(/any more emails from Glacier Detailing/)).toBeInTheDocument();
+    // No promise of a remedy nobody can perform (the shop cannot clear an
+    // email opt-out: customers_comms_guard, 0033).
+    expect(screen.queryByText(/ask to be added back/)).not.toBeInTheDocument();
+    expect(screen.getByText(/receipts, invoices and appointment reminders/)).toBeInTheDocument();
     expect(supabase.rpc).toHaveBeenCalledWith('public_unsubscribe', { p_token: TOKEN });
   });
 

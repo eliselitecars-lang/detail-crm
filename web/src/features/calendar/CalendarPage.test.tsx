@@ -97,16 +97,80 @@ describe('CalendarPage', () => {
     setup();
     // Week of Sun 27 Sep 2026 in America/Chicago (UTC−5), not the Honolulu test browser.
     await waitFor(() =>
-      expect(supabase.rpc).toHaveBeenCalledWith('calendar_events', {
-        p_shop_id: 'shop-1',
-        p_from: '2026-09-27T05:00:00.000Z',
-        p_to: '2026-10-04T05:00:00.000Z',
-        p_include_cancelled: false,
-      }),
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'calendar_events',
+        {
+          p_shop_id: 'shop-1',
+          p_from: '2026-09-27T05:00:00.000Z',
+          p_to: '2026-10-04T05:00:00.000Z',
+          p_include_cancelled: false,
+        },
+        { count: 'exact' },
+      ),
     );
     expect(await screen.findByText('#1001 · Jane Doe')).toBeInTheDocument();
     expect(screen.getByText('Busy')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /New job/ })).toBeInTheDocument();
+  });
+
+  it('reads every event of the range past the server’s per-response row cap', async () => {
+    // PostgREST cuts each response at max_rows; here the server answers 2 rows
+    // at a time, whatever range is asked, for a range that matches 3.
+    const rows = [
+      JOB,
+      BUSY,
+      {
+        ...JOB,
+        id: 'job-3',
+        job_number: 1003,
+        starts_at: '2026-10-02T14:00:00Z',
+        ends_at: '2026-10-02T16:00:00Z',
+        title: 'Sam Lee',
+        customer_name: 'Sam Lee',
+      },
+    ];
+    const ranges: [number, number][] = [];
+    const orders: string[] = [];
+    supabase.rpc.mockImplementation((...args: unknown[]) => {
+      if (String(args[0]) !== 'calendar_events') {
+        return createBuilder({ data: String(args[0]) === 'shop_team' ? TEAM : null });
+      }
+      const withCount = (args[2] as { count?: string } | undefined)?.count === 'exact';
+      let from = 0;
+      const builder = createBuilder();
+      builder.order.mockImplementation((column: string) => {
+        orders.push(column);
+        return builder;
+      });
+      builder.range.mockImplementation((f: number, t: number) => {
+        ranges.push([f, t]);
+        from = f;
+        return builder;
+      });
+      builder.then = ((onFulfilled, onRejected) =>
+        Promise.resolve({
+          data: rows.slice(from, from + 2),
+          error: null,
+          count: withCount ? rows.length : null,
+        }).then(onFulfilled, onRejected)) as typeof builder.then;
+      return builder;
+    });
+    setTableResult('business_hours', { data: [] });
+    setTableResult('resources', { data: [] });
+    renderRoute(<CalendarPage />, {
+      path: '/app/calendar',
+      routePath: '/app/calendar',
+      shop: shopValue({ membership: membership({ role: 'owner' }) }),
+    });
+    expect(await screen.findByText('#1003 · Sam Lee')).toBeInTheDocument();
+    expect(screen.getByText('#1001 · Jane Doe')).toBeInTheDocument();
+    expect(ranges).toEqual([
+      [0, 999],
+      [2, 2],
+    ]);
+    // Stable pages: the RPC's own order, made explicit.
+    expect(orders.slice(0, 3)).toEqual(['starts_at', 'event_type', 'id']);
+    expect(screen.queryByText(/more events than the calendar can show/)).not.toBeInTheDocument();
   });
 
   it('opens the job when a job event is clicked', async () => {
@@ -203,12 +267,16 @@ describe('CalendarPage', () => {
     await user.click(screen.getByRole('button', { name: 'Next day' }));
     expect(await screen.findByText('Tuesday, September 29, 2026')).toBeInTheDocument();
     await waitFor(() =>
-      expect(supabase.rpc).toHaveBeenCalledWith('calendar_events', {
-        p_shop_id: 'shop-1',
-        p_from: '2026-09-29T05:00:00.000Z',
-        p_to: '2026-09-30T05:00:00.000Z',
-        p_include_cancelled: false,
-      }),
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'calendar_events',
+        {
+          p_shop_id: 'shop-1',
+          p_from: '2026-09-29T05:00:00.000Z',
+          p_to: '2026-09-30T05:00:00.000Z',
+          p_include_cancelled: false,
+        },
+        { count: 'exact' },
+      ),
     );
     const bay = screen.getByRole('region', { name: 'Bay 1' });
     const none = screen.getByRole('region', { name: 'No bay / van' });

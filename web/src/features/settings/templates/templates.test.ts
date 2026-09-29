@@ -16,11 +16,13 @@ import {
 import {
   describeOffset,
   describeReminders,
+  missingRequiredPlaceholders,
   offsetFromInput,
   placeholdersFor,
   previewVars,
   templateMeta,
   TEMPLATE_KEYS,
+  wordingInUse,
 } from './meta';
 import { placeholdersIn, renderTemplate, smsSegments } from './render';
 
@@ -201,6 +203,30 @@ describe('template drafts', () => {
     });
     expect(validateDraft('sms', { ...email, body: 'x'.repeat(1601) }).body).toMatch(/1,600/);
     expect(validateDraft('sms', { ...email, subject: '', body: 'ok' })).toEqual({});
+  });
+
+  it('requires {{invite_link}} in Team invitation wording that is on (invites/index.ts)', () => {
+    const invite = templateMeta('invite');
+    expect(invite.alwaysSent).toBe(true);
+    const draft = draftFromRow(
+      row({ key: 'invite', subject: 'Join us', body: 'Join {{shop_name}}' }),
+    );
+    expect(validateDraft('email', draft, invite).body).toBe(
+      'Include the invitation link ({{invite_link}}). Without it, invitations are sent with the default wording.',
+    );
+    expect(validateDraft('email', { ...draft, body: 'Join: {{ invite_link }}' }, invite)).toEqual(
+      {},
+    );
+    // Off: the default wording is sent anyway, so nothing to require.
+    expect(validateDraft('email', { ...draft, enabled: false }, invite)).toEqual({});
+    // Other keys have no required placeholder.
+    expect(validateDraft('email', draft, templateMeta('booking_confirmed'))).toEqual({});
+    expect(missingRequiredPlaceholders(invite, 'invite_link {invite_link}')).toEqual([
+      'invite_link',
+    ]);
+    expect(wordingInUse(invite, { enabled: true, body: '{{invite_link}}' })).toBe(true);
+    expect(wordingInUse(invite, { enabled: false, body: '{{invite_link}}' })).toBe(false);
+    expect(wordingInUse(invite, { enabled: true, body: 'no link' })).toBe(false);
   });
 
   it('builds minimal patches', () => {

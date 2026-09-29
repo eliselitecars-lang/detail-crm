@@ -179,7 +179,7 @@ export function CustomerFormDialog({ open, onClose, customer, onSaved }: Custome
                 label="Email opt-in"
                 description={
                   customer?.email_opted_out_at
-                    ? `Unsubscribed on ${formatDate(customer.email_opted_out_at, timezone)}.`
+                    ? `Unsubscribed on ${formatDate(customer.email_opted_out_at, timezone)} — no email can be sent to this address, including invoices, receipts and reminders. The unsubscribe can’t be undone; to email this customer again, use a different address they give you.`
                     : 'Customer agreed to receive emails.'
                 }
               />

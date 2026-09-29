@@ -42,7 +42,8 @@ function channelBlock(customer: PickerCustomer, channel: MessageChannel): string
     return null;
   }
   if (!customer.email) return 'No email address on file.';
-  if (customer.email_opted_out_at) return 'This customer unsubscribed from email.';
+  if (customer.email_opted_out_at)
+    return 'This customer unsubscribed from email, so nothing can be emailed to this address. Text it or share the link instead.';
   return null;
 }
 

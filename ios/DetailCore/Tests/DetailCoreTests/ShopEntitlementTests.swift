@@ -125,8 +125,9 @@ final class ShopEntitlementTests: XCTestCase {
     // MARK: - Notice rules
 
     private func entitlement(_ state: ShopEntitlement.State?, owner: Bool, canWrite: Bool = true,
-                             trialEnds: Date? = nil, billing: Bool = true) -> ShopEntitlement {
-        ShopEntitlement(billingEnabled: billing, state: state, trialEndsAt: trialEnds, canWrite: canWrite, isOwner: owner)
+                             trialEnds: Date? = nil, billing: Bool = true, reason: String? = nil) -> ShopEntitlement {
+        ShopEntitlement(billingEnabled: billing, state: state, reason: reason, trialEndsAt: trialEnds,
+                        canWrite: canWrite, isOwner: owner)
     }
 
     func testNoticeRules() {
@@ -145,6 +146,14 @@ final class ShopEntitlementTests: XCTestCase {
             ("lapsed technician", entitlement(.lapsed, owner: false, canWrite: false), .paused),
             ("unknown state but writes paused", entitlement(nil, owner: false, canWrite: false), .paused),
             ("unknown state", entitlement(nil, owner: true), nil),
+            ("trial ended owner", entitlement(.lapsed, owner: true, canWrite: false, reason: "trial_ended"), .trialEnded),
+            ("trial ended technician", entitlement(.lapsed, owner: false, canWrite: false, reason: "trial_ended"), .trialEnded),
+            ("second shop, trial already used (0120)",
+             entitlement(.lapsed, owner: true, canWrite: false, reason: "no_subscription"), .noSubscription),
+            ("canceled subscription", entitlement(.lapsed, owner: true, canWrite: false, reason: "canceled"), .paused),
+            ("unpaid subscription", entitlement(.lapsed, owner: false, canWrite: false, reason: "unpaid"), .paused),
+            ("billing off, lapsed reason ignored",
+             entitlement(.lapsed, owner: true, canWrite: false, billing: false, reason: "no_subscription"), nil),
         ]
         for (name, value, expected) in table {
             XCTAssertEqual(value.notice, expected, name)
@@ -162,11 +171,57 @@ final class ShopEntitlementTests: XCTestCase {
         XCTAssertFalse(ShopEntitlement.Notice.trialEnds(chicagoEvening).isWarning)
         XCTAssertTrue(ShopEntitlement.Notice.paymentProblem.isWarning)
         XCTAssertTrue(ShopEntitlement.Notice.paused.isWarning)
+        XCTAssertEqual(ShopEntitlement.Notice.trialEnded.text(clock: chicago),
+                       "This shop's trial has ended. Creating new jobs, quotes, invoices and customers is paused.")
+        XCTAssertEqual(ShopEntitlement.Notice.noSubscription.text(clock: chicago),
+                       "This shop has no subscription or free trial. Creating new jobs, quotes, invoices and customers is paused.")
+        XCTAssertTrue(ShopEntitlement.Notice.trialEnded.isWarning)
+        XCTAssertTrue(ShopEntitlement.Notice.noSubscription.isWarning)
         // Nothing that sells: no amounts, no plan, no call to buy.
-        for notice in [ShopEntitlement.Notice.trialEnds(chicagoEvening), .paymentProblem, .paused] {
+        for notice in [ShopEntitlement.Notice.trialEnds(chicagoEvening), .paymentProblem, .paused, .trialEnded, .noSubscription] {
             let text = notice.text(clock: chicago).lowercased()
             for word in ["$", "price", "plan", "upgrade", "subscribe", "buy", "purchase", "renew", "settings"] {
                 XCTAssertFalse(text.contains(word), "\(notice) mentions \(word)")
+            }
+        }
+    }
+
+    // MARK: - Right after creating a shop
+
+    func testNewShopMessage() throws {
+        let end = utc("2026-10-13T03:30:00Z") // Oct 12 in Chicago
+        func message(_ value: ShopEntitlement?) -> ShopEntitlement.NewShopMessage {
+            ShopEntitlement.newShopMessage(shopName: "Summit Auto Spa", entitlement: value, clock: chicago)
+        }
+        let ready = ShopEntitlement.NewShopMessage(text: "Summit Auto Spa is ready.", isWarning: false)
+        XCTAssertEqual(message(nil), ready, "standing unknown")
+        XCTAssertEqual(message(entitlement(.active, owner: true, billing: false, reason: "billing_off")), ready)
+        XCTAssertEqual(message(entitlement(.comped, owner: true, reason: "comped")), ready)
+        XCTAssertEqual(message(entitlement(.trialing, owner: true, trialEnds: end, reason: "trial")),
+                       .init(text: "Summit Auto Spa is ready. Trial ends Monday, October 12, 2026.", isWarning: false))
+        XCTAssertEqual(message(entitlement(.trialing, owner: true, reason: "trial")), ready, "no date, no trial words")
+
+        // 0120: the person already had a trial, so the new shop starts lapsed.
+        let second = try decode("""
+        {"billing_enabled": true, "state": "lapsed", "reason": "no_subscription",
+         "plan_name": null, "trial_ends_at": null, "current_period_end": null,
+         "cancel_at_period_end": false, "max_members": null, "members_used": 1,
+         "can_write": false, "is_owner": true}
+        """)
+        let used = message(second)
+        XCTAssertTrue(used.isWarning)
+        XCTAssertEqual(used.text,
+                       "Summit Auto Spa was created without a free trial, because a free trial is given once per person. Creating new jobs, quotes, invoices and customers is paused.")
+        XCTAssertEqual(second.notice, .noSubscription, "the status line keeps the reason afterwards")
+
+        let other = message(entitlement(.lapsed, owner: true, canWrite: false, reason: "unknown_status"))
+        XCTAssertTrue(other.isWarning)
+        XCTAssertEqual(other.text, "Summit Auto Spa was created. " + ShopEntitlement.pausedText)
+
+        // Neutral wording only (App Store 3.1.1 / 3.1.3).
+        for text in [used.text, other.text, message(entitlement(.trialing, owner: true, trialEnds: end)).text] {
+            for word in ["$", "price", "plan", "upgrade", "subscribe", "buy", "purchase", "renew", "settings", "billing"] {
+                XCTAssertFalse(text.lowercased().contains(word), "\(text) mentions \(word)")
             }
         }
     }

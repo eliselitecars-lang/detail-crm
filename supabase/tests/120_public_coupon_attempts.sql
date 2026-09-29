@@ -1,8 +1,9 @@
--- 120 (0122): coupon codes on the public booking page are attempt-limited.
--- public_validate_coupon looks a code up only while the connection (an IPv4
--- address or IPv6 /64) has tried fewer than 10 different unknown codes in
--- the shop in the last hour and the shop fewer than 200 from everyone;
--- past that it answers valid=false 'too many coupon codes were tried ...'
+-- 120 (0122; 0123): coupon codes on the public booking page are
+-- attempt-limited. public_validate_coupon looks a code up only while the
+-- connection (an IPv4 address or IPv6 /64) has tried fewer than 10
+-- different unknown codes in the shop in the last hour (3 while the shop is
+-- busy: 200 from everyone) and an IPv6 connection's /56 fewer than 30;
+-- there is no shop-wide lockout (0123). Past that it answers valid=false 'too many coupon codes were tried ...'
 -- without looking (a code the connection already looked up is still
 -- answered). create_online_booking takes a coupon code only after the
 -- connection looked it up, so the booking is no way around the limit.
@@ -24,10 +25,10 @@ $$;
 create function pg_temp.from_ip(p_ip text) returns void language sql as $$
   select set_config('request.headers', jsonb_build_object('x-forwarded-for', p_ip)::text, true)
 $$;
-create function pg_temp.book(p_day integer, p_code text) returns text language plpgsql as $$
+create function pg_temp.book(p_day integer, p_code text, p_email text default 'nina@example.com') returns text language plpgsql as $$
 begin
   perform public.create_online_booking('shop-a', pg_temp.booking(jsonb_build_object(
-            'customer', jsonb_build_object('first_name', 'Nina', 'last_name', 'New', 'email', 'nina@example.com'),
+            'customer', jsonb_build_object('first_name', 'Nina', 'last_name', 'New', 'email', p_email),
             'service_ids', jsonb_build_array(tests.fx('svc_wash')),
             'starts_at', ((now() at time zone 'America/Chicago')::date + p_day)::text || 'T10:00:00',
             'coupon_code', p_code)));
@@ -35,7 +36,7 @@ begin
 exception when others then
   return sqlstate || ': ' || sqlerrm;
 end $$;
-grant execute on function pg_temp.check(text), pg_temp.answer(text), pg_temp.from_ip(text), pg_temp.book(integer, text)
+grant execute on function pg_temp.check(text), pg_temp.answer(text), pg_temp.from_ip(text), pg_temp.book(integer, text, text)
   to anon, authenticated;
 
 \set limit_msg 'too many coupon codes were tried; please try again later'
@@ -88,19 +89,57 @@ select tests.as_anon();
 select pg_temp.from_ip('198.51.100.1');
 select tests.eq(pg_temp.answer('GUESS12'), 'this coupon code is not valid', 'the hourly allowance comes back');
 
--- ============================================================ the shop-wide cap (many connections)
-select tests.as_superuser();
-insert into public.coupon_code_attempts (shop_id, client_scope, code_hash, found)
-select tests.fx('shop_a'), ('10.0.' || (i / 250) || '.' || (i % 250))::inet, public.coupon_code_attempt_hash(tests.fx('shop_a'), 'SPRAY' || i), false
-  from generate_series(1, 200) i;
+-- ============================================================ no shop-wide lockout (0123)
+-- the round-10 repro: 20 /64s of one /56 home delegation, 10 junk codes each
 select tests.as_anon();
-select pg_temp.from_ip('198.51.100.3');
-select tests.eq(pg_temp.answer('STAFF50'), :'limit_msg', '200 unknown codes from everyone in an hour: codes wait');
+select tests.eq((select count(*) filter (where r = 'this coupon code is not valid')
+                   from (select pg_temp.from_ip('2001:db8:aa:' || to_hex(n) || '::1'),
+                                pg_temp.answer('JUNK' || n || 'X' || i) as r
+                           from generate_series(0, 19) n, generate_series(1, 10) i) x),
+                30::bigint, 'one IPv6 /56 shares 30 unknown codes an hour, however many /64s it uses');
+select pg_temp.from_ip('2001:db8:aa:ff:1::1');
+select tests.eq(pg_temp.answer('JUNKNEW'), :'limit_msg', 'a fresh /64 of that /56 waits too');
+select pg_temp.from_ip('2001:db8:ab::1');
+select tests.eq(pg_temp.answer('JUNKNEW'), 'this coupon code is not valid', 'the next /56 has its own allowance');
+select pg_temp.from_ip('203.0.113.9');
+select tests.eq(pg_temp.answer('SAVE10'), 'valid', 'a real customer is answered for the published code');
+select tests.eq(pg_temp.book(20, 'SAVE10', 'rita@example.com'), 'booked', 'and books with it');
+
+-- 20 IPv4 addresses (or a botnet), 10 junk codes each: the shop is busy
+-- (the earlier misses are an hour old by now)
+select tests.as_superuser();
+update public.coupon_code_attempts set created_at = created_at - interval '61 minutes'
+ where shop_id = tests.fx('shop_a') and client_scope is distinct from '198.51.100.2'::inet;
+select tests.as_anon();
+select tests.eq((select count(*) filter (where r = 'this coupon code is not valid')
+                   from (select pg_temp.from_ip('192.0.2.' || n), pg_temp.answer('SPRAY' || n || 'X' || i) as r
+                           from generate_series(1, 20) n, generate_series(1, 10) i) x),
+                200::bigint, '200 unknown codes from 20 addresses are answered');
+select pg_temp.from_ip('203.0.113.77');
+select tests.eq(pg_temp.answer('SAVE10'), 'valid', 'busy shop: a fresh customer still gets the published code');
+select tests.eq(pg_temp.book(21, 'SAVE10', 'sam@example.com'), 'booked', 'and can book with it');
+select pg_temp.from_ip('203.0.113.78');
+select tests.eq((select array_agg(pg_temp.answer(c) order by o)
+                   from unnest(array['SAVE1O', 'SAEV10', 'SAVE10']) with ordinality u(c, o)),
+                array['this coupon code is not valid', 'this coupon code is not valid', 'valid'],
+                'busy shop: two typos, then the right code, still works');
+select pg_temp.from_ip('203.0.113.79');
+select tests.eq((select array_agg(pg_temp.answer('BUSYGUESS' || i) order by i) from generate_series(1, 4) i),
+                array['this coupon code is not valid', 'this coupon code is not valid', 'this coupon code is not valid',
+                      :'limit_msg'],
+                'busy shop: a connection gets 3 unknown codes an hour instead of 10');
 select pg_temp.from_ip('198.51.100.2');
 select tests.eq(pg_temp.answer('STAFF50'), 'valid', 'a connection that already looked the code up is still answered');
+-- a caller with no known connection (server side) keeps the shop-wide rule
+select set_config('request.headers', '', true);
+select tests.eq(pg_temp.answer('NOIPGUESS'), :'limit_msg', 'no client address: waits while the shop is busy');
 select tests.as_superuser();
-update public.coupon_code_attempts set created_at = created_at - interval '61 minutes' where code_hash in
-  (select public.coupon_code_attempt_hash(tests.fx('shop_a'), 'SPRAY' || i) from generate_series(1, 200) i);
+update public.coupon_code_attempts set created_at = created_at - interval '61 minutes'
+ where shop_id = tests.fx('shop_a') and created_at > now() - interval '1 hour'
+   and client_scope is distinct from '198.51.100.2'::inet;
+select tests.as_anon();
+select set_config('request.headers', '', true);
+select tests.eq(pg_temp.answer('NOIPGUESS'), 'this coupon code is not valid', '... and is answered once it is not');
 
 -- ============================================================ the booking is no way around it
 select tests.as_anon();

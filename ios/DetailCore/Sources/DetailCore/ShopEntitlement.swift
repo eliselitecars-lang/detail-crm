@@ -119,6 +119,14 @@ public struct ShopEntitlement: Decodable, Hashable, Sendable {
         case paymentProblem
         /// Everyone, while the subscription is inactive.
         case paused
+        /// Everyone, while lapsed because the in-app trial is over
+        /// (reason `trial_ended`).
+        case trialEnded
+        /// Everyone, while lapsed because the shop never had a subscription
+        /// or a trial (reason `no_subscription`): since 0120 a person's
+        /// second shop starts this way, as does a shop created while the
+        /// trial length is 0.
+        case noSubscription
 
         /// Neutral wording (no prices, no purchase prompts). Dates are in
         /// the shop's time zone.
@@ -130,6 +138,10 @@ public struct ShopEntitlement: Decodable, Hashable, Sendable {
                 return ShopEntitlement.paymentProblemText
             case .paused:
                 return ShopEntitlement.pausedText
+            case .trialEnded:
+                return ShopEntitlement.trialEndedText
+            case .noSubscription:
+                return ShopEntitlement.noSubscriptionText
             }
         }
 
@@ -137,22 +149,29 @@ public struct ShopEntitlement: Decodable, Hashable, Sendable {
         public var isWarning: Bool {
             switch self {
             case .trialEnds: return false
-            case .paymentProblem, .paused: return true
+            case .paymentProblem, .paused, .trialEnded, .noSubscription: return true
             }
         }
     }
 
     public static let paymentProblemText = "There's a problem with this shop's subscription payment."
-    public static let pausedText =
-        "This shop's subscription is inactive. Creating new jobs, quotes, invoices and customers is paused."
+    public static let pausedSentence = "Creating new jobs, quotes, invoices and customers is paused."
+    public static let pausedText = "This shop's subscription is inactive. " + pausedSentence
+    public static let trialEndedText = "This shop's trial has ended. " + pausedSentence
+    public static let noSubscriptionText = "This shop has no subscription or free trial. " + pausedSentence
 
     /// Nothing while billing is off or the shop is active / comped. A
-    /// lapsed shop (or one the server says can't write) tells everyone;
+    /// lapsed shop (or one the server says can't write) tells everyone,
+    /// with the reason when it is the trial ending or no subscription;
     /// the trial end and a failing payment are for the owner only.
     public var notice: Notice? {
         guard billingEnabled else { return nil }
         if state == .lapsed || !canWrite {
-            return .paused
+            switch reason {
+            case "trial_ended": return .trialEnded
+            case "no_subscription": return .noSubscription
+            default: return .paused
+            }
         }
         switch state {
         case .trialing:
@@ -163,6 +182,40 @@ public struct ShopEntitlement: Decodable, Hashable, Sendable {
         case .active, .comped, .lapsed, .none:
             return nil
         }
+    }
+
+    // MARK: - Right after creating a shop
+
+    /// What the Create shop flow says once the new shop exists. The web
+    /// explains the same case (onboarding: "the free trial was already
+    /// used"); the phone keeps it neutral — no plan, price or way to buy
+    /// (App Store 3.1.1 / 3.1.3).
+    public struct NewShopMessage: Hashable, Sendable {
+        public let text: String
+        /// New work is paused from the start.
+        public let isWarning: Bool
+    }
+
+    /// `entitlement` is the new shop's standing (nil when it couldn't be
+    /// read: say it's ready, the status line appears once it can be).
+    /// Since 0120 the in-app trial is given once per person, so with
+    /// billing on a second shop starts lapsed (`no_subscription`).
+    public static func newShopMessage(shopName: String, entitlement: ShopEntitlement?, clock: ShopClock) -> NewShopMessage {
+        let ready = NewShopMessage(text: "\(shopName) is ready.", isWarning: false)
+        guard let entitlement, entitlement.billingEnabled else { return ready }
+        if entitlement.state == .lapsed || !entitlement.canWrite {
+            if entitlement.reason == "no_subscription" {
+                return NewShopMessage(
+                    text: "\(shopName) was created without a free trial, because a free trial is given once per person. " + pausedSentence,
+                    isWarning: true
+                )
+            }
+            return NewShopMessage(text: "\(shopName) was created. " + pausedText, isWarning: true)
+        }
+        if entitlement.state == .trialing, entitlement.isOwner, let end = entitlement.trialEndsAt {
+            return NewShopMessage(text: "\(shopName) is ready. Trial ends \(clock.longDayText(end)).", isWarning: false)
+        }
+        return ready
     }
 
     // MARK: - "Subscription inactive" refusals (HTTP 402)

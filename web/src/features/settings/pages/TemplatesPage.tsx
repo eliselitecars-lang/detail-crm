@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { useSearchParams } from 'react-router';
 import { Badge, Button, SectionCard, Switch, useToast } from '@/components/ui';
 import { useShop } from '@/features/shop/shopContext';
+import { useShopEntitlement } from '@/features/billing/api';
 import { LapsedAutomationsNotice } from '@/features/billing/components/LapsedNotice';
 import { formatPhone } from '@/lib/phone';
 import {
@@ -21,7 +22,7 @@ import {
   hasMailingAddress,
   MARKETING_EMAIL_KEYS,
 } from '../marketingAddress';
-import { reminderOffsetsOf } from '../templates/drafts';
+import { reminderOffsetsOf, requiredPlaceholderText } from '../templates/drafts';
 import {
   CHANNEL_LABELS,
   describeOffset,
@@ -29,7 +30,9 @@ import {
   TEMPLATE_KEYS,
   previewVars,
   TEMPLATE_GROUPS,
+  missingRequiredPlaceholders,
   templateMeta,
+  wordingInUse,
   type TemplateKeyMeta,
 } from '../templates/meta';
 import { useSettingsAccess } from '../useSettingsAccess';
@@ -39,6 +42,10 @@ export default function TemplatesPage() {
   const { shop } = useShop();
   const query = useMessageTemplates();
   const shopSettings = useShopSettings();
+  // 0124 invite_email_permit: a shop on a free trial always sends the default
+  // invitation wording (the invites function ignores its own).
+  const entitlement = useShopEntitlement(shop.id);
+  const trialDefaultWording = entitlement.data?.state === 'trialing';
   // ?edit=<key> opens a template's editor (links from Settings → Follow-ups).
   const [params, setParams] = useSearchParams();
   const editParam = params.get('edit');
@@ -102,6 +109,7 @@ export default function TemplatesPage() {
                         rows={byKey.get(meta.key) ?? []}
                         canEdit={canEdit}
                         emailNeedsAddress={noMailingAddress && MARKETING_EMAIL_KEYS.has(meta.key)}
+                        trialDefaultWording={trialDefaultWording}
                         onOpen={() => setEditing(meta.key)}
                       />
                     ))}
@@ -114,6 +122,7 @@ export default function TemplatesPage() {
                   rows={byKey.get(editing) ?? []}
                   previewVars={vars}
                   canEdit={canEdit}
+                  trialDefaultWording={trialDefaultWording}
                   onClose={() => setEditing(null)}
                 />
               )}
@@ -130,6 +139,7 @@ function TemplateRow({
   rows,
   canEdit,
   emailNeedsAddress,
+  trialDefaultWording,
   onOpen,
 }: {
   meta: TemplateKeyMeta;
@@ -137,6 +147,8 @@ function TemplateRow({
   canEdit: boolean;
   /** Marketing email with no shop mailing address on file: never sent (0119). */
   emailNeedsAddress: boolean;
+  /** Free trial: an always-sent message (invite) goes out in the default wording. */
+  trialDefaultWording: boolean;
   onOpen: () => void;
 }) {
   const toast = useToast();
@@ -157,6 +169,9 @@ function TemplateRow({
           </p>
         )}
         {meta.timingNote && <p className="text-muted mt-1 text-xs">{meta.timingNote}</p>}
+        {meta.alwaysSent && (
+          <WordingStatus meta={meta} rows={rows} trialDefaultWording={trialDefaultWording} />
+        )}
         {emailNeedsAddress && rows.some((r) => r.channel === 'email') && (
           <p className="text-warning-ink mt-1 text-xs">
             Emails aren’t sent until the shop’s mailing address is on file (Settings → Business
@@ -177,10 +192,14 @@ function TemplateRow({
           return (
             <div key={channel} className="flex items-center gap-2">
               <span aria-hidden="true" className="text-muted text-xs font-medium">
-                {channel === 'sms' ? 'Text' : 'Email'}
+                {meta.alwaysSent ? 'Your wording' : channel === 'sms' ? 'Text' : 'Email'}
               </span>
               <Switch
-                aria-label={`${meta.label}: ${CHANNEL_LABELS[channel]}`}
+                aria-label={
+                  meta.alwaysSent
+                    ? `${meta.label}: use your wording`
+                    : `${meta.label}: ${CHANNEL_LABELS[channel]}`
+                }
                 checked={row.enabled}
                 disabled={!canEdit || update.isPending}
                 onCheckedChange={(enabled) =>
@@ -189,7 +208,7 @@ function TemplateRow({
                     {
                       onSuccess: () =>
                         toast.success(
-                          `${meta.label} ${channel === 'sms' ? 'text' : 'email'} ${enabled ? 'on' : 'off'}`,
+                          switchToast(meta, row, channel, enabled, trialDefaultWording),
                         ),
                       onError: (error) => toast.error(error),
                     },
@@ -218,5 +237,63 @@ function TemplateRow({
         )}
       </div>
     </li>
+  );
+}
+
+/** What the list's switch did, in the words of what is now sent. */
+function switchToast(
+  meta: TemplateKeyMeta,
+  row: MessageTemplate,
+  channel: MessageTemplate['channel'],
+  enabled: boolean,
+  trialDefaultWording: boolean,
+): string {
+  if (!meta.alwaysSent) {
+    return `${meta.label} ${channel === 'sms' ? 'text' : 'email'} ${enabled ? 'on' : 'off'}`;
+  }
+  if (enabled && trialDefaultWording) {
+    return `${meta.label}: your wording is used once your free trial ends`;
+  }
+  // The message is still sent either way; only the wording changes.
+  return wordingInUse(meta, { ...row, enabled })
+    ? `${meta.label}: your wording is used`
+    : `${meta.label}: the default wording is used`;
+}
+
+/**
+ * For a message that is always sent (Team invitation): which wording goes
+ * out, and why the shop's own wording is ignored when it is.
+ */
+function WordingStatus({
+  meta,
+  rows,
+  trialDefaultWording,
+}: {
+  meta: TemplateKeyMeta;
+  rows: MessageTemplate[];
+  trialDefaultWording: boolean;
+}) {
+  const row = rows[0];
+  if (!row) return null;
+  if (trialDefaultWording) {
+    return (
+      <p className="text-muted mt-1 text-xs">
+        During your free trial, invitations are sent with the default wording.
+      </p>
+    );
+  }
+  if (!row.enabled) {
+    return (
+      <p className="text-muted mt-1 text-xs">
+        Your wording is off, so invitations are sent with the default wording.
+      </p>
+    );
+  }
+  const missing = missingRequiredPlaceholders(meta, row.body);
+  if (missing.length === 0) return null;
+  return (
+    <p className="text-warning-ink mt-1 text-xs">
+      {requiredPlaceholderText(missing)} Edit the wording to use it.
+    </p>
   );
 }

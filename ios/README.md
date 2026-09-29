@@ -115,7 +115,12 @@ ios/
   slug rules identical to the database), `SessionExpiry` (when a refused
   request means the session is over; `SessionExpiryGate`),
   `ShopEntitlement` (the shop's subscription standing, which status line
-  to show, and the PT402 / HTTP 402 refusal text), `UnsentVideoWarning`
+  to show — with the reason when the trial ended or the shop has no
+  subscription or trial, e.g. a person's second shop since 0120 — what
+  Create shop says once the new shop exists, and the PT402 / HTTP 402
+  refusal text), `MarketingAddress` (0119: marketing email needs the
+  shop's street address and city; email follow-ups read "Not sent" and
+  Business profile warns while either is blank), `UnsentVideoWarning`
   (the sign-out / discard / account-deletion wording while job videos
   haven't finished uploading), `ListPage` / `IDChunks` (paged "Load more"
   lists fetched with one extra row; id look-ups split into de-duplicated

@@ -9,10 +9,11 @@ import {
   MessagesSquare,
   Pencil,
   Phone,
+  Trash2,
   UserX,
 } from 'lucide-react';
 import { useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import {
   Badge,
   Button,
@@ -31,7 +32,7 @@ import { useShop } from '@/features/shop/shopContext';
 import { useCan } from '@/features/shop/useCan';
 import { toAppError } from '@/lib/errors';
 import { phoneHref } from '@/lib/phone';
-import { useCustomer, useSetCustomerArchived } from './api';
+import { useCustomer, useDeleteCustomer, useSetCustomerArchived } from './api';
 import { CustomerFormDialog } from './components/CustomerFormDialog';
 import { DocumentsTab } from './components/DocumentsTab';
 import { InvoicesTab, JobsTab, MembershipsTab, QuotesTab } from './components/HistoryTabs';
@@ -92,7 +93,10 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
   const [editing, setEditing] = useState(false);
   const [merging, setMerging] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const setArchived = useSetCustomerArchived(shopId);
+  const deleteCustomer = useDeleteCustomer(shopId);
+  const navigate = useNavigate();
 
   const name = customerName(customer);
   const archived = customer.archived_at !== null;
@@ -153,6 +157,31 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
     }
   };
 
+  const remove = async () => {
+    try {
+      await deleteCustomer.mutateAsync(customer.id);
+      toast.success(`${name} deleted`);
+      setConfirmDelete(false);
+      void navigate('/app/customers', { replace: true });
+    } catch (error) {
+      toast.error(toAppError(error).message);
+      setConfirmDelete(false);
+    }
+  };
+
+  // Deleting a customer (e.g. on their request) — a merged-away duplicate too,
+  // which still holds the old name and contact details.
+  const deleteButton = (
+    <Button
+      variant="secondary"
+      size="sm"
+      leadingIcon={<Trash2 className="size-4" aria-hidden="true" />}
+      onClick={() => setConfirmDelete(true)}
+    >
+      Delete
+    </Button>
+  );
+
   const linkClass = buttonClasses({ variant: 'secondary', size: 'sm' });
 
   return (
@@ -174,7 +203,9 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
         }
         actions={
           canManage &&
-          !merged && (
+          (merged ? (
+            deleteButton
+          ) : (
             <>
               <Button
                 variant="secondary"
@@ -214,8 +245,9 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
                   Merge into…
                 </Button>
               )}
+              {deleteButton}
             </>
-          )
+          ))
         }
       />
 
@@ -288,6 +320,16 @@ function CustomerDetail({ customer }: { customer: CustomerRow }) {
         title={`Archive ${name}?`}
         description="Archived customers are hidden from lists and pickers. Their jobs, invoices and history are kept, and you can restore them anytime."
         confirmLabel="Archive customer"
+      />
+      <ConfirmDialog
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        onConfirm={remove}
+        loading={deleteCustomer.isPending}
+        tone="danger"
+        title={`Delete ${name}?`}
+        description="The customer is deleted for good, with their vehicles, quotes, messages and files. This can’t be undone. A customer with jobs, invoices, payments or a membership can’t be deleted — those records are kept for your books; archive them instead."
+        confirmLabel="Delete customer"
       />
     </>
   );

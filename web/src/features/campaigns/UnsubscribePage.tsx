@@ -9,10 +9,12 @@ import { useUnsubscribe, useUnsubscribeInfo, type UnsubscribeInfo } from './api'
 import { isUnsubscribeToken } from './model';
 
 /**
- * Public /u/:token — the unsubscribe link in every campaign email (and where
- * the messaging function's List-Unsubscribe GET redirects). Nothing happens
- * until the visitor presses the button: link scanners and prefetchers open
- * links, and must not unsubscribe anyone.
+ * Public /u/:token — the unsubscribe link in every campaign and follow-up
+ * email (and where the messaging function's List-Unsubscribe GET redirects).
+ * Nothing happens until the visitor presses the button: link scanners and
+ * prefetchers open links, and must not unsubscribe anyone. The opt-out stops
+ * every email to the address, transactional included, and nobody can clear
+ * it (customers_comms_guard), so the page never promises a way back.
  */
 export default function UnsubscribePage() {
   const { token } = useParams();
@@ -54,7 +56,7 @@ function Unsubscribed({ shopName, focus }: { shopName: string; focus: boolean })
       icon={<MailCheck aria-hidden="true" />}
       tone="success"
       title="You’re unsubscribed"
-      body={`You won’t get any more emails from ${shopName} at this address. If you change your mind, contact ${shopName} and ask to be added back.`}
+      body={`You won’t get any more emails from ${shopName} at this address — including receipts, invoices and appointment reminders. This can’t be undone for this address; if you want emails from ${shopName} again, give them a different email address.`}
       focus={focus}
     />
   );
@@ -101,6 +103,12 @@ function UnsubscribeForm({ token, info }: { token: string; info: UnsubscribeInfo
         </h1>
         <p className="text-muted mt-1 text-sm">
           Stop receiving emails from {info.shop_name} at the address this email was sent to.
+        </p>
+        {/* 0033: an email opt-out blocks every email to the address, and no
+            one — the shop included — can clear it, so say so before the click. */}
+        <p className="text-muted mt-2 text-sm">
+          This stops all of their emails, including receipts, invoices and appointment reminders,
+          and can’t be undone for this address.
         </p>
       </div>
       <Button

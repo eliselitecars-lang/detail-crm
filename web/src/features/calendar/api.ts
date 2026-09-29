@@ -6,7 +6,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import type { Json } from '@/lib/database.types';
-import { unwrap, type Row } from '@/lib/db';
+import { readPages, unwrap, type Row } from '@/lib/db';
 import { AppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
@@ -59,23 +59,59 @@ const rowSchema = z.object({
   service_lng: z.number().nullable().default(null),
 });
 
+/**
+ * Most calendar rows read for one range. A 93-day range (the RPC's cap) of a
+ * very busy multi-van shop stays well under this; past it the page says the
+ * calendar is incomplete (`truncated`) instead of showing empty days.
+ */
+export const CALENDAR_MAX_ROWS = 20_000;
+
+export interface CalendarEvents {
+  rows: CalendarRow[];
+  /** More than CALENDAR_MAX_ROWS rows matched: the latest ones are missing. */
+  truncated: boolean;
+}
+
+/** One row per job, and per occurrence of a (repeating) blocked time. */
+const calendarRowKey = (row: { event_type: string; id: string; starts_at: string }) =>
+  `${row.event_type}:${row.id}:${row.starts_at}`;
+
+/**
+ * calendar_events for a range, read in pages: PostgREST returns at most
+ * max_rows (1,000) rows per request and cuts the rest silently, and a month
+ * grid (42 days) of a busy multi-van shop — jobs plus lunch and time-off
+ * blocks — passes that, which used to leave the last weeks empty. Ordered by
+ * start, then type and id (the RPC's own order, made explicit so the pages
+ * are stable).
+ */
 export function useCalendarEvents(range: CalendarRange | null, includeCancelled: boolean) {
   const { shopId } = useShop();
   return useQuery({
     queryKey: calendarKeys.events(shopId, range ?? { from: '', to: '' }, includeCancelled),
     enabled: range !== null,
     placeholderData: keepPreviousData,
-    queryFn: async (): Promise<CalendarRow[]> => {
-      if (!range) return [];
-      const data = unwrap(
-        await supabase.rpc('calendar_events', {
-          p_shop_id: shopId,
-          p_from: range.from,
-          p_to: range.to,
-          p_include_cancelled: includeCancelled,
-        }),
+    queryFn: async (): Promise<CalendarEvents> => {
+      if (!range) return { rows: [], truncated: false };
+      const args = {
+        p_shop_id: shopId,
+        p_from: range.from,
+        p_to: range.to,
+        p_include_cancelled: includeCancelled,
+      };
+      const read = await readPages(
+        (from, to, withCount) =>
+          supabase
+            .rpc('calendar_events', args, withCount ? { count: 'exact' } : undefined)
+            .order('starts_at')
+            .order('event_type')
+            .order('id')
+            .range(from, to),
+        {
+          limit: CALENDAR_MAX_ROWS,
+          key: calendarRowKey,
+        },
       );
-      return z.array(rowSchema).parse(data ?? []);
+      return { rows: z.array(rowSchema).parse(read.rows), truncated: read.truncated };
     },
   });
 }

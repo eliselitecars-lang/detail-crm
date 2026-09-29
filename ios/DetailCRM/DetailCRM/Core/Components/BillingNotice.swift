@@ -5,7 +5,8 @@
 //  The shop's subscription status line on Today and in More: the owner's
 //  trial end or a failing subscription payment, and for everyone the
 //  "creating new records is paused" notice while the subscription is
-//  inactive (DetailCore `ShopEntitlement.notice`). Text only — no prices,
+//  inactive, with the reason when the trial ended or the shop never had a
+//  subscription or trial (DetailCore `ShopEntitlement.notice`). Text only — no prices,
 //  no plans, no buttons or links toward buying (App Store 3.1.1 / 3.1.3).
 //  Nothing shows while billing is off, the shop is active or comped, or
 //  the standing can't be read; it never holds up the screen it sits on.

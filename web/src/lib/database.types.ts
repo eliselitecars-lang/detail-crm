@@ -5434,6 +5434,27 @@ export type Database = {
           },
         ]
       }
+      shop_invite_emails: {
+        Row: {
+          created_at: string
+          email_key: string
+          sent_by: string | null
+          shop_id: string
+        }
+        Insert: {
+          created_at?: string
+          email_key: string
+          sent_by?: string | null
+          shop_id: string
+        }
+        Update: {
+          created_at?: string
+          email_key?: string
+          sent_by?: string | null
+          shop_id?: string
+        }
+        Relationships: []
+      }
       shop_invites: {
         Row: {
           accepted_at: string | null
@@ -6550,6 +6571,10 @@ export type Database = {
       }
       billing_trial_days: { Args: Record<PropertyKey, never>; Returns: number }
       billing_trial_email_key: { Args: { p_email: string }; Returns: string }
+      billing_trial_email_key_0120: {
+        Args: { p_email: string }
+        Returns: string
+      }
       billing_upsert_plan: {
         Args: {
           p_active: boolean
@@ -7509,37 +7534,73 @@ export type Database = {
         }
         Returns: string
       }
-      coupon_redeem_for_job: {
-        Args: { p_coupon_id: string; p_shop_id: string }
-        Returns: {
-          active: boolean
-          code: string
-          created_at: string
-          customer_id: string | null
-          description: string | null
-          ends_at: string | null
-          id: string
-          kind: Database["public"]["Enums"]["coupon_kind"]
-          max_redemptions: number | null
-          min_subtotal_cents: number | null
-          new_customers_only: boolean
-          once_per_customer: boolean
-          online_only: boolean
-          redemptions: number
-          referrer_customer_id: string | null
-          service_ids: string[] | null
-          shop_id: string
-          starts_at: string | null
-          updated_at: string
-          value: number
-        }
-        SetofOptions: {
-          from: "*"
-          to: "coupons"
-          isOneToOne: true
-          isSetofReturn: false
-        }
-      }
+      coupon_redeem_for_job:
+        | {
+            Args: { p_coupon_id: string; p_shop_id: string }
+            Returns: {
+              active: boolean
+              code: string
+              created_at: string
+              customer_id: string | null
+              description: string | null
+              ends_at: string | null
+              id: string
+              kind: Database["public"]["Enums"]["coupon_kind"]
+              max_redemptions: number | null
+              min_subtotal_cents: number | null
+              new_customers_only: boolean
+              once_per_customer: boolean
+              online_only: boolean
+              redemptions: number
+              referrer_customer_id: string | null
+              service_ids: string[] | null
+              shop_id: string
+              starts_at: string | null
+              updated_at: string
+              value: number
+            }
+            SetofOptions: {
+              from: "*"
+              to: "coupons"
+              isOneToOne: true
+              isSetofReturn: false
+            }
+          }
+        | {
+            Args: {
+              p_coupon_id: string
+              p_online_booking: boolean
+              p_shop_id: string
+            }
+            Returns: {
+              active: boolean
+              code: string
+              created_at: string
+              customer_id: string | null
+              description: string | null
+              ends_at: string | null
+              id: string
+              kind: Database["public"]["Enums"]["coupon_kind"]
+              max_redemptions: number | null
+              min_subtotal_cents: number | null
+              new_customers_only: boolean
+              once_per_customer: boolean
+              online_only: boolean
+              redemptions: number
+              referrer_customer_id: string | null
+              service_ids: string[] | null
+              shop_id: string
+              starts_at: string | null
+              updated_at: string
+              value: number
+            }
+            SetofOptions: {
+              from: "*"
+              to: "coupons"
+              isOneToOne: true
+              isSetofReturn: false
+            }
+          }
       coupon_release_for_job: {
         Args: { p_coupon_id: string; p_shop_id: string }
         Returns: undefined
@@ -8263,6 +8324,14 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      invite_email_permit: {
+        Args: { p_email_key?: string; p_shop_id: string; p_user_id: string }
+        Returns: Json
+      }
+      invite_limit_retry_seconds: {
+        Args: { p_limit: number; p_times: string[] }
+        Returns: number
       }
       invite_member: {
         Args: {

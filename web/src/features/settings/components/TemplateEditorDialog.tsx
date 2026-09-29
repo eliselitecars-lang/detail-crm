@@ -33,6 +33,7 @@ import {
   remindersError,
   remindersFromDrafts,
   remindersPatch,
+  requiredPlaceholderText,
   isEmptyPatch,
   offsetDraftFrom,
   offsetError,
@@ -45,6 +46,7 @@ import {
 import {
   BODY_LIMITS,
   CHANNEL_LABELS,
+  missingRequiredPlaceholders,
   offsetFromInput,
   placeholdersFor,
   type TemplateKeyMeta,
@@ -57,6 +59,8 @@ export interface TemplateEditorDialogProps {
   rows: readonly MessageTemplate[];
   previewVars: Readonly<Record<string, string>>;
   canEdit: boolean;
+  /** Free trial: an always-sent message (invite) goes out in the default wording (0124). */
+  trialDefaultWording?: boolean;
   onClose: () => void;
 }
 
@@ -71,6 +75,7 @@ export function TemplateEditorDialog({
   rows,
   previewVars,
   canEdit,
+  trialDefaultWording = false,
   onClose,
 }: TemplateEditorDialogProps) {
   const toast = useToast();
@@ -123,12 +128,12 @@ export function TemplateEditorDialog({
 
   const save = async () => {
     const invalid = rows.some(
-      (row) => Object.keys(validateDraft(row.channel, draftFor(row))).length > 0,
+      (row) => Object.keys(validateDraft(row.channel, draftFor(row), meta)).length > 0,
     );
     if (invalid || offsetProblem) {
       setShowErrors(true);
       const firstBad = rows.find(
-        (row) => Object.keys(validateDraft(row.channel, draftFor(row))).length > 0,
+        (row) => Object.keys(validateDraft(row.channel, draftFor(row), meta)).length > 0,
       );
       if (firstBad) setChannel(firstBad.channel);
       return;
@@ -171,11 +176,12 @@ export function TemplateEditorDialog({
           key={row.id}
           row={row}
           draft={draftFor(row)}
-          errors={showErrors ? validateDraft(row.channel, draftFor(row)) : {}}
+          errors={showErrors ? validateDraft(row.channel, draftFor(row), meta) : {}}
           onChange={(patch) => edit(row, patch)}
           previewVars={previewVars}
           meta={meta}
           canEdit={canEdit}
+          trialDefaultWording={trialDefaultWording}
         />
       ) : (
         <MissingChannel meta={meta} channel={ch} canEdit={canEdit} offset={storedOffset} />
@@ -337,6 +343,7 @@ function ChannelEditor({
   previewVars,
   meta,
   canEdit,
+  trialDefaultWording,
 }: {
   row: MessageTemplate;
   draft: ChannelDraft;
@@ -345,6 +352,7 @@ function ChannelEditor({
   previewVars: Readonly<Record<string, string>>;
   meta: TemplateKeyMeta;
   canEdit: boolean;
+  trialDefaultWording: boolean;
 }) {
   const toast = useToast();
   const bodyRef = useRef<HTMLTextAreaElement>(null);
@@ -355,6 +363,10 @@ function ChannelEditor({
   const placeholders = placeholdersFor(meta.key);
   const known = new Set(placeholders.map((p) => p.name));
   const unknown = placeholdersIn(`${draft.subject}\n${draft.body}`).filter((n) => !known.has(n));
+  // Wording that is on but leaves out a required placeholder is never sent
+  // (the server uses the default wording); say so as it is typed.
+  const missing = draft.enabled ? missingRequiredPlaceholders(meta, draft.body) : [];
+  const defaultSent = meta.alwaysSent === true && (!draft.enabled || missing.length > 0);
   const preview = renderTemplate(draft.body, previewVars);
   const previewSubject = renderTemplate(draft.subject, previewVars);
   const segments = smsSegments(preview);
@@ -377,10 +389,10 @@ function ChannelEditor({
       <fieldset disabled={!canEdit} className="flex min-w-0 flex-col gap-4">
         <legend className="sr-only">{CHANNEL_LABELS[row.channel]} wording</legend>
         <Switch
-          label={`Send the ${isSms ? 'text' : 'email'}`}
+          label={meta.alwaysSent ? 'Use this wording' : `Send the ${isSms ? 'text' : 'email'}`}
           description={
-            meta.audience === 'staff'
-              ? 'Turn off to send invitations without this wording.'
+            meta.alwaysSent
+              ? 'Invitations are always emailed. Turn off to send the default wording instead.'
               : 'Turn off to stop sending this message on this channel.'
           }
           checked={draft.enabled}
@@ -437,6 +449,14 @@ function ChannelEditor({
             </div>
           </div>
         )}
+        {missing.length > 0 && !errors.body && (
+          <p
+            role="note"
+            className="bg-warning-soft text-warning-ink rounded-control px-3 py-2 text-xs"
+          >
+            {requiredPlaceholderText(missing)}
+          </p>
+        )}
         {unknown.length > 0 && (
           <p
             role="note"
@@ -472,6 +492,19 @@ function ChannelEditor({
 
       <section aria-label="Preview" className="flex min-w-0 flex-col gap-2">
         <h3 className="text-ink text-sm font-medium">Preview</h3>
+        {meta.alwaysSent && trialDefaultWording ? (
+          <p className="text-muted text-xs">
+            Not what’s sent yet: during your free trial, invitations use the default wording.
+          </p>
+        ) : (
+          defaultSent && (
+            <p className="text-muted text-xs">
+              Not what’s sent: while this wording is{' '}
+              {draft.enabled ? 'missing the invitation link' : 'off'}, invitations use the default
+              wording.
+            </p>
+          )
+        )}
         <div className="border-line bg-surface-2 rounded-card flex flex-col gap-2 border p-3">
           {!isSms && (
             <p className="text-ink border-line border-b pb-2 text-sm font-semibold break-words">

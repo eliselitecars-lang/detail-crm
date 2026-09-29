@@ -175,6 +175,42 @@ describe('BusinessProfilePage', () => {
   });
 });
 
+describe('BusinessProfilePage: removing the logo', () => {
+  it('asks first; Cancel keeps it, confirming clears logo_path and deletes the file', async () => {
+    setTableResult('shops', { data: { ...SHOP, logo_path: 'shop-1/logo.png' } });
+    const { user } = renderSettings('/app/settings/business');
+    const bucket = supabase.storage.from('shop-assets');
+    await user.click(await screen.findByRole('button', { name: 'Remove' }));
+
+    const dialog = await screen.findByRole('alertdialog', { name: 'Remove your logo?' });
+    expect(dialog).toHaveTextContent(/booking page, quotes, invoices and customer emails/);
+    expect(dialog).toHaveTextContent(/can’t be undone/);
+    const logoCleared = () =>
+      builders.shops?.some((b) =>
+        b.update.mock.calls.some((c) => JSON.stringify(c[0]) === '{"logo_path":null}'),
+      ) ?? false;
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('alertdialog', { name: 'Remove your logo?' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(logoCleared()).toBe(false);
+    expect(bucket.remove).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+    await user.click(
+      within(await screen.findByRole('alertdialog', { name: 'Remove your logo?' })).getByRole(
+        'button',
+        { name: 'Remove logo' },
+      ),
+    );
+    await waitFor(() => expect(logoCleared()).toBe(true));
+    await waitFor(() => expect(bucket.remove).toHaveBeenCalledWith(['shop-1/logo.png']));
+    expect(await screen.findByText('Logo removed')).toBeVisible();
+  });
+});
+
 describe('BusinessProfilePage: mailing address for marketing email (0119)', () => {
   it('says marketing email stops while the street address or city is blank', async () => {
     const { user } = renderSettings('/app/settings/business');
@@ -345,6 +381,129 @@ describe('TemplatesPage', () => {
         p_template_id: 'sms-1',
       }),
     );
+  });
+});
+
+describe('TemplatesPage: Team invitation (always sent; needs {{invite_link}})', () => {
+  const invite = (over: Partial<MessageTemplate> = {}) =>
+    template({
+      id: 'inv-email',
+      key: 'invite',
+      channel: 'email',
+      subject: 'Join {{shop_name}}',
+      body: 'Accept here: {{invite_link}}',
+      offset_minutes: null,
+      ...over,
+    });
+
+  it('labels the switch as the wording, not sending, and says what turning it off does', async () => {
+    setTableResult('message_templates', { data: [invite()] });
+    const { user } = renderSettings('/app/settings/templates');
+    const toggle = await screen.findByRole('switch', {
+      name: 'Team invitation: use your wording',
+    });
+    expect(
+      screen.queryByRole('switch', { name: /Team invitation: Email/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/Invitations are always sent/)).toBeVisible();
+    await user.click(toggle);
+    await waitFor(() => {
+      const update = builders.message_templates?.find((b) => b.update.mock.calls.length > 0);
+      expect(update?.update).toHaveBeenCalledWith({ enabled: false });
+    });
+    expect(await screen.findByText('Team invitation: the default wording is used')).toBeVisible();
+  });
+
+  it('says the default wording is sent while the wording is off or has no invitation link', async () => {
+    setTableResult('message_templates', { data: [invite({ enabled: false })] });
+    const first = renderSettings('/app/settings/templates');
+    expect(
+      await screen.findByText(
+        'Your wording is off, so invitations are sent with the default wording.',
+      ),
+    ).toBeVisible();
+    first.unmount();
+
+    setTableResult('message_templates', { data: [invite({ body: 'Welcome aboard!' })] });
+    renderSettings('/app/settings/templates');
+    expect(
+      await screen.findByText(
+        /Include the invitation link \(\{\{invite_link\}\}\)\. Without it, invitations are sent with the default wording\. Edit the wording/,
+      ),
+    ).toBeVisible();
+  });
+
+  it('says a shop on its free trial sends the default wording (0124 invite_email_permit)', async () => {
+    supabase.rpc.mockImplementation(((fn: string) =>
+      createBuilder(
+        fn === 'shop_entitlement'
+          ? {
+              data: {
+                billing_enabled: true,
+                state: 'trialing',
+                reason: 'trial',
+                plan_name: null,
+                trial_ends_at: '2099-01-01T00:00:00Z',
+                current_period_end: null,
+                cancel_at_period_end: false,
+                max_members: null,
+                members_used: 1,
+                can_write: true,
+                is_owner: true,
+              },
+            }
+          : { data: null },
+      )) as never);
+    setTableResult('message_templates', { data: [invite()] });
+    const { user } = renderSettings('/app/settings/templates');
+    expect(
+      await screen.findByText(
+        'During your free trial, invitations are sent with the default wording.',
+      ),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Edit Team invitation' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Team invitation' });
+    expect(
+      within(dialog).getByText(
+        'Not what’s sent yet: during your free trial, invitations use the default wording.',
+      ),
+    ).toBeVisible();
+  });
+
+  it('refuses to save wording without {{invite_link}} and explains why', async () => {
+    setTableResult('message_templates', { data: [invite()] });
+    const { user } = renderSettings('/app/settings/templates');
+    await user.click(await screen.findByRole('button', { name: 'Edit Team invitation' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Team invitation' });
+    expect(within(dialog).getByRole('switch', { name: /Use this wording/ })).toBeChecked();
+    const body = within(dialog).getByRole('textbox', { name: /^Message/ });
+    await user.clear(body);
+    await user.type(body, 'Welcome aboard!');
+    // Said as it is typed, before any save attempt.
+    expect(within(dialog).getByText(/^Include the invitation link/)).toHaveAttribute(
+      'role',
+      'note',
+    );
+    expect(within(dialog).getByText(/Not what’s sent/)).toBeVisible();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+    expect(
+      await within(dialog).findByText(
+        'Include the invitation link ({{invite_link}}). Without it, invitations are sent with the default wording.',
+      ),
+    ).toBeVisible();
+    expect(builders.message_templates?.some((b) => b.update.mock.calls.length > 0) ?? false).toBe(
+      false,
+    );
+
+    await user.click(within(dialog).getByRole('button', { name: 'Invitation link' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => {
+      const update = builders.message_templates?.find((b) => b.update.mock.calls.length > 0);
+      expect(update?.update).toHaveBeenCalledWith({
+        body: expect.stringContaining('{{invite_link}}') as unknown,
+      });
+    });
   });
 });
 

@@ -5,6 +5,9 @@
 //  Business profile: name, phone, email, address, time zone and review
 //  link. Owners/admins edit; managers read. The server validates every
 //  field again (E.164 phone, email, time zone name, lengths).
+//  The address is also the mailing address every marketing email ends
+//  with (0119): without a street line and city, marketing email isn't
+//  sent, and the Address section says so (DetailCore `MarketingAddress`).
 //
 
 import SwiftUI
@@ -120,6 +123,7 @@ private struct SettingsProfileForm: View {
                 if showErrors, let problem = problems["address"] {
                     InlineMessage(text: problem, kind: .error)
                 }
+                MailingAddressNote(onFile: MarketingAddress.isOnFile(addressLine1: draft.addressLine1, city: draft.city))
             }
             VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                 SectionHeader(title: "Time zone & reviews")
@@ -174,10 +178,41 @@ private struct SettingsProfileReadOnly: View {
                 InfoRow(label: "Address", value: shop.addressSummary ?? "—").themedRow()
                 InfoRow(label: "Time zone", value: TimeZonePickerView.displayName(for: shop.timezone)).themedRow()
                 InfoRow(label: "Review link", value: shop.reviewURL ?? "—").themedRow()
+                if !MarketingAddress.isOnFile(addressLine1: shop.addressLine1, city: shop.city) {
+                    MailingAddressNote(onFile: false).themedRow()
+                }
             } footer: {
                 Text("Only owners and admins can change the business profile.")
             }
         }
         .listStyle(.insetGrouped)
+    }
+}
+
+/// What the address is used for, and — while the street line or city is
+/// blank — that marketing email isn't sent (0119).
+private struct MailingAddressNote: View {
+    let onFile: Bool
+
+    var body: some View {
+        if onFile {
+            Text(MarketingAddress.useText)
+                .font(Theme.Typography.footnote)
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(Theme.Typography.subheadline)
+                    .foregroundStyle(Theme.warningInk)
+                    .accessibilityHidden(true)
+                Text(MarketingAddress.missingText)
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+        }
     }
 }

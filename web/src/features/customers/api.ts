@@ -7,7 +7,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { z } from 'zod';
 import { pageRange, type SortState } from '@/components/ui';
 import { unwrap, unwrapRequired } from '@/lib/db';
-import { AppError, edgeFunctionError } from '@/lib/errors';
+import { AppError, edgeFunctionError, toAppError } from '@/lib/errors';
 import { shopKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { normalizeTags, type CustomerLifecycle, type CustomerRow } from './model';
@@ -219,6 +219,61 @@ export function useSetCustomerArchived(shopId: string) {
           .eq('shop_id', shopId)
           .eq('id', id),
       );
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: customerKeys.all(shopId) }),
+  });
+}
+
+/** 23503 on delete: jobs / invoices / payments / memberships restrict it (0006, 0011, 0012, 0050). */
+export const CUSTOMER_IN_USE_MESSAGE =
+  'This customer has jobs, invoices, payments or a membership on file. Those are kept for your records, so the customer can’t be deleted — archive them instead.';
+export const CUSTOMER_HAS_CARDS_MESSAGE =
+  'Remove this customer’s saved cards first (Saved cards tab), so they’re removed from Stripe too.';
+
+/**
+ * Deletes a customer for good (managers+, RLS customers_delete) — e.g. for a
+ * customer's deletion request. Their vehicles, quotes, messages and files go
+ * with them (ON DELETE CASCADE; files are queued for storage-purge). The
+ * database refuses (23503) while jobs, invoices, payments or a membership
+ * point at them. Saved cards must be removed first so they are detached in
+ * Stripe too (deleting the rows alone would leave them on the shop's Stripe
+ * customer).
+ */
+export function useDeleteCustomer(shopId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const cards = await supabase
+        .from('customer_payment_methods')
+        .select('id', { count: 'exact', head: true })
+        .eq('shop_id', shopId)
+        .eq('customer_id', id);
+      if (cards.error) throw toAppError(cards.error);
+      if ((cards.count ?? 0) > 0) {
+        throw new AppError(CUSTOMER_HAS_CARDS_MESSAGE, { kind: 'conflict' });
+      }
+      const result = await supabase
+        .from('customers')
+        .delete()
+        .eq('shop_id', shopId)
+        .eq('id', id)
+        .select('id');
+      if (result.error) {
+        const error = toAppError(result.error);
+        if (error.code === '23503') {
+          throw new AppError(CUSTOMER_IN_USE_MESSAGE, { kind: 'conflict', code: error.code });
+        }
+        throw error;
+      }
+      // RLS hides the row from a caller who may not delete it: nothing deleted.
+      if ((result.data ?? []).length === 0) {
+        throw new AppError('This customer couldn’t be deleted. Refresh and try again.', {
+          kind: 'not_found',
+        });
+      }
+    },
+    onSuccess: (_data, id) => {
+      queryClient.removeQueries({ queryKey: customerKeys.detail(shopId, id) });
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: customerKeys.all(shopId) }),
   });

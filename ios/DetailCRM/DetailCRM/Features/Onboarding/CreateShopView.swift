@@ -82,7 +82,8 @@ struct CreateShopView: View {
             navigationButtons
             if step == .contact {
                 // Creating the shop is the step the Terms count as
-                // acceptance (and, with billing on, starts its trial).
+                // acceptance (and, with billing on, starts its trial unless
+                // this person already had one — 0120).
                 LegalLinksFooter(step: .createShop)
             }
         }
@@ -179,10 +180,25 @@ struct CreateShopView: View {
             }
             return
         }
+        // Read before activating (that swaps the root to the main tabs).
+        // Since 0120 the free trial is given once per person, so with
+        // billing on a second shop starts with new work paused; say why
+        // now rather than leave the owner to meet the refusal on every
+        // create. Never holds up opening the shop.
+        let entitlement = try? await BillingService.entitlement(shopID: shop.id)
+        let message = ShopEntitlement.newShopMessage(
+            shopName: shop.name,
+            entitlement: entitlement,
+            clock: shop.clock
+        )
         do {
             // Activating the new shop swaps the root to the main tabs.
             try await appState.activateShop(shop.id)
-            toasts.show("\(shop.name) is ready.")
+            if message.isWarning {
+                toasts.show(message.text, style: .info, duration: .seconds(10))
+            } else {
+                toasts.show(message.text)
+            }
         } catch {
             // The shop exists; only opening it failed. Go back to the list
             // (pull to refresh shows it) instead of offering to create it again.
