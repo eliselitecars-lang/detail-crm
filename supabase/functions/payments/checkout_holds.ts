@@ -19,11 +19,17 @@
  * session (expireOpenSessions and closeSession callers release it:
  * releaseCheckoutHolds; the customer's booking_cancel and staff
  * cancel_open_payments also sweep every live hold of the job / invoice).
+ * The customer's invoice_checkout_cancel (back from Stripe with ?canceled=1,
+ * or before using a gift card on /i) closes only the invoice's own /i pay
+ * links and releases their invoice holds and the job hold such a link took
+ * (releaseInvoicePayLinks): never a deposit link, a staff PaymentSheet or a
+ * Terminal payment.
  */
-import { errors } from "../_shared/errors.ts";
+import { errors, type HttpError } from "../_shared/errors.ts";
 import { idempotencyKey, onAccount } from "../_shared/stripe.ts";
 import {
   type AccountRow,
+  customerSessions,
   dbFailure,
   expireOpenSessions,
   isInvalidRequest,
@@ -32,6 +38,7 @@ import {
   refusedWith,
   releaseCheckoutHolds,
   type Services,
+  sessionFor,
   type SessionMatch,
 } from "./lib.ts";
 
@@ -358,4 +365,128 @@ export async function releaseInvoiceCheckouts(
     match,
     { refuseCompleted: false },
   );
+}
+
+/** The invoice a customer's invoice_checkout_cancel closes pay links for. */
+export interface PayLinkInvoice {
+  id: string;
+  shop_id: string;
+  customer_id: string;
+  job_id: string | null;
+}
+
+/** 409 payment_in_progress, worded for the customer (the /i page shows it as is). */
+function payLinkPaying(): HttpError {
+  return errors.conflict(
+    "Your card payment is already going through, so the payment page can't be closed. Refresh in a moment to see it.",
+    { reason: "payment_in_progress" },
+  );
+}
+
+/**
+ * Closes one /i pay link. "closed" when it can no longer be paid: this call
+ * expired it (a repeat replays Stripe's first answer under the same key), it
+ * had expired already, or Stripe no longer knows it on this account.
+ * "paying" when it was paid (complete: a card payment, or a bank debit /
+ * pay-later payment submitted and still processing), or when Stripe would
+ * not expire it although it is still open (a payment on it is being
+ * confirmed right now). A "paying" page keeps its holds: its payment row
+ * releases them.
+ */
+async function closePayLink(
+  s: Services,
+  account: AccountRow,
+  sessionId: string,
+): Promise<"closed" | "paying"> {
+  try {
+    await s.stripe.checkout.sessions.expire(
+      sessionId,
+      {},
+      onAccount(account.stripe_account_id, {
+        idempotencyKey: await idempotencyKey("checkout_expire", sessionId),
+      }),
+    );
+    return "closed";
+  } catch (err) {
+    // Only open sessions can be expired.
+    if (!isInvalidRequest(err)) throw err;
+  }
+  try {
+    const current = await s.stripe.checkout.sessions.retrieve(
+      sessionId,
+      {},
+      onAccount(account.stripe_account_id),
+    );
+    return current.status === "expired" ? "closed" : "paying";
+  } catch (err) {
+    // Not on this account (e.g. the shop connected another Stripe account).
+    if (isInvalidRequest(err)) return "closed";
+    throw err;
+  }
+}
+
+/**
+ * The customer's invoice_checkout_cancel: closes the invoice's open /i pay
+ * links (the Checkout Sessions invoice_checkout opened for it) and releases
+ * their holds, so a gift card or store credit can pay the invoice at once
+ * instead of after Stripe expires the page. The links are
+ *  - the invoice customer's open sessions matching sessionFor.invoice (the
+ *    live invoice's links booking_cancel matches: mode payment, kind payment,
+ *    this invoice_id), and
+ *  - every live hold of the invoice (only invoice_checkout takes one; also a
+ *    link opened for the invoice's previous customer).
+ * Deposit links (kind deposit) and their job holds, card-setup and
+ * membership links, staff PaymentSheets and Terminal payments (PaymentIntents,
+ * never listed here) are left alone. Each closed link loses its invoice hold
+ * and the job hold a single-job invoice's link took (by session id, so a
+ * deposit link's hold is never among them). Nothing open: nothing changes.
+ * A link that was just paid, or whose payment is going through, keeps its
+ * holds and the call ends in 409 payment_in_progress once every other link
+ * is closed. Returns how many links were closed and released.
+ */
+export async function releaseInvoicePayLinks(
+  s: Services,
+  account: AccountRow,
+  invoice: PayLinkInvoice,
+): Promise<number> {
+  const shopId = invoice.shop_id;
+  const links = new Set<string>();
+  const customer = await loadCustomer(s.admin, shopId, invoice.customer_id);
+  if (customer.stripe_customer_id) {
+    const match = sessionFor.invoice(shopId, invoice.id);
+    for (
+      const session of await customerSessions(s, account, customer.stripe_customer_id, "open")
+    ) {
+      if (session.status === "open" && match(session)) links.add(session.id);
+    }
+  }
+  for (const sessionId of await liveHolds(s, shopId, [], invoice.id)) links.add(sessionId);
+
+  const closed: string[] = [];
+  let paying = false;
+  for (const sessionId of links) {
+    if (await closePayLink(s, account, sessionId) === "closed") closed.push(sessionId);
+    else paying = true;
+  }
+  if (closed.length > 0) {
+    // The closed links' holds (invoice and job), then the database's own
+    // releases for the invoice and its job (idempotent), by session only.
+    await releaseCheckoutHolds(s, shopId, closed);
+    if (invoice.job_id) {
+      const { error } = await s.admin.rpc("payments_release_job_checkouts", {
+        p_shop_id: shopId,
+        p_job_id: invoice.job_id,
+        p_session_ids: closed,
+      });
+      if (error) throw dbFailure("payments_release_job_checkouts", error);
+    }
+    const { error } = await s.admin.rpc("payments_release_invoice_checkouts", {
+      p_shop_id: shopId,
+      p_invoice_id: invoice.id,
+      p_session_ids: closed,
+    });
+    if (error) throw dbFailure("payments_release_invoice_checkouts", error);
+  }
+  if (paying) throw payLinkPaying();
+  return closed.length;
 }

@@ -4,6 +4,8 @@
  * public; every action enforces its own authorization:
  *
  *   invoice_checkout           PUBLIC by invoice token
+ *   invoice_checkout_cancel    PUBLIC by invoice token: expire the invoice's open
+ *                              /i pay links (only those) and release their holds
  *   booking_deposit_checkout   PUBLIC by booking (job) token
  *   quote_deposit_checkout     PUBLIC by quote token (a self-scheduled quote's deposit)
  *   booking_cancel             PUBLIC by booking (job) token: expire the booking's
@@ -59,6 +61,8 @@ import {
   bookingDepositCheckout,
   bookingDepositCheckoutInput,
   invoiceCheckout,
+  invoiceCheckoutCancel,
+  invoiceCheckoutCancelInput,
   invoiceCheckoutInput,
   quoteDepositCheckout,
   quoteDepositCheckoutInput,
@@ -97,6 +101,10 @@ export function makeHandler(deps: Deps = {}): (req: Request) => Promise<Response
     invoice_checkout: jsonAction(
       invoiceCheckoutInput,
       (input, ctx) => invoiceCheckout(services(deps, ctx), input),
+    ),
+    invoice_checkout_cancel: jsonAction(
+      invoiceCheckoutCancelInput,
+      (input, ctx) => invoiceCheckoutCancel(services(deps, ctx), input),
     ),
     booking_deposit_checkout: jsonAction(
       bookingDepositCheckoutInput,

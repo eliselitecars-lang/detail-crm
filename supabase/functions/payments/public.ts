@@ -1,6 +1,9 @@
 /**
  * Public payment actions, authorized only by an unguessable link token:
  *   invoice_checkout          /i/<token>        pay the invoice balance (+ optional tip)
+ *   invoice_checkout_cancel   /i/<token>        close the invoice's open pay links
+ *                                               (back with ?canceled=1, or before a
+ *                                               gift card) and release their holds
  *   booking_deposit_checkout  /booking/<token>  pay the booking deposit still due
  *                                               (never more than the job's
  *                                               invoice still owes)
@@ -87,6 +90,7 @@ import {
   holdJobCheckout,
   refuseClosedJobSession,
   refuseUnheldInvoiceSession,
+  releaseInvoicePayLinks,
   releaseJobCheckouts,
 } from "./checkout_holds.ts";
 
@@ -239,6 +243,45 @@ export async function invoiceCheckout(
     tip_cents: tip,
     currency: shop.currency,
   };
+}
+
+// ---------------------------------------------------------------------------
+// invoice_checkout_cancel — the customer closes the invoice's card pay page
+// ---------------------------------------------------------------------------
+
+export const invoiceCheckoutCancelInput = z.object({
+  /** invoices.public_token (the /i/<token> link). */
+  token: publicToken,
+}).strict();
+
+/**
+ * The customer left the card page (/i/<token>?canceled=1) or wants to use a
+ * gift card instead: the invoice's open /i pay links are expired and their
+ * holds released (releaseInvoicePayLinks), so gift cards and store credit are
+ * accepted at once instead of after Stripe expires the page (~30-40 min).
+ * Only the links invoice_checkout opened: never a deposit link, a staff
+ * PaymentSheet or a Terminal payment, and nothing is settled or charged.
+ * Nothing open (or no Stripe account): 200 without any change. Repeating it
+ * is harmless (the expire calls are idempotent per session). 409
+ * payment_in_progress when a link was just paid or its payment is going
+ * through (that link keeps its holds).
+ */
+export async function invoiceCheckoutCancel(
+  s: Services,
+  input: z.output<typeof invoiceCheckoutCancelInput>,
+): Promise<{ released: number }> {
+  const { data, error } = await s.admin
+    .from("invoices")
+    .select(INVOICE_COLUMNS)
+    .eq("public_token", input.token)
+    .maybeSingle();
+  if (error) throw dbFailure("invoices lookup", error);
+  const invoice = data as InvoiceRow | null;
+  // Drafts are not published (same as invoice_checkout / public_get_invoice).
+  if (!invoice || invoice.status === "draft") throw errors.notFound("Invoice not found.");
+  const account = await findAccount(s.admin, invoice.shop_id);
+  if (!account) return { released: 0 };
+  return { released: await releaseInvoicePayLinks(s, account, invoice) };
 }
 
 interface JobRow {

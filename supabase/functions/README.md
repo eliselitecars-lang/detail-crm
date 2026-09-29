@@ -305,7 +305,7 @@ Invoice state errors (`assertPayable`), used by the invoice actions:
 
 ### `payments`
 
-`verify_jwt = false`: six actions are public (link token or shop slug),
+`verify_jwt = false`: seven actions are public (link token or shop slug),
 two take a signed-in client's JWT, one is cron; the rest verify the staff
 JWT themselves. Payment rows are written server-side; `stripe-webhook` is
 the source of truth for final states, so after a checkout/sheet/reader
@@ -370,6 +370,39 @@ link would charge: refresh), `booking_cancelled` (every appointment on the
 invoice was cancelled; the page says it is not payable), `422 unprocessable` reasons `tip_too_large`
 (`details.max_tip_cents`), `amount_out_of_range`, `stripe_not_connected`,
 `charges_disabled`.
+
+#### `invoice_checkout_cancel` (PUBLIC, invoice token)
+
+Body `{token}` (`token` = `invoices.public_token`, the `/i/<token>` link;
+nothing else is accepted). The customer closes the invoice's open card pay
+page: `/i` calls it once when Stripe sends the customer back with
+`?canceled=1`, and from the gift card panel ("Close it and use the gift
+card") after a redemption was refused with `checkout_open`. It expires the
+invoice's open `/i` pay links, the Checkout Sessions `invoice_checkout`
+opened for it (the invoice customer's open sessions with `kind` `payment`
+and this `invoice_id`, and every live hold of the invoice, also a link
+opened for a previous customer), and releases their invoice holds and the
+job hold a single-job invoice's link took, so gift cards and store credit
+are accepted at once instead of after Stripe expires the page. Nothing
+else is touched: deposit links and their job holds, card-setup and
+membership links, staff PaymentSheets and Terminal payments stay as they
+are, and nothing is settled or charged.
+
+200: `{released}`, the number of pay links closed (expired now, or already
+closed in Stripe with a hold left behind). Nothing open, or a shop without
+Stripe: `{released: 0}` and nothing changes. Repeating the call is
+harmless: the expire calls are idempotent per session and a closed link
+has no hold left. Like the other link-token actions it is bounded by the
+unguessable token (no amount, no new Stripe object; Stripe rate limits
+answer `503 service_unavailable` with `Retry-After`).
+
+Errors: `404 not_found` (unknown token or a draft invoice), `409 conflict`
+reason `payment_in_progress` when a pay link was just paid, its bank debit /
+pay-later payment is processing, or Stripe will not expire it because its
+payment is being confirmed; `error` is written for the customer ("Your card
+payment is already going through, so the payment page can't be closed.
+Refresh in a moment to see it."). That link keeps its holds (its payment
+row releases them); the invoice's other links are still closed.
 
 #### `booking_deposit_checkout` (PUBLIC, booking token)
 
@@ -436,8 +469,9 @@ A hold ends when Stripe expires the session, when its payment row turns
 processing / received (a trigger), or when this function expires the
 session: **every** session it expires (a newer link, a job's deposit links,
 a staff PaymentSheet / Terminal intent or saved-card charge superseding the
-customer's pages, `booking_cancel`, `cancel_open_payments`) loses its job and
-invoice holds at once (`expireOpenSessions`). `cancel_open_payments` also
+customer's pages, `booking_cancel`, `invoice_checkout_cancel`,
+`cancel_open_payments`) loses its job and invoice holds at once
+(`expireOpenSessions`). `cancel_open_payments` also
 sweeps every live hold that blocks the document — by `invoice_id` the
 invoice's holds and its jobs' holds, by `job_id` the job's and its live
 invoice's — expiring any of those sessions still open (also one opened for a
