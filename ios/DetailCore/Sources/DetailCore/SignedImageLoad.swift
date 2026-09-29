@@ -16,6 +16,11 @@
 //
 
 import Foundation
+// CGSize/CGPoint/CGRect members (.zero, CGRect(x:y:width:height:)) live in the
+// CoreGraphics overlay on Apple platforms; Linux Foundation defines them itself.
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 public struct SignedImageLoad: Equatable, Sendable {
 
