@@ -8,6 +8,9 @@
 -- (and its re-check), the shop switch, rebook link, 4-per-channel limit,
 -- roles and cross-shop FKs.
 \ir fixtures/two_shops.psql
+-- marketing email carries the shop's postal address (0119: none on file = not sent)
+update public.shops set address_line1 = '100 Main St', city = 'Birmingham', region = 'AL', postal_code = '35203'
+ where id in (tests.fx('shop_a'), tests.fx('shop_b'));
 
 select tests.as_superuser();
 update public.booking_settings set enabled = true where shop_id = tests.fx('shop_a');

@@ -209,6 +209,40 @@ describe('CampaignDetailPage', () => {
     expect(await screen.findByText('Campaign launched to 7 recipients')).toBeInTheDocument();
   });
 
+  it('links the owner to the Business profile when an email launch needs a mailing address', async () => {
+    const email = { ...draft, channel: 'email', subject: 'Spring' };
+    setTableResult('campaigns', { data: email });
+    supabase.rpc.mockImplementation(((fn: string) =>
+      createBuilder(
+        fn === 'launch_campaign'
+          ? {
+              data: null,
+              error: {
+                code: '55000',
+                message:
+                  "add your shop's mailing address (Settings → Business profile) before sending marketing email: the law requires it in every marketing email",
+                details: null,
+                hint: 'postal_address_required',
+              },
+            }
+          : { data: fn === 'preview_campaign_audience' ? 7 : null },
+      )) as never);
+    const { user } = renderRoute(<CampaignDetailPage />, {
+      path: '/app/campaigns/camp-1',
+      routePath: '/app/campaigns/:campaignId',
+    });
+    await user.click(await screen.findByRole('button', { name: 'Review & launch' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Launch this campaign?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Launch campaign' }));
+    expect(
+      await screen.findByText(/mailing address \(Settings → Business profile\)/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Add the mailing address' })).toHaveAttribute(
+      'href',
+      '/app/settings/business',
+    );
+  });
+
   it('shows delivery stats and cancels unsent messages', async () => {
     setTableResult('campaigns', {
       data: {

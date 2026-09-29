@@ -145,6 +145,44 @@ describe('CalendarPage', () => {
     expect(screen.getByRole('button', { name: /Try again|Retry/ })).toBeInTheDocument();
   });
 
+  it('phone list view never says "No jobs" while jobs are loading or failed to load', async () => {
+    window.localStorage.setItem('detailcrm:calendarView', 'listWeek');
+    let answer: () => void = () => undefined;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    supabase.rpc.mockImplementation((...args: unknown[]) => {
+      if (String(args[0]) !== 'calendar_events') {
+        return createBuilder({ data: String(args[0]) === 'shop_team' ? TEAM : null });
+      }
+      // Pending until answer(), then a server error.
+      const builder = createBuilder({ error: { message: 'boom', code: 'XX000' } });
+      const settle = builder.then.bind(builder);
+      builder.then = ((onFulfilled, onRejected) =>
+        answered.then(() => settle(onFulfilled, onRejected))) as typeof builder.then;
+      return builder;
+    });
+    setTableResult('business_hours', { data: [] });
+    setTableResult('resources', { data: [] });
+    renderRoute(<CalendarPage />, {
+      path: '/app/calendar',
+      routePath: '/app/calendar',
+      shop: shopValue({ membership: membership({ role: 'technician' }) }),
+    });
+    await waitFor(() => expect(screen.getAllByText('Loading jobs…').length).toBeGreaterThan(0));
+    expect(screen.queryByText(/No jobs in this range/)).not.toBeInTheDocument();
+
+    answer();
+    expect(await screen.findByText('Couldn’t load the calendar')).toBeInTheDocument();
+    expect(screen.getByText('Jobs for this range couldn’t be loaded.')).toBeInTheDocument();
+    expect(screen.queryByText(/No jobs in this range/)).not.toBeInTheDocument();
+  });
+
+  it('phone list view says "No jobs" once an empty range has loaded', async () => {
+    window.localStorage.setItem('detailcrm:calendarView', 'listWeek');
+    setup('technician', []);
+    await waitFor(() => expect(screen.getAllByText(/No jobs in this range/).length).toBe(2));
+    expect(screen.queryByText('Loading jobs…')).not.toBeInTheDocument();
+  });
+
   it('shows a bay / van view with one column per resource for a single shop day', async () => {
     const { user } = setup(
       'owner',

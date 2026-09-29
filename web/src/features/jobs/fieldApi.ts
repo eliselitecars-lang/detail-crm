@@ -967,11 +967,12 @@ export function useJobMessages(jobId: string, customerId: string, enabled: boole
 }
 
 /**
- * Templates the job page sends. `booking_confirmed` (managers+) carries
- * {{booking_link}}: the customer's /booking page, where they manage the
- * booking and pay a deposit that is due.
+ * Templates the job page sends. `job_started` goes out only from here (or
+ * the Inbox / iPhone): no status change sends it. `booking_confirmed`
+ * (managers+) carries {{booking_link}}: the customer's /booking page, where
+ * they manage the booking and pay a deposit that is due.
  */
-export type JobTemplateKey = 'on_the_way' | 'job_completed' | 'booking_confirmed';
+export type JobTemplateKey = 'on_the_way' | 'job_started' | 'job_completed' | 'booking_confirmed';
 
 /** The customer's booking page (SPEC §6 /booking/:token). */
 export function bookingPageUrl(token: string, origin?: string): string {

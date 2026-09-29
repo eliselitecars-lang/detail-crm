@@ -5,6 +5,9 @@
 -- START / service_role clear it for the whole address; staff can record but
 -- never clear or write suppressions; shop isolation and constraints.
 \ir fixtures/two_shops.psql
+-- marketing email carries the shop's postal address (0119: none on file = not sent)
+update public.shops set address_line1 = '100 Main St', city = 'Birmingham', region = 'AL', postal_code = '35203'
+ where id in (tests.fx('shop_a'), tests.fx('shop_b'));
 
 insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
   on conflict (key) do update set value = excluded.value;

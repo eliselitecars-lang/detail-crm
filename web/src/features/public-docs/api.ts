@@ -7,7 +7,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { unwrap } from '@/lib/db';
-import { AppError, isCheckoutOpenError, toAppError } from '@/lib/errors';
+import { AppError, edgeFunctionError, isCheckoutOpenError, toAppError } from '@/lib/errors';
 import { publicKey } from '@/lib/queryKeys';
 import { supabase } from '@/lib/supabase';
 import { createCheckout, navigation } from './shared/checkout';
@@ -454,17 +454,48 @@ const redeemResponseSchema = invoiceDocumentSchema.extend({
 
 /**
  * public_redeem_gift_card's checkout_open refusal is worded for staff
- * ("cancel the open payments first"); a customer can't do that, so say what
- * they can: finish or close the card page, or wait until it expires.
+ * ("cancel the open payments first"). The customer's way out is to finish
+ * paying on the card page, or to close it from here (useCancelInvoiceCheckout,
+ * which the gift card panel offers next to this message).
  */
 export function checkoutOpenForCustomer(error: unknown): AppError {
   const until = /\(until ([^)]+)\)/.exec(toAppError(error).message)?.[1];
   return new AppError(
-    `A card payment page for this invoice is still open. Finish paying there, or try the gift card again${
-      until ? ` after ${until}` : ' in about half an hour'
-    }, when that page expires.`,
+    `A card payment page for this invoice is still open${
+      until ? ` (until ${until})` : ''
+    }. Finish paying there, or close that page to use your gift card now.`,
     { kind: 'conflict', code: '55000', cause: error },
   );
+}
+
+/**
+ * payments `invoice_checkout_cancel` (PUBLIC by invoice token): expires the
+ * invoice's open card payment pages (the Checkout Sessions invoice_checkout
+ * opened for this /i link) and releases their holds, so a gift card or store
+ * credit can pay the invoice right away instead of after the ~30-40 minutes
+ * Stripe keeps a page alive. Staff payment sheets and terminal payments are
+ * not the customer's to close and stay untouched. The edge refuses (409
+ * payment_in_progress) when one of the pages was just paid.
+ */
+export async function cancelInvoiceCheckout(token: string): Promise<void> {
+  let response: Awaited<ReturnType<typeof supabase.functions.invoke<unknown>>>;
+  try {
+    response = await supabase.functions.invoke<unknown>('payments', {
+      body: { action: 'invoice_checkout_cancel', token },
+    });
+  } catch (error) {
+    throw await edgeFunctionError(error);
+  }
+  if (response.error) throw await edgeFunctionError(response.error);
+}
+
+/** cancelInvoiceCheckout, then the invoice is read again (its payability may have moved). */
+export function useCancelInvoiceCheckout(token: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => cancelInvoiceCheckout(token),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: publicDocKeys.invoice(token) }),
+  });
 }
 
 /**

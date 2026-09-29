@@ -24,6 +24,14 @@ struct CustomerDetailContent: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
                 AnyView(CustomerHeaderCard(customer: customer, clock: clock))
                 AnyView(CustomerPrimaryActions(customer: customer, permissions: permissions, newJob: actions.newJob))
+                if permissions.canSeeLeadRequests {
+                    AnyView(CustomerLeadRequestsSection(
+                        state: history.leadRequests,
+                        fields: history.customFields.value ?? [],
+                        clock: clock,
+                        retry: actions.retryLeadRequests
+                    ))
+                }
                 AnyView(CustomerContactDetails(customer: customer))
                 AnyView(CustomerTagsAndNotes(customer: customer))
                 AnyView(OpsCustomerCustomDataSection(
@@ -54,7 +62,8 @@ struct CustomerDetailContent: View {
                     showTotals: permissions.canSeeJobTotals,
                     clock: clock,
                     currencyCode: currencyCode,
-                    retry: actions.retryHistory
+                    retry: actions.retryHistory,
+                    loadMore: actions.loadMoreJobs
                 ))
                 if permissions.canManageDocuments {
                     AnyView(OpsCustomerDocumentsSection(customerID: customer.id, canManage: permissions.canManageDocuments))
@@ -76,10 +85,22 @@ struct CustomerDetailContent: View {
     private var moneySections: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
             if permissions.canSeeQuotes {
-                AnyView(CustomerQuotesSection(state: history.quotes, clock: clock, currencyCode: currencyCode, retry: actions.retryHistory))
+                AnyView(CustomerQuotesSection(
+                    state: history.quotes,
+                    clock: clock,
+                    currencyCode: currencyCode,
+                    retry: actions.retryHistory,
+                    loadMore: actions.loadMoreQuotes
+                ))
             }
             if permissions.canSeeInvoices {
-                AnyView(CustomerInvoicesSection(state: history.invoices, clock: clock, currencyCode: currencyCode, retry: actions.retryHistory))
+                AnyView(CustomerInvoicesSection(
+                    state: history.invoices,
+                    clock: clock,
+                    currencyCode: currencyCode,
+                    retry: actions.retryHistory,
+                    loadMore: actions.loadMoreInvoices
+                ))
             }
             if permissions.canSeeMemberships {
                 AnyView(CustomerMembershipsSection(state: history.memberships, clock: clock, currencyCode: currencyCode, retry: actions.retryHistory))
@@ -390,11 +411,12 @@ private struct CustomerVehicleRow: View {
 // MARK: - Jobs
 
 private struct CustomerJobsSection: View {
-    let state: LoadState<[CustomerJobSummary]>
+    let state: LoadState<HistoryList<CustomerJobSummary>>
     let showTotals: Bool
     let clock: ShopClock
     let currencyCode: String
     let retry: () async -> Void
+    let loadMore: () async -> Void
 
     @State private var showAll = false
 
@@ -407,7 +429,8 @@ private struct CustomerJobsSection: View {
                 CustomersSectionStatusRow(kind: .loading)
             case .failed(let message):
                 CustomersSectionStatusRow(kind: .failed(message), retry: retry)
-            case .loaded(let jobs):
+            case .loaded(let list):
+                let jobs = list.rows
                 if jobs.isEmpty {
                     CustomersSectionStatusRow(kind: .empty("No jobs yet."))
                 } else {
@@ -421,13 +444,19 @@ private struct CustomerJobsSection: View {
                     }
                     if jobs.count > collapsedCount {
                         CustomersRowDivider()
-                        let toggleTitle: String = showAll ? "Show fewer" : "Show all \(jobs.count) jobs"
+                        let toggleTitle: String = showAll
+                            ? "Show fewer"
+                            : HistoryListing.expandTitle(loaded: jobs.count, total: list.total, plural: "jobs")
                         Button(toggleTitle) {
                             showAll.toggle()
                         }
                         .font(Theme.Typography.footnote.weight(.semibold))
                         .foregroundStyle(Theme.glacier)
                         .padding(.vertical, Theme.Spacing.xs)
+                    }
+                    // Older jobs: only once the loaded ones are all shown.
+                    if showAll || jobs.count <= collapsedCount {
+                        CustomerHistoryMore(list: list, plural: "jobs", loadMore: loadMore)
                     }
                 }
             }
@@ -474,13 +503,43 @@ private struct CustomerJobRow: View {
     }
 }
 
+// MARK: - Older history
+
+/// Under a history list that doesn't hold every row: how many exist and a
+/// button for the next page (nothing when the list is complete).
+private struct CustomerHistoryMore<Row>: View {
+    let list: HistoryList<Row>
+    let plural: String
+    let loadMore: () async -> Void
+
+    var body: some View {
+        if let notice = HistoryListing.truncationNotice(loaded: list.rows.count, total: list.total, plural: plural) {
+            CustomersRowDivider()
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                Text(notice)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                AsyncButton(style: .themeSecondaryCompact) {
+                    await loadMore()
+                } label: {
+                    Text(HistoryListing.loadMoreTitle(remaining: list.remaining, pageSize: HistoryListing.pageSize))
+                }
+                .accessibilityHint("Adds older \(plural) to the list")
+            }
+            .padding(.vertical, Theme.Spacing.xs)
+        }
+    }
+}
+
 // MARK: - Quotes
 
 private struct CustomerQuotesSection: View {
-    let state: LoadState<[CustomerQuoteSummary]>
+    let state: LoadState<HistoryList<CustomerQuoteSummary>>
     let clock: ShopClock
     let currencyCode: String
     let retry: () async -> Void
+    let loadMore: () async -> Void
 
     var body: some View {
         CustomersSectionCard("Quotes") {
@@ -489,7 +548,8 @@ private struct CustomerQuotesSection: View {
                 CustomersSectionStatusRow(kind: .loading)
             case .failed(let message):
                 CustomersSectionStatusRow(kind: .failed(message), retry: retry)
-            case .loaded(let quotes):
+            case .loaded(let list):
+                let quotes = list.rows
                 if quotes.isEmpty {
                     CustomersSectionStatusRow(kind: .empty("No quotes yet."))
                 } else {
@@ -507,6 +567,7 @@ private struct CustomerQuotesSection: View {
                         }
                         .buttonStyle(.themeRow)
                     }
+                    CustomerHistoryMore(list: list, plural: "quotes", loadMore: loadMore)
                 }
             }
         }
@@ -524,10 +585,11 @@ private struct CustomerQuotesSection: View {
 // MARK: - Invoices
 
 private struct CustomerInvoicesSection: View {
-    let state: LoadState<[CustomerInvoiceSummary]>
+    let state: LoadState<HistoryList<CustomerInvoiceSummary>>
     let clock: ShopClock
     let currencyCode: String
     let retry: () async -> Void
+    let loadMore: () async -> Void
 
     var body: some View {
         CustomersSectionCard("Invoices") {
@@ -536,7 +598,8 @@ private struct CustomerInvoicesSection: View {
                 CustomersSectionStatusRow(kind: .loading)
             case .failed(let message):
                 CustomersSectionStatusRow(kind: .failed(message), retry: retry)
-            case .loaded(let invoices):
+            case .loaded(let list):
+                let invoices = list.rows
                 if invoices.isEmpty {
                     CustomersSectionStatusRow(kind: .empty("No invoices yet."))
                 } else {
@@ -554,6 +617,7 @@ private struct CustomerInvoicesSection: View {
                         }
                         .buttonStyle(.themeRow)
                     }
+                    CustomerHistoryMore(list: list, plural: "invoices", loadMore: loadMore)
                 }
             }
         }

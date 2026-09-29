@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { addLocalDays, shopLocalToUtcIso, shopToday } from '@/lib/dates';
 import { renderRoute } from '@/test/render';
-import { mockRpc, resetSupabaseMock, supabase } from '@/test/supabaseMock';
+import { edgeHttpError, mockRpc, resetSupabaseMock, supabase } from '@/test/supabaseMock';
 import InvoicePage from './InvoicePage';
 import QuotePage from './QuotePage';
 import { quoteDocumentSchema } from './api';
@@ -386,30 +386,138 @@ describe('InvoicePage — parity', () => {
     expect(await screen.findByText('This gift card has expired.')).toBeInTheDocument();
   });
 
-  it('tells the customer to finish or wait while a card payment page is open (checkout_open)', async () => {
-    mockRpc({
-      public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },
-      public_redeem_gift_card: {
-        data: null,
-        error: {
-          code: '55000',
-          message:
-            'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
-          details: null,
-          hint: 'checkout_open',
-        },
-      },
+  it('offers to close an open card payment page (checkout_open), then uses the gift card', async () => {
+    const doc = invoiceFixture({ gift_card_redeemable: true });
+    const after = invoiceFixture({ balance_cents: 15000, amount_paid_cents: 15000 });
+    let held = true;
+    const calls = mockRpc({
+      public_get_invoice: { data: doc },
+      public_redeem_gift_card: () =>
+        held
+          ? {
+              data: null,
+              error: {
+                code: '55000',
+                message:
+                  'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+                details: null,
+                hint: 'checkout_open',
+              },
+            }
+          : {
+              data: {
+                ...after,
+                gift_card_result: {
+                  redeemed: true,
+                  message: null,
+                  amount_cents: 5000,
+                  remaining_cents: 0,
+                  last4: 'Q7ZK',
+                },
+              },
+            },
+    });
+    supabase.functions.invoke.mockImplementation(() => {
+      held = false;
+      return Promise.resolve({ data: { sessions_expired: 1 }, error: null });
     });
     const { user } = renderInvoice();
     await user.type(await screen.findByLabelText(/Gift card code/), 'ABCD-EFGH');
     await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
     expect(
       await screen.findByText(
-        'A card payment page for this invoice is still open. Finish paying there, or try the gift card again after 3:40 PM, when that page expires.',
+        'A card payment page for this invoice is still open (until 3:40 PM). Finish paying there, or close that page to use your gift card now.',
       ),
     ).toBeInTheDocument();
     // Staff wording ("cancel the open payments") is never shown to a customer.
     expect(screen.queryByText(/cancel the open payments/i)).not.toBeInTheDocument();
+    // Only the customer's click closes the page (no ?canceled=1 here).
+    expect(supabase.functions.invoke).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Close it and use the gift card' }));
+    expect(await screen.findByText('Gift card applied')).toBeInTheDocument();
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(1);
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+      body: { action: 'invoice_checkout_cancel', token: DOC_TOKEN },
+    });
+    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(2);
+  });
+
+  it('says why the card page could not be closed (e.g. it was just paid)', async () => {
+    mockRpc({
+      public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },
+      public_redeem_gift_card: {
+        data: null,
+        error: {
+          code: '55000',
+          message: 'a card payment page for this invoice is still open (until 3:40 PM)',
+          details: null,
+          hint: 'checkout_open',
+        },
+      },
+    });
+    supabase.functions.invoke.mockResolvedValue({
+      data: null,
+      error: edgeHttpError(409, {
+        error: 'A payment for this invoice is going through. Refresh in a moment.',
+        reason: 'payment_in_progress',
+      }),
+    });
+    const { user } = renderInvoice();
+    await user.type(await screen.findByLabelText(/Gift card code/), 'ABCD-EFGH');
+    await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
+    await user.click(await screen.findByRole('button', { name: 'Close it and use the gift card' }));
+    expect(
+      await screen.findByText(
+        /Couldn’t close the card page: A payment for this invoice is going through/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('closes the abandoned card page on the ?canceled=1 return, so a gift card works at once', async () => {
+    let held = true;
+    const calls = mockRpc({
+      public_get_invoice: { data: invoiceFixture({ gift_card_redeemable: true }) },
+      public_redeem_gift_card: () =>
+        held
+          ? { data: null, error: { code: '55000', message: 'still open', hint: 'checkout_open' } }
+          : {
+              data: {
+                ...invoiceFixture({ balance_cents: 15000, amount_paid_cents: 15000 }),
+                gift_card_result: {
+                  redeemed: true,
+                  message: null,
+                  amount_cents: 5000,
+                  remaining_cents: 0,
+                  last4: 'Q7ZK',
+                },
+              },
+            },
+    });
+    supabase.functions.invoke.mockImplementation(() => {
+      held = false;
+      return Promise.resolve({ data: { sessions_expired: 1 }, error: null });
+    });
+    const { user } = renderInvoice(`/i/${DOC_TOKEN}?canceled=1`);
+    expect(await screen.findByText('Payment cancelled')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+        body: { action: 'invoice_checkout_cancel', token: DOC_TOKEN },
+      }),
+    );
+    await user.type(screen.getByLabelText(/Gift card code/), 'ABCD-EFGH');
+    await user.click(screen.getByRole('button', { name: 'Apply gift card' }));
+    expect(await screen.findByText('Gift card applied')).toBeInTheDocument();
+    expect(calls.filter((c) => c.fn === 'public_redeem_gift_card')).toHaveLength(1);
+    // Once per visit, even though the document was read again.
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not close card pages on the ?paid=1 return', async () => {
+    mockRpc({ public_get_invoice: { data: invoiceFixture() } });
+    renderInvoice(`/i/${DOC_TOKEN}?paid=1&canceled=1`);
+    expect(await screen.findByText(/Confirming your payment|still confirming/)).toBeInTheDocument();
+    expect(supabase.functions.invoke).not.toHaveBeenCalled();
   });
 
   it('shows clearing bank payments and hides Pay while they cover the balance', async () => {

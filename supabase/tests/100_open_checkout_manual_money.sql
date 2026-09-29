@@ -9,6 +9,8 @@
 
 select tests.as_superuser();
 update public.shops set tax_rate_bps = 0 where id = tests.fx('shop_a');
+-- job_a asks a deposit, so its deposit pages can be held (0118 refuses one with nothing due)
+update public.jobs set deposit_required_cents = 5000 where id = tests.fx('job_a');
 insert into public.shop_stripe_accounts (shop_id, stripe_account_id, charges_enabled) values (tests.fx('shop_a'), 'acct_A1', true);
 select tests.authenticate_as(tests.fx('u_owner_a'));
 select tests.fx_set('inv', (public.create_invoice_from_job(tests.fx('job_a'))).id);

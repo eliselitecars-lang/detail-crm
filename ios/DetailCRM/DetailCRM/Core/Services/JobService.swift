@@ -211,6 +211,21 @@ enum JobService {
             .value
     }
 
+    /// Every move of the job past its completion gates, oldest first: who
+    /// overrode the required checklist items / photo minimums, when, why
+    /// and what was missing (P-11; staff who can work the job read them).
+    static func gateOverrides(shopID: UUID, jobID: UUID) async throws -> [JobsGateOverride] {
+        try await Supa.client
+            .from("job_gate_overrides")
+            .select(JobsGateOverride.selectColumns)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("job_id", value: jobID.uuidString)
+            .order("created_at", ascending: true)
+            .order("id", ascending: true)
+            .execute()
+            .value
+    }
+
     /// Internal (staff-only) notes; technicians may edit these on assigned jobs.
     static func updateInternalNotes(shopID: UUID, jobID: UUID, notes: String?) async throws -> Job {
         try await Supa.client
@@ -569,6 +584,34 @@ enum JobService {
         } catch let error as EdgeFunctionError where error.reason == "payment_in_progress" {
             throw AppError.message(paymentInProgressMessage)
         }
+    }
+
+    /// Runs a job edit that may lower the job's total or deposit (line
+    /// edits and removals, the discount, the deposit). While a deposit
+    /// payment page of the job can still be paid the database refuses such
+    /// a cut (0118: 55000 HINT `checkout_open`), so the page can't charge
+    /// more than the job now asks. This releases the job's open payments
+    /// (`cancel_open_payments` with `job_id`) and tries once more; a page
+    /// already processing stays open and the server's message (it names
+    /// when the page closes) is shown. Only for members who may release
+    /// payments (`canRelease`); others get the refusal as it is.
+    static func releasingOpenCheckout<T>(
+        shopID: UUID,
+        jobID: UUID,
+        canRelease: Bool,
+        _ write: () async throws -> T
+    ) async throws -> T {
+        guard canRelease else { return try await write() }
+        return try await OpenCheckoutRefusal.retryingAfterRelease(
+            isRefusal: { error in
+                guard let postgrest = error as? PostgrestError else { return false }
+                return OpenCheckoutRefusal.matches(code: postgrest.code, hint: postgrest.hint)
+            },
+            release: {
+                _ = try await releaseOpenPayments(shopID: shopID, jobID: jobID)
+            },
+            write: write
+        )
     }
 
     // MARK: - New job: customers

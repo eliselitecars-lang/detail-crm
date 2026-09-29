@@ -4,7 +4,9 @@
 //
 //  Account creation. After sign-up the user either lands in onboarding
 //  (create or join a shop) or, when the project requires email
-//  confirmation, sees instructions to confirm first.
+//  confirmation, sees instructions to confirm first. The Terms of Service
+//  and Privacy Policy links sit under the button (creating the account is
+//  what the Terms count as acceptance).
 //
 
 import SwiftUI
@@ -66,6 +68,7 @@ struct SignUpView: View {
                 AsyncButton("Create account") {
                     await signUp()
                 }
+                LegalLinksFooter(step: .createAccount)
             }
         }
     }

@@ -6,6 +6,9 @@
 -- footer like campaign emails; transactional email gets neither. Shop
 -- isolation and constraints.
 \ir fixtures/two_shops.psql
+-- marketing email carries the shop's postal address (0119: none on file = not sent)
+update public.shops set address_line1 = '100 Main St', city = 'Birmingham', region = 'AL', postal_code = '35203'
+ where id in (tests.fx('shop_a'), tests.fx('shop_b'));
 -- shop A takes online bookings, so the follow-up's {{booking_page_link}} is live
 update public.booking_settings set enabled = true where shop_id = tests.fx('shop_a');
 
@@ -79,8 +82,9 @@ select tests.ok((select body like '%https://app.example.test/u/%' from public.me
                   where customer_id = tests.fx('cust_a') and template_key = 'follow_up' and channel = 'email'),
                 'marketing follow_up email carries a working unsubscribe link');
 select tests.eq((select body from public.messages where id = tests.fx('fu_mail')),
-                'Come back! Unsubscribe: https://app.example.test/u/' || tests.fx('fu_token'),
-                'the placed link is used (no duplicate footer; extra vars cannot replace it)');
+                'Come back! Unsubscribe: https://app.example.test/u/' || tests.fx('fu_token')
+                  || E'\n\nShop A · 100 Main St, Birmingham, AL 35203',
+                'the placed link is used (no duplicate footer; extra vars cannot replace it); the postal address ends it (0119)');
 
 -- the seeded wording (no placeholder) gets the unsubscribe footer
 select tests.authenticate_as(tests.fx('u_owner_a'));
@@ -92,9 +96,9 @@ select tests.fx_set('fu_mail2', public.enqueue_customer_template(tests.fx('shop_
                                                                  tests.fx('job_a')));
 select tests.ok((select body like E'Hi Alice,\n\nIt has been a while since your last visit to Shop A.%'
                         and body like E'%\n\nTo unsubscribe from these emails, visit: https://app.example.test/u/'
-                                      || unsubscribe_token::text
+                                      || unsubscribe_token::text || E'\n\nShop A · 100 Main St, Birmingham, AL 35203'
                    from public.messages where id = tests.fx('fu_mail2')),
-                'default follow_up wording ends with the unsubscribe footer');
+                'default follow_up wording ends with the unsubscribe footer, then the postal address (0119)');
 select tests.ok((select count(distinct unsubscribe_token) = 2 from public.messages
                   where id in (tests.fx('fu_mail'), tests.fx('fu_mail2'))), 'one token per email');
 -- the SMS follow-up has the STOP line and no token

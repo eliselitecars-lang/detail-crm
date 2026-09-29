@@ -31,6 +31,7 @@ import { vehicleLabel } from '../../model';
 import { useCustomerVehicles } from '../../newJobApi';
 import { DiscountDialog } from './DiscountDialog';
 import { CatalogDialog, LineDialog } from './LineItemDialogs';
+import { useJobEditError } from './useJobEditError';
 
 type DialogState =
   | { kind: 'catalog' }
@@ -44,6 +45,7 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
   const canManage = useCan('jobs.manage');
   const canSeeMoney = useCan('invoices.viewAssigned');
   const toast = useToast();
+  const editError = useJobEditError(job.id);
   const lines = useLineItems(job.id);
   const move = useMoveLineItem(job.id);
   const remove = useDeleteLineItem();
@@ -298,7 +300,7 @@ export function LineItemsCard({ job }: { job: JobDetail }) {
             toast.success('Item deleted');
             setDeleting(null);
           } catch (error) {
-            toast.error(error);
+            editError(error);
           }
         }}
       />

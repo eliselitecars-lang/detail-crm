@@ -2,7 +2,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { Rocket, Save, Trash2 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import type { z } from 'zod';
 import {
   Button,
@@ -19,9 +19,10 @@ import {
   useToast,
 } from '@/components/ui';
 import { formatDateTime, shopLocalToUtcIso, utcToShopLocal } from '@/lib/dates';
-import { errorMessage } from '@/lib/errors';
+import { errorMessage, toAppError } from '@/lib/errors';
 import { BillingErrorLink } from '@/features/billing/BillingErrorLink';
 import { useShop } from '@/features/shop/shopContext';
+import { useCan } from '@/features/shop/useCan';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import {
   useAudiencePreview,
@@ -65,6 +66,7 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
   const save = useSaveCampaign();
   const launch = useLaunchCampaign();
   const remove = useDeleteCampaign();
+  const canEditBusiness = useCan('settings.manage');
   const [audience, setAudience] = useState<AudienceForm>(() =>
     campaign ? audienceToForm(campaign.audience) : { ...EMPTY_AUDIENCE_FORM },
   );
@@ -226,6 +228,14 @@ export function CampaignEditor({ campaign }: CampaignEditorProps) {
         >
           {submitError}
           <BillingErrorLink error={submitCause} />
+          {canEditBusiness && isPostalAddressRequired(submitCause) && (
+            <Link
+              to="/app/settings/business"
+              className="text-primary-ink ml-1 font-medium whitespace-nowrap underline"
+            >
+              Add the mailing address
+            </Link>
+          )}
         </p>
       )}
 
@@ -479,4 +489,16 @@ function CampaignPreviewPanel({
       )}
     </section>
   );
+}
+
+/**
+ * launch_campaign's refusal of an email campaign while the shop has no
+ * mailing address on file (0119: 55000 HINT postal_address_required; every
+ * marketing email must carry it).
+ */
+function isPostalAddressRequired(error: unknown): boolean {
+  if (error === null || error === undefined) return false;
+  const appError = toAppError(error);
+  const hint = (appError.cause as { hint?: unknown } | undefined)?.hint;
+  return appError.code === '55000' && hint === 'postal_address_required';
 }

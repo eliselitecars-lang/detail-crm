@@ -152,6 +152,18 @@ ios/
   and a confirmed "Discard this video".
 * Theme additions: `Theme.scrim` (dark overlay behind white text on
   camera / video) and `Theme.Typography.caption2`.
+* `JobStorageImage` — every private Storage image on the job screen
+  (photo thumbnails, the full-screen viewer, damage-mark photos,
+  signatures). DetailCore `SignedImageLoad` signs a link when the list
+  had none, re-signs once when a link from the list fails (an expired
+  hour-long link), and otherwise ends in a message with Retry — never an
+  endless spinner. The viewer's `JobZoomableImageView` is a UIScrollView:
+  pinch where the fingers are, double-tap to zoom at the tap, drag to pan;
+  at the photo's edge the pager takes over.
+* `JobsGateOverridesNotice` — on the job screen under the header, every
+  move past the completion gates (`job_gate_overrides`: who, when, the
+  reason and what was missing, DetailCore `GateWaiver`), for everyone who
+  can work the job.
 
 **Type names:** new top-level types start with their owner's prefix
 (`Jobs*`, `Money*`, `Ops*`); nested helper types live inside them.
@@ -179,7 +191,16 @@ ios/
   listed (so a manager can close it) and counts from Monday.
 * **Customer screen:** custom fields (`OpsCustomerCustomDataSection`),
   documents (`OpsCustomerDocumentsSection`), referral link
-  (`OpsReferralCodeRow`).
+  (`OpsReferralCodeRow`). Managers and up also see "Web form requests"
+  (`CustomerLeadRequestsSection`, `CustomerService.leadRequests`): the
+  message, vehicle described and answers of the customer's lead form
+  submissions, newest 10 with the total (a lead form never changes an
+  existing customer, so this is the only place the request is kept; the
+  new-lead notification opens this screen). Jobs, quotes and invoices load
+  50 at a time with the server's exact count (`CustomerService.jobsPage` /
+  `quotesPage` / `invoicesPage`, DetailCore `HistoryList`): a longer
+  history says "Showing the 50 most recent of 80 jobs." with "Load 30
+  more", so every row the overview tiles count can be reached.
 * **Settings:** booking link QR code (`OpsBookingQRView`) and the personal
   iCal feed in Your account (`OpsCalendarFeedRow`).
 * **Reports:** `OpsEarningsCard` (technicians: their own; owners / admins:
@@ -207,13 +228,29 @@ ios/
   `MoneyTerminalTokenProvider` that imports StripeTerminal (its `Toggle`,
   `PaymentMethod` and `PaymentStatus` names clash with SwiftUI and
   DetailCore); it runs Tap to Pay or a Bluetooth reader and asks for
-  location access first (see below).
+  location access first (see below). When a payment ends (paid,
+  declined / failed, canceled) the progress sheet announces it to
+  VoiceOver and moves focus to the result (DetailCore
+  `PaymentOutcomeSpeech`): Apple's card screen has just closed, so the
+  changed text alone isn't heard.
 * **Memberships** support weekly plans, visit limits (`Membership.Usage`,
   `MoneyMembershipUsageRow`) and "Offer on the online join page".
 * **Save a card without charging** (customer screen, managers and above):
   `CustomerAddCardSheet` calls `payments` `setup_card` and opens Stripe's
   PaymentSheet in setup mode; the webhook stores the card and the sheet
   polls `PaymentService.awaitNewSavedCard` until it shows.
+* **Legal links:** Create account, Sign in, the shop picker (under the
+  choices and in its account menu), Create shop and Join a team show the
+  Terms of Service and Privacy Policy (`LegalLinksFooter`, DetailCore
+  `LegalNotice`, web `/terms` and `/privacy`) with the sentence that says
+  the step counts as accepting the Terms; Your account lists them too.
+* **Job price / deposit cuts** (line edits and removals, the discount, the
+  deposit) are refused by the database while a deposit payment page of the
+  job can still be paid (0118: 55000 HINT `checkout_open`). For members who
+  may release payments, `JobService.releasingOpenCheckout` releases the
+  job's open payments (`cancel_open_payments` with `job_id`) and retries
+  once (DetailCore `OpenCheckoutRefusal`, as for manual invoice payments);
+  otherwise the server's message says when the page closes.
 * **Status reasons** (cancel reason, completion-gate override) are checked
   against the server's 500-character limit (DetailCore
   `Validation.statusReasonMaxLength`, counted like Postgres `char_length`)

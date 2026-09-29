@@ -7,9 +7,13 @@
 //  entitlement) and the SDK says this iPhone supports it; otherwise it
 //  explains why it isn't offered. The first use shows how it works. The
 //  payment itself runs in MoneyTapToPayModel; this shows its progress.
+//  When the payment ends (paid, declined / failed, canceled) VoiceOver
+//  says so at once and focus moves to the result, because Apple's card
+//  screen has just closed and the operator can't see the change.
 //
 
 import SwiftUI
+import UIKit
 import DetailCore
 
 struct MoneyTapToPayButton: View {
@@ -193,6 +197,10 @@ struct MoneyTapToPayButton: View {
 
         private var model: MoneyTapToPayModel { .shared }
 
+        /// Focus goes to the result when the payment ends.
+        @AccessibilityFocusState private var resultFocused: Bool
+        @State private var announceTask: Task<Void, Never>?
+
         var body: some View {
             FormScreen {
                 VStack(spacing: Theme.Spacing.lg) {
@@ -205,10 +213,43 @@ struct MoneyTapToPayButton: View {
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.updatesFrequently)
+                        .accessibilityFocused($resultFocused)
                 }
                 .frame(maxWidth: .infinity)
                 .cardStyle()
                 actions
+            }
+            .onChange(of: model.phase) { _, phase in
+                announceOutcome(phase)
+            }
+            .onDisappear { announceTask?.cancel() }
+        }
+
+        /// The end of a payment, for VoiceOver (nil while it's under way).
+        static func outcome(of phase: MoneyTapToPayModel.Phase) -> PaymentOutcomeSpeech.Outcome? {
+            switch phase {
+            case .succeeded(let text): return .succeeded(text)
+            case .failed(let text): return .failed(text)
+            case .canceled: return .canceled
+            case .idle, .preparing, .collecting, .processing: return nil
+            }
+        }
+
+        /// Says the result and moves focus to it, after Apple's card screen
+        /// has closed (an announcement made while it closes is cut off).
+        private func announceOutcome(_ phase: MoneyTapToPayModel.Phase) {
+            announceTask?.cancel()
+            guard let outcome = Self.outcome(of: phase) else { return }
+            let text = PaymentOutcomeSpeech.announcement(for: outcome)
+            announceTask = Task { @MainActor in
+                try? await Task.sleep(for: PaymentOutcomeSpeech.announcementDelay)
+                guard !Task.isCancelled, Self.outcome(of: model.phase) == outcome else { return }
+                resultFocused = true
+                let announcement = NSAttributedString(
+                    string: text,
+                    attributes: [.accessibilitySpeechQueueAnnouncement: true]
+                )
+                UIAccessibility.post(notification: .announcement, argument: announcement)
             }
         }
 

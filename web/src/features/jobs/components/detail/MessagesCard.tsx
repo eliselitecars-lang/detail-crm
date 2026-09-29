@@ -1,4 +1,4 @@
-import { CalendarCheck, CheckCircle2, Navigation } from 'lucide-react';
+import { CalendarCheck, CheckCircle2, Navigation, Wrench } from 'lucide-react';
 import { useState } from 'react';
 import {
   Button,
@@ -17,6 +17,7 @@ import { useJobMessages, useSendJobTemplate, type JobTemplateKey } from '../../f
 
 const TEMPLATE_LABELS: Record<JobTemplateKey, string> = {
   on_the_way: '“On my way”',
+  job_started: '“Work started”',
   job_completed: '“Job complete”',
   booking_confirmed: '“Booking confirmed”',
 };
@@ -74,6 +75,16 @@ export function MessagesCard({ job }: { job: JobDetail }) {
                 onClick={() => void onSend('on_the_way')}
               >
                 On my way
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={send.isPending && send.variables.templateKey === 'job_started'}
+                disabled={send.isPending}
+                leadingIcon={<Wrench className="size-4" aria-hidden="true" />}
+                onClick={() => void onSend('job_started')}
+              >
+                Work started
               </Button>
               <Button
                 size="sm"

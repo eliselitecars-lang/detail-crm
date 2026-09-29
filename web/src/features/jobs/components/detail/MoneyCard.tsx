@@ -30,6 +30,7 @@ import {
   useSetDepositFollowupsPaused,
 } from '../../fieldApi';
 import { describeFollowup } from '../../model';
+import { useJobEditError } from './useJobEditError';
 
 /**
  * Deposit and invoice panel. Every amount is read from job_payment_summary
@@ -278,6 +279,7 @@ function DepositFollowups({ jobId }: { jobId: string }) {
 
 function DepositDialog({ job, onClose }: { job: JobDetail; onClose: () => void }) {
   const toast = useToast();
+  const editError = useJobEditError(job.id);
   const update = useUpdateJob(job.id);
   const [value, setValue] = useState<number | null>(job.deposit_required_cents);
   const save = async () => {
@@ -286,7 +288,7 @@ function DepositDialog({ job, onClose }: { job: JobDetail; onClose: () => void }
       toast.success('Deposit saved');
       onClose();
     } catch (error) {
-      toast.error(error);
+      editError(error);
     }
   };
   return (

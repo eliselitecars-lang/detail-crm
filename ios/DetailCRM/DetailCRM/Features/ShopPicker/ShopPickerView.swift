@@ -4,7 +4,9 @@
 //
 //  Shown when the signed-in user has no active shop: pick one of their
 //  shops, create a new shop, or join a team by invite. Also reached from
-//  More > Switch Shop.
+//  More > Switch Shop. The Terms of Service and Privacy Policy are linked
+//  under the choices and in the account menu (a signed-in person with no
+//  shop can't reach Settings).
 //
 
 import SwiftUI
@@ -88,6 +90,8 @@ struct ShopPickerView: View {
                             .foregroundStyle(Theme.glacier)
                     }
                     .themedRow()
+                } footer: {
+                    LegalLinksFooter(step: .createOrJoinShop)
                 }
             }
             .listStyle(.insetGrouped)
@@ -108,6 +112,17 @@ struct ShopPickerView: View {
             Menu {
                 if let email = appState.userEmail {
                     Text("Signed in as \(email)")
+                }
+                // The legal pages, reachable before any shop exists.
+                if let terms = LegalWebLinks.termsOfService {
+                    Link(destination: terms) {
+                        Label("Terms of Service", systemImage: "doc.text")
+                    }
+                }
+                if let privacy = LegalWebLinks.privacyPolicy {
+                    Link(destination: privacy) {
+                        Label("Privacy Policy", systemImage: "hand.raised")
+                    }
                 }
                 Button("Sign out", role: .destructive) {
                     confirmation = .signOut(appState)
@@ -187,6 +202,7 @@ private struct NoShopsView: View {
                 }
                 .buttonStyle(.themeSecondary)
             }
+            LegalLinksFooter(step: .createOrJoinShop)
         }
     }
 }

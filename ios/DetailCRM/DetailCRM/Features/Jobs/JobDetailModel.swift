@@ -78,6 +78,9 @@ final class JobDetailModel {
     var photos: LoadState<[JobPhotoItem]> = .idle
     var inspections: LoadState<[JobInspectionBundle]> = .idle
     var forms: LoadState<[FormSubmission]> = .idle
+    /// Moves past the completion gates (P-11): who skipped required
+    /// checklist items or photos, when and why. Everyone on the job sees it.
+    var gateOverrides: LoadState<[JobsGateOverride]> = .idle
     /// The job's live customer report (nil = none, or not visible to this
     /// member).
     var report: LoadState<JobsReport?> = .idle
@@ -159,6 +162,7 @@ final class JobDetailModel {
         async let documentsError = loadDocuments()
         async let fieldsDone: Void = loadCustomFields()
         async let reportDone: Void = loadReport()
+        async let overridesDone: Void = loadGateOverrides()
         let errors: [String?] = [
             detailError,
             await checklistError,
@@ -171,6 +175,7 @@ final class JobDetailModel {
         _ = await resourcesDone
         _ = await fieldsDone
         _ = await reportDone
+        _ = await overridesDone
         refreshPendingUploads()
         await loadSeries()
         return errors.compactMap { $0 }.first
@@ -547,6 +552,18 @@ final class JobDetailModel {
         return hadContent ? result.errorMessage : nil
     }
 
+    /// The job's completion-gate overrides (secondary: a failure shows a
+    /// retry line on the notice, never blanks the job).
+    func loadGateOverrides() async {
+        guard let shopID else { return }
+        gateOverrides.beginLoading()
+        let jobID = self.jobID
+        let result = await LoadState<[JobsGateOverride]>.result {
+            try await JobService.gateOverrides(shopID: shopID, jobID: jobID)
+        }
+        gateOverrides.apply(result)
+    }
+
     /// Bays/vans (names on the schedule card, choices in the editor).
     /// A failure is remembered so the screens can say the list is missing.
     func loadResources() async {
@@ -588,6 +605,19 @@ final class JobDetailModel {
             && (role.isManagerOrAbove || permissions.isAssigned)
     }
 
+    /// A price or deposit cut refused while a deposit payment page is open
+    /// (0118 `checkout_open`): release the job's open payments and try once
+    /// more (collectors only; see JobService.releasingOpenCheckout).
+    private func releasingOpenCheckout<T>(_ write: () async throws -> T) async throws -> T {
+        let shopID = try requireShop()
+        return try await JobService.releasingOpenCheckout(
+            shopID: shopID,
+            jobID: jobID,
+            canRelease: canReleasePayments,
+            write
+        )
+    }
+
     /// Moves the job to `status`. Before cancelling or marking a no-show,
     /// the job's open card payments and pay links are released first; a
     /// card payment that is still processing stops the change (thrown).
@@ -624,6 +654,10 @@ final class JobDetailModel {
         // Forms become void on cancel / no-show; deposits may matter again.
         await loadForms()
         await loadPayment()
+        if force {
+            // The override is on record now: show it on the job.
+            await loadGateOverrides()
+        }
         return recordedPayments
     }
 
@@ -645,7 +679,10 @@ final class JobDetailModel {
 
     func saveDetails(_ patch: JobDetailsPatch) async throws {
         let shopID = try requireShop()
-        let updated = try await JobService.updateDetails(shopID: shopID, jobID: jobID, patch: patch)
+        let jobID = self.jobID
+        let updated = try await releasingOpenCheckout {
+            try await JobService.updateDetails(shopID: shopID, jobID: jobID, patch: patch)
+        }
         replaceJob(updated)
         if patch.status != nil {
             // A status change can void or revive forms.
@@ -717,13 +754,17 @@ final class JobDetailModel {
 
     func updateLine(_ lineID: UUID, draft: JobLineDraft) async throws {
         let shopID = try requireShop()
-        try await JobService.updateLine(shopID: shopID, lineID: lineID, draft: draft)
+        try await releasingOpenCheckout {
+            try await JobService.updateLine(shopID: shopID, lineID: lineID, draft: draft)
+        }
         await refreshJobAndLines()
     }
 
     func deleteLine(_ lineID: UUID) async throws {
         let shopID = try requireShop()
-        try await JobService.deleteLine(shopID: shopID, lineID: lineID)
+        try await releasingOpenCheckout {
+            try await JobService.deleteLine(shopID: shopID, lineID: lineID)
+        }
         await refreshJobAndLines()
     }
 
@@ -744,7 +785,10 @@ final class JobDetailModel {
 
     func updateDiscount(kind: JobDiscountKind, value: Int) async throws {
         let shopID = try requireShop()
-        let updated = try await JobService.updateDiscount(shopID: shopID, jobID: jobID, kind: kind, value: value)
+        let jobID = self.jobID
+        let updated = try await releasingOpenCheckout {
+            try await JobService.updateDiscount(shopID: shopID, jobID: jobID, kind: kind, value: value)
+        }
         replaceJob(updated)
         await loadPayment()
     }

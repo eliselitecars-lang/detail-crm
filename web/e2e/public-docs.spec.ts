@@ -353,6 +353,61 @@ test.describe('public invoice', () => {
     await expect(page.getByText('Payment received — thank you!')).toBeVisible({ timeout: 15_000 });
   });
 
+  test('backing out of card checkout closes that page, so a gift card works right away', async ({
+    page,
+  }) => {
+    // The hold the abandoned Checkout Session keeps on the invoice (0109)
+    // refuses gift cards until the payments edge expires the session.
+    let held = true;
+    const calls: unknown[] = [];
+    await mockSupabase(page, {
+      rpc: {
+        public_get_invoice: invoiceDoc({ gift_card_redeemable: true }),
+        public_redeem_gift_card: () =>
+          held
+            ? reply(400, {
+                code: '55000',
+                message:
+                  'a card payment page for this invoice is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+                details: null,
+                hint: 'checkout_open',
+              })
+            : {
+                ...invoiceDoc({ amount_paid_cents: 15000, balance_cents: 15000 }),
+                gift_card_result: {
+                  redeemed: true,
+                  message: null,
+                  amount_cents: 5000,
+                  remaining_cents: 0,
+                  last4: 'Q7ZK',
+                },
+              },
+      },
+      functions: {
+        payments: ({ body }) => {
+          calls.push(body);
+          held = false;
+          return {
+            invoice_id: null,
+            cancelled: 0,
+            succeeded: 0,
+            in_progress: 0,
+            sessions_expired: 1,
+          };
+        },
+      },
+    });
+    await page.goto(`/i/${INVOICE_TOKEN}?canceled=1`);
+    await expect(page.getByText('Payment cancelled')).toBeVisible();
+    await expect
+      .poll(() => calls)
+      .toEqual([{ action: 'invoice_checkout_cancel', token: INVOICE_TOKEN }]);
+    await page.getByLabel('Gift card code').fill('ABCD-EFGH-JKMN-Q7ZK');
+    await page.getByRole('button', { name: 'Apply gift card' }).click();
+    await expect(page.getByText('Gift card applied')).toBeVisible();
+    await expect(page.getByText(/still open/)).toHaveCount(0);
+  });
+
   test('a void invoice shows nothing owed and no pay button', async ({ page }) => {
     await mockSupabase(page, {
       rpc: {

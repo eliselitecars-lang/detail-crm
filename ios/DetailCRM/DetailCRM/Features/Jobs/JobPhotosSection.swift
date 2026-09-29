@@ -4,8 +4,10 @@
 //
 //  Before / after photos: library picker and camera (JPEG, 0.8 quality,
 //  longest side 2048 px via ImageCompression), a thumbnail grid from
-//  signed URLs, and a full-screen pager. Uploaders delete their own
-//  photos; managers delete any.
+//  signed URLs, and a full-screen pager (pinch / double-tap zoom and pan,
+//  JobStorageImage.swift). A photo whose link couldn't be signed or that
+//  fails to load says so with Retry instead of loading forever.
+//  Uploaders delete their own photos; managers delete any.
 //
 //  Videos (P-30): staff on the job record walkaround videos (up to two
 //  minutes, medium quality) that upload with the resumable protocol, with
@@ -341,17 +343,21 @@ struct JobPhotoThumbnail: View {
         Color.clear
             .aspectRatio(1, contentMode: .fit)
             .overlay {
-                AsyncImage(url: item.url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    case .failure:
-                        placeholder(systemImage: "exclamationmark.triangle")
-                    case .empty:
-                        placeholder(systemImage: "photo")
-                    @unknown default:
-                        placeholder(systemImage: "photo")
+                if let path = displayPath {
+                    // Signs its own link when the list couldn't, and shows
+                    // a warning tile (not an endless placeholder) when the
+                    // photo can't be loaded; the viewer offers Retry.
+                    JobStorageImage(
+                        bucket: JobOpsService.photosBucket,
+                        path: path,
+                        initialURL: item.url,
+                        noun: "photo"
+                    ) { phase, _ in
+                        JobStorageImageTile(phase: phase)
                     }
+                } else {
+                    // A video recorded without a poster frame.
+                    placeholder(systemImage: "video")
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
@@ -398,6 +404,11 @@ struct JobPhotoThumbnail: View {
                     )
                     .padding(Theme.Spacing.xs)
             }
+    }
+
+    /// Images show themselves; videos their poster frame (if any).
+    private var displayPath: String? {
+        item.photo.isVideo ? item.photo.posterPath : item.photo.storagePath
     }
 
     private func placeholder(systemImage: String) -> some View {
@@ -464,7 +475,7 @@ struct JobPhotoViewer: View {
                         if item.photo.isVideo {
                             JobPhotosSection.VideoPlayerPage(photo: item.photo)
                         } else {
-                            JobZoomablePhoto(url: item.url)
+                            JobZoomablePhoto(item: item)
                         }
                     }
                     .tag(item.id)
@@ -548,51 +559,6 @@ struct JobPhotoViewer: View {
                 errorMessage = ErrorText.message(for: error)
             }
         }
-    }
-}
-
-/// A photo that fits the screen and zooms with a pinch (double-tap resets).
-struct JobZoomablePhoto: View {
-    let url: URL?
-
-    @State private var scale: CGFloat = 1
-    @State private var lastScale: CGFloat = 1
-
-    var body: some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-                image
-                    .resizable()
-                    .scaledToFit()
-                    .scaleEffect(scale)
-                    .gesture(magnification)
-                    .onTapGesture(count: 2) {
-                        withAnimation(Theme.Motion.standard) {
-                            scale = 1
-                            lastScale = 1
-                        }
-                    }
-                    .accessibilityLabel("Job photo")
-            case .failure:
-                ErrorStateView(message: "This photo couldn't be loaded.")
-            case .empty:
-                LoadingStateView(label: "Loading photo…")
-            @unknown default:
-                LoadingStateView(label: "Loading photo…")
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var magnification: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                scale = min(max(lastScale * value.magnification, 1), 5)
-            }
-            .onEnded { _ in
-                lastScale = scale
-            }
     }
 }
 

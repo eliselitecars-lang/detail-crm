@@ -3,6 +3,9 @@
 -- address already unsubscribed. Anon may call it; only curated keys come
 -- back (never the address, customer or message); unknown tokens are PT404.
 \ir fixtures/two_shops.psql
+-- marketing email carries the shop's postal address (0119: none on file = not sent)
+update public.shops set address_line1 = '100 Main St', city = 'Birmingham', region = 'AL', postal_code = '35203'
+ where id in (tests.fx('shop_a'), tests.fx('shop_b'));
 
 select tests.as_superuser();
 insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')

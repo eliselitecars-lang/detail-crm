@@ -2,11 +2,12 @@
 //  JobDetailView.swift
 //  DetailCRM
 //
-//  The job screen: status + stepper, customer & vehicle, schedule and
-//  crew (with the repeat rule of a recurring visit), job details (custom
-//  fields), services with server totals, the money picture, checklist,
-//  photos and videos, the customer job report, inspections, documents,
-//  forms, customer texts, notes and activity. Realtime changes to the job
+//  The job screen: status + stepper, any requirement overrides (who moved
+//  it past required checklist items / photos, when and why), customer &
+//  vehicle, schedule and crew (with the repeat rule of a recurring visit),
+//  job details (custom fields), services with server totals, the money
+//  picture, checklist, photos and videos, the customer job report,
+//  inspections, documents, forms, customer texts, notes and activity. Realtime changes to the job
 //  refresh it; payment changes refresh the money picture (a payment never
 //  touches the jobs row, so the jobs counter alone would leave it stale).
 //
@@ -96,7 +97,11 @@ struct JobDetailView: View {
         // Someone else changed a job (Realtime): refresh this one quietly.
         .onChange(of: realtime.revision(.jobs)) { _, _ in
             guard model.detail.value != nil, sheet == nil else { return }
-            Task { await model.loadDetail() }
+            Task {
+                await model.loadDetail()
+                // A status change elsewhere may have been an override.
+                await model.loadGateOverrides()
+            }
         }
         // A payment landed or changed (a texted deposit / pay link paid, the
         // webhook settled a card, someone collected elsewhere). Payments
@@ -146,6 +151,7 @@ struct JobDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
                     headerSection(snapshot)
+                    gateOverridesSection
                     partiesSection(snapshot)
                     scheduleSection(snapshot)
                     customDataSection
@@ -180,6 +186,11 @@ struct JobDetailView: View {
                 onMessage: { key in sheet = .message(key) }
             )
         )
+    }
+
+    /// Who moved the job past its required checklist / photos, and why.
+    private var gateOverridesSection: AnyView {
+        AnyView(JobsGateOverridesNotice(model: model, clock: appState.clock))
     }
 
     private func partiesSection(_ snapshot: JobDetailSnapshot) -> AnyView {

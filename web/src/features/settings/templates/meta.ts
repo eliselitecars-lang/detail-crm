@@ -80,7 +80,9 @@ export const TEMPLATE_GROUPS: readonly TemplateGroup[] = [
       {
         key: 'job_started',
         label: 'Job started',
-        description: 'Sent when work on the vehicle begins.',
+        // No status change sends it (unlike On the way / Job completed).
+        description:
+          'Send it from the job (“Work started”) or the Inbox when work begins. Starting the job doesn’t send it automatically.',
         channels: BOTH,
         audience: 'customer',
       },

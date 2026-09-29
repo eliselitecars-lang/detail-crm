@@ -14,6 +14,7 @@ import {
 import { bpsToPercentInput, formatBps, formatCents, parsePercentToBps } from '@/lib/money';
 import { useShop } from '@/features/shop/shopContext';
 import { useActiveCoupons, useUpdateJob, type JobDetail } from '../../api';
+import { useJobEditError } from './useJobEditError';
 
 type Mode = 'none' | 'percent' | 'fixed' | 'coupon';
 
@@ -26,6 +27,7 @@ type Mode = 'none' | 'percent' | 'fixed' | 'coupon';
 export function DiscountDialog({ job, onClose }: { job: JobDetail; onClose: () => void }) {
   const { currency } = useShop();
   const toast = useToast();
+  const editError = useJobEditError(job.id);
   const update = useUpdateJob(job.id);
   const coupons = useActiveCoupons(true);
   const [mode, setMode] = useState<Mode>(
@@ -70,7 +72,7 @@ export function DiscountDialog({ job, onClose }: { job: JobDetail; onClose: () =
       toast.success('Discount saved');
       onClose();
     } catch (err) {
-      toast.error(err);
+      editError(err);
     }
   };
 

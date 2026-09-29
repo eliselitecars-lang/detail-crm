@@ -14,6 +14,9 @@
 --   * a per-service follow-up is skipped while the customer has any open job
 --     with the service (or a package containing it), whatever its dates
 \ir fixtures/two_shops.psql
+-- marketing email carries the shop's postal address (0119: none on file = not sent)
+update public.shops set address_line1 = '100 Main St', city = 'Birmingham', region = 'AL', postal_code = '35203'
+ where id in (tests.fx('shop_a'), tests.fx('shop_b'));
 
 -- ================================================================ import consent
 select tests.as_superuser();

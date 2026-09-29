@@ -4,6 +4,9 @@
 -- once, compliance footers, scheduling, cancel, email unsubscribe, role
 -- rules and cross-shop isolation.
 \ir fixtures/two_shops.psql
+-- marketing email carries the shop's postal address (0119: none on file = not sent)
+update public.shops set address_line1 = '100 Main St', city = 'Birmingham', region = 'AL', postal_code = '35203'
+ where id in (tests.fx('shop_a'), tests.fx('shop_b'));
 -- shop A takes online bookings, so {{booking_page_link}} links to a live page
 -- (it is blank while online booking is off: 30_link_availability.sql)
 update public.booking_settings set enabled = true where shop_id = tests.fx('shop_a');
@@ -227,8 +230,9 @@ select tests.fx_set('mail_alice', (select id from public.messages where campaign
 select tests.fx_set('mail_alice_token', (select unsubscribe_token from public.messages where id = tests.fx('mail_alice')));
 select tests.eq((select subject || ' | ' || body from public.messages where id = tests.fx('mail_alice')),
                 'News from Shop A | Hi Alice, our new ceramic coating packages are here.' || E'\n\n'
-                  || 'To unsubscribe from these emails, visit: https://app.example.test/u/' || tests.fx('mail_alice_token'),
-                'email with a per-message unsubscribe link');
+                  || 'To unsubscribe from these emails, visit: https://app.example.test/u/' || tests.fx('mail_alice_token')
+                  || E'\n\n' || 'Shop A · 100 Main St, Birmingham, AL 35203',
+                'email with a per-message unsubscribe link and the shop''s postal address (0119)');
 select tests.ok((select count(distinct unsubscribe_token) = 2 and bool_and(unsubscribe_token <> id)
                    from public.messages where campaign_id = tests.fx('camp_mail')),
                 'each email has its own random unsubscribe token, distinct from its message id');

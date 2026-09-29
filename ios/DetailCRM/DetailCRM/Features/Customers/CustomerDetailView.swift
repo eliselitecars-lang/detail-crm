@@ -2,15 +2,18 @@
 //  CustomerDetailView.swift
 //  DetailCRM
 //
-//  One customer: contact card (call / text / email / Maps), tags, notes,
-//  custom fields (P-9), vehicles (add / edit with VIN scan and decode),
-//  job history, documents (P-25), the referral link (P-29), and — for roles
+//  One customer: contact card (call / text / email / Maps), what they asked
+//  for on the shop's lead forms (P-9, managers+), tags, notes, custom
+//  fields (P-9), vehicles (add / edit with VIN scan and decode), job
+//  history, documents (P-25), the referral link (P-29), and — for roles
 //  that handle money — quotes, invoices, memberships (read-only summary;
 //  the Money screens own the details) and saved cards. Managers and above
 //  see the server's overview (lifetime paid, open balance, visits), can
 //  edit, archive, start a new job, open the message thread, save a card on
 //  file without charging it (`setup_card`, CustomerAddCardSheet) and
-//  remove a saved card.
+//  remove a saved card. Jobs, quotes and invoices load a page at a time
+//  with the server's count ("Load more" reaches the oldest), so a long
+//  history is never cut silently.
 //
 
 import SwiftUI
@@ -70,7 +73,8 @@ struct CustomerDetailView: View {
             canSeeSavedCards: appState.can(.useSavedCards),
             canSeeSummary: appState.role?.isManagerOrAbove ?? false,
             canManageDocuments: appState.can(.editCustomers),
-            canUseReferrals: appState.role?.isManagerOrAbove ?? false
+            canUseReferrals: appState.role?.isManagerOrAbove ?? false,
+            canSeeLeadRequests: appState.role?.isManagerOrAbove ?? false
         )
     }
 
@@ -82,6 +86,10 @@ struct CustomerDetailView: View {
             retryHistory: { await loadHistory() },
             retrySummary: { await reloadSummary() },
             retryCustomFields: { await reloadCustomFields() },
+            retryLeadRequests: { await reloadLeadRequests() },
+            loadMoreJobs: { await loadMoreJobs() },
+            loadMoreQuotes: { await loadMoreQuotes() },
+            loadMoreInvoices: { await loadMoreInvoices() },
             removeCard: { card in confirmRemoveCard(card) },
             addCard: { sheet = .addCard },
             customerUpdated: { updated in state = .loaded(updated) }
@@ -278,11 +286,55 @@ struct CustomerDetailView: View {
 
     private func reloadJobs() async {
         guard let shopID = try? appState.requireShopID() else { return }
+        history.jobs.apply(await CustomerDetailLoader.loadJobs(shopID: shopID, customerID: customerID))
+    }
+
+    private func reloadLeadRequests() async {
+        guard permissions.canSeeLeadRequests, let shopID = try? appState.requireShopID() else { return }
+        if history.leadRequests.value == nil { history.leadRequests = .loading }
+        history.leadRequests.apply(await CustomerDetailLoader.loadLeadRequests(
+            allowed: true,
+            shopID: shopID,
+            customerID: customerID
+        ))
+    }
+
+    // MARK: Older history ("Load more")
+
+    private func loadMoreJobs() async {
+        guard let shopID = try? appState.requireShopID(), var list = history.jobs.value, list.hasMore else { return }
         let id = customerID
-        let result = await LoadState<[CustomerJobSummary]>.result {
-            try await CustomerService.jobs(shopID: shopID, customerID: id)
+        do {
+            let page = try await CustomerService.jobsPage(shopID: shopID, customerID: id, offset: list.nextOffset)
+            list.append(page: page.rows, total: page.total, id: \.id)
+            history.jobs = .loaded(list)
+        } catch {
+            toasts.showError(error)
         }
-        history.jobs.apply(result)
+    }
+
+    private func loadMoreQuotes() async {
+        guard let shopID = try? appState.requireShopID(), var list = history.quotes.value, list.hasMore else { return }
+        let id = customerID
+        do {
+            let page = try await CustomerService.quotesPage(shopID: shopID, customerID: id, offset: list.nextOffset)
+            list.append(page: page.rows, total: page.total, id: \.id)
+            history.quotes = .loaded(list)
+        } catch {
+            toasts.showError(error)
+        }
+    }
+
+    private func loadMoreInvoices() async {
+        guard let shopID = try? appState.requireShopID(), var list = history.invoices.value, list.hasMore else { return }
+        let id = customerID
+        do {
+            let page = try await CustomerService.invoicesPage(shopID: shopID, customerID: id, offset: list.nextOffset)
+            list.append(page: page.rows, total: page.total, id: \.id)
+            history.invoices = .loaded(list)
+        } catch {
+            toasts.showError(error)
+        }
     }
 
     private func reloadCustomFields() async {
@@ -350,6 +402,8 @@ struct CustomerDetailPermissions: Equatable {
     var canManageDocuments: Bool
     /// Referral links (P-29): owner/admin/manager.
     var canUseReferrals: Bool
+    /// Lead form requests (P-9): managers+ (RLS on lead_submissions).
+    var canSeeLeadRequests: Bool
     /// Removing a saved card follows the saved-card capability (manager+).
     var canRemoveCards: Bool { canSeeSavedCards }
     /// Saving a new card on file (`setup_card`, manager+) follows the same
@@ -367,6 +421,11 @@ struct CustomerDetailActions {
     let retryHistory: () async -> Void
     let retrySummary: () async -> Void
     let retryCustomFields: () async -> Void
+    let retryLeadRequests: () async -> Void
+    /// Next page of the history lists.
+    let loadMoreJobs: () async -> Void
+    let loadMoreQuotes: () async -> Void
+    let loadMoreInvoices: () async -> Void
     let removeCard: (SavedCard) -> Void
     /// Opens the "Save a card" sheet (PaymentSheet in setup mode).
     let addCard: () -> Void
@@ -378,14 +437,18 @@ struct CustomerDetailActions {
 /// section never blanks the whole customer.
 struct CustomerDetailHistory {
     var vehicles: LoadState<[Vehicle]> = .idle
-    var jobs: LoadState<[CustomerJobSummary]> = .idle
-    var quotes: LoadState<[CustomerQuoteSummary]> = .idle
-    var invoices: LoadState<[CustomerInvoiceSummary]> = .idle
+    /// Newest first, a page at a time with the server's count.
+    var jobs: LoadState<HistoryList<CustomerJobSummary>> = .idle
+    var quotes: LoadState<HistoryList<CustomerQuoteSummary>> = .idle
+    var invoices: LoadState<HistoryList<CustomerInvoiceSummary>> = .idle
     var memberships: LoadState<[CustomerMembershipItem]> = .idle
     var savedCards: LoadState<[SavedCard]> = .idle
     var summary: LoadState<CustomerSummary> = .idle
     /// The shop's customer fields, archived ones included (P-9).
     var customFields: LoadState<[JobsCustomField]> = .idle
+    /// What they asked for on lead forms (P-9; `.idle` for roles below
+    /// manager, which never load it).
+    var leadRequests: LoadState<CustomerLeadRequests> = .idle
     /// Whether the shop's referral program is on (P-29; managers+ read it,
     /// false when unknown).
     var referralProgramOn = false
@@ -409,6 +472,7 @@ enum CustomerDetailLoader {
         async let summary = loadSummary(allowed: permissions.canSeeSummary, customerID: customerID)
         async let customFields = loadCustomFields(shopID: shopID)
         async let referralProgramOn = loadReferralProgram(allowed: permissions.canUseReferrals, shopID: shopID)
+        async let leadRequests = loadLeadRequests(allowed: permissions.canSeeLeadRequests, shopID: shopID, customerID: customerID)
 
         var next = current
         next.vehicles.apply(await vehicles)
@@ -420,6 +484,7 @@ enum CustomerDetailLoader {
         next.summary.apply(await summary)
         next.customFields.apply(await customFields)
         next.referralProgramOn = await referralProgramOn
+        next.leadRequests.apply(await leadRequests)
         return next
     }
 
@@ -441,23 +506,35 @@ enum CustomerDetailLoader {
         }
     }
 
-    private static func loadJobs(shopID: UUID, customerID: UUID) async -> LoadState<[CustomerJobSummary]> {
-        await LoadState<[CustomerJobSummary]>.result {
-            try await CustomerService.jobs(shopID: shopID, customerID: customerID)
+    /// Not loaded for roles below manager (the section is hidden).
+    static func loadLeadRequests(allowed: Bool, shopID: UUID, customerID: UUID) async -> LoadState<CustomerLeadRequests> {
+        guard allowed else { return .idle }
+        return await LoadState<CustomerLeadRequests>.result {
+            try await CustomerService.leadRequests(shopID: shopID, customerID: customerID)
         }
     }
 
-    private static func loadQuotes(allowed: Bool, shopID: UUID, customerID: UUID) async -> LoadState<[CustomerQuoteSummary]> {
-        guard allowed else { return .loaded([]) }
-        return await LoadState<[CustomerQuoteSummary]>.result {
-            try await CustomerService.quotes(shopID: shopID, customerID: customerID)
+    /// The first page of each history list (a reload starts over).
+    static func loadJobs(shopID: UUID, customerID: UUID) async -> LoadState<HistoryList<CustomerJobSummary>> {
+        await LoadState<HistoryList<CustomerJobSummary>>.result {
+            let page = try await CustomerService.jobsPage(shopID: shopID, customerID: customerID, offset: 0)
+            return HistoryList(rows: page.rows, total: page.total)
         }
     }
 
-    private static func loadInvoices(allowed: Bool, shopID: UUID, customerID: UUID) async -> LoadState<[CustomerInvoiceSummary]> {
-        guard allowed else { return .loaded([]) }
-        return await LoadState<[CustomerInvoiceSummary]>.result {
-            try await CustomerService.invoices(shopID: shopID, customerID: customerID)
+    private static func loadQuotes(allowed: Bool, shopID: UUID, customerID: UUID) async -> LoadState<HistoryList<CustomerQuoteSummary>> {
+        guard allowed else { return .loaded(HistoryList(rows: [], total: 0)) }
+        return await LoadState<HistoryList<CustomerQuoteSummary>>.result {
+            let page = try await CustomerService.quotesPage(shopID: shopID, customerID: customerID, offset: 0)
+            return HistoryList(rows: page.rows, total: page.total)
+        }
+    }
+
+    private static func loadInvoices(allowed: Bool, shopID: UUID, customerID: UUID) async -> LoadState<HistoryList<CustomerInvoiceSummary>> {
+        guard allowed else { return .loaded(HistoryList(rows: [], total: 0)) }
+        return await LoadState<HistoryList<CustomerInvoiceSummary>>.result {
+            let page = try await CustomerService.invoicesPage(shopID: shopID, customerID: customerID, offset: 0)
+            return HistoryList(rows: page.rows, total: page.total)
         }
     }
 

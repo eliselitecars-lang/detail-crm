@@ -122,8 +122,9 @@ enum JobOpsService {
             .value
     }
 
-    /// Photos with signed display URLs (a photo whose URL can't be signed
-    /// keeps a nil URL and shows a placeholder).
+    /// Photos with signed display URLs. A photo whose URL can't be signed
+    /// here keeps a nil URL: its tile (JobStorageImage) signs one itself
+    /// and shows a failure with Retry if that fails too.
     static func photoItems(shopID: UUID, jobID: UUID) async throws -> [JobPhotoItem] {
         let rows = try await photos(shopID: shopID, jobID: jobID)
         guard !rows.isEmpty else { return [] }

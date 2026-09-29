@@ -50,6 +50,7 @@ struct JoinShopView: View {
                     }
                 }
             }
+            LegalLinksFooter(step: .joinShop)
         }
         .navigationTitle("Join a shop")
         .navigationBarTitleDisplayMode(.inline)

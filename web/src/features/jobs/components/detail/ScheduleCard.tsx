@@ -45,6 +45,14 @@ export function ScheduleCard({ job }: { job: JobDetail }) {
   const [editing, setEditing] = useState(false);
   const [seriesDialog, setSeriesDialog] = useState<'repeat' | 'end' | null>(null);
   const resource = resources.data?.find((r) => r.id === job.resource_id);
+  // Until the bays / vans load, the job's bay can't be named or changed; a
+  // failed load says so (with a retry) instead of reading as a deleted bay.
+  const resourcesStatus: ResourcesStatus = resources.isPending
+    ? 'loading'
+    : resources.isError
+      ? 'error'
+      : 'ready';
+  const retryResources = () => void resources.refetch();
   const liveSeries = series.data?.active ? series.data : null;
   // Until the series row is known, a save could only apply to this visit,
   // and the server then detaches it from the repeat for good (0051
@@ -115,7 +123,29 @@ export function ScheduleCard({ job }: { job: JobDetail }) {
           {
             key: 'resource',
             label: 'Bay / van',
-            value: resource ? resource.name : job.resource_id ? 'Unavailable' : 'None',
+            value: !job.resource_id ? (
+              'None'
+            ) : resource ? (
+              resource.name
+            ) : resourcesStatus === 'loading' ? (
+              <span className="text-muted">Loading…</span>
+            ) : resourcesStatus === 'error' ? (
+              <span className="inline-flex flex-wrap items-center gap-2">
+                <span className="text-danger-ink" role="alert">
+                  Couldn’t load bays and vans
+                </span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={resources.isFetching}
+                  onClick={retryResources}
+                >
+                  Try again
+                </Button>
+              </span>
+            ) : (
+              'Unavailable'
+            ),
           },
         ]}
       />
@@ -131,6 +161,10 @@ export function ScheduleCard({ job }: { job: JobDetail }) {
           resources={(resources.data ?? []).filter(
             (r) => (r.active && !r.archived_at) || r.id === job.resource_id,
           )}
+          resourcesStatus={resourcesStatus}
+          resourcesError={resources.error}
+          onRetryResources={retryResources}
+          retryingResources={resources.isFetching}
         />
       )}
       {seriesDialog === 'repeat' && liveSeries && (
@@ -145,6 +179,9 @@ export function ScheduleCard({ job }: { job: JobDetail }) {
 
 /** Whether the job's series row is known (managers only; 'none' = not a repeat / not read). */
 type SeriesStatus = 'none' | 'loading' | 'error' | 'ready';
+
+/** Whether the shop's bays / vans are known (the bay select needs them). */
+type ResourcesStatus = 'loading' | 'error' | 'ready';
 
 interface SeriesBannerProps {
   job: JobDetail;
@@ -233,6 +270,11 @@ interface ScheduleDialogProps {
   retryingSeries: boolean;
   onClose: () => void;
   resources: { id: string; name: string }[];
+  /** Until the bays / vans load, the select keeps the job's current bay (disabled). */
+  resourcesStatus: ResourcesStatus;
+  resourcesError: unknown;
+  onRetryResources: () => void;
+  retryingResources: boolean;
 }
 
 type Scope = 'this' | 'following';
@@ -246,6 +288,10 @@ function ScheduleDialog({
   retryingSeries,
   onClose,
   resources,
+  resourcesStatus,
+  resourcesError,
+  onRetryResources,
+  retryingResources,
 }: ScheduleDialogProps) {
   const { timezone } = useShop();
   const toast = useToast();
@@ -515,16 +561,33 @@ function ScheduleDialog({
             </div>
           </div>
         )}
-        <FormField label="Bay / van">
+        <FormField
+          label="Bay / van"
+          help={
+            resourcesStatus === 'ready'
+              ? undefined
+              : job.resource_id
+                ? 'Saving keeps the current bay / van.'
+                : 'Saving keeps it unassigned.'
+          }
+        >
           <Select
             value={form.resourceId}
+            disabled={resourcesStatus !== 'ready'}
             onChange={(e) => set({ resourceId: e.target.value })}
-            options={[
-              { value: '', label: 'None' },
-              ...resources.map((r) => ({ value: r.id, label: r.name })),
-            ]}
+            options={resourceOptions(resources, resourcesStatus, job.resource_id)}
           />
         </FormField>
+        {resourcesStatus === 'loading' && <LoadingState label="Loading bays and vans…" />}
+        {resourcesStatus === 'error' && (
+          <ErrorState
+            compact
+            title="Couldn’t load bays and vans"
+            error={resourcesError}
+            onRetry={onRetryResources}
+            retrying={retryingResources}
+          />
+        )}
         {error && (
           <p role="alert" className="text-danger-ink text-sm">
             {error}
@@ -533,4 +596,29 @@ function ScheduleDialog({
       </div>
     </Dialog>
   );
+}
+
+/**
+ * The bay / van select's options. The job's current bay is always one of
+ * them, so the select shows what a save sends: named once the list loads,
+ * "Current bay / van" while it is loading or failed, "Unavailable" when the
+ * loaded list no longer has it.
+ */
+function resourceOptions(
+  resources: { id: string; name: string }[],
+  status: ResourcesStatus,
+  currentId: string | null,
+): { value: string; label: string }[] {
+  const listed = resources.map((r) => ({ value: r.id, label: r.name }));
+  const known = currentId === null || listed.some((o) => o.value === currentId);
+  const current =
+    currentId === null || known
+      ? []
+      : [
+          {
+            value: currentId,
+            label: status === 'ready' ? 'Unavailable bay / van' : 'Current bay / van',
+          },
+        ];
+  return [{ value: '', label: 'None' }, ...current, ...listed];
 }

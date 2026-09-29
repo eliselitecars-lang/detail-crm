@@ -6871,6 +6871,10 @@ export type Database = {
         Args: { p_invoice_id?: string; p_quote_id?: string }
         Returns: Json
       }
+      comms_email_with_postal_address: {
+        Args: { p_address: string; p_body: string; p_shop_name: string }
+        Returns: string
+      }
       comms_email_with_unsubscribe: {
         Args: { p_body: string; p_link: string }
         Returns: string
@@ -7168,6 +7172,10 @@ export type Database = {
           p_vars: Json
         }
         Returns: Record<string, unknown>
+      }
+      comms_shop_postal_address: {
+        Args: { p_shop_id: string }
+        Returns: string
       }
       comms_sms_with_optout: { Args: { p_body: string }; Returns: string }
       comms_suppress: {
@@ -8252,6 +8260,10 @@ export type Database = {
         Args: { p_job_id: string; p_shop_id: string }
         Returns: number
       }
+      job_open_checkout_until: {
+        Args: { p_job_id: string; p_shop_id: string }
+        Returns: string
+      }
       job_payment_summary: {
         Args: { p_job_id: string }
         Returns: {
@@ -8974,6 +8986,7 @@ export type Database = {
       }
       payments_hold_job_checkout: {
         Args: {
+          p_amount_cents?: number
           p_expires_at: string
           p_job_id: string
           p_session_id: string

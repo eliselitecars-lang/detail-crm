@@ -473,3 +473,128 @@ describe('JobDetailPage', () => {
     expect(await screen.findByText('Couldn’t load this job')).toBeInTheDocument();
   });
 });
+
+describe('JobDetailPage bay / van', () => {
+  const VAN = { id: 'res-1', name: 'Van 1', kind: 'van', active: true, archived_at: null };
+
+  it('names the job’s bay and offers it selected in the schedule dialog', async () => {
+    setTableResult('resources', { data: [VAN] });
+    const { user } = setup({ job: jobDetailRow({ resource_id: 'res-1' }) });
+    expect(await screen.findByText('Van 1')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit schedule & location' });
+    const select = within(dialog).getByLabelText('Bay / van');
+    expect(select).toHaveValue('res-1');
+    expect(select).toBeEnabled();
+  });
+
+  it('says the bays failed to load (not “Unavailable”), and the dialog shows what a save keeps', async () => {
+    setTableResult('resources', pgError('XX000', 'upstream timeout'));
+    const { user } = setup({ job: jobDetailRow({ resource_id: 'res-1' }) });
+    const card = (await screen.findByRole('heading', { name: 'Schedule & location' })).closest(
+      'section',
+    ) as HTMLElement;
+    expect(await within(card).findByText('Couldn’t load bays and vans')).toBeInTheDocument();
+    expect(within(card).queryByText('Unavailable')).toBeNull();
+
+    await user.click(within(card).getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit schedule & location' });
+    const select = within(dialog).getByLabelText('Bay / van');
+    expect(select).toHaveValue('res-1');
+    expect(select).toBeDisabled();
+    expect(within(select).getByRole('option', { selected: true })).toHaveTextContent(
+      'Current bay / van',
+    );
+    expect(within(dialog).getByText('Saving keeps the current bay / van.')).toBeInTheDocument();
+    expect(within(dialog).getByText('Couldn’t load bays and vans')).toBeInTheDocument();
+
+    // Retry from the dialog: the list loads and the bay can be changed.
+    setTableResult('resources', { data: [VAN] });
+    await user.click(within(dialog).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(within(dialog).getByLabelText('Bay / van')).toBeEnabled());
+    expect(
+      within(within(dialog).getByLabelText('Bay / van')).getByRole('option', { selected: true }),
+    ).toHaveTextContent('Van 1');
+  });
+
+  it('shows a bay the loaded list no longer has as “Unavailable” in the dialog too', async () => {
+    setTableResult('resources', { data: [VAN] });
+    const { user } = setup({ job: jobDetailRow({ resource_id: 'res-gone' }) });
+    expect(await screen.findByText('Unavailable')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit schedule & location' });
+    const select = within(dialog).getByLabelText('Bay / van');
+    expect(select).toHaveValue('res-gone');
+    expect(within(select).getByRole('option', { selected: true })).toHaveTextContent(
+      'Unavailable bay / van',
+    );
+  });
+});
+
+describe('JobDetailPage job messages', () => {
+  it('lets the assigned technician send “Work started” (job_started) from the job', async () => {
+    setFunctionResult('messaging', {
+      data: { message_id: 'msg-1', channel: 'sms', status: 'queued', error: null },
+    });
+    const { user } = setup({ role: 'technician' });
+    await user.click(await screen.findByRole('button', { name: 'Work started' }));
+    await waitFor(() =>
+      expect(supabase.functions.invoke).toHaveBeenCalledWith('messaging', {
+        body: {
+          action: 'send',
+          shop_id: 'shop-1',
+          job_id: 'job-1',
+          channel: 'sms',
+          template_key: 'job_started',
+        },
+      }),
+    );
+    expect(await screen.findByText('“Work started” sent')).toBeInTheDocument();
+  });
+});
+
+describe('JobDetailPage price cuts while a card payment page is open (0118)', () => {
+  it('offers to cancel the job’s open payments when deleting a line is refused', async () => {
+    setFunctionResult('payments', { data: released({ cancelled: 1 }) });
+    const baseFrom = supabase.from.getMockImplementation();
+    if (!baseFrom) throw new Error('supabase.from has no default implementation');
+    supabase.from.mockImplementation((table: string) => {
+      const builder = baseFrom(table);
+      if (table === 'job_line_items') {
+        builder.delete.mockImplementation(() =>
+          createBuilder({
+            data: null,
+            error: {
+              code: '55000',
+              message:
+                'a card payment page for this job is still open (until 3:40 PM); cancel the open payments first, or wait until then',
+              details: null,
+              hint: 'checkout_open',
+            },
+          }),
+        );
+      }
+      return builder;
+    });
+    try {
+      const { user } = setup();
+      await user.click(await screen.findByRole('button', { name: 'Delete Full detail' }));
+      const dialog = await screen.findByRole('alertdialog', { name: 'Delete this item?' });
+      await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+      expect(
+        await screen.findByText('A card payment page for this job is still open'),
+      ).toBeInTheDocument();
+      expect(supabase.functions.invoke).not.toHaveBeenCalled();
+
+      await user.click(screen.getByRole('button', { name: 'Cancel open payments' }));
+      await waitFor(() =>
+        expect(supabase.functions.invoke).toHaveBeenCalledWith('payments', {
+          body: { action: 'cancel_open_payments', shop_id: 'shop-1', job_id: 'job-1' },
+        }),
+      );
+      expect(await screen.findByText('Open payment pages closed')).toBeInTheDocument();
+    } finally {
+      supabase.from.mockImplementation(baseFrom);
+    }
+  });
+});

@@ -475,7 +475,6 @@ struct JobMarkRow: View {
     let isSelected: Bool
     let onDelete: (() -> Void)?
 
-    @State private var photoURL: URL?
     /// The number badge grows with Dynamic Type.
     @ScaledMetric(relativeTo: .caption) private var badgeSide: CGFloat = 24
 
@@ -499,15 +498,15 @@ struct JobMarkRow: View {
                         .foregroundStyle(Theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if mark.photoPath != nil {
-                    AsyncImage(url: photoURL) { image in
-                        image.resizable().scaledToFill()
-                    } placeholder: {
-                        Theme.surfaceMuted
+                if let photoPath = mark.photoPath {
+                    JobStorageImage(
+                        bucket: JobOpsService.photosBucket,
+                        path: photoPath,
+                        initialURL: nil,
+                        noun: "photo"
+                    ) { phase, retry in
+                        JobMarkPhoto(phase: phase, retry: retry)
                     }
-                    .frame(width: 88, height: 88)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
-                    .accessibilityLabel("Damage photo")
                 }
             }
             Spacer(minLength: Theme.Spacing.sm)
@@ -526,10 +525,6 @@ struct JobMarkRow: View {
             RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
                 .fill(isSelected ? Theme.glacier.opacity(0.10) : Color.clear)
         )
-        .task(id: mark.photoPath) {
-            guard let path = mark.photoPath else { return }
-            photoURL = try? await JobOpsService.signedURL(bucket: JobOpsService.photosBucket, path: path)
-        }
     }
 }
 
@@ -539,8 +534,6 @@ struct JobSignedBlock: View {
     let signedAt: Date?
     let signaturePath: String?
     let clock: ShopClock
-
-    @State private var imageURL: URL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
@@ -552,25 +545,18 @@ struct JobSignedBlock: View {
                 Image(systemName: "checkmark.seal.fill")
                     .foregroundStyle(Theme.successInk)
             }
-            if signaturePath != nil {
-                AsyncImage(url: imageURL) { image in
-                    image.resizable().scaledToFit()
-                } placeholder: {
-                    ProgressView()
-                        .tint(Theme.glacier)
-                        .frame(maxWidth: .infinity, minHeight: 80)
+            if let signaturePath {
+                // Signs its own link; a failure says so with Retry instead
+                // of spinning forever.
+                JobStorageImage(
+                    bucket: JobOpsService.signaturesBucket,
+                    path: signaturePath,
+                    initialURL: nil,
+                    noun: "signature"
+                ) { phase, retry in
+                    JobSignatureImage(phase: phase, retry: retry)
                 }
-                .frame(maxWidth: .infinity, maxHeight: 140)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                        .fill(Theme.surfaceMuted)
-                )
-                .accessibilityLabel("Signature")
             }
-        }
-        .task(id: signaturePath) {
-            guard let signaturePath else { return }
-            imageURL = try? await JobOpsService.signedURL(bucket: JobOpsService.signaturesBucket, path: signaturePath)
         }
     }
 
@@ -578,6 +564,71 @@ struct JobSignedBlock: View {
         let who = signerName?.trimmedNonEmpty ?? "Signed"
         guard let signedAt else { return who }
         return "\(who) · \(clock.dateTimeText(signedAt))"
+    }
+}
+
+/// A damage-mark photo tile; when it couldn't be loaded, tapping it tries
+/// again.
+private struct JobMarkPhoto: View {
+    let phase: JobStorageImagePhase
+    let retry: () -> Void
+
+    var body: some View {
+        switch phase {
+        case .failed(let message):
+            Button(action: retry) {
+                tile
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Damage photo. " + message)
+            .accessibilityHint("Tries again")
+        case .image, .loading:
+            tile
+                .accessibilityLabel("Damage photo")
+        }
+    }
+
+    private var tile: some View {
+        JobStorageImageTile(phase: phase)
+            .frame(width: 88, height: 88)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+            .contentShape(Rectangle())
+    }
+}
+
+/// The signature image, its loading state, or the failure with Retry.
+private struct JobSignatureImage: View {
+    let phase: JobStorageImagePhase
+    let retry: () -> Void
+
+    var body: some View {
+        switch phase {
+        case .image(let image):
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: 140)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                        .fill(Theme.surfaceMuted)
+                )
+                .accessibilityLabel("Signature")
+        case .loading:
+            ProgressView()
+                .tint(Theme.glacier)
+                .frame(maxWidth: .infinity, minHeight: 80)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                        .fill(Theme.surfaceMuted)
+                )
+                .accessibilityLabel("Loading signature")
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                InlineMessage(text: message, kind: .error)
+                Button("Retry", action: retry)
+                    .buttonStyle(.themeSecondaryCompact)
+            }
+        }
     }
 }
 

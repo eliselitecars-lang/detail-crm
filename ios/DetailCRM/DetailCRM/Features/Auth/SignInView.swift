@@ -68,6 +68,8 @@ struct SignInView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.top, Theme.Spacing.sm)
+
+            LegalLinksFooter(step: .signIn)
         }
         .navigationBarTitleDisplayMode(.inline)
     }

@@ -1,5 +1,5 @@
 import { CreditCard, FileDown, Gift, Landmark, Printer, RefreshCw } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { PublicLayout } from '@/components/layout/PublicLayout';
 import {
@@ -15,11 +15,12 @@ import {
   StatusBadge,
 } from '@/components/ui';
 import { formatDate, formatDateTime, formatLocalDate } from '@/lib/dates';
-import { errorMessage } from '@/lib/errors';
+import { errorMessage, isCheckoutOpenError } from '@/lib/errors';
 import { formatCents } from '@/lib/money';
 import { publicPdfUrl } from '@/features/quotes/shared/pdf';
 import {
   PAID_POLL_ATTEMPTS,
+  useCancelInvoiceCheckout,
   useInvoiceCheckout,
   usePublicInvoice,
   useRedeemInvoiceGiftCard,
@@ -96,6 +97,7 @@ function InvoiceDocumentView({
   const vehicle = vehicleLabel(doc.vehicle);
   const shopAddress = addressLines(shop);
   const canPayOnline = invoice.payable && invoice.card_payments_enabled && !paidReturn;
+  useCloseAbandonedCheckout(token, canceledReturn && !paidReturn && invoice.payable);
   const pdfUrl = publicPdfUrl('invoice', token);
   const grouped = doc.jobs.length > 1;
 
@@ -289,6 +291,22 @@ function InvoiceDocumentView({
       </div>
     </PublicLayout>
   );
+}
+
+/**
+ * Back from Stripe with ?canceled=1: the customer left the card page on
+ * purpose, yet it stays payable (and holds the invoice, refusing gift cards
+ * and store credit) until Stripe expires it ~30-40 minutes later. Close it
+ * once, quietly: if that fails, the gift card panel still offers to.
+ */
+function useCloseAbandonedCheckout(token: string, active: boolean) {
+  const { mutate } = useCancelInvoiceCheckout(token);
+  const done = useRef(false);
+  useEffect(() => {
+    if (!active || done.current) return;
+    done.current = true;
+    mutate();
+  }, [active, mutate]);
 }
 
 function PaidReturnBanner({
@@ -519,11 +537,13 @@ function GiftCardPanel({
   redeemable: boolean;
 }) {
   const redeem = useRedeemInvoiceGiftCard(token);
+  const closeCheckout = useCancelInvoiceCheckout(token);
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GiftCardResult | null>(null);
 
   const apply = () => {
+    closeCheckout.reset();
     setResult(null);
     if (code.trim().length < 4) {
       setError('Enter the code from your gift card.');
@@ -583,10 +603,37 @@ function GiftCardPanel({
             onChange={(event) => setCode(event.target.value)}
           />
         </FormField>
-        {redeem.isError && (
-          <Banner tone="danger" title="Couldn’t use the gift card">
+        {redeem.isError && isCheckoutOpenError(redeem.error) ? (
+          <Banner
+            tone="warning"
+            title="A card payment page is still open"
+            action={
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={closeCheckout.isPending}
+                onClick={() =>
+                  // Close the card page, then use the gift card as asked.
+                  closeCheckout.mutate(undefined, { onSuccess: apply })
+                }
+              >
+                Close it and use the gift card
+              </Button>
+            }
+          >
             {errorMessage(redeem.error)}
+            {closeCheckout.isError && (
+              <span className="mt-1 block">
+                Couldn’t close the card page: {errorMessage(closeCheckout.error)}
+              </span>
+            )}
           </Banner>
+        ) : (
+          redeem.isError && (
+            <Banner tone="danger" title="Couldn’t use the gift card">
+              {errorMessage(redeem.error)}
+            </Banner>
+          )
         )}
         {applied}
         {result && !result.redeemed && (

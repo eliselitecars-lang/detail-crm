@@ -5,21 +5,11 @@
 //  "Privacy Policy" and "Terms of Service": the operator's public pages on
 //  the web app (`WEB_APP_URL` + `/privacy` and `/terms`, no sign-in), opened
 //  in the browser. Shown on Your account, which every role reaches from the
-//  More tab.
+//  More tab; before that, sign-up, sign-in, the shop picker, Create shop
+//  and Join a team show them with LegalLinksFooter (same `LegalWebLinks`).
 //
 
 import SwiftUI
-
-/// The legal pages on the web app; nil until WEB_APP_URL is configured.
-enum LegalWebLinks {
-    static var privacyPolicy: URL? {
-        ShopSettingsWebLinks.webURL(path: "/privacy")
-    }
-
-    static var termsOfService: URL? {
-        ShopSettingsWebLinks.webURL(path: "/terms")
-    }
-}
 
 struct SettingsLegalSection: View {
     var body: some View {

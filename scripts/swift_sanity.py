@@ -16,8 +16,10 @@ mechanical mistakes that would otherwise burn a macOS CI run:
     `.not(in:)` — chain `.neq`), `try!`, force-unwrapped `URL(string:)`
     outside Supa.swift, hard-coded colors outside Theme.swift, negative
     frames, types nested inside generic functions, `AnyJSON` without
-    `import Supabase`, and `safeAreaInset` combined with preference-key
-    observers in one file
+    `import Supabase`, `safeAreaInset` combined with preference-key
+    observers in one file, and `AsyncImage` (a nil URL stays in its
+    loading phase forever and an expired signed link has no retry: Storage
+    images go through `JobStorageImage`)
   * accessibility: a tone *fill* color (`Theme.amber/success/warning/
     danger`) used as text via `foregroundStyle`/`foregroundColor` (too
     light to read in light mode — use the matching `…Ink` token); white
@@ -317,6 +319,9 @@ FORBIDDEN = [
     (re.compile(r"\btry!"), "'try!' is not allowed in app code — handle the error"),
     (re.compile(r"\.frame\([^)]*\b(?:width|height|minWidth|minHeight|maxWidth|maxHeight)\s*:\s*-\s*\d"),
      "negative frame size"),
+    (re.compile(r"\bAsyncImage\s*[({]"),
+     "AsyncImage stays 'loading' forever for a nil URL and can't re-sign an expired Storage link — "
+     "use JobStorageImage (sign, retry, visible failure)"),
 ]
 FILL_AS_TEXT = re.compile(r"\.foreground(?:Style|Color)\(.*\bTheme\.(amber|success|warning|danger)\b")
 INK_FOR = {"amber": "moneyInk", "success": "successInk", "warning": "warningInk", "danger": "dangerInk"}
@@ -984,6 +989,11 @@ def self_test() -> int:
     expect("sign-out after account deletion allowed", not run_swift(
         "func f() async { await appState.signOut() }\n", filename="AccountDeletionView.swift").errors)
     expect("confirmed sign-out passes", not run_swift("let b = Button(\"x\") { confirmation = .signOut(appState) }\n").errors)
+    expect("AsyncImage detected", any("AsyncImage" in e for e in run_swift(
+        "var body: some View { AsyncImage(url: item.url) { image in image } placeholder: { ProgressView() } }\n").errors))
+    expect("AsyncImage in a comment ignored", not run_swift("// AsyncImage(url:) never fails for nil\nlet x = 1\n").errors)
+    expect("JobStorageImage passes", not run_swift(
+        "var body: some View { JobStorageImage(bucket: b, path: p, initialURL: u, noun: \"photo\") { phase, retry in Text(\"x\") } }\n").errors)
 
     def run_toolchain(workflow: str, script_min: str = "26", fastfile_min: str = "26") -> Report:
         with tempfile.TemporaryDirectory() as tmp:

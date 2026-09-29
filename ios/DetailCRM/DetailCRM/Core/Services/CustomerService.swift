@@ -11,6 +11,7 @@
 
 import Foundation
 import Supabase
+import DetailCore
 
 enum CustomerService {
 
@@ -286,6 +287,108 @@ enum CustomerService {
             .limit(limit)
             .execute()
             .value
+    }
+
+    /// The customer's lead form requests, newest first (P-9, managers+ —
+    /// RLS on lead_submissions and lead_forms), with the exact count so the
+    /// screen can say when older ones aren't shown. The form names come
+    /// from a second read (a deleted form leaves the name nil).
+    static func leadRequests(
+        shopID: UUID,
+        customerID: UUID,
+        limit: Int = LeadRequestText.limit
+    ) async throws -> CustomerLeadRequests {
+        let response: PostgrestResponse<[CustomerLeadRequestRow]> = try await Supa.client
+            .from("lead_submissions")
+            .select(CustomerLeadRequestRow.selectColumns, count: .exact)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("customer_id", value: customerID.uuidString)
+            .order("created_at", ascending: false)
+            .order("id", ascending: true)
+            .limit(limit)
+            .execute()
+        let rows = response.value
+        var formIDs: [String] = []
+        for row in rows {
+            if let formID = row.leadFormID?.uuidString, !formIDs.contains(formID) {
+                formIDs.append(formID)
+            }
+        }
+        var names: [UUID: String] = [:]
+        if !formIDs.isEmpty {
+            let forms: [CustomerLeadFormName] = try await Supa.client
+                .from("lead_forms")
+                .select(CustomerLeadFormName.selectColumns)
+                .eq("shop_id", value: shopID.uuidString)
+                .in("id", values: formIDs)
+                .execute()
+                .value
+            for form in forms { names[form.id] = form.name }
+        }
+        let requests = rows.map { row in
+            CustomerLeadRequest(row: row, formName: row.leadFormID.flatMap { names[$0] })
+        }
+        return CustomerLeadRequests(requests: requests, total: max(response.count ?? requests.count, requests.count))
+    }
+
+    // MARK: - History pages (customer screen)
+
+    /// One page of the customer's jobs, most recent first, with the exact
+    /// count (technicians: only assigned jobs, counted the same way). The
+    /// order ends with `id` so pages neither overlap nor skip rows.
+    static func jobsPage(
+        shopID: UUID,
+        customerID: UUID,
+        offset: Int,
+        limit: Int = HistoryListing.pageSize
+    ) async throws -> PagedRows.Page<CustomerJobSummary> {
+        let response: PostgrestResponse<[CustomerJobSummary]> = try await Supa.client
+            .from("jobs")
+            .select(CustomerJobSummary.selectColumns, count: .exact)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("customer_id", value: customerID.uuidString)
+            .order("scheduled_start", ascending: false, nullsFirst: true)
+            .order("created_at", ascending: false)
+            .order("id", ascending: true)
+            .range(from: offset, to: offset + limit - 1)
+            .execute()
+        return PagedRows.Page(rows: response.value, total: response.count)
+    }
+
+    static func quotesPage(
+        shopID: UUID,
+        customerID: UUID,
+        offset: Int,
+        limit: Int = HistoryListing.pageSize
+    ) async throws -> PagedRows.Page<CustomerQuoteSummary> {
+        let response: PostgrestResponse<[CustomerQuoteSummary]> = try await Supa.client
+            .from("quotes")
+            .select(CustomerQuoteSummary.selectColumns, count: .exact)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("customer_id", value: customerID.uuidString)
+            .order("created_at", ascending: false)
+            .order("id", ascending: true)
+            .range(from: offset, to: offset + limit - 1)
+            .execute()
+        return PagedRows.Page(rows: response.value, total: response.count)
+    }
+
+    static func invoicesPage(
+        shopID: UUID,
+        customerID: UUID,
+        offset: Int,
+        limit: Int = HistoryListing.pageSize
+    ) async throws -> PagedRows.Page<CustomerInvoiceSummary> {
+        let response: PostgrestResponse<[CustomerInvoiceSummary]> = try await Supa.client
+            .from("invoices")
+            .select(CustomerInvoiceSummary.selectColumns, count: .exact)
+            .eq("shop_id", value: shopID.uuidString)
+            .eq("customer_id", value: customerID.uuidString)
+            .order("created_at", ascending: false)
+            .order("id", ascending: true)
+            .range(from: offset, to: offset + limit - 1)
+            .execute()
+        return PagedRows.Page(rows: response.value, total: response.count)
     }
 
     /// Memberships (with their own billed price/cadence) plus the plan name.

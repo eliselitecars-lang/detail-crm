@@ -538,7 +538,15 @@ export default function CalendarPage() {
                 hasCustomContent(arg.event.extendedProps) ? <EventContent arg={arg} /> : true
               }
               select={onSelect}
-              noEventsText="No jobs in this range"
+              // The list view's own empty text: "No jobs" only once the range
+              // actually loaded (the page's error / loading lines say the rest).
+              noEventsText={
+                events.isSuccess
+                  ? 'No jobs in this range'
+                  : events.isError
+                    ? 'Jobs for this range couldn’t be loaded.'
+                    : 'Loading jobs…'
+              }
             />
           )}
         </div>

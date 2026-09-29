@@ -11,6 +11,9 @@
 -- quote_sent / invoice_sent / review_request are not sent without the link
 -- they exist to deliver; campaigns using an unavailable link cannot launch.
 \ir fixtures/two_shops.psql
+-- marketing email carries the shop's postal address (0119: none on file = not sent)
+update public.shops set address_line1 = '100 Main St', city = 'Birmingham', region = 'AL', postal_code = '35203'
+ where id in (tests.fx('shop_a'), tests.fx('shop_b'));
 
 insert into public.platform_config (key, value) values ('app_base_url', 'https://app.example.test')
   on conflict (key) do update set value = excluded.value;
@@ -118,7 +121,7 @@ select tests.eq(public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('c
                 null::uuid, 'no follow-up text whose only point is a dead booking link');
 select tests.fx_set('fu', public.enqueue_customer_template(tests.fx('shop_a'), tests.fx('cust_a'), 'follow_up', 'email', tests.fx('job_a')));
 select tests.ok((select body not like '%/book/%' and body not like '%Book your next appointment here%'
-                        and body like '%/u/' || unsubscribe_token::text
+                        and body like '%/u/' || unsubscribe_token::text || E'\n\nShop A · %'
                    from public.messages where id = tests.fx('fu')),
                 'the follow-up email leaves out the booking line and keeps its unsubscribe link');
 

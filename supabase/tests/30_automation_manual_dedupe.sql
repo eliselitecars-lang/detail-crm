@@ -7,6 +7,9 @@
 -- message of the key is skipped; for reminders only one announcing the
 -- job's current appointment to its current customer counts.
 \ir fixtures/two_shops.psql
+-- marketing email carries the shop's postal address (0119: none on file = not sent)
+update public.shops set address_line1 = '100 Main St', city = 'Birmingham', region = 'AL', postal_code = '35203'
+ where id in (tests.fx('shop_a'), tests.fx('shop_b'));
 -- shop A takes online bookings, so {{booking_page_link}} links to a live page
 -- (it is blank while online booking is off: 30_link_availability.sql)
 update public.booking_settings set enabled = true where shop_id = tests.fx('shop_a');

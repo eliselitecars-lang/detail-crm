@@ -80,6 +80,11 @@ struct CreateShopView: View {
                 InlineMessage(text: errorMessage, kind: .error)
             }
             navigationButtons
+            if step == .contact {
+                // Creating the shop is the step the Terms count as
+                // acceptance (and, with billing on, starts its trial).
+                LegalLinksFooter(step: .createShop)
+            }
         }
         .navigationTitle("New shop")
         .navigationBarTitleDisplayMode(.inline)

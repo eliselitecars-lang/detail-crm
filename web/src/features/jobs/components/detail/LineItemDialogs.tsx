@@ -29,6 +29,7 @@ import {
 } from '../../api';
 import { formatDuration, vehicleLabel } from '../../model';
 import { useCustomerVehicles, type VehicleOption } from '../../newJobApi';
+import { useJobEditError } from './useJobEditError';
 
 // ---------------------------------------------------------------------------
 // Vehicle picker (P-7: a line can name another of the customer's vehicles —
@@ -88,6 +89,7 @@ function parseQuantity(text: string): number | null {
 export function LineDialog({ job, line, nextSort, onClose }: LineDialogProps) {
   const { currency } = useShop();
   const toast = useToast();
+  const editError = useJobEditError(job.id);
   const add = useAddLineItems(job.id);
   const update = useUpdateLineItem();
   const [name, setName] = useState(line?.name ?? '');
@@ -140,7 +142,8 @@ export function LineDialog({ job, line, nextSort, onClose }: LineDialogProps) {
       }
       onClose();
     } catch (error) {
-      toast.error(error);
+      // A cut price waits for the job's open card payment pages (0118).
+      editError(error);
     }
   };
 
