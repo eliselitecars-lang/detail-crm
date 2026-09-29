@@ -224,7 +224,9 @@ test.describe('tasks', () => {
     // The list reloads (on reconnect, or via Try again if that comes first).
     await expect(async () => {
       const retry = page.getByRole('button', { name: 'Try again' });
-      if (await retry.isVisible()) await retry.click();
+      // The reconnect refetch can remove the button between the check and the
+      // click; a click with no timeout would then wait out the whole test.
+      if (await retry.isVisible()) await retry.click({ timeout: 1_000 }).catch(() => undefined);
       await expect(page.getByText('No finished tasks yet')).toBeVisible({ timeout: 1_000 });
     }).toPass();
     await page.waitForTimeout(500);
