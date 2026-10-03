@@ -4,7 +4,11 @@ import { Avatar, DropdownMenu, type DropdownMenuEntry } from '@/components/ui';
 import { ROLE_LABELS } from '@/features/shop/permissions';
 import { useShop } from '@/features/shop/shopContext';
 
-/** Current shop + role; lists the user's other shops and "Create a shop". */
+/**
+ * Current shop + role; lists the user's other shops and "Create a shop".
+ * The name takes the header's room (up to 40% of it, so search keeps its
+ * share) and truncates only when that runs out.
+ */
 export function ShopSwitcher() {
   const { shop, role, memberships, switchShop } = useShop();
   const navigate = useNavigate();
@@ -42,6 +46,7 @@ export function ShopSwitcher() {
     <DropdownMenu
       align="start"
       items={items}
+      className="max-w-[40%] min-w-0"
       menuClassName="w-64"
       trigger={({ ref, ...props }) => (
         <button
@@ -49,7 +54,7 @@ export function ShopSwitcher() {
           type="button"
           {...props}
           aria-label={`Current shop: ${shop.name}. Switch shop`}
-          className="rounded-control hover:bg-surface-2 flex max-w-56 min-w-0 items-center gap-2 px-2 py-1.5 text-left"
+          className="rounded-control hover:bg-surface-2 flex max-w-full min-w-0 items-center gap-2 px-2 py-1.5 text-left"
         >
           <Avatar name={shop.name} color={shop.brand_color} size="sm" className="rounded-md" />
           <span className="hidden min-w-0 sm:block">

@@ -60,6 +60,40 @@ describe('QuotePage', () => {
     expect(screen.queryByRole('button', { name: 'Approve quote' })).not.toBeInTheDocument();
   });
 
+  it('says the total includes add-ons only when one is selected', async () => {
+    // The fixture pre-selects Glass coating: the server total includes it.
+    mockRpc({ public_get_quote: { data: quoteFixture() } });
+    const { user } = render();
+    expect(
+      await screen.findByText('Total includes the selected optional add-ons.'),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('checkbox', { name: 'Wheel coating' }));
+    expect(screen.getByText(/add-ons that were pre-selected/)).toBeInTheDocument();
+    expect(
+      screen.queryByText('Total includes the selected optional add-ons.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('makes no add-on claim when none is selected', async () => {
+    const doc = quoteFixture();
+    doc.line_items = doc.line_items.map((l) => ({
+      ...l,
+      selected: l.optional ? false : l.selected,
+    }));
+    mockRpc({ public_get_quote: { data: doc } });
+    const { user } = render();
+    expect(await screen.findByRole('checkbox', { name: 'Glass coating' })).not.toBeChecked();
+    expect(screen.queryByText(/Total includes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/pre-selected/)).not.toBeInTheDocument();
+    // Ticking one: the total shown still has no add-ons, and says so.
+    await user.click(screen.getByRole('checkbox', { name: 'Wheel coating' }));
+    expect(
+      screen.getByText(
+        'This total doesn’t include add-ons yet. The ones you choose are priced by the shop when you approve.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('declines with a reason', async () => {
     const calls = mockRpc({
       public_get_quote: { data: quoteFixture() },

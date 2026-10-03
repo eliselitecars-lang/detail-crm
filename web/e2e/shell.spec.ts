@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { membershipRow, OWNER, TECH } from './support/fixtures';
+import { membershipRow, OWNER, SHOP, TECH } from './support/fixtures';
 import { mockSupabase } from './support/mockSupabase';
 
 async function navLabels(page: Page) {
@@ -97,6 +97,31 @@ test.describe('staff shell', () => {
     await expect(dialog.getByRole('option', { name: /Casey Customer/ })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
+  });
+
+  test('the shop switcher shows the whole name when the header has room', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const shop = { ...SHOP, name: 'Summit Auto Detailing & Ceramic Coating' };
+    await mockSupabase(page, {
+      user: OWNER,
+      tables: { shop_members: [membershipRow(OWNER, 'owner', shop)], notifications: [] },
+    });
+    await page.goto('/app');
+    const switcher = page.getByRole('button', { name: /^Current shop:/ });
+    const name = switcher.getByText(shop.name, { exact: true });
+    await expect(name).toBeVisible();
+    const clipped = (el: HTMLElement) => el.scrollWidth > el.clientWidth;
+    expect(await name.evaluate(clipped)).toBe(false);
+
+    // A narrower window: the name truncates and search keeps its room.
+    await page.setViewportSize({ width: 700, height: 900 });
+    await expect.poll(() => name.evaluate(clipped)).toBe(true);
+    const search = await page.getByRole('button', { name: 'Search' }).boundingBox();
+    expect(search?.width ?? 0).toBeGreaterThan(160);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
   });
 
   test('works at 360px: drawer navigation and no horizontal scroll', async ({ page }) => {

@@ -91,6 +91,28 @@ function useCloseAbandonedDeposit(token: string, jobToken: string | null, active
   }, [active, jobToken, mutate]);
 }
 
+/**
+ * The line under the totals about optional add-ons. The total shown is the
+ * server's: it counts the add-ons the shop pre-selected (`selected`), so it
+ * says it includes add-ons only when one is; while the customer's ticks
+ * differ, it says those are priced on approval. Null when there is nothing
+ * true to say (no add-ons, or none included and none ticked).
+ */
+function optionalAddOnsNote(
+  optional: readonly QuoteLine[],
+  picked: ReadonlySet<string>,
+  canRespond: boolean,
+): string | null {
+  const included = optional.some((l) => l.selected);
+  const changed = optional.some((l) => l.selected !== picked.has(l.id));
+  if (changed && canRespond) {
+    return included
+      ? 'This total reflects the add-ons that were pre-selected. Your changes are priced by the shop when you approve.'
+      : 'This total doesn’t include add-ons yet. The ones you choose are priced by the shop when you approve.';
+  }
+  return included ? 'Total includes the selected optional add-ons.' : null;
+}
+
 /** Lines of one option (or the shared ones, optionId null), split into required / optional. */
 function linesOf(lines: readonly QuoteLine[], optionId: string | null) {
   const own = lines.filter((l) => l.option_id === optionId);
@@ -141,7 +163,7 @@ function QuoteDocumentView({
   const optional = hasOptions
     ? [...shared.optional, ...(chosenOption ? linesOf(doc.line_items, chosenOption).optional : [])]
     : shared.optional;
-  const selectionChanged = optional.some((l) => l.selected !== picked.has(l.id));
+  const addOnsNote = optionalAddOnsNote(optional, picked, canRespond);
   const totalsOption = hasOptions ? (options.find((o) => o.id === chosenOption) ?? null) : null;
   const totals = totalsOption ?? quote;
   const pdfUrl = publicPdfUrl('quote', token);
@@ -265,13 +287,7 @@ function QuoteDocumentView({
               rows={standardTotals({ ...totals, tax_rate_bps: quote.tax_rate_bps })}
             />
           )}
-          {optional.length > 0 && (
-            <p className="text-muted mt-3 text-xs">
-              {selectionChanged && canRespond
-                ? 'This total reflects the add-ons that were pre-selected. Your changes are priced by the shop when you approve.'
-                : 'Total includes the selected optional add-ons.'}
-            </p>
-          )}
+          {addOnsNote && <p className="text-muted mt-3 text-xs">{addOnsNote}</p>}
           {quote.valid_until && (
             <p className="text-muted mt-2 text-xs">
               Valid until {formatLocalDate(quote.valid_until)}
