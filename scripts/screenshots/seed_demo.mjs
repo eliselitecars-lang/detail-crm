@@ -34,6 +34,7 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { deflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -377,6 +378,85 @@ async function postTwilioInbound(shopId, params) {
   must(r, 'Twilio inbound webhook');
 }
 
+// ------------------------------------------------------------------ sample logo
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([len, body, crc]);
+}
+
+/** A made-up sample logo (two mountain peaks on a blue tile), drawn as a PNG. */
+function sampleLogoPng(size = 256) {
+  const inTri = (x, y, [ax, ay], [bx, by], [cx, cy]) => {
+    const d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by);
+    const d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy);
+    const d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay);
+    return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+  };
+  const inTile = (x, y, r = 0.22) => {
+    const qx = Math.max(Math.abs(x - 0.5) - (0.5 - r), 0);
+    const qy = Math.max(Math.abs(y - 0.5) - (0.5 - r), 0);
+    return qx * qx + qy * qy <= r * r;
+  };
+  const colorAt = (x, y) => {
+    if (!inTile(x, y)) return null;
+    if (inTri(x, y, [0.32, 0.76], [0.6, 0.24], [0.88, 0.76])) {
+      return inTri(x, y, [0.49, 0.45], [0.6, 0.24], [0.71, 0.45]) ? [219, 234, 254] : [255, 255, 255];
+    }
+    if (inTri(x, y, [0.12, 0.76], [0.38, 0.4], [0.64, 0.76])) return [147, 197, 253];
+    return y > 0.76 && y < 0.8 && x > 0.12 && x < 0.88 ? [255, 255, 255] : [29, 78, 216];
+  };
+  const ss = 4;
+  const raw = Buffer.alloc(size * (size * 4 + 1));
+  for (let py = 0; py < size; py += 1) {
+    raw[py * (size * 4 + 1)] = 0;
+    for (let px = 0; px < size; px += 1) {
+      let r = 0, g = 0, b = 0, a = 0;
+      for (let sy = 0; sy < ss; sy += 1) {
+        for (let sx = 0; sx < ss; sx += 1) {
+          const c = colorAt((px + (sx + 0.5) / ss) / size, (py + (sy + 0.5) / ss) / size);
+          if (c) {
+            r += c[0];
+            g += c[1];
+            b += c[2];
+            a += 1;
+          }
+        }
+      }
+      const o = py * (size * 4 + 1) + 1 + px * 4;
+      raw[o] = a ? Math.round(r / a) : 0;
+      raw[o + 1] = a ? Math.round(g / a) : 0;
+      raw[o + 2] = a ? Math.round(b / a) : 0;
+      raw[o + 3] = Math.round((a / (ss * ss)) * 255);
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(size, 0);
+  ihdr.writeUInt32BE(size, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
 // ------------------------------------------------------------------ sample content
 
 const PASSWORDS = {
@@ -430,11 +510,11 @@ const SERVICES = [
 ];
 
 const ADDONS = [
-  { key: 'engine', name: 'Engine Bay Detail', minutes: 45, price: 49, for: ['full', 'exterior', 'correction'] },
-  { key: 'headlights', name: 'Headlight Restoration', minutes: 45, price: 79, for: ['full', 'exterior', 'maint', 'correction'] },
-  { key: 'pethair', name: 'Pet Hair Removal', minutes: 45, price: 45, for: ['full', 'interior'] },
-  { key: 'odor', name: 'Odor Elimination', minutes: 60, price: 65, for: ['full', 'interior'] },
-  { key: 'clay', name: 'Clay Bar & Iron Decon', minutes: 45, price: 59, for: ['exterior', 'maint'] },
+  { key: 'engine', name: 'Engine Bay Detail', minutes: 45, price: 49, description: 'Degrease, rinse and dress the engine bay plastics.', for: ['full', 'exterior', 'correction'] },
+  { key: 'headlights', name: 'Headlight Restoration', minutes: 45, price: 79, description: 'Wet-sand, polish and UV-seal cloudy headlight lenses.', for: ['full', 'exterior', 'maint', 'correction'] },
+  { key: 'pethair', name: 'Pet Hair Removal', minutes: 45, price: 45, description: 'Extra time with rubber brushes and air for embedded pet hair.', for: ['full', 'interior'] },
+  { key: 'odor', name: 'Odor Elimination', minutes: 60, price: 65, description: 'Enzyme treatment and ozone cycle for smoke, pet and food odors.', for: ['full', 'interior'] },
+  { key: 'clay', name: 'Clay Bar & Iron Decon', minutes: 45, price: 59, description: 'Removes bonded contamination so paint feels glass-smooth.', for: ['exterior', 'maint'] },
 ];
 
 // size: 0 Car, 1 Small SUV, 2 Large SUV / Truck, 3 Van
@@ -491,16 +571,28 @@ const CUSTOMERS = [
  * | overdue | deposit. who: tech | owner | both.
  */
 const JOBS = [
-  // ---- past, completed
+  // ---- past, completed (older history first)
+  { day: -24, at: '09:00', c: 'ashley', svc: ['exterior'], add: [], loc: 'shop', who: 'tech', pay: 'card', card: 'visa' },
+  { day: -23, at: '08:30', c: 'megan', svc: ['full'], add: [], loc: 'shop', who: 'tech', pay: 'card', card: 'visa', tip: 3000 },
+  { day: -22, at: '10:00', c: 'david', svc: ['exterior'], add: [], loc: 'mobile', who: 'tech', pay: 'card', card: 'mastercard' },
+  { day: -21, at: '09:00', c: 'ryan', svc: ['tint'], add: [], loc: 'shop', who: 'owner', pay: 'card', card: 'amex' },
+  { day: -20, at: '13:00', c: 'lauren', svc: ['interior'], add: [], loc: 'mobile', who: 'tech', pay: 'card', card: 'visa', tip: 2500 },
+  { day: -19, at: '09:30', c: 'kevin', svc: ['exterior'], add: [], loc: 'mobile', who: 'tech', pay: 'card', card: 'discover' },
+  { day: -18, at: '08:00', c: 'sarah', svc: ['full'], add: [], loc: 'shop', who: 'tech', pay: 'card', card: 'mastercard', tip: 2000 },
+  { day: -17, at: '10:00', c: 'brandon', v: 1, svc: ['interior'], add: [], loc: 'mobile', who: 'tech', pay: 'card', card: 'amex' },
+  { day: -16, at: '09:00', c: 'jessica', svc: ['exterior'], add: ['clay'], loc: 'shop', who: 'owner', pay: 'card', card: 'visa' },
+  { day: -14, at: '08:30', c: 'michael', svc: ['full'], add: ['engine'], loc: 'shop', who: 'tech', pay: 'card', card: 'visa', tip: 4000 },
   { day: -15, at: '09:00', c: 'david', svc: ['full'], add: ['pethair'], loc: 'mobile', who: 'tech', pay: 'card', card: 'visa', tip: 4000 },
   { day: -13, at: '08:30', c: 'chris', svc: ['correction'], add: [], loc: 'shop', who: 'both', pay: 'card', card: 'amex',
     internal: 'Swirls on driver door and roof. 80% correction achieved, customer happy.' },
   { day: -12, at: '10:00', c: 'ashley', svc: ['interior'], add: ['odor'], loc: 'mobile', who: 'tech', pay: 'card', card: 'mastercard' },
+  { day: -10, at: '13:00', c: 'emily', svc: ['exterior'], add: ['clay'], loc: 'mobile', who: 'tech', pay: 'card', card: 'visa', tip: 2000 },
   { day: -11, at: '09:00', c: 'megan', svc: ['tint'], add: [], loc: 'shop', who: 'owner', pay: 'card', card: 'visa', tip: 2000 },
   { day: -9, at: '08:00', c: 'daniel', svc: ['full'], add: ['engine'], loc: 'shop', who: 'tech', pay: 'overdue' },
   { day: -8, at: '09:30', c: 'lauren', svc: ['exterior'], add: ['clay'], loc: 'mobile', who: 'tech', pay: 'card', card: 'visa', tip: 1500 },
   { day: -7, at: '08:00', c: 'ryan', svc: ['ppf'], add: [], loc: 'shop', who: 'both', pay: 'card', card: 'discover' },
   { day: -6, at: '10:00', c: 'kevin', svc: ['interior'], add: [], loc: 'mobile', who: 'tech', pay: 'partial', card: 'visa', partial: 10000 },
+  { day: -5, at: '09:00', c: 'chris', svc: ['maint'], add: [], loc: 'mobile', who: 'tech', pay: 'card', card: 'amex' },
   { day: -4, at: '09:00', c: 'olivia', svc: ['full'], add: [], loc: 'mobile', who: 'tech', pay: 'card', card: 'mastercard', tip: 3000 },
   { day: -3, at: '08:30', c: 'jessica', svc: ['ceramic'], add: [], loc: 'shop', who: 'both', pay: 'card', card: 'amex',
     internal: 'Coated paint, wheel faces and glass. Cure 24h before washing; follow-up maintenance wash in 2 weeks.' },
@@ -591,6 +683,14 @@ async function main() {
     },
     owner,
   );
+  // logo, as Settings -> Business profile uploads it (Storage shop-assets, owner JWT)
+  const logoPath = `${shopId}/logo.png`;
+  const up = await http('POST', `${env.apiUrl}/storage/v1/object/shop-assets/${logoPath}`, {
+    headers: { ...authHeaders(owner), 'content-type': 'image/png', 'x-upsert': 'true', 'cache-control': '60' },
+    raw: sampleLogoPng(),
+  });
+  must(up, 'Storage upload shop logo');
+  await rest('PATCH', `shops?id=eq.${shopId}&select=id`, owner, { logo_path: logoPath });
   log(`shop ${SHOP.name} (${shopId}) /book/${slug}`);
 
   // owner's own membership row (the owner works jobs too)
@@ -656,6 +756,7 @@ async function main() {
         shop_id: shopId,
         category_id: catIds['Add-ons'],
         name: a.name,
+        description: a.description,
         kind: 'addon',
         duration_minutes: a.minutes,
         online_bookable: true,
@@ -804,6 +905,13 @@ async function main() {
     calendar_color: '#16A34A',
     phone: '+16155550120',
   });
+  await rest('POST', 'member_compensation?on_conflict=member_id', owner, {
+    shop_id: shopId,
+    member_id: techMember.id,
+    hourly_rate_cents: 2200,
+    commission_bps: 500,
+    sales_commission_bps: 0,
+  }, { prefer: 'return=representation,resolution=merge-duplicates' });
   // a second invite still pending (shows on the Team page)
   await fn('invites', { action: 'send_invite', shop_id: shopId, email: login('tyler.grant'), role: 'technician' }, owner);
   log(`technician ${tech.email} joined; 1 invite pending`);
@@ -853,9 +961,10 @@ async function main() {
 
   // --- 8. jobs, invoices, payments
   const memberFor = { tech: [techMember.id], owner: [ownerMember.id], both: [ownerMember.id, techMember.id] };
-  const history = { jobs: [], invoices: [] };
+  const history = { jobs: [], invoices: [], deposits: new Map(), cash: [] };
   const jobIds = {};
   const invoiceLinks = {};
+  const invoiceSent = new Set();
   let completedToday = null;
 
   const priceLines = async (cust, vehicle, keys) => {
@@ -932,18 +1041,22 @@ async function main() {
 
     const past = j.day < 0;
     const status = past ? 'completed' : j.status ?? 'scheduled';
+    // Mobile jobs go "on the way" (which texts the customer); shop jobs start in the bay.
+    const enRoute = mobile ? ['en_route'] : [];
     const path = {
       scheduled: [],
       confirmed: ['confirmed'],
       en_route: ['confirmed', 'en_route'],
-      in_progress: ['confirmed', 'en_route', 'in_progress'],
-      completed: ['confirmed', 'en_route', 'in_progress', 'completed'],
+      in_progress: ['confirmed', ...enRoute, 'in_progress'],
+      completed: ['confirmed', ...enRoute, 'in_progress', 'completed'],
     }[status];
     if (j.checklist) {
       await rpc('apply_checklist_template', { p_job_id: job.id, p_template_id: checklist.id }, owner);
     }
     await setStatus(job.id, path);
-    if (past) history.jobs.push({ id: job.id, start, end });
+    // Work that is already over (earlier days, or finished earlier today) is dated in step 17.
+    const done = past || (status === 'completed' && end.getTime() + minutes(30) < NOW.getTime());
+    if (done) history.jobs.push({ id: job.id, start, end, mobile });
 
     const md = (extra) => ({
       shop_id: shopId,
@@ -953,18 +1066,22 @@ async function main() {
     });
 
     if (j.pay === 'deposit') {
+      const paidAt = new Date(NOW.getTime() - 3 * 86400000);
+      history.deposits.set(job.id, paidAt);
       await payByCheckout({
         account,
         amount: j.deposit,
         card: CARDS[j.card],
-        paidAt: new Date(NOW.getTime() - 3 * 86400000),
+        paidAt,
         metadata: md({ kind: 'deposit', tip_cents: '0', source: 'booking_deposit_checkout' }),
       });
     }
     if (status === 'completed' && j.pay) {
       const invoice = await rpc('create_invoice_from_job', { p_job_id: job.id }, owner);
       const paidAt = new Date(end.getTime() + minutes(20));
-      if (past) history.invoices.push({ id: invoice.id, issuedAt: new Date(end.getTime() + minutes(10)) });
+      if (done) {
+        history.invoices.push({ id: invoice.id, jobId: job.id, customerId: cust.id, issuedAt: new Date(end.getTime() + minutes(10)) });
+      }
       if (j.pay === 'card') {
         await payByCheckout({
           account,
@@ -1000,12 +1117,14 @@ async function main() {
           owner,
         );
         completedToday = invoice.id;
+        if (done) history.cash.push({ invoiceId: invoice.id, paidAt: new Date(end.getTime() + minutes(20)) });
       } else if (j.pay === 'open') {
         invoiceLinks.open = invoice.id;
       } else if (j.pay === 'overdue') {
         invoiceLinks.overdue = invoice.id;
       }
       if (j.pay === 'open' || j.pay === 'overdue' || j.pay === 'partial') {
+        invoiceSent.add(invoice.id);
         // the invoice email (messaging.send renders invoice_sent server-side)
         await fn(
           'messaging',
@@ -1035,12 +1154,6 @@ async function main() {
     await rest('PATCH', `job_checklist_items?id=eq.${item.id}&select=id`, tech, { done_at: new Date().toISOString() });
   }
 
-  // "On my way" text from the technician for the en-route mobile job
-  await fn(
-    'messaging',
-    { action: 'send', shop_id: shopId, job_id: jobIds['david:0'], channel: 'sms', template_key: 'on_the_way' },
-    tech,
-  );
 
   // --- 9. quotes: draft, sent, approved (by the customer), converted, declined
   const quote = async (custKey, keys, optionalKeys, notes) => {
@@ -1085,7 +1198,7 @@ async function main() {
     );
   };
 
-  await quote('michael', ['ppf', 'ceramic'], ['tint'], 'Full front PPF plus ceramic coating over the film and remaining paint.');
+  const draftQuote = await quote('michael', ['ppf', 'ceramic'], ['tint'], 'Full front PPF plus ceramic coating over the film and remaining paint.');
   const sentQuote = await quote(
     'ashley',
     ['ceramic'],
@@ -1254,11 +1367,26 @@ async function main() {
       clock_out: new Date(h.end.getTime() - minutes(10 - (i % 4) * 5)).toISOString(),
     });
   }
+  // Today: Marcus started his shift before 8 and has been on Emily's job since
+  // 9:35. Once those times have passed they are entered as open timesheet
+  // entries; before that he clocks in himself, now (his own JWT).
+  const shiftStart = at(TODAY, '07:55');
+  const jobStart = at(TODAY, '09:35');
+  if (NOW > jobStart) {
+    entries.push(
+      { shop_id: shopId, member_id: techMember.id, kind: 'shift', job_id: null, clock_in: shiftStart.toISOString(), clock_out: null },
+      { shop_id: shopId, member_id: techMember.id, kind: 'job', job_id: emilyJob, clock_in: jobStart.toISOString(), clock_out: null },
+    );
+  }
   await rest('POST', 'time_entries', owner, entries);
-  // Today: Marcus clocks in for his shift and to the job he is working (his own JWT).
-  await rpc('clock_in', { p_shop_id: shopId, p_kind: 'shift' }, tech);
-  await rpc('clock_in', { p_shop_id: shopId, p_job_id: emilyJob, p_kind: 'job' }, tech);
-  log(`${entries.length} timesheet entries + live clock-ins`);
+  if (NOW <= jobStart) {
+    await rpc('clock_in', { p_shop_id: shopId, p_kind: 'shift' }, tech);
+    await rpc('clock_in', { p_shop_id: shopId, p_job_id: emilyJob, p_kind: 'job' }, tech);
+  }
+  // The owner clocks in too (managers may give the start time).
+  const ownerStart = at(TODAY, '07:40');
+  await rpc('clock_in', { p_shop_id: shopId, p_kind: 'shift', ...(NOW > ownerStart ? { p_now: ownerStart.toISOString() } : {}) }, owner);
+  log(`${entries.length} timesheet entries, Marcus and Jordan on the clock`);
 
   // --- 14. tasks
   const task = (t) => ({ shop_id: shopId, notes: null, customer_id: null, ...t });
@@ -1288,7 +1416,19 @@ async function main() {
     }),
   ]);
 
-  // --- 15. a draft email campaign
+  // --- 15. campaigns: one sent three weeks ago, one draft
+  const sentCampaign = (
+    await rest('POST', 'campaigns?select=id', owner, {
+      shop_id: shopId,
+      name: 'End of summer interior special',
+      channel: 'email',
+      subject: '15% off interior details through Labor Day',
+      body:
+        'Hi {{first_name}},\n\nSummer road trips leave their mark. Book an Interior Detail before Labor Day and we will take 15% off.\n\nSummit Auto Detailing',
+      audience: {},
+    })
+  )[0];
+  await rpc('launch_campaign', { p_campaign_id: sentCampaign.id }, owner);
   await rest('POST', 'campaigns', owner, {
     shop_id: shopId,
     name: 'Fall protection special',
@@ -1299,17 +1439,32 @@ async function main() {
     audience: {},
   });
 
-  // --- 16. history: the stack's clock cannot move, so shift PAST work back to
+  // --- 16. the platform's cron (pg_cron -> messaging): reminders, then the
+  // queue of automatic texts/emails (on the way, receipts, ...) is delivered.
+  const cron = { 'x-cron-secret': env.cronSecret };
+  await fn('messaging', { action: 'run_automations' }, anon, '', cron);
+  for (let i = 0; i < 20; i += 1) {
+    const run = await fn('messaging', { action: 'process_queue' }, anon, '', cron);
+    if (!run || !(Number(run.sent ?? 0) + Number(run.failed ?? 0) > 0)) break;
+  }
+
+  // --- 17. history: the stack's clock cannot move, so shift PAST work back to
   // when it happened (service role; see the header). Card payments are
   // already dated by their Stripe charge time.
   for (const h of history.jobs) {
     await rest('PATCH', `jobs?id=eq.${h.id}&select=id`, service, {
       confirmed_at: new Date(h.start.getTime() - 2 * 86400000).toISOString(),
-      en_route_at: new Date(h.start.getTime() - minutes(30)).toISOString(),
+      en_route_at: h.mobile ? new Date(h.start.getTime() - minutes(30)).toISOString() : null,
       started_at: new Date(h.start.getTime() + minutes(5)).toISOString(),
       completed_at: new Date(h.end.getTime() - minutes(5)).toISOString(),
       appointment_set_at: new Date(h.start.getTime() - 6 * 86400000).toISOString(),
       created_at: new Date(h.start.getTime() - 6 * 86400000).toISOString(),
+    });
+  }
+  for (const c of history.cash) {
+    await rest('PATCH', `payments?invoice_id=eq.${c.invoiceId}&method=eq.cash&select=id`, service, {
+      paid_at: c.paidAt.toISOString(),
+      created_at: c.paidAt.toISOString(),
     });
   }
   for (const inv of history.invoices) {
@@ -1325,6 +1480,96 @@ async function main() {
     const since = new Date(NOW.getTime() - (40 + i * 23) * 86400000);
     await rest('PATCH', `customers?id=eq.${c.id}&select=id`, service, { created_at: since.toISOString() });
   }
+  // Quotes: when each was written, sent, opened and answered.
+  const daysAgo = (n, hm) => {
+    const t = at(addDays(TODAY, -n), hm);
+    return t < NOW ? t : new Date(NOW.getTime() - minutes(30 + n));
+  };
+  const quoteTimes = new Map([
+    [draftQuote.id, { created_at: daysAgo(0, '08:45') }],
+    [sentQuote.id, { created_at: daysAgo(2, '15:05'), sent_at: daysAgo(2, '15:12') }],
+    [approvedQuote.id, { created_at: daysAgo(6, '11:20'), sent_at: daysAgo(6, '11:25'), viewed_at: daysAgo(5, '19:02'), approved_at: daysAgo(5, '19:10') }],
+    [convertQuote.id, { created_at: daysAgo(9, '16:00'), sent_at: daysAgo(9, '16:04'), viewed_at: daysAgo(8, '08:15'), approved_at: daysAgo(8, '08:21'), converted_at: daysAgo(7, '09:30') }],
+    [declinedQuote.id, { created_at: daysAgo(12, '10:10'), sent_at: daysAgo(12, '10:15'), viewed_at: daysAgo(11, '12:40'), declined_at: daysAgo(10, '18:05') }],
+  ]);
+  for (const [id, times] of quoteTimes) {
+    const patch = Object.fromEntries(Object.entries(times).map(([k, v]) => [k, v.toISOString()]));
+    patch.valid_until = addDays(ymdIn(times.created_at), 30);
+    await rest('PATCH', `quotes?id=eq.${id}&select=id`, service, patch);
+  }
+  const campaignAt = daysAgo(21, '10:00');
+  await rest('PATCH', `campaigns?id=eq.${sentCampaign.id}&select=id`, service, {
+    created_at: new Date(campaignAt.getTime() - 86400000).toISOString(),
+    launched_at: campaignAt.toISOString(),
+  });
+  await rest('PATCH', `campaign_recipients?campaign_id=eq.${sentCampaign.id}`, service, { created_at: campaignAt.toISOString() });
+
+  // Messages and notifications: dated by the event that produced them.
+  const jobTimes = new Map(history.jobs.map((h) => [h.id, h]));
+  const invoiceJob = new Map(history.invoices.map((inv) => [inv.id, inv.jobId]));
+  const eventTime = (row) => {
+    const h = jobTimes.get(row.job_id) ?? jobTimes.get(invoiceJob.get(row.invoice_id));
+    if (h) {
+      const key = String(row.template_key ?? row.kind ?? '');
+      if (/on_the_way|reminder|en_route/.test(key)) return new Date(h.start.getTime() - minutes(30));
+      if (/receipt|payment/.test(key)) return new Date(h.end.getTime() + minutes(21));
+      if (/invoice/.test(key)) return new Date(h.end.getTime() + minutes(10));
+      if (/review/.test(key)) return new Date(h.end.getTime() + minutes(120));
+      return new Date(h.end.getTime() - minutes(4));
+    }
+    if (history.deposits.has(row.job_id) && /receipt|payment/.test(String(row.template_key ?? row.kind ?? ''))) {
+      return new Date(history.deposits.get(row.job_id).getTime() + minutes(1));
+    }
+    // document emails carry the customer (not always the document id)
+    if (row.template_key === 'quote_sent' && !row.quote_id) {
+      const qq = [sentQuote, approvedQuote, convertQuote, declinedQuote].find((x) => x.cust.id === row.customer_id);
+      if (qq) return quoteTimes.get(qq.id).sent_at;
+    }
+    if (row.template_key === 'invoice_sent' && !row.invoice_id) {
+      const inv = history.invoices.find((x) => x.customerId === row.customer_id && invoiceSent.has(x.id));
+      if (inv) return new Date(inv.issuedAt.getTime() + minutes(2));
+    }
+    const q = quoteTimes.get(row.quote_id);
+    if (q) return row.kind ? q.declined_at ?? q.approved_at ?? q.viewed_at ?? q.sent_at : q.sent_at ?? q.created_at;
+    if (row.campaign_id === sentCampaign.id) return campaignAt;
+    return null;
+  };
+  const msgs = await rest(
+    'GET',
+    `messages?shop_id=eq.${shopId}&select=id,customer_id,job_id,invoice_id,quote_id,campaign_id,template_key,direction,status,sent_at,delivered_at,created_at&order=created_at`,
+    service,
+  );
+  // today's two-way conversations, spread over the morning
+  const thread = { [emily.id]: ['10:05', '10:12', '10:14', '10:16'], [ashley.id]: ['09:20', '09:48'], [lauren.id]: ['08:30', '08:41'] };
+  const seen = {};
+  for (const m of msgs) {
+    let t = eventTime(m);
+    if (!t && !m.template_key && thread[m.customer_id]) {
+      const k = (seen[m.customer_id] = (seen[m.customer_id] ?? -1) + 1);
+      const slots = thread[m.customer_id];
+      t = daysAgo(0, slots[Math.min(k, slots.length - 1)]);
+      if (t >= NOW) t = new Date(NOW.getTime() - minutes((slots.length - k) * 3));
+    }
+    if (!t) continue;
+    await rest('PATCH', `messages?id=eq.${m.id}`, service, {
+      created_at: t.toISOString(),
+      ...(m.sent_at ? { sent_at: t.toISOString() } : {}),
+      ...(m.delivered_at ? { delivered_at: new Date(t.getTime() + 4000).toISOString() } : {}),
+    });
+  }
+  const notes = await rest(
+    'GET',
+    `notifications?shop_id=eq.${shopId}&select=id,kind,job_id,invoice_id,quote_id`,
+    service,
+  );
+  for (const n of notes) {
+    const t = eventTime(n);
+    if (!t) continue;
+    await rest('PATCH', `notifications?id=eq.${n.id}`, service, {
+      created_at: t.toISOString(),
+      read_at: new Date(t.getTime() + minutes(45)).toISOString(),
+    });
+  }
 
   // --- links + output
   const invoiceToken = async (id) => (id ? await rpc('invoice_link_token', { p_invoice_id: id }, owner) : null);
@@ -1332,6 +1577,7 @@ async function main() {
   const overdueInvoiceToken = await invoiceToken(invoiceLinks.overdue);
   const ids = {
     jobInProgress: emilyJob,
+    serviceFullDetail: services.full,
     jobEnRoute: jobIds['david:0'],
     jobCompletedToday: jobIds['michael:0'],
     customer: emily.id,

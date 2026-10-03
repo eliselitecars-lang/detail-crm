@@ -19,18 +19,21 @@ Node 22, no dependencies. Reads `STACK_API_URL`, `STACK_ANON_KEY`,
 `STACK_APP_URL` from the environment or `scripts/stack/.state/stack.env`.
 Takes a few seconds.
 
-**Summit Auto Detailing** (Nashville, America/Chicago, shop + mobile): owner
-Jordan Avery, technician Marcus Reed (joined through the real invite flow) and
-one pending invite, a priced catalog (8 services × 4 vehicle sizes, 5 add-ons,
-2 membership plans, a coupon, a checklist), online booking with a 25% deposit,
-14 customers with vehicles, ~26 jobs relative to *today* in the shop zone
-(12 completed over the last ~3 weeks, 4 today: completed / in progress /
-en route / confirmed, ~10 upcoming), invoices (paid by card with tips, cash,
-partially paid, open, overdue), quotes (draft, sent, approved, converted,
+**Summit Auto Detailing** (Nashville, America/Chicago, shop + mobile, a
+generated sample logo): owner Jordan Avery, technician Marcus Reed (joined
+through the real invite flow, with a pay rate) and one pending invite, a priced
+catalog (8 services × 4 vehicle sizes, 5 add-ons, 2 membership plans, a coupon,
+a checklist, 2 bays and a van), online booking with a 25% deposit, 14 customers
+with vehicles, ~38 jobs relative to *today* in the shop zone (24 completed
+over the last ~4 weeks, 4 today: completed / in progress / on the way /
+confirmed, ~10 upcoming), invoices (paid by card with tips, cash, partially
+paid, open, overdue), a deposit, quotes (draft, sent, approved, converted,
 declined), an online booking request, SMS threads (outbound + signed inbound
-replies, an "on my way" text), timesheets (past shifts + live clock-ins),
-tasks, a draft campaign and a client portal login. Phones are 555-01xx and
-emails `@example.com`.
+replies), the shop's automatic texts and emails (on the way, job done,
+receipts, reminders) delivered by the cron path, timesheets (past shifts and
+job time, owner and technician on the clock today), tasks, a sent and a draft
+campaign, and a client portal login. Phones are 555-01xx, emails
+`@example.com`.
 
 Records are created through the paths the apps use: GoTrue sign-ups, the
 owner's JWT on PostgREST (RLS) and the real RPCs and edge functions
@@ -40,7 +43,10 @@ payment is dated by its Stripe charge's `created`). The service role is used
 only as the e2e journeys use it (Stripe `charges_enabled`, provisioning the
 SMS number) plus one **history** step: the stack clock cannot move, so the
 server-stamped times of past work (job started/completed, invoice issued/due,
-customer since) are shifted back to when that work happened.
+quote sent/answered, campaign launched, the messages and notifications they
+produced, customer since) are shifted back to when that work happened. The
+queued automatic messages are delivered with the cron secret, as pg_cron
+does (`messaging` `run_automations` / `process_queue`).
 
 **Re-runs**: the first run on a fresh database uses the canonical logins
 below and `/book/summit-auto`. When they already exist, the script creates a
@@ -73,16 +79,25 @@ describes the latest run.
 }
 ```
 
-Not seeded: active memberships (stripe-mock is stateless, so a subscription
-cannot be activated with believable terms) and job photos.
+Not seeded: active memberships (stripe-mock is stateless: activating a
+subscription would store its fixture price and a period end in 2000) and job
+photos.
 
 ## `web_shots.mjs` — web screenshots
 
 Builds the web app against the stack (`vite build` with `VITE_SUPABASE_URL` /
-`VITE_SUPABASE_ANON_KEY` from `stack.env`), serves it with `vite preview` on
-the origin the stack expects (`STACK_APP_URL`, default
-`http://127.0.0.1:5173`), signs in through the real login page and saves PNGs
-(desktop 1440×900 @2x, phone 390×844 @3x) plus `MANIFEST.md` to
-`SHOTS_DIR` (default `scripts/screenshots/.state/web`). Uses Playwright from
-`web/node_modules`. `SHOTS_SKIP_BUILD=1` reuses `web/dist`; `SHOTS_ONLY=<regex>`
-captures a subset.
+`VITE_SUPABASE_ANON_KEY` from `stack.env`, into `.state/web-dist`), serves it
+with `vite preview` on the origin the stack expects (`STACK_APP_URL`, default
+`http://127.0.0.1:5173`; stop a dev server there first), signs in through the
+real login page and saves ~40 PNGs plus `MANIFEST.md` to `SHOTS_DIR` (default
+`scripts/screenshots/.state/web`): staff screens at 1440×900 @2x, the
+technician's view, public pages (booking flow, quote, invoice, portal,
+pricing) and phone-width (390×844 @3x) shots. Each shot waits for network
+idle, no skeletons and loaded fonts; API errors, page errors and error states
+are listed under "Issues seen" in the manifest. Uses Playwright's Chromium
+from `web/node_modules` (`PW_CHROMIUM_EXECUTABLE` overrides).
+
+Knobs: `SHOTS_SKIP_BUILD=1` reuses the last build, `SHOTS_ONLY=<regex>`
+captures matching file names only (no manifest). Behind an HTTPS proxy
+(`HTTPS_PROXY`), Google Fonts are fetched by Node (`NODE_USE_ENV_PROXY`)
+because Chromium cannot verify the proxy's certificate.
