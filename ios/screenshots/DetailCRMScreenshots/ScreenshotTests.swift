@@ -455,12 +455,14 @@ final class ScreenshotTour {
     }
 
     /// Positive distance moves the content up (shows what is below). The
-    /// finger holds at the end so the scroll view does not fling.
+    /// finger holds at the end so the scroll view does not fling, and runs
+    /// down the right-hand margin, where no row or button can take the
+    /// press (a drag that starts on a checklist row does not scroll).
     private func drag(by distance: CGFloat) {
         let startY: CGFloat = distance > 0 ? 0.72 : 0.28
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: startY))
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: startY))
         let end = start.withOffset(CGVector(dx: 0, dy: -distance))
-        start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
         pause(0.4)
     }
 
