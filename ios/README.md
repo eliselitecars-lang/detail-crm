@@ -501,3 +501,38 @@ iOS changes):
    the logs are uploaded as an artifact.
 
 Run `python3 scripts/swift_sanity.py` before every push that touches `ios/`.
+
+## Screenshots (`.github/workflows/screenshots.yml`)
+
+iPhone simulator screenshots of the app running against a real backend full
+of sample data. Run it from the Actions tab (workflow_dispatch) or push a
+change to `.github/trigger-screenshots`. Two jobs run side by side:
+
+1. **backend** (ubuntu): the real local Supabase stack exactly as
+   `e2e-stack.yml` runs it (`scripts/stack/up.sh`), sample data from
+   `scripts/screenshots/seed_demo.mjs` (or `screenshots/fallback_seed.mjs`,
+   an owner + shop only, when that script is missing), and a Cloudflare quick
+   tunnel to the API gateway. `screenshots/verify_tunnel.mjs` signs in through
+   the tunnel before the URL and the demo logins are published as the
+   `screenshot-backend` artifact (kept one day); the job then stays up until
+   the iPhone job ends.
+2. **iphone** (macos-26): `screenshots/add_ui_test_target.rb` adds a UI-test
+   target and scheme (`DetailCRMScreenshots`) to the project **on the runner
+   only** — the committed project has no test target, and the test source
+   (`screenshots/DetailCRMScreenshots/ScreenshotTests.swift`) sits outside the
+   app's synchronized folder, so it is never compiled into the app. The app is
+   built while the backend starts, Config.plist is pointed at the tunnel and
+   the app rebuilt (incremental), and the tour runs on the newest iPhone Pro
+   Max simulator (`screenshots/pick_simulator.py`; 6.9-inch, the size App
+   Store Connect asks for) with a 9:41 status bar. It signs in through the real
+   Sign in screen as the owner, visits Today, a job, Calendar (day / week /
+   agenda), Customers, Inbox, More and every More screen, signs out and repeats
+   the field screens as the technician.
+
+Output: the `ios-screenshots` artifact — `NN-<screen>.png` (1320×2868 on an
+iPhone 17 Pro Max) plus `report.txt`, which lists every step as OK, FAILED
+(with why, and a `fail-…` screenshot of what was on screen) or SKIPPED. A
+failed step never stops the tour; the job fails at the end when any step
+failed, and uploads `ios-screenshots-debug` (the .xcresult and build logs).
+Everything shown is sample data on a stack that lives only for the run;
+nothing touches production, and no secrets are needed.

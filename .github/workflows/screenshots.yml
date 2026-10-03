@@ -1,0 +1,411 @@
+# iPhone screenshots of the app running against a real backend full of
+# sample data (ios/README.md "Screenshots"). Two jobs run side by side:
+#
+#   backend  (ubuntu)  the real local Supabase stack exactly as e2e-stack.yml
+#                      runs it (scripts/stack/up.sh), sample data
+#                      (scripts/screenshots/seed_demo.mjs; a minimal fallback
+#                      seed when that script is not in the commit), and a
+#                      Cloudflare quick tunnel to its API gateway (Kong). It
+#                      publishes the tunnel URL and the demo logins as the
+#                      `screenshot-backend` artifact, then keeps everything up
+#                      until the iPhone job has finished.
+#   iphone   (macOS)   builds the app plus a CI-only UI-test target
+#                      (ios/screenshots/add_ui_test_target.rb; the shipping
+#                      project has none) while the backend starts, points
+#                      Config.plist at the tunnel, and runs the screenshot tour
+#                      (ios/screenshots/DetailCRMScreenshots) on the newest
+#                      iPhone Pro Max simulator. PNGs -> `ios-screenshots`.
+#
+# Nothing here touches production: the stack, its sample data and the tunnel
+# live only for the length of the run. Run it from the Actions tab, or push a
+# change to .github/trigger-screenshots.
+name: screenshots
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/trigger-screenshots"
+      - ".github/workflows/screenshots.yml"
+
+concurrency:
+  group: screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SUPABASE_CLI_VERSION: 2.118.0
+  STRIPE_MOCK_VERSION: 0.205.0
+  BACKEND_ARTIFACT: screenshot-backend
+  # The jobs find each other by these display names (the `name:` values below).
+  BACKEND_JOB_NAME: Backend for screenshots
+  IPHONE_JOB_NAME: iPhone simulator screenshots
+
+jobs:
+  backend:
+    name: Backend for screenshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEMO_JSON: ${{ github.workspace }}/scripts/screenshots/.state/demo.json
+      BACKEND_DIR: ${{ github.workspace }}/.screenshot-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Install stripe-mock and cloudflared
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/stripe/stripe-mock/releases/download/v${STRIPE_MOCK_VERSION}/stripe-mock_${STRIPE_MOCK_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" stripe-mock
+          curl -fsSL -o "$RUNNER_TEMP/bin/cloudflared" \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+          chmod +x "$RUNNER_TEMP/bin/cloudflared"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/cloudflared" --version
+
+      - name: Ensure the psql client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Start the real stack (all migrations via supabase db reset)
+        run: scripts/stack/up.sh
+
+      - name: Sample data
+        run: |
+          set -euo pipefail
+          if [ -f scripts/screenshots/seed_demo.mjs ]; then
+            if [ -f scripts/screenshots/package.json ]; then
+              (cd scripts/screenshots && npm ci --no-audit --no-fund)
+            fi
+            node scripts/screenshots/seed_demo.mjs
+          else
+            echo "::warning::scripts/screenshots/seed_demo.mjs is not in this commit: using the minimal fallback seed (owner + shop + 2 customers, no technician)"
+            node ios/screenshots/fallback_seed.mjs "$DEMO_JSON"
+          fi
+          test -s "$DEMO_JSON" || { echo "::error::the seed did not write $DEMO_JSON"; exit 1; }
+          jq '{shop, owner: (.owner | {email, name}), technician: (.technician // null | if . then {email, name} else null end)}' "$DEMO_JSON"
+
+      - name: Open a Cloudflare quick tunnel to the API gateway
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source scripts/stack/.state/stack.env
+          port="${STACK_API_URL##*:}"
+          port="${port%%/*}"
+          nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${port}" \
+            > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cloudflared.pid"
+          url=""
+          for _ in $(seq 1 120); do
+            url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n 1 || true)"
+            [ -n "$url" ] && break
+            sleep 1
+          done
+          if [ -z "$url" ]; then
+            cat "$RUNNER_TEMP/cloudflared.log"
+            echo "::error::cloudflared printed no trycloudflare.com URL within 2 minutes"
+            exit 1
+          fi
+          echo "Tunnel: $url -> http://127.0.0.1:${port} (Kong)"
+          mkdir -p "$BACKEND_DIR"
+          jq --arg url "$url" --arg anon "$STACK_ANON_KEY" \
+            '{tunnelUrl: $url, anonKey: $anon, webAppUrl: (.appUrl // "http://127.0.0.1:5173"),
+              shop, owner, technician: (.technician // null), client: (.client // null), links: (.links // {})}' \
+            "$DEMO_JSON" > "$BACKEND_DIR/backend.json"
+
+      - name: Verify the app's path through the tunnel
+        run: node ios/screenshots/verify_tunnel.mjs "$BACKEND_DIR/backend.json"
+
+      # Throwaway logins of a stack that exists only during this run.
+      - name: Publish the backend for the iPhone job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKEND_ARTIFACT }}
+          path: ${{ env.BACKEND_DIR }}/backend.json
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Keep the backend up until the iPhone job finishes
+        timeout-minutes: 100
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + 95 * 60 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+              --jq ".jobs[] | select(.name == \"$IPHONE_JOB_NAME\") | .status" 2>/dev/null | head -n 1 || true)"
+            if [ "$status" = "completed" ]; then
+              echo "The iPhone job has finished."
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/cloudflared.pid")" 2>/dev/null; then
+              echo "::warning::cloudflared exited; the iPhone job can no longer reach the backend"
+              tail -n 30 "$RUNNER_TEMP/cloudflared.log"
+            fi
+            echo "$(date -u +%H:%M:%S) iPhone job: ${status:-not started}"
+            sleep 30
+          done
+          echo "::warning::stopped waiting for the iPhone job after 95 minutes"
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/backend-logs/docker"
+          cp "$RUNNER_TEMP/cloudflared.log" "$RUNNER_TEMP/backend-logs/" 2>/dev/null || true
+          cp scripts/stack/.state/*.log "$RUNNER_TEMP/backend-logs/" 2>/dev/null || true
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^supabase_' || true); do
+            docker logs "$c" > "$RUNNER_TEMP/backend-logs/docker/$c.log" 2>&1 || true
+          done
+
+      - name: Upload backend logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-backend-logs
+          path: ${{ runner.temp }}/backend-logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Stop the stack
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/cloudflared.pid" 2>/dev/null)" 2>/dev/null || true
+          scripts/stack/down.sh || true
+
+  iphone:
+    name: iPhone simulator screenshots
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PROJECT: ios/DetailCRM/DetailCRM.xcodeproj
+      SCHEME: DetailCRMScreenshots
+      APP_BUNDLE_ID: com.detailcrm.app
+      SPM_DIR: ${{ github.workspace }}/.spm-cache
+      DERIVED: ${{ github.workspace }}/DerivedData
+      LOG_DIR: ${{ github.workspace }}/build-logs
+      OUT_DIR: ${{ github.workspace }}/screenshots-out
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode (newest release, 26 or later)
+        run: |
+          set -euo pipefail
+          bash ios/ci/select_xcode.sh
+          echo "XCODE_VERSION=$(xcodebuild -version | head -1 | awk '{print $2}')" >> "$GITHUB_ENV"
+          mkdir -p "$LOG_DIR" "$OUT_DIR"
+          FORMATTER="cat"
+          if command -v xcbeautify >/dev/null 2>&1; then FORMATTER="xcbeautify --quieter --renderer github-actions"; fi
+          echo "FORMATTER=$FORMATTER" >> "$GITHUB_ENV"
+
+      # Booting takes a minute or two; it runs while the app builds.
+      - name: Pick and boot the newest iPhone Pro Max simulator
+        run: |
+          set -euo pipefail
+          line="$(python3 ios/screenshots/pick_simulator.py)"
+          udid="$(printf '%s' "$line" | cut -f1)"
+          echo "Simulator: $(printf '%s' "$line" | cut -f2) on $(printf '%s' "$line" | cut -f3) ($udid)"
+          echo "SIM_UDID=$udid" >> "$GITHUB_ENV"
+          echo "SIM_NAME=$(printf '%s' "$line" | cut -f2) ($(printf '%s' "$line" | cut -f3))" >> "$GITHUB_ENV"
+          xcrun simctl boot "$udid" || true
+
+      # Same key as ios.yml (computed before the test target changes the project).
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SPM_DIR }}
+          key: spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('ios/DetailCRM/**/Package.resolved', 'ios/DetailCRM/DetailCRM.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-
+
+      - name: Ruby (xcodeproj)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: ios
+
+      - name: Add the CI-only UI-test target
+        working-directory: ios
+        run: bundle exec ruby screenshots/add_ui_test_target.rb
+
+      - name: Resolve package dependencies
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation 2>&1 | tee "$LOG_DIR/resolve.log" | tail -n 20
+
+      # Built once with the placeholder Config.plist while the backend
+      # starts; the second build below only copies the real Config.plist
+      # and signs again.
+      - name: Build for testing
+        timeout-minutes: 40
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "id=$SIM_UDID" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            -derivedDataPath "$DERIVED" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation 2>&1 | tee "$LOG_DIR/build-for-testing.log" | $FORMATTER
+
+      - name: Wait for the backend
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          api="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          id=""
+          for _ in $(seq 1 260); do
+            id="$(gh api "$api/artifacts?per_page=100" \
+              --jq ".artifacts[] | select(.name == \"$BACKEND_ARTIFACT\") | .id" 2>/dev/null | head -n 1 || true)"
+            [ -n "$id" ] && break
+            conclusion="$(gh api "$api/jobs?per_page=100" \
+              --jq ".jobs[] | select(.name == \"$BACKEND_JOB_NAME\") | .conclusion" 2>/dev/null | head -n 1 || true)"
+            if [ -n "$conclusion" ] && [ "$conclusion" != "null" ]; then
+              echo "::error::the backend job ended ($conclusion) without publishing $BACKEND_ARTIFACT"
+              exit 1
+            fi
+            sleep 10
+          done
+          [ -n "$id" ] || { echo "::error::$BACKEND_ARTIFACT did not appear"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/backend"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$RUNNER_TEMP/backend.zip"
+          unzip -o -q "$RUNNER_TEMP/backend.zip" -d "$RUNNER_TEMP/backend"
+          B="$RUNNER_TEMP/backend/backend.json"
+          for field in owner.password technician.password; do
+            secret="$(jq -r ".$field // empty" "$B")"
+            [ -n "$secret" ] && echo "::add-mask::$secret"
+          done
+          echo "Backend: $(jq -r .tunnelUrl "$B"), shop $(jq -r .shop.name "$B")"
+          {
+            echo "TUNNEL_URL=$(jq -r .tunnelUrl "$B")"
+            echo "TEST_RUNNER_SHOTS_OWNER_EMAIL=$(jq -r .owner.email "$B")"
+            echo "TEST_RUNNER_SHOTS_OWNER_PASSWORD=$(jq -r .owner.password "$B")"
+            echo "TEST_RUNNER_SHOTS_TECH_EMAIL=$(jq -r '.technician.email // empty' "$B")"
+            echo "TEST_RUNNER_SHOTS_TECH_PASSWORD=$(jq -r '.technician.password // empty' "$B")"
+          } >> "$GITHUB_ENV"
+
+      - name: Point Config.plist at the tunnel and rebuild
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          B="$RUNNER_TEMP/backend/backend.json"
+          plist=ios/DetailCRM/DetailCRM/Config.plist
+          plutil -replace SUPABASE_URL -string "$(jq -r .tunnelUrl "$B")" "$plist"
+          plutil -replace SUPABASE_ANON_KEY -string "$(jq -r .anonKey "$B")" "$plist"
+          plutil -replace WEB_APP_URL -string "$(jq -r '.webAppUrl // "http://127.0.0.1:5173"' "$B")" "$plist"
+          curl -fsS --max-time 20 -o /dev/null -H "apikey: $(jq -r .anonKey "$B")" "$TUNNEL_URL/auth/v1/health" \
+            && echo "The tunnel answers from this runner."
+          xcodebuild build-for-testing \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "id=$SIM_UDID" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            -derivedDataPath "$DERIVED" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation 2>&1 | tee "$LOG_DIR/rebuild.log" | $FORMATTER
+          app="$DERIVED/Build/Products/Debug-iphonesimulator/DetailCRM.app"
+          echo "Built app config: $(plutil -extract SUPABASE_URL raw "$app/Config.plist")"
+
+      - name: Prepare the simulator (status bar, app, permissions)
+        run: |
+          set -euo pipefail
+          xcrun simctl bootstatus "$SIM_UDID" -b
+          xcrun simctl status_bar "$SIM_UDID" override --time 9:41 \
+            --dataNetwork wifi --wifiMode active --wifiBars 3 \
+            --cellularMode active --cellularBars 4 \
+            --batteryState charged --batteryLevel 100
+          # No "slide to type" keyboard tip over the Sign in form.
+          xcrun simctl spawn "$SIM_UDID" defaults write com.apple.Preferences DidShowContinuousPathIntroduction -bool true || true
+          xcrun simctl install "$SIM_UDID" "$DERIVED/Build/Products/Debug-iphonesimulator/DetailCRM.app"
+          for service in location photos photos-add contacts microphone; do
+            xcrun simctl privacy "$SIM_UDID" grant "$service" "$APP_BUNDLE_ID" || echo "(could not pre-grant $service)"
+          done
+
+      - name: Run the screenshot tour
+        timeout-minutes: 35
+        env:
+          TEST_RUNNER_SHOTS_DIR: ${{ github.workspace }}/screenshots-out/raw
+        run: |
+          set -o pipefail
+          mkdir -p "$TEST_RUNNER_SHOTS_DIR"
+          xcodebuild test-without-building \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "id=$SIM_UDID" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            -derivedDataPath "$DERIVED" \
+            -resultBundlePath "$OUT_DIR/ScreenshotTour.xcresult" \
+            -test-timeouts-enabled YES \
+            -maximum-test-execution-time-allowance 1800 2>&1 | tee "$LOG_DIR/test.log" | $FORMATTER
+
+      - name: Collect the screenshots
+        if: always()
+        run: |
+          set -uo pipefail
+          python3 ios/screenshots/collect_screenshots.py \
+            --raw "$OUT_DIR/raw" --xcresult "$OUT_DIR/ScreenshotTour.xcresult" --out "$OUT_DIR/png" || true
+          grep '\[tour\]' "$LOG_DIR/test.log" > "$OUT_DIR/png/tour-log.txt" 2>/dev/null || true
+          {
+            echo "### iPhone screenshots"
+            echo "- simulator: ${SIM_NAME:-unknown}, Xcode ${XCODE_VERSION:-?}"
+            echo "- backend: throwaway CI stack with sample data (${TUNNEL_URL:-no tunnel})"
+            echo "- screenshots: $(ls "$OUT_DIR/png"/*.png 2>/dev/null | wc -l | tr -d ' ') (artifact \`ios-screenshots\`)"
+            echo
+            echo '```'
+            cat "$OUT_DIR/png/report.txt" 2>/dev/null || echo "(no report.txt: the tour did not finish)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-screenshots
+          path: ${{ env.OUT_DIR }}/png
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Fail when a screen was not captured
+        run: |
+          set -euo pipefail
+          report="$OUT_DIR/png/report.txt"
+          [ -f "$report" ] || { echo "::error::the tour wrote no report"; exit 1; }
+          if grep -q '^FAILED' "$report"; then
+            grep -B3 '^FAILED' "$report" | while IFS= read -r line; do echo "::warning::$line"; done
+            echo "::error::some screens were not captured cleanly (see report.txt in ios-screenshots)"
+            exit 1
+          fi
+          echo "Every step of the tour passed."
+
+      - name: Upload the test results and logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-screenshots-debug
+          path: |
+            ${{ env.OUT_DIR }}/ScreenshotTour.xcresult
+            ${{ env.LOG_DIR }}
+          retention-days: 7
+          if-no-files-found: ignore
