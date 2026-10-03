@@ -557,6 +557,10 @@ final class ScreenshotTour {
             if !loading.exists { return true }
             pause(0.5)
         }
+        // Says which loader never finished (and where), for the report.
+        if loading.exists {
+            record("        still on screen: \"\(loading.label)\" id=\"\(loading.identifier)\" frame=\(loading.frame)")
+        }
         return false
     }
 
