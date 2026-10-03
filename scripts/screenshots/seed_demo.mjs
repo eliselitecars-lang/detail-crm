@@ -961,7 +961,7 @@ async function main() {
 
   // --- 8. jobs, invoices, payments
   const memberFor = { tech: [techMember.id], owner: [ownerMember.id], both: [ownerMember.id, techMember.id] };
-  const history = { jobs: [], invoices: [], deposits: new Map(), cash: [] };
+  const history = { jobs: [], invoices: [], deposits: new Map(), cash: [], open: [] };
   const jobIds = {};
   const invoiceLinks = {};
   const invoiceSent = new Set();
@@ -1057,6 +1057,7 @@ async function main() {
     // Work that is already over (earlier days, or finished earlier today) is dated in step 17.
     const done = past || (status === 'completed' && end.getTime() + minutes(30) < NOW.getTime());
     if (done) history.jobs.push({ id: job.id, start, end, mobile });
+    else history.open.push({ id: job.id, start, status, mobile, booked: j.day < 3 ? 6 + (i % 5) : 3 + (i % 9) });
 
     const md = (extra) => ({
       shop_id: shopId,
@@ -1424,7 +1425,7 @@ async function main() {
       channel: 'email',
       subject: '15% off interior details through Labor Day',
       body:
-        'Hi {{first_name}},\n\nSummer road trips leave their mark. Book an Interior Detail before Labor Day and we will take 15% off.\n\nSummit Auto Detailing',
+        'Hi {{customer_first_name}},\n\nSummer road trips leave their mark. Book an Interior Detail before Labor Day and we will take 15% off.\n\nSummit Auto Detailing',
       audience: {},
     })
   )[0];
@@ -1435,7 +1436,7 @@ async function main() {
     channel: 'email',
     subject: 'Get your paint ready for winter',
     body:
-      'Hi {{first_name}},\n\nWinter road salt is hard on paint. Book a Full Detail before November 30 and use code FALLSHINE for $25 off.\n\nSee you soon,\nSummit Auto Detailing',
+      'Hi {{customer_first_name}},\n\nWinter road salt is hard on paint. Book a Full Detail before November 30 and use code FALLSHINE for $25 off.\n\nSee you soon,\nSummit Auto Detailing',
     audience: {},
   });
 
@@ -1460,6 +1461,27 @@ async function main() {
       appointment_set_at: new Date(h.start.getTime() - 6 * 86400000).toISOString(),
       created_at: new Date(h.start.getTime() - 6 * 86400000).toISOString(),
     });
+  }
+  // Today's and upcoming jobs: booked days ago, confirmed the next day, and
+  // today's work started / went on the way at its scheduled time once that
+  // time has passed.
+  const todayStamps = new Map();
+  for (const o of history.open) {
+    const booked = new Date(Math.min(o.start.getTime(), NOW.getTime()) - o.booked * 86400000);
+    const patch = { created_at: booked.toISOString(), appointment_set_at: booked.toISOString() };
+    if (o.status !== 'scheduled') patch.confirmed_at = new Date(booked.getTime() + 86400000 + minutes(95)).toISOString();
+    const enRouteAt = new Date(o.start.getTime() - minutes(25));
+    if (o.status === 'en_route' && enRouteAt < NOW) {
+      patch.en_route_at = enRouteAt.toISOString();
+      todayStamps.set(o.id, enRouteAt);
+    }
+    const startedAt = new Date(o.start.getTime() + minutes(5));
+    if (o.status === 'in_progress' && startedAt < NOW) {
+      patch.started_at = startedAt.toISOString();
+      if (o.mobile) patch.en_route_at = new Date(o.start.getTime() - minutes(25)).toISOString();
+      todayStamps.set(o.id, startedAt);
+    }
+    await rest('PATCH', `jobs?id=eq.${o.id}&select=id`, service, patch);
   }
   for (const c of history.cash) {
     await rest('PATCH', `payments?invoice_id=eq.${c.invoiceId}&method=eq.cash&select=id`, service, {
@@ -1497,6 +1519,10 @@ async function main() {
     patch.valid_until = addDays(ymdIn(times.created_at), 30);
     await rest('PATCH', `quotes?id=eq.${id}&select=id`, service, patch);
   }
+  if (typeof convertedJobId === 'string') {
+    const at7 = quoteTimes.get(convertQuote.id).converted_at.toISOString();
+    await rest('PATCH', `jobs?id=eq.${convertedJobId}&select=id`, service, { created_at: at7, appointment_set_at: at7 });
+  }
   const campaignAt = daysAgo(21, '10:00');
   await rest('PATCH', `campaigns?id=eq.${sentCampaign.id}&select=id`, service, {
     created_at: new Date(campaignAt.getTime() - 86400000).toISOString(),
@@ -1528,6 +1554,9 @@ async function main() {
     if (row.template_key === 'invoice_sent' && !row.invoice_id) {
       const inv = history.invoices.find((x) => x.customerId === row.customer_id && invoiceSent.has(x.id));
       if (inv) return new Date(inv.issuedAt.getTime() + minutes(2));
+    }
+    if (todayStamps.has(row.job_id) && /on_the_way|job_started|en_route|started/.test(String(row.template_key ?? row.kind ?? ''))) {
+      return todayStamps.get(row.job_id);
     }
     const q = quoteTimes.get(row.quote_id);
     if (q) return row.kind ? q.declined_at ?? q.approved_at ?? q.viewed_at ?? q.sent_at : q.sent_at ?? q.created_at;
