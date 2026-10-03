@@ -35,6 +35,9 @@ supabase/functions/.stack-ca.pem
 web/playwright-report-stack/
 web/test-results-stack/
 
+# Screenshot tooling (scripts/screenshots/): sample-shop output, PNGs
+scripts/screenshots/.state/
+
 # Python bytecode (scripts/*.py)
 __pycache__/
 *.pyc
