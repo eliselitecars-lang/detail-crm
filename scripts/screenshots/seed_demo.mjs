@@ -1151,7 +1151,8 @@ async function main() {
     `job_checklist_items?job_id=eq.${emilyJob}&select=id,sort&order=sort`,
     owner,
   );
-  for (const item of items.slice(0, 5)) {
+  const ticked = items.slice(0, 5);
+  for (const item of ticked) {
     await rest('PATCH', `job_checklist_items?id=eq.${item.id}&select=id`, tech, { done_at: new Date().toISOString() });
   }
 
@@ -1482,6 +1483,13 @@ async function main() {
       todayStamps.set(o.id, startedAt);
     }
     await rest('PATCH', `jobs?id=eq.${o.id}&select=id`, service, patch);
+  }
+  // Marcus ticked the checklist through the morning (done_at is server-stamped).
+  for (const [k, item] of ticked.entries()) {
+    const doneAt = new Date(at(TODAY, '09:40').getTime() + minutes(k * 35));
+    if (doneAt < NOW) {
+      await rest('PATCH', `job_checklist_items?id=eq.${item.id}&select=id`, service, { done_at: doneAt.toISOString() });
+    }
   }
   for (const c of history.cash) {
     await rest('PATCH', `payments?invoice_id=eq.${c.invoiceId}&method=eq.cash&select=id`, service, {
