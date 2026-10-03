@@ -103,7 +103,7 @@ final class ScreenshotTour {
         guard step("00-sign-in-owner", { signIn(owner, captureFormAs: "00-sign-in") }) else { return }
         signedIn = true
 
-        step("01-owner-today") { openTab("Today") && shoot("01-owner-today", title: "Today") }
+        step("01-owner-today") { openTab("Today") && scrollToTop() && shoot("01-owner-today", title: "Today") }
         step("02-owner-today-scrolled") { scrollPage() && shoot("02-owner-today-scrolled") }
         step("03-owner-job") {
             openTab("Today") && openTodayJob() && shoot("03-owner-job", expect: header("Customer & vehicle"))
@@ -125,9 +125,9 @@ final class ScreenshotTour {
 
         step("15-owner-more") { openTab("More") && shoot("15-owner-more", title: "More") }
         step("16-owner-quotes") { openMoreItem("Quotes") && shoot("16-owner-quotes", title: "Quotes") }
-        step("17-owner-quote") { openFirstRow() && shoot("17-owner-quote") }
+        step("17-owner-quote") { openFirstRow(preferring: "Sent") && shoot("17-owner-quote") }
         step("18-owner-invoices") { openMoreItem("Invoices") && shoot("18-owner-invoices", title: "Invoices") }
-        step("19-owner-invoice") { openFirstRow() && shoot("19-owner-invoice") }
+        step("19-owner-invoice") { openFirstRow(preferring: "Partially paid") && shoot("19-owner-invoice") }
         step("20-owner-payments") { openMoreItem("Payments") && shoot("20-owner-payments", title: "Payments") }
         step("21-owner-memberships") {
             openMoreItem("Memberships") && shoot("21-owner-memberships", title: "Memberships")
@@ -148,16 +148,19 @@ final class ScreenshotTour {
     func technicianTour(_ technician: Credentials) {
         guard step("40-sign-in-technician", { signIn(technician, captureFormAs: nil) }) else { return }
 
-        step("41-tech-today") { openTab("Today") && shoot("41-tech-today", title: "Today") }
+        step("41-tech-today") { openTab("Today") && scrollToTop() && shoot("41-tech-today", title: "Today") }
         step("42-tech-today-scrolled") { scrollPage() && shoot("42-tech-today-scrolled") }
         step("43-tech-job") {
             openTab("Today") && openTodayJob() && shoot("43-tech-job", expect: header("Customer & vehicle"))
         }
         step("44-tech-job-checklist") { scrollTo(header: "Checklist") && shoot("44-tech-job-checklist") }
         step("45-tech-job-photos") { scrollTo(header: "Photos") && shoot("45-tech-job-photos") }
-        step("46-tech-calendar") { openTab("Calendar") && shoot("46-tech-calendar", title: "Calendar") }
-        step("47-tech-time-clock") { openMoreItem("Time Clock") && shoot("47-tech-time-clock", title: "Time Clock") }
-        step("48-tech-more") { openTab("More") && shoot("48-tech-more", title: "More") }
+        step("46-tech-calendar-day") {
+            openTab("Calendar") && pickSegment("Day") && shoot("46-tech-calendar-day", title: "Calendar")
+        }
+        step("47-tech-calendar-agenda") { pickSegment("Agenda") && shoot("47-tech-calendar-agenda") }
+        step("48-tech-time-clock") { openMoreItem("Time Clock") && shoot("48-tech-time-clock", title: "Time Clock") }
+        step("49-tech-more") { openTab("More") && shoot("49-tech-more", title: "More") }
     }
 
     func skip(_ what: String, reason: String) {
@@ -232,7 +235,8 @@ final class ScreenshotTour {
         email.typeText(who.email)
         password.tap()
         dismissKeyboardTip()
-        password.typeText(who.password)
+        // Return ends editing, so the keyboard is gone before the tabs appear.
+        password.typeText(who.password + "\n")
         let button = app.buttons["Sign in"]
         guard button.exists else { return note("no Sign in button") }
         button.tap()
@@ -329,10 +333,18 @@ final class ScreenshotTour {
         return true
     }
 
-    /// Next Up's "Open job", else the first job row on Today (row labels
-    /// carry the time range).
+    /// Today's in-progress job (the one with checklist progress), else Next
+    /// Up's "Open job", else the first job row (row labels carry the status
+    /// and the time range).
     private func openTodayJob() -> Bool {
         guard waitForLoading(timeout: 40) else { return note("Today is still loading") }
+        let inProgress = app.scrollViews.firstMatch.buttons.matching(
+            NSPredicate(format: "label CONTAINS[c] 'In progress'")
+        ).firstMatch
+        if inProgress.exists, reveal(inProgress) {
+            inProgress.tap()
+            return true
+        }
         let open = app.buttons["Open job"]
         if open.exists, reveal(open) {
             open.tap()
@@ -349,11 +361,19 @@ final class ScreenshotTour {
         return note("Today has no job to open (no Next Up card and no job rows)")
     }
 
-    /// Taps the first navigation row of the screen's list.
-    private func openFirstRow() -> Bool {
+    /// Taps the first row of the screen's list whose label contains
+    /// `preferring` (e.g. a status), else its first navigation row.
+    private func openFirstRow(preferring preferred: String? = nil) -> Bool {
         guard waitForLoading(timeout: 40) else { return note("the list is still loading") }
         let list = app.collectionViews.firstMatch
         guard list.waitForExistence(timeout: 10) else { return note("no list on screen (empty state?)") }
+        if let preferred {
+            let match = list.buttons.matching(NSPredicate(format: "label CONTAINS %@", preferred)).firstMatch
+            if match.exists, reveal(match) {
+                match.tap()
+                return true
+            }
+        }
         let candidates = [list.buttons, list.cells]
         for query in candidates {
             let count = min(query.count, 8)
@@ -380,6 +400,15 @@ final class ScreenshotTour {
     /// A section header (SectionHeader upper-cases its title).
     private func header(_ text: String) -> XCUIElement {
         app.descendants(matching: .any).matching(NSPredicate(format: "label ==[c] %@", text)).firstMatch
+    }
+
+    /// Taps the status bar: the screen's scroll view returns to the top.
+    private func scrollToTop() -> Bool {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0))
+            .withOffset(CGVector(dx: 0, dy: 16))
+            .tap()
+        pause(1)
+        return true
     }
 
     /// Scrolls the screen by about half a page.
