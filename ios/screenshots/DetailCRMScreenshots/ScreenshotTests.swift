@@ -517,12 +517,33 @@ final class ScreenshotTour {
         }
         pause(1.2)
         dismissSystemAlerts(waiting: 0)
+        retryOnceAfterNetworkError(timeout: timeout)
         let problem = app.staticTexts["Something went wrong"]
         if problem.exists {
             ok = note("the screen shows \"Something went wrong\"")
         }
         capture(name)
         return ok
+    }
+
+    /// The backend sits behind a quick tunnel that drops connections left
+    /// idle for about a minute, so the first request after a quiet stretch
+    /// (e.g. the Calendar right after the job screens) can fail with "the
+    /// network connection was lost". Such a load is retried once with the
+    /// screen's own Try again button, and the report says so; any other error
+    /// (or a second failure) still fails the step.
+    private func retryOnceAfterNetworkError(timeout: TimeInterval) {
+        guard app.staticTexts["Something went wrong"].exists else { return }
+        let networkError = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] 'offline' OR label CONTAINS[c] 'took too long' OR label CONTAINS[c] 'reach the server'"
+        )).firstMatch
+        let retry = app.buttons["Try again"]
+        guard networkError.exists, retry.exists else { return }
+        record("        (retried once after a network error: \"\(networkError.label)\")")
+        retry.tap()
+        pause(1)
+        _ = waitForLoading(timeout: timeout)
+        pause(1.2)
     }
 
     /// True once nothing on screen says "Loading…" (the app's LoadStateView
