@@ -3,8 +3,10 @@
 //  DetailCRM
 //
 //  Switches between the session phases owned by AppState. The main tabs
-//  are keyed by shop id, so switching shops rebuilds every screen and no
-//  state from the previous shop can leak into the next.
+//  are keyed by the signed-in user and the shop, so a sign-in (another
+//  member of the same shop included) or a shop switch rebuilds every screen:
+//  no navigation path, calendar mode, scroll position or loaded data from
+//  the previous session or shop carries over.
 //
 
 import SwiftUI
@@ -31,7 +33,7 @@ struct RootView: View {
                 .transition(.opacity)
         case .ready:
             MainTabView()
-                .id(appState.shop?.id)
+                .id(MainTabIdentity(userID: appState.userID, shopID: appState.shop?.id))
                 .transition(.opacity)
         case .failed(let message):
             BootstrapErrorView(message: message)
@@ -49,6 +51,12 @@ struct RootView: View {
         case .failed: return 4
         }
     }
+}
+
+/// Who the main tabs belong to: a new value builds them from scratch.
+private struct MainTabIdentity: Hashable {
+    let userID: UUID?
+    let shopID: UUID?
 }
 
 /// Brand splash while the stored session and memberships load.

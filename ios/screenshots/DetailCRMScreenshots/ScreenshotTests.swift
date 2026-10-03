@@ -128,6 +128,11 @@ final class ScreenshotTour {
         step("17-owner-quote") { openFirstRow(preferring: "Sent") && shoot("17-owner-quote") }
         step("18-owner-invoices") { openMoreItem("Invoices") && shoot("18-owner-invoices", title: "Invoices") }
         step("19-owner-invoice") { openFirstRow(preferring: "Partially paid") && shoot("19-owner-invoice") }
+        step("19b-owner-invoice-paid") {
+            // A paid invoice's balance card shows the amount received.
+            openMoreItem("Invoices") && openFirstRow(preferring: "Paid")
+                && shoot("19b-owner-invoice-paid", expect: app.staticTexts["Paid in full"])
+        }
         step("20-owner-payments") { openMoreItem("Payments") && shoot("20-owner-payments", title: "Payments") }
         step("21-owner-memberships") {
             openMoreItem("Memberships") && shoot("21-owner-memberships", title: "Memberships")
@@ -148,7 +153,13 @@ final class ScreenshotTour {
     func technicianTour(_ technician: Credentials) {
         guard step("40-sign-in-technician", { signIn(technician, captureFormAs: nil) }) else { return }
 
-        step("41-tech-today") { openTab("Today") && scrollToTop() && shoot("41-tech-today", title: "Today") }
+        // The technician's screens are NOT reset first: a new sign-in must
+        // start on fresh tabs (Today at the top, the Calendar in Day), even
+        // though the owner left Today scrolled and the Calendar in Agenda.
+        step("41-tech-today") {
+            openTab("Today") && shoot("41-tech-today", title: "Today")
+                && expectOnScreen(todayGreeting, "Today did not start at the top (the greeting is off screen)")
+        }
         step("42-tech-today-scrolled") { scrollPage() && shoot("42-tech-today-scrolled") }
         step("43-tech-job") {
             openTab("Today") && openTodayJob() && shoot("43-tech-job", expect: header("Customer & vehicle"))
@@ -156,7 +167,8 @@ final class ScreenshotTour {
         step("44-tech-job-checklist") { scrollTo(header: "Checklist") && shoot("44-tech-job-checklist") }
         step("45-tech-job-photos") { scrollTo(header: "Photos") && shoot("45-tech-job-photos") }
         step("46-tech-calendar-day") {
-            openTab("Calendar") && pickSegment("Day") && shoot("46-tech-calendar-day", title: "Calendar")
+            openTab("Calendar") && shoot("46-tech-calendar-day", title: "Calendar")
+                && expectOnScreen(selectedSegment("Day"), "the Calendar did not open in Day mode")
         }
         step("47-tech-calendar-agenda") { pickSegment("Agenda") && shoot("47-tech-calendar-agenda") }
         step("48-tech-time-clock") { openMoreItem("Time Clock") && shoot("48-tech-time-clock", title: "Time Clock") }
@@ -386,6 +398,21 @@ final class ScreenshotTour {
             }
         }
         return note("the list has no row to open")
+    }
+
+    /// Today's "Good morning, …" line (at the top of the page).
+    private var todayGreeting: XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Good '")).firstMatch
+    }
+
+    /// The segment titled `title` when it is the selected one.
+    private func selectedSegment(_ title: String) -> XCUIElement {
+        app.segmentedControls.buttons.matching(NSPredicate(format: "label == %@ AND selected == true", title)).firstMatch
+    }
+
+    /// Records `problem` (failing the step) unless `element` is on screen.
+    private func expectOnScreen(_ element: XCUIElement, _ problem: String) -> Bool {
+        element.waitForExistence(timeout: 5) && element.isHittable ? true : note(problem)
     }
 
     private func pickSegment(_ title: String) -> Bool {

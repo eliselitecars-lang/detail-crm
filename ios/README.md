@@ -40,8 +40,10 @@ ios/
   ready | failed(message)`, driven by `Supa.client.auth.authStateChanges`.
   `needsShop` shows the shop picker (pick / create a shop / join by invite);
   the chosen shop id is remembered per user in `UserDefaults`.
-  `RootView` keys the main tabs by shop id, so switching shops rebuilds every
-  screen and nothing from the previous tenant survives.
+  `RootView` keys the main tabs by user and shop id, so switching shops or
+  signing in (another member of the same shop included) rebuilds every
+  screen: nothing from the previous tenant or session survives (navigation
+  paths, calendar mode, scroll positions).
   The client emits the stored session as `.initialSession` even when its
   access token has expired (`emitLocalSessionAsInitialSession`); bootstrap
   refreshes it, so opening the app offline lands on `failed` (Retry) rather
@@ -527,7 +529,9 @@ change to `.github/trigger-screenshots`. Two jobs run side by side:
    Store Connect asks for) with a 9:41 status bar. It signs in through the real
    Sign in screen as the owner, visits Today, a job, Calendar (day / week /
    agenda), Customers, Inbox, More and every More screen, signs out and repeats
-   the field screens as the technician.
+   the field screens as the technician — without resetting them first, so a
+   step fails if the new sign-in did not start on fresh tabs (Today at the
+   top, the Calendar in Day).
 
 Output: the `ios-screenshots` artifact — `NN-<screen>.png` (1320×2868 on an
 iPhone 17 Pro Max) plus `report.txt`, which lists every step as OK, FAILED

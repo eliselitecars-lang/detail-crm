@@ -189,14 +189,16 @@ private struct CalendarDayColumn: View {
                             .offset(y: y(of: placed.startMinute))
                     }
                     ForEach(layout.blocks) { placed in
+                        let placedWidth = blockWidth(placed, total: width)
                         CalendarBlockLink(
                             placed: placed,
                             compact: compact,
+                            width: placedWidth,
                             clock: clock,
                             memberColors: memberColors,
                             onOpenEvent: onOpenEvent
                         )
-                        .frame(width: blockWidth(placed, total: width), height: height(of: placed))
+                        .frame(width: placedWidth, height: height(of: placed))
                         .offset(x: blockX(placed, total: width), y: y(of: placed.startMinute))
                     }
                     CalendarNowLine(day: layout.day, clock: clock, hourHeight: hourHeight)
@@ -307,6 +309,7 @@ private struct CalendarShadedBlock: View {
 private struct CalendarBlockLink: View {
     let placed: CalendarPlacedEvent
     let compact: Bool
+    let width: CGFloat
     let clock: ShopClock
     let memberColors: [UUID: String]
     let onOpenEvent: ((CalendarEvent) -> Void)?
@@ -314,18 +317,18 @@ private struct CalendarBlockLink: View {
     var body: some View {
         if placed.event.isOpenableJob {
             NavigationLink(value: AppRoute.job(placed.event.id)) {
-                CalendarBlock(placed: placed, compact: compact, clock: clock, memberColors: memberColors)
+                CalendarBlock(placed: placed, compact: compact, width: width, clock: clock, memberColors: memberColors)
             }
             .buttonStyle(.plain)
         } else if placed.event.isForegroundEvent, let onOpenEvent {
             Button {
                 onOpenEvent(placed.event)
             } label: {
-                CalendarBlock(placed: placed, compact: compact, clock: clock, memberColors: memberColors)
+                CalendarBlock(placed: placed, compact: compact, width: width, clock: clock, memberColors: memberColors)
             }
             .buttonStyle(.plain)
         } else {
-            CalendarBlock(placed: placed, compact: compact, clock: clock, memberColors: memberColors)
+            CalendarBlock(placed: placed, compact: compact, width: width, clock: clock, memberColors: memberColors)
         }
     }
 }
@@ -333,8 +336,14 @@ private struct CalendarBlockLink: View {
 private struct CalendarBlock: View {
     let placed: CalendarPlacedEvent
     let compact: Bool
+    /// The block's width on screen (Week columns are narrow, and jobs that
+    /// overlap share one).
+    let width: CGFloat
     let clock: ShopClock
     let memberColors: [UUID: String]
+    /// The narrowest Week block that still shows words (a few letters and
+    /// "…"); a narrower one shows initials.
+    @ScaledMetric(relativeTo: .caption) private var minWordsWidth: CGFloat = 36
 
     var body: some View {
         let event = placed.event
@@ -354,9 +363,13 @@ private struct CalendarBlock: View {
                             .font(Theme.Typography.caption2)
                             .accessibilityHidden(true)
                     }
-                    Text(event.displayTitle)
-                        .font(compact ? Theme.Typography.caption.weight(.semibold) : Theme.Typography.footnote.weight(.semibold))
-                        .lineLimit(compact ? 3 : 2)
+                    if compact {
+                        CalendarCompactTitle(title: event.displayTitle, showsWords: width >= minWordsWidth)
+                    } else {
+                        Text(event.displayTitle)
+                            .font(Theme.Typography.footnote.weight(.semibold))
+                            .lineLimit(2)
+                    }
                 }
                 .foregroundStyle(event.isOpenableJob || event.isForegroundEvent ? Theme.textPrimary : Theme.textSecondary)
                 if !compact && placed.durationMinutes >= 40 {
@@ -392,5 +405,34 @@ private struct CalendarBlock: View {
     private func detailText(_ event: CalendarEvent) -> String? {
         let parts = [event.servicesSummary, event.vehicleLabel?.trimmedNonEmpty].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+/// A Week-column block title (about 45 pt wide on an iPhone): whole words,
+/// one per line, each truncated ("Christo…") instead of broken mid-word, or
+/// initials when the block is too narrow for even a few letters. VoiceOver
+/// reads the block's full label.
+private struct CalendarCompactTitle: View {
+    let title: String
+    let showsWords: Bool
+
+    var body: some View {
+        Group {
+            if showsWords {
+                let lines = CompactTitle.lines(title, maxLines: 3)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(lines.indices, id: \.self) { index in
+                        Text(lines[index])
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+            } else {
+                Text(AvatarView.initials(from: title))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+        }
+        .font(Theme.Typography.caption.weight(.semibold))
     }
 }

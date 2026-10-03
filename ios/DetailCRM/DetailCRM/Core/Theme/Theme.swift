@@ -223,6 +223,15 @@ enum Theme {
 
     /// Tab and navigation bar appearance so every bar matches the theme
     /// without per-screen overrides. Called once at launch.
+    ///
+    /// iOS 26 keeps the system (Liquid Glass) navigation bar: there a
+    /// `UINavigationBarAppearance` background is drawn over the large title,
+    /// so a screen whose root is a List or ScrollView showed an empty band
+    /// where its title belongs (Apple's advice: no bar appearance on
+    /// iOS 26). Screens paint `Theme.background` behind the bar
+    /// (`screenBackground()`), so it still reads as the theme, and the
+    /// system scroll-edge effect sets off content scrolling under it.
+    /// iOS 17 and 18 keep the opaque themed bar.
     static func configureChrome() {
         let background = UIColor(Theme.surface)
         let separator = UIColor(Theme.border)
@@ -243,6 +252,7 @@ enum Theme {
         UITabBar.appearance().standardAppearance = tabBar
         UITabBar.appearance().scrollEdgeAppearance = tabBar
 
+        if #available(iOS 26.0, *) { return }
         let navBar = UINavigationBarAppearance()
         navBar.configureWithOpaqueBackground()
         navBar.backgroundColor = UIColor(Theme.background)

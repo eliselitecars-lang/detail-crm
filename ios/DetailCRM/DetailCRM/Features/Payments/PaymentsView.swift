@@ -491,18 +491,19 @@ private struct PaymentsLedgerRow: View {
         }
     }
 
-    /// The summary as its own link (with a chevron) above the actions.
+    /// The summary as its own link above the actions. The List draws the
+    /// link's disclosure chevron itself (a chevron of our own made two).
     @ViewBuilder
     private var linkedSummary: some View {
         switch payment.target {
         case .invoice(let invoiceID):
             NavigationLink(value: AppRoute.invoice(invoiceID)) {
-                chevronBody
+                linkBody
             }
             .buttonStyle(.plain)
         case .job(let jobID):
             NavigationLink(value: AppRoute.job(jobID)) {
-                chevronBody
+                linkBody
             }
             .buttonStyle(.plain)
         case .membership, .unapplied:
@@ -510,15 +511,9 @@ private struct PaymentsLedgerRow: View {
         }
     }
 
-    private var chevronBody: some View {
-        HStack(spacing: Theme.Spacing.sm) {
-            rowBody
-            Image(systemName: "chevron.right")
-                .font(Theme.Typography.footnote.weight(.semibold))
-                .foregroundStyle(Theme.textTertiary)
-                .accessibilityHidden(true)
-        }
-        .contentShape(Rectangle())
+    private var linkBody: some View {
+        rowBody
+            .contentShape(Rectangle())
     }
 
     private var rowBody: some View {

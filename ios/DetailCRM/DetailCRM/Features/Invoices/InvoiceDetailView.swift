@@ -188,6 +188,7 @@ private struct InvoiceDetailContent: View {
                     data: data,
                     permissions: permissions,
                     currencyCode: currencyCode,
+                    clock: clock,
                     present: present,
                     retry: retry
                 ))
@@ -323,26 +324,46 @@ private struct InvoiceHeaderSection: View {
     }
 }
 
+/// The balance card: what is still owed (with the collect buttons), or —
+/// once paid — the amount received (DetailCore `InvoiceBalanceHeadline`).
 private struct InvoiceBalanceSection: View {
     let data: InvoiceService.DetailData
     let permissions: InvoicePermissions
     let currencyCode: String
+    let clock: ShopClock
     let present: (InvoiceDetailSheet) -> Void
     let retry: () async -> Void
 
     var body: some View {
         let invoice = data.invoice
+        let headline = InvoiceBalanceHeadline.make(
+            status: invoice.status,
+            balanceCents: invoice.balanceCents,
+            amountPaidCents: invoice.amountPaidCents
+        )
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                Text(balanceTitle)
+                Text(headline.title)
                     .font(Theme.Typography.footnote.weight(.semibold))
                     .foregroundStyle(Theme.textSecondary)
-                MoneyText(
-                    cents: max(invoice.balanceCents, 0),
-                    currencyCode: currencyCode,
-                    size: .large,
-                    emphasis: invoice.canCollect ? .attention : .normal
-                )
+                switch headline.amount {
+                case .due(let cents):
+                    MoneyText(
+                        cents: cents,
+                        currencyCode: currencyCode,
+                        size: .large,
+                        emphasis: invoice.canCollect ? .attention : .normal
+                    )
+                case .paid(let cents):
+                    MoneyText(cents: cents, currencyCode: currencyCode, size: .large)
+                    Text(paidLine(invoice))
+                        .font(Theme.Typography.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                case .noAmount:
+                    Text(InvoiceBalanceHeadline.voidNote)
+                        .font(Theme.Typography.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                }
                 if invoice.balanceCents < 0 {
                     Text("Customer credit: \(Money.format(cents: -invoice.balanceCents, currencyCode: currencyCode))")
                         .font(Theme.Typography.footnote)
@@ -410,13 +431,10 @@ private struct InvoiceBalanceSection: View {
         InvoiceService.processingCents(data.payments)
     }
 
-    private var balanceTitle: String {
-        switch data.invoice.status {
-        case .paid: return "Paid in full"
-        case .void: return "Void"
-        case .draft: return "Balance (not issued yet)"
-        case .open, .partiallyPaid: return "Balance due"
-        }
+    /// "Received Sat, Oct 3" under a paid invoice's amount.
+    private func paidLine(_ invoice: Invoice) -> String {
+        guard let paidAt = invoice.paidAt else { return "Received" }
+        return "Received \(clock.shortDayText(paidAt))"
     }
 
     private var hasPendingPayment: Bool {
